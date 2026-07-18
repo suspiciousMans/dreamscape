@@ -1,0 +1,21 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sdl2.workspace = true
+glow.workspace = true
+glam.workspace = true
+hecs.workspace = true
+tobj.workspace = true
+image.workspace = true
+serde.workspace = true
+ron.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+egui.workspace = true
+egui_glow.workspace = true
+rodio.workspace = true

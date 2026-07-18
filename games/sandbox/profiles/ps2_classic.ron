@@ -1,0 +1,20 @@
+(
+    name: "ps2_classic",
+    vertex_shader: "assets/shaders/mesh.vert",
+    fragment_shader: "assets/shaders/mesh.frag",
+    post_fragment_shader: "assets/shaders/post_composite.frag",
+    render: (
+        resolution_scale: 0.35,
+        fixed_resolution: None,
+        fog_color: (0.08, 0.08, 0.12),
+        fog_start: 4.0,
+        fog_end: 16.0,
+        color_levels: 24,
+        dither_strength: 0.25,
+        lighting_mode: VertexLit,
+        ambient_color: (0.25, 0.25, 0.3),
+        vertex_snap_amount: 0.0,
+        affine_texture_mapping: false,
+        texture_filter: Nearest,
+    ),
+)
