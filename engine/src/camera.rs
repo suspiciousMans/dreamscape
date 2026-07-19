@@ -72,8 +72,24 @@ impl FirstPersonCamera {
             yaw: 0.0,
             pitch: 0.0,
             fov_y_radians: 60f32.to_radians(),
-            near: 0.05,
-            far: 500.0,
+            // `far` is kept far tighter than a generously large default
+            // (e.g. 500) to preserve depth-buffer precision at range — a
+            // standard (non-reversed) depth buffer concentrates almost all
+            // of its precision near the near plane, so a wide near:far
+            // ratio starves distant geometry of precision.
+            //
+            // `near`, though, has to stay small: the player's collider can
+            // press right up against solid geometry (walls, pillars), and
+            // at a grazing angle a nearby edge/corner can be closer to the
+            // camera — in view-space depth — than the face's straight-on
+            // distance suggests. If `near` isn't comfortably below that,
+            // the near plane clips that corner away, letting whatever is
+            // far behind it show through a solid-looking wall. Pulling
+            // `near` back in (it was briefly raised to 0.1 chasing distant
+            // z-fighting, which reintroduced exactly this) restores that
+            // margin while `far` still does most of the precision work.
+            near: 0.02,
+            far: 100.0,
         }
     }
 

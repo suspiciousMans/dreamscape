@@ -1,0 +1,33 @@
+// Demo script attached to "Script Demo Cube" in the default level.
+// Bobs up and down and reacts to interact — deliberately the same math as
+// `NativeBobBehavior` in engine/src/behavior.rs (the "Native Behavior Cube"
+// standing next to this one), to make the point that a script and a
+// compiled Rust type can drive identical behavior through the same hooks.
+
+let phase = 0.0;
+let amplitude = 0.4;
+let period_secs = 2.0;
+
+fn ready() {
+    log("Script Demo Cube ready!");
+}
+
+fn update(dt) {
+    let previous_phase = phase;
+    phase = phase + dt;
+    // 6.283185307 is tau (2*pi) — this language has no named constants yet.
+    let wave_now = sin(phase / period_secs * 6.283185307);
+    let wave_prev = sin(previous_phase / period_secs * 6.283185307);
+    move_by(0.0, amplitude * (wave_now - wave_prev), 0.0);
+    // Demonstrates a script driving the HUD: a "Wobble" bar that tracks
+    // how close the cube is to the top of its bob cycle.
+    hud_bar("Wobble", wave_now * 0.5 + 0.5);
+}
+
+fn interact() {
+    log("Scripted cube says hi!");
+    play_tone(500.0, 0.1);
+    // Demonstrates a script playing a real decoded sample file, side by
+    // side with the procedural tone above.
+    play_sfx("sfx/demo_blip.wav");
+}

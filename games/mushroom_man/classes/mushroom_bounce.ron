@@ -1,0 +1,10 @@
+(
+    name: "mushroom_bounce",
+    mesh: Primitive(Cube),
+    texture_path: None,
+    scale: (0.5, 0.5, 0.5),
+    is_dynamic: false,
+    is_trigger: true,
+    animation: None,
+    script: None,
+)

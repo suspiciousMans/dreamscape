@@ -103,8 +103,23 @@ impl Renderer {
 
     /// Binds the low-res offscreen target and sets its viewport. Call once
     /// per frame before issuing scene draw calls.
+    ///
+    /// Also unconditionally re-enables `GL_DEPTH_TEST`: an embedder's egui
+    /// pass (drawn after `present()`, on top of the composited frame) draws
+    /// through `egui_glow`'s own painter, which disables depth testing for
+    /// its 2D drawing and does not restore it afterward. Since depth testing
+    /// was otherwise only ever enabled once at app startup, every frame
+    /// after the first egui paint would render the entire 3D scene with it
+    /// off — occlusion silently falling back to raw draw order instead of
+    /// actual distance, which reads as solid objects being invisible/
+    /// see-through from certain angles. Re-enabling it here, before any
+    /// scene geometry is drawn, makes each frame self-sufficient regardless
+    /// of whatever GL state the previous frame's UI pass left behind.
     pub fn begin_scene(&self, gl: &glow::Context) {
         self.offscreen.bind(gl);
+        unsafe {
+            gl.enable(glow::DEPTH_TEST);
+        }
     }
 
     /// Unbinds the offscreen target and blits it to the default framebuffer
