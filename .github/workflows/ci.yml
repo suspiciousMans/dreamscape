@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # This workspace vendors SDL2 (sdl2-sys "bundled" feature), which
+      # compiles it from source via CMake + a C compiler matching whatever
+      # Rust host toolchain is active. Locally that's the GNU host
+      # (x86_64-pc-windows-gnu) with a MinGW-w64 gcc — .cargo/config.toml's
+      # CFLAGS/CMAKE_POLICY_VERSION_MINIMUM env vars are written for that
+      # exact combination, so CI matches it rather than the MSVC default.
+      - name: Install MinGW-w64 (gcc + cmake, for the GNU host toolchain)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake
+          path-type: inherit
+
+      - name: Switch to the GNU host toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        shell: pwsh
+        run: cargo build --workspace --verbose
+
+      - name: Run engine test suite
+        shell: pwsh
+        run: cargo test -p engine --verbose
