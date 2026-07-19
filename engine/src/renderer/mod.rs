@@ -1,10 +1,16 @@
 mod framebuffer;
+mod particles;
 mod post;
+mod skybox;
 
 pub use framebuffer::OffscreenFramebuffer;
+pub use particles::ParticlePass;
 pub use post::{CompositePass, PostParams, DEFAULT_FRAGMENT_SRC};
+pub use skybox::SkyboxPass;
 
 use glow::HasContext;
+
+use crate::mesh::GpuMesh;
 
 /// Owns the low-res offscreen pass and the composite blit that upscales it
 /// back to the window. Games render their scene between `begin_scene` and
@@ -12,6 +18,8 @@ use glow::HasContext;
 pub struct Renderer {
     offscreen: OffscreenFramebuffer,
     composite: CompositePass,
+    skybox: SkyboxPass,
+    particles: ParticlePass,
     resolution_scale: f32,
 }
 
@@ -33,8 +41,32 @@ impl Renderer {
         Ok(Self {
             offscreen: OffscreenFramebuffer::new(gl, w, h)?,
             composite: CompositePass::new(gl, post_fragment_src)?,
+            skybox: SkyboxPass::new(gl)?,
+            particles: ParticlePass::new(gl)?,
             resolution_scale,
         })
+    }
+
+    /// Draws the sky gradient — call right after `begin_scene`, before any
+    /// mesh, so scene geometry draws over it normally.
+    pub fn draw_skybox(&self, gl: &glow::Context, inv_view_proj: [f32; 16], horizon_color: [f32; 3], zenith_color: [f32; 3]) {
+        self.skybox.draw(gl, inv_view_proj, horizon_color, zenith_color);
+    }
+
+    /// Draws every `(mesh, model, color)` particle, blended — call after
+    /// the opaque mesh loop so particles composite over real geometry.
+    pub fn draw_particles(
+        &self,
+        gl: &glow::Context,
+        view: &[f32; 16],
+        proj: &[f32; 16],
+        particles: impl Iterator<Item = (std::sync::Arc<GpuMesh>, [f32; 16], [f32; 4])>,
+    ) {
+        self.particles.begin(gl, view, proj);
+        for (mesh, model, color) in particles {
+            self.particles.draw_particle(gl, &mesh, &model, color);
+        }
+        self.particles.end(gl);
     }
 
     /// Recompiles the composite pass with a different post fragment shader

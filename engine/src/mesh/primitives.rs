@@ -54,3 +54,19 @@ pub fn plane() -> MeshData {
 
     MeshData { vertices, indices }
 }
+
+/// A 1x1 unit quad in the XY plane facing +Z — `engine::particles`'
+/// billboard shape (scaled/rotated-to-face-camera per particle at draw
+/// time, not baked into the mesh itself).
+pub fn quad() -> MeshData {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    let p1 = Vec3::new(-0.5, -0.5, 0.0);
+    let p2 = Vec3::new(0.5, -0.5, 0.0);
+    let p3 = Vec3::new(0.5, 0.5, 0.0);
+    let p4 = Vec3::new(-0.5, 0.5, 0.0);
+    face(&mut vertices, &mut indices, [p1, p2, p3, p4], Vec3::Z);
+
+    MeshData { vertices, indices }
+}

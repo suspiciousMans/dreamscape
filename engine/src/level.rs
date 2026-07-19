@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,21 @@ pub struct LevelObject {
     /// saved before this field existed still load (as `None`/unanimated).
     #[serde(default)]
     pub animation: Option<AnimationSpec>,
+    /// A `.pss` script to compile and attach as a `Behavior` when spawned,
+    /// if any. `#[serde(default)]` so levels saved before this field existed
+    /// still load (as `None`/no behavior).
+    #[serde(default)]
+    pub script: Option<PathBuf>,
+    /// An `engine::class::ObjectClass` this object was spawned from, if
+    /// any. When set, `mesh`/`texture_path`/`scale`/`is_dynamic`/
+    /// `is_trigger`/`animation`/`script` above are resolved **from the
+    /// class** at spawn time instead — this object's own copies of those
+    /// fields become a fallback only, kept in sync at save time so the
+    /// level still loads sensibly if the class is later deleted.
+    /// `#[serde(default)]` so levels saved before this field existed still
+    /// load (as `None`/unclassed).
+    #[serde(default)]
+    pub class: Option<PathBuf>,
 }
 
 /// A placed point light: a separate shape from `LevelObject` because a light
@@ -71,12 +87,40 @@ pub struct LevelLight {
     pub range: f32,
 }
 
+/// A placed instance of a `engine::rig::RigAsset` — a separate list from
+/// `objects` because a rig is structurally a multi-entity hierarchy, not a
+/// single mesh. No per-instance scale: scale is authored per-part inside
+/// the rig asset itself, since scaling only the root's own mesh (not the
+/// whole hierarchy's offsets) would be more confusing than useful.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RigInstance {
+    pub name: String,
+    pub rig_path: PathBuf,
+    pub position: [f32; 3],
+    pub rotation_euler_deg: [f32; 3],
+    pub playing_clip: Option<String>,
+}
+
+/// A placed particle emitter — position + `ParticleEmitterDef`. A sibling
+/// list on `Level`, not folded into `LevelObject`, since an emitter has no
+/// mesh/texture/scale/physics of its own.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LevelParticleEmitter {
+    pub name: String,
+    pub position: [f32; 3],
+    pub def: ParticleEmitterDef,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Level {
     pub name: String,
     pub objects: Vec<LevelObject>,
     #[serde(default)]
     pub lights: Vec<LevelLight>,
+    #[serde(default)]
+    pub particle_emitters: Vec<LevelParticleEmitter>,
+    #[serde(default)]
+    pub rig_instances: Vec<RigInstance>,
     #[serde(default)]
     pub physics: PhysicsParams,
 }

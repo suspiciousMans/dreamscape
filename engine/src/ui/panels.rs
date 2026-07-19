@@ -30,6 +30,11 @@ pub fn render_params_editor(ui: &mut egui::Ui, params: &mut RenderParams) -> boo
     changed |= color_edit(ui, "Ambient color", &mut params.ambient_color);
 
     ui.separator();
+    ui.heading("Sky");
+    changed |= color_edit(ui, "Horizon color", &mut params.sky_horizon_color);
+    changed |= color_edit(ui, "Zenith color", &mut params.sky_zenith_color);
+
+    ui.separator();
     ui.heading("Fog");
     changed |= color_edit(ui, "Fog color", &mut params.fog_color);
     changed |= ui

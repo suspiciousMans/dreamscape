@@ -2,19 +2,25 @@
 // so `cargo run` still shows log output and panic messages as usual.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use engine::animation::{AnimationKind, Animator};
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
+use engine::behavior::{Behavior, BehaviorSlot, NativeBobBehavior, ScriptApi, ScriptBehavior};
 use engine::camera::{FirstPersonCamera, OrbitCamera};
-use engine::ecs::{Entity, Light, LevelObjectMeta, LightKind, MeshRenderer, PlayerController, Transform, World};
-use engine::glam::{EulerRot, Quat, Vec3};
+use engine::class::ObjectClass;
+use engine::ecs::{euler_deg_to_quat, Entity, Light, LevelObjectMeta, LightKind, MeshRenderer, PlayerController, Transform, World};
+use engine::hud::HudState;
+use engine::glam::{Mat4, Quat, Vec3};
 use engine::glow::{self, HasContext};
-use engine::level::{AnimationSpec, Level, LevelLight, LevelObject, MeshSource, PrimitiveKind};
+use engine::level::{AnimationSpec, Level, LevelLight, LevelObject, LevelParticleEmitter, MeshSource, PrimitiveKind, RigInstance};
+use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
+use engine::save::SaveData;
 use engine::mesh::{load_obj, primitives, GpuMesh};
+use engine::particles::{ParticleEmitter, ParticleEmitterDef};
 use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
 use engine::profile::{LightingMode, ProfileCycler, RenderParams, ShaderProfile, TextureFilterMode};
 use engine::renderer::{PostParams, Renderer};
@@ -24,7 +30,7 @@ use engine::sdl2::keyboard::Keycode;
 use engine::sdl2::mouse::MouseButton;
 use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
-use engine::ui::{render_params_editor, EguiState};
+use engine::ui::{draw_hud, render_params_editor, EguiState};
 
 fn default_demo_profiles() -> Vec<ShaderProfile> {
     let make = |name: &str, render: RenderParams| ShaderProfile {
@@ -105,6 +111,8 @@ fn default_level() -> Level {
         is_dynamic: true,
         is_trigger: false,
         animation: None,
+        script: None,
+        class: None,
     };
 
     let floor = LevelObject {
@@ -117,6 +125,8 @@ fn default_level() -> Level {
         is_dynamic: false,
         is_trigger: false,
         animation: None,
+        script: None,
+        class: None,
     };
 
     // Static (no RigidBody) but animated — demonstrates that an animated
@@ -135,6 +145,8 @@ fn default_level() -> Level {
             axis: [0.0, 1.0, 0.0],
             speed_deg_per_sec: 90.0,
         }),
+        script: None,
+        class: None,
     };
 
     let demo_light = LevelLight {
@@ -157,6 +169,60 @@ fn default_level() -> Level {
         is_dynamic: false,
         is_trigger: true,
         animation: None,
+        script: None,
+        class: None,
+    };
+
+    // Bobs via `scripts/bob_demo.pss` — stands next to the compiled-in
+    // "Native Behavior Cube" (see `spawn_native_behavior_demo`) so
+    // interacting with both makes the script/Rust parity concrete.
+    let script_demo_cube = LevelObject {
+        name: "Script Demo Cube".to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        position: [-2.4, 1.0, -2.0],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale: [0.6, 0.6, 0.6],
+        is_dynamic: false,
+        is_trigger: false,
+        animation: None,
+        script: Some(PathBuf::from("scripts/bob_demo.pss")),
+        class: None,
+    };
+
+    let humanoid_instance = RigInstance {
+        name: "Humanoid".to_string(),
+        rig_path: PathBuf::from("rigs/humanoid.ron"),
+        position: [3.2, 1.5, -2.0],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        playing_clip: Some("Wave".to_string()),
+    };
+
+    // Two instances of the "barrel" class — demonstrates the class/family
+    // system: mesh/texture/scale/physics all come from `classes/barrel.ron`
+    // at spawn time, not from the fields below (kept only as a fallback in
+    // case the class is ever deleted). Edit the class in F2 and click
+    // "Apply to All Instances" to see both barrels update together.
+    let make_barrel = |name: &str, x: f32| LevelObject {
+        name: name.to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        position: [x, 1.0, 4.5],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        is_dynamic: false,
+        is_trigger: false,
+        animation: None,
+        script: None,
+        class: Some(PathBuf::from("classes/barrel.ron")),
+    };
+
+    // A small continuous sparkle jet — placed near the light so it reads as
+    // decoration rather than needing its own explanation.
+    let sparkle_emitter = LevelParticleEmitter {
+        name: "Sparkles".to_string(),
+        position: [0.0, 2.5, 1.5],
+        def: ParticleEmitterDef::default(),
     };
 
     Level {
@@ -168,9 +234,74 @@ fn default_level() -> Level {
             make_cube("Cube 3", 1.6),
             trigger,
             orbiting_cube,
+            script_demo_cube,
+            make_barrel("Barrel 1", -0.7),
+            make_barrel("Barrel 2", 0.7),
         ],
         lights: vec![demo_light],
+        particle_emitters: vec![sparkle_emitter],
+        rig_instances: vec![humanoid_instance],
         physics: PhysicsParams::default(),
+    }
+}
+
+/// The starting rig: a simple 6-part cube humanoid (Torso root + Head, two
+/// arms, two legs) with one "Wave" clip swinging `RightArm`. Written to
+/// `rigs/humanoid.ron` on first run, same bootstrap-if-empty convention as
+/// `default_demo_profiles`/`default_level`.
+fn default_rig_asset() -> RigAsset {
+    let part = |name: &str, parent: Option<&str>, local_position: [f32; 3], scale: [f32; 3]| RigPartDef {
+        name: name.to_string(),
+        parent: parent.map(str::to_string),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        local_position,
+        local_rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale,
+    };
+
+    let wave_clip = RigClip {
+        name: "Wave".to_string(),
+        duration: 1.0,
+        looping: true,
+        tracks: vec![JointTrack {
+            joint_name: "RightArm".to_string(),
+            keyframes: vec![
+                Keyframe { time: 0.0, rotation_euler_deg: [0.0, 0.0, 0.0] },
+                Keyframe { time: 0.5, rotation_euler_deg: [0.0, 0.0, -60.0] },
+                Keyframe { time: 1.0, rotation_euler_deg: [0.0, 0.0, 0.0] },
+            ],
+        }],
+    };
+
+    RigAsset {
+        name: "humanoid".to_string(),
+        parts: vec![
+            part("Torso", None, [0.0, 0.0, 0.0], [0.5, 0.7, 0.3]),
+            part("Head", Some("Torso"), [0.0, 0.55, 0.0], [0.3, 0.3, 0.3]),
+            part("LeftArm", Some("Torso"), [-0.4, 0.2, 0.0], [0.15, 0.5, 0.15]),
+            part("RightArm", Some("Torso"), [0.4, 0.2, 0.0], [0.15, 0.5, 0.15]),
+            part("LeftLeg", Some("Torso"), [-0.2, -0.6, 0.0], [0.18, 0.55, 0.18]),
+            part("RightLeg", Some("Torso"), [0.2, -0.6, 0.0], [0.18, 0.55, 0.18]),
+        ],
+        clips: vec![wave_clip],
+    }
+}
+
+/// The starting object class: a plain dynamic cube standing in for a
+/// "barrel" (no dedicated art yet — reuses the built-in cube primitive).
+/// Written to `classes/barrel.ron` on first run, same bootstrap-if-empty
+/// convention as `default_demo_profiles`/`default_level`/`default_rig_asset`.
+fn default_barrel_class() -> ObjectClass {
+    ObjectClass {
+        name: "barrel".to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        scale: [0.8, 0.8, 0.8],
+        is_dynamic: true,
+        is_trigger: false,
+        animation: None,
+        script: None,
     }
 }
 
@@ -190,13 +321,78 @@ fn solid_color_texture(gl: &glow::Context, rgba: [u8; 4]) -> GpuTexture {
 
 const TRIGGER_COLOR: [u8; 4] = [40, 220, 220, 255];
 
-fn euler_deg_to_quat(euler_deg: Vec3) -> Quat {
-    Quat::from_euler(
-        EulerRot::XYZ,
-        euler_deg.x.to_radians(),
-        euler_deg.y.to_radians(),
-        euler_deg.z.to_radians(),
-    )
+/// Approximate collision bounds from mesh kind + scale, not an exact
+/// mesh-fitted bound — fine for boxy low-poly levels, called out in the
+/// guide. Shared by `spawn_level_object` and `apply_class_to_instances`
+/// (re-resolving a classed object's collider after an "Apply to All
+/// Instances" edit).
+fn collider_half_extents(mesh: &MeshSource, scale: [f32; 3]) -> Vec3 {
+    match mesh {
+        MeshSource::Primitive(PrimitiveKind::Plane) => Vec3::new(scale[0], 0.1, scale[2]),
+        _ => Vec3::from(scale) * 0.5,
+    }
+}
+
+/// The `ScriptApi` a script (or a native `Behavior`) sees, scoped to
+/// exactly one entity — built fresh for each dispatch, never stored.
+struct SandboxScriptApi<'a> {
+    transform: &'a mut Transform,
+    audio: Option<&'a AudioContext>,
+    elapsed: f32,
+    hud: &'a mut HudState,
+}
+
+impl ScriptApi for SandboxScriptApi<'_> {
+    fn log(&mut self, message: &str) {
+        log::info!("[script] {message}");
+    }
+
+    fn position(&self) -> (f32, f32, f32) {
+        (self.transform.position.x, self.transform.position.y, self.transform.position.z)
+    }
+
+    fn set_position(&mut self, x: f32, y: f32, z: f32) {
+        self.transform.position = Vec3::new(x, y, z);
+    }
+
+    fn move_by(&mut self, dx: f32, dy: f32, dz: f32) {
+        self.transform.position += Vec3::new(dx, dy, dz);
+    }
+
+    fn play_tone(&mut self, frequency_hz: f32, duration_secs: f32) {
+        if let Some(audio) = self.audio {
+            audio.play_tone(frequency_hz, duration_secs);
+        }
+    }
+
+    fn elapsed(&self) -> f32 {
+        self.elapsed
+    }
+
+    fn set_hud_bar(&mut self, name: &str, fraction: f32) {
+        self.hud.set_bar(name, fraction);
+    }
+
+    fn show_toast(&mut self, message: &str, seconds: f32) {
+        self.hud.show_toast(message, seconds);
+    }
+}
+
+/// Launches the standalone script editor (`tools/script_editor`) pointed at
+/// `path`, non-blocking. Dev-time convenience: assumes the sibling binary
+/// lives next to this one, true when both are built from the same
+/// workspace target directory — not something a shipped game needs.
+fn spawn_script_editor(path: &Path) {
+    let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) else {
+        log::error!("could not determine the current executable's directory");
+        return;
+    };
+    let editor_name = if cfg!(windows) { "script_editor.exe" } else { "script_editor" };
+    let editor_path = exe_dir.join(editor_name);
+    match std::process::Command::new(&editor_path).arg(path).spawn() {
+        Ok(_) => log::info!("launched script editor for {path:?}"),
+        Err(err) => log::error!("failed to launch script editor at {editor_path:?} (is it built?): {err}"),
+    }
 }
 
 struct MeshUniforms {
@@ -288,6 +484,26 @@ enum EditorMode {
     Play,
 }
 
+/// Tags the compiled-in native-behavior demo cube so `build_level_from_ecs`
+/// can exclude it — it isn't level data, just always re-added by
+/// `spawn_native_behavior_demo`.
+struct NativeBehaviorDemoMarker;
+
+/// Tags a rig instance's root entity (see `spawn_rig_instance`) so it can be
+/// listed in the F2 "Rigs" section separately from the flat "Scene Objects"
+/// outliner, and so `build_level_from_ecs` can reconstruct `Level.rig_instances`.
+struct RigRoot {
+    name: String,
+    rig_path: PathBuf,
+}
+
+/// Tags an entity spawned from an `engine::class::ObjectClass` so
+/// "Apply to All Instances" can find every member of a class, and so
+/// `build_level_from_ecs` can write `LevelObject::class` back out.
+struct ClassMember {
+    class_path: PathBuf,
+}
+
 struct Sandbox {
     asset_root: PathBuf,
     profiles_dir: PathBuf,
@@ -310,6 +526,7 @@ struct Sandbox {
     selected_entity: Option<Entity>,
     cube_mesh: Option<Arc<GpuMesh>>,
     plane_mesh: Option<Arc<GpuMesh>>,
+    particle_quad_mesh: Option<Arc<GpuMesh>>,
     physics_params: PhysicsParams,
     mode: EditorMode,
     fp_camera: FirstPersonCamera,
@@ -321,6 +538,42 @@ struct Sandbox {
     /// Trigger-vs-entity pairs overlapping as of last frame, diffed each
     /// frame against `physics::step`'s return value to fire enter/exit.
     trigger_overlaps: HashSet<(Entity, Entity)>,
+    /// Total seconds since startup — stored (rather than read from `Context`
+    /// each time) since scripts can be dispatched from places without a
+    /// `Context` handy (spawning, the F2 panel).
+    elapsed_time: f32,
+    /// F2 panel: whether the selected object's script is being edited
+    /// inline, and the text buffer backing that `TextEdit`.
+    script_editor_open: bool,
+    script_editor_buffer: String,
+    rigs_dir: PathBuf,
+    rigs: Vec<RigAsset>,
+    /// F2 panel: the currently selected rig *instance* (its root entity)
+    /// and, within it, the currently selected *part* for hand-posing — kept
+    /// separate from `selected_entity` since rigs get their own "Rigs"
+    /// section rather than sharing the flat Scene Objects outliner.
+    selected_rig: Option<Entity>,
+    selected_rig_part: Option<Entity>,
+    rig_new_name: String,
+    new_part_name: String,
+    new_part_parent: String,
+    new_clip_name: String,
+    new_clip_duration: f32,
+    new_clip_looping: bool,
+    classes_dir: PathBuf,
+    classes: Vec<ObjectClass>,
+    /// F2 panel: the currently selected *class* (an index into `classes`,
+    /// not an ECS entity — a class is plain data, not a live thing).
+    selected_class: Option<usize>,
+    class_new_name: String,
+    /// F2 panel: transient input buffer for the "Add Particle Emitter"
+    /// naming — actual per-emitter properties are edited on the selected
+    /// entity's own `ParticleEmitter` component, not buffered here.
+    particle_emitter_new_name: String,
+    /// In-game HUD state (title/bars/toasts) — drawn in Play mode only,
+    /// mutated by scripts/native `Behavior`s through `ScriptApi`.
+    hud: HudState,
+    saves_dir: PathBuf,
 }
 
 impl Sandbox {
@@ -328,10 +581,16 @@ impl Sandbox {
         let asset_root = resolve_asset_root();
         let profiles_dir = asset_root.join("profiles");
         let levels_dir = asset_root.join("levels");
+        let rigs_dir = asset_root.join("rigs");
+        let classes_dir = asset_root.join("classes");
+        let saves_dir = asset_root.join("saves");
         Self {
             asset_root,
             profiles_dir,
             levels_dir,
+            rigs_dir,
+            classes_dir,
+            saves_dir,
             shader_cache: None,
             shader_paths: (PathBuf::new(), PathBuf::new(), PathBuf::new()),
             render_params: RenderParams::default(),
@@ -349,6 +608,7 @@ impl Sandbox {
             level_ui_visible: true,
             selected_entity: None,
             cube_mesh: None,
+            particle_quad_mesh: None,
             plane_mesh: None,
             physics_params: PhysicsParams::default(),
             mode: EditorMode::Edit,
@@ -356,6 +616,23 @@ impl Sandbox {
             player_entity: None,
             pre_play_snapshot: None,
             trigger_overlaps: HashSet::new(),
+            elapsed_time: 0.0,
+            script_editor_open: false,
+            script_editor_buffer: String::new(),
+            rigs: Vec::new(),
+            selected_rig: None,
+            selected_rig_part: None,
+            rig_new_name: String::from("humanoid"),
+            new_part_name: String::from("Part"),
+            new_part_parent: String::new(),
+            new_clip_name: String::from("clip_1"),
+            new_clip_duration: 1.0,
+            new_clip_looping: true,
+            classes: Vec::new(),
+            selected_class: None,
+            class_new_name: String::from("class_1"),
+            particle_emitter_new_name: String::from("Sparkles"),
+            hud: HudState::default(),
             audio: match AudioContext::new() {
                 Ok(audio) => Some(audio),
                 Err(err) => {
@@ -370,6 +647,60 @@ impl Sandbox {
         if let Some(audio) = &self.audio {
             audio.play_tone(frequency_hz, duration_secs);
         }
+    }
+
+    /// Builds a `ScriptApi` scoped to `entity` and calls `f` with it and its
+    /// `BehaviorSlot` — the one place that bridges `Behavior`/`ScriptApi` to
+    /// the ECS. Uses the same "combined tuple `query_one`" idiom as every
+    /// other simultaneous two-component fetch in this file, so it needs no
+    /// new borrow-checker workaround. Returns `false` if `entity` has no
+    /// `Transform` + `BehaviorSlot` (not scripted, or already despawned).
+    fn with_behavior(&mut self, entity: Entity, f: impl FnOnce(&mut dyn Behavior, &mut dyn ScriptApi)) -> bool {
+        let elapsed = self.elapsed_time;
+        let audio = self.audio.as_ref();
+        let hud = &mut self.hud;
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut BehaviorSlot)>(entity) {
+            if let Some((transform, BehaviorSlot(behavior))) = query.get() {
+                let mut api = SandboxScriptApi { transform, audio, elapsed, hud };
+                f(behavior.as_mut(), &mut api);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// (Re)compiles the script at `relative_path` and attaches it as
+    /// `entity`'s `BehaviorSlot`, replacing any existing one — used by
+    /// "Attach/Change Script...", "Reload", and after an inline "Save".
+    /// Updates `LevelObjectMeta::script_path` so it round-trips when the
+    /// level is saved, and fires `on_ready` immediately so new logic takes
+    /// effect live rather than waiting for the next hook call.
+    fn attach_script_to_entity(&mut self, entity: Entity, relative_path: &Path) {
+        let full_path = self.asset_root.join(relative_path);
+        let source = match std::fs::read_to_string(&full_path) {
+            Ok(source) => source,
+            Err(err) => {
+                log::error!("failed to read script {full_path:?}: {err}");
+                return;
+            }
+        };
+        let behavior = match ScriptBehavior::from_source(&source) {
+            Ok(behavior) => behavior,
+            Err(errors) => {
+                for error in errors {
+                    log::error!("script error in {full_path:?}: {error}");
+                }
+                return;
+            }
+        };
+        let _ = self.world.insert_one(entity, BehaviorSlot(Box::new(behavior)));
+        if let Ok(mut query) = self.world.query_one::<&mut LevelObjectMeta>(entity) {
+            if let Some(meta) = query.get() {
+                meta.script_path = Some(relative_path.to_path_buf());
+            }
+        }
+        self.with_behavior(entity, |behavior, api| behavior.on_ready(api));
+        log::info!("attached script {relative_path:?}");
     }
 
     /// Loads the profile's shader files, swaps the composite shader, and
@@ -458,8 +789,11 @@ impl Sandbox {
     /// and texture (or a white fallback), then spawns it with a `Transform` +
     /// `MeshRenderer` + `LevelObjectMeta` (the last so it round-trips back
     /// into a `LevelObject` when the level is saved).
-    fn spawn_level_object(&mut self, gl: &glow::Context, obj: &LevelObject) -> anyhow::Result<Entity> {
-        let mesh: Arc<GpuMesh> = match &obj.mesh {
+    /// Resolves a `MeshSource` to a GPU mesh — a cached, shared primitive, or
+    /// an OBJ loaded fresh. Shared by `spawn_level_object` and
+    /// `spawn_rig_part` so both go through the same cube/plane cache.
+    fn resolve_mesh(&mut self, gl: &glow::Context, source: &MeshSource) -> anyhow::Result<Arc<GpuMesh>> {
+        Ok(match source {
             MeshSource::Primitive(PrimitiveKind::Cube) => {
                 if self.cube_mesh.is_none() {
                     self.cube_mesh = Some(Arc::new(GpuMesh::upload(gl, &primitives::cube())?));
@@ -479,33 +813,76 @@ impl Sandbox {
                 let data = load_obj(&self.asset_root.join(path))?;
                 Arc::new(GpuMesh::upload(gl, &data[0])?)
             }
+        })
+    }
+
+    /// Resolves an optional texture path to a GPU texture, or a solid white
+    /// 1x1 fallback if `path` is `None` or fails to load. Shared by
+    /// `spawn_level_object` and `spawn_rig_part`.
+    fn resolve_texture(&self, gl: &glow::Context, path: Option<&Path>) -> Arc<GpuTexture> {
+        match path {
+            Some(path) => {
+                match GpuTexture::load_from_file(gl, &self.asset_root.join(path), TextureFilter::Nearest) {
+                    Ok(tex) => Arc::new(tex),
+                    Err(err) => {
+                        log::error!("failed to load texture {path:?}: {err}; using white fallback");
+                        Arc::new(white_fallback_texture(gl))
+                    }
+                }
+            }
+            None => Arc::new(white_fallback_texture(gl)),
+        }
+    }
+
+    /// Resolves an `ObjectClass` referenced by `class_path` — matched by
+    /// file stem against `self.classes` (same convention as
+    /// `find_rig_asset`: `save_to_file` always writes `classes/<name>.ron`,
+    /// so the stem recovers the name without a separate path table).
+    fn find_class(&self, class_path: &Path) -> Option<&ObjectClass> {
+        let stem = class_path.file_stem()?.to_str()?;
+        self.classes.iter().find(|class| class.name == stem)
+    }
+
+    /// If `obj.class` references a loaded class, returns a copy of `obj`
+    /// with mesh/texture/scale/dynamic/trigger/animation/script overridden
+    /// from the class — everything about an object except its placement
+    /// (name/position/rotation stay `obj`'s own). Falls back to `obj`
+    /// unchanged if unclassed, or if the referenced class isn't loaded
+    /// (logged, not fatal — the object still spawns as a plain object).
+    fn resolve_class_overrides(&self, obj: &LevelObject) -> LevelObject {
+        let Some(class_path) = &obj.class else { return obj.clone() };
+        let Some(class) = self.find_class(class_path) else {
+            log::warn!(
+                "object '{}' references missing class {class_path:?}; spawning with its own fallback fields",
+                obj.name
+            );
+            return obj.clone();
         };
+        LevelObject {
+            mesh: class.mesh.clone(),
+            texture_path: class.texture_path.clone(),
+            scale: class.scale,
+            is_dynamic: class.is_dynamic,
+            is_trigger: class.is_trigger,
+            animation: class.animation,
+            script: class.script.clone(),
+            ..obj.clone()
+        }
+    }
+
+    fn spawn_level_object(&mut self, gl: &glow::Context, obj: &LevelObject) -> anyhow::Result<Entity> {
+        let resolved = self.resolve_class_overrides(obj);
+        let obj = &resolved;
+
+        let mesh = self.resolve_mesh(gl, &obj.mesh)?;
 
         let texture = if obj.is_trigger {
             Arc::new(solid_color_texture(gl, TRIGGER_COLOR))
         } else {
-            match &obj.texture_path {
-                Some(path) => {
-                    match GpuTexture::load_from_file(gl, &self.asset_root.join(path), TextureFilter::Nearest) {
-                        Ok(tex) => Arc::new(tex),
-                        Err(err) => {
-                            log::error!("failed to load texture {path:?}: {err}; using white fallback");
-                            Arc::new(white_fallback_texture(gl))
-                        }
-                    }
-                }
-                None => Arc::new(white_fallback_texture(gl)),
-            }
+            self.resolve_texture(gl, obj.texture_path.as_deref())
         };
 
-        // Approximate collision bounds from scale, not an exact mesh-fitted
-        // bound — fine for boxy low-poly levels, called out in the guide.
-        let half_extents = match &obj.mesh {
-            MeshSource::Primitive(PrimitiveKind::Plane) => {
-                Vec3::new(obj.scale[0], 0.1, obj.scale[2])
-            }
-            _ => Vec3::from(obj.scale) * 0.5,
-        };
+        let half_extents = collider_half_extents(&obj.mesh, obj.scale);
 
         let rotation_euler_deg = Vec3::from(obj.rotation_euler_deg);
         let entity = self.world.spawn((
@@ -523,6 +900,7 @@ impl Sandbox {
                 mesh_source: obj.mesh.clone(),
                 texture_path: obj.texture_path.clone(),
                 rotation_euler_deg,
+                script_path: obj.script.clone(),
             },
             Collider {
                 shape: ColliderShape::Aabb { half_extents },
@@ -532,6 +910,24 @@ impl Sandbox {
 
         if obj.is_dynamic {
             let _ = self.world.insert_one(entity, RigidBody::default());
+        }
+
+        if let Some(script_path) = &obj.script {
+            let full_path = self.asset_root.join(script_path);
+            match std::fs::read_to_string(&full_path) {
+                Ok(source) => match ScriptBehavior::from_source(&source) {
+                    Ok(behavior) => {
+                        let _ = self.world.insert_one(entity, BehaviorSlot(Box::new(behavior)));
+                        self.with_behavior(entity, |behavior, api| behavior.on_ready(api));
+                    }
+                    Err(errors) => {
+                        for error in errors {
+                            log::error!("script error in {full_path:?}: {error}");
+                        }
+                    }
+                },
+                Err(err) => log::error!("failed to read script {full_path:?}: {err}"),
+            }
         }
 
         if let Some(spec) = obj.animation {
@@ -552,6 +948,10 @@ impl Sandbox {
                     elapsed: 0.0,
                 },
             );
+        }
+
+        if let Some(class_path) = &obj.class {
+            let _ = self.world.insert_one(entity, ClassMember { class_path: class_path.clone() });
         }
 
         Ok(entity)
@@ -577,6 +977,29 @@ impl Sandbox {
                 mesh_source: MeshSource::Primitive(PrimitiveKind::Cube),
                 texture_path: None,
                 rotation_euler_deg: Vec3::ZERO,
+                script_path: None,
+            },
+        ))
+    }
+
+    /// Spawns a placed particle emitter: `Transform` + `LevelObjectMeta`
+    /// (a filler `mesh_source`, no `MeshRenderer` — same trick
+    /// `spawn_level_light` uses so it shares the outliner/selection code)
+    /// + `ParticleEmitter`.
+    fn spawn_level_particle_emitter(&mut self, emitter: &LevelParticleEmitter) -> Entity {
+        self.world.spawn((
+            Transform {
+                position: Vec3::from(emitter.position),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            ParticleEmitter::new(emitter.def),
+            LevelObjectMeta {
+                name: emitter.name.clone(),
+                mesh_source: MeshSource::Primitive(PrimitiveKind::Cube),
+                texture_path: None,
+                rotation_euler_deg: Vec3::ZERO,
+                script_path: None,
             },
         ))
     }
@@ -584,6 +1007,8 @@ impl Sandbox {
     fn apply_level(&mut self, gl: &glow::Context, level: &Level) -> anyhow::Result<()> {
         self.world.clear();
         self.selected_entity = None;
+        self.selected_rig = None;
+        self.selected_rig_part = None;
         for obj in &level.objects {
             if let Err(err) = self.spawn_level_object(gl, obj) {
                 log::error!("failed to spawn level object '{}': {err}", obj.name);
@@ -592,15 +1017,201 @@ impl Sandbox {
         for light in &level.lights {
             self.spawn_level_light(light);
         }
+        for emitter in &level.particle_emitters {
+            self.spawn_level_particle_emitter(emitter);
+        }
+        for instance in &level.rig_instances {
+            let Some(asset) = self.find_rig_asset(&instance.rig_path).cloned() else {
+                log::error!(
+                    "failed to spawn rig instance '{}': rig {:?} not loaded",
+                    instance.name,
+                    instance.rig_path
+                );
+                continue;
+            };
+            if let Err(err) = self.spawn_rig_instance(gl, &asset, instance) {
+                log::error!("failed to spawn rig instance '{}': {err}", instance.name);
+            }
+        }
+        self.spawn_native_behavior_demo(gl);
         self.current_level_name = level.name.clone();
         self.physics_params = level.physics;
         log::info!(
-            "loaded level '{}' ({} objects, {} lights)",
+            "loaded level '{}' ({} objects, {} lights, {} particle emitters, {} rig instances)",
             level.name,
             level.objects.len(),
-            level.lights.len()
+            level.lights.len(),
+            level.particle_emitters.len(),
+            level.rig_instances.len()
         );
         Ok(())
+    }
+
+    /// A compiled-in demo object, not part of the serialized level data —
+    /// it's re-added every time `apply_level` rebuilds the world (level
+    /// load, or restoring the pre-Play snapshot) rather than being saved as
+    /// a `LevelObject`. This is the tradeoff of a native-Rust `Behavior`
+    /// versus a script: it can't be authored/persisted as level data, only
+    /// compiled in. Tagged with `NativeBehaviorDemoMarker` so
+    /// `build_level_from_ecs` knows to skip it — saving the level should
+    /// never freeze a copy of it in as an inert, behavior-less cube.
+    fn spawn_native_behavior_demo(&mut self, gl: &glow::Context) {
+        let obj = LevelObject {
+            name: "Native Behavior Cube".to_string(),
+            mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+            texture_path: None,
+            position: [2.4, 1.0, -2.0],
+            rotation_euler_deg: [0.0, 0.0, 0.0],
+            scale: [0.6, 0.6, 0.6],
+            is_dynamic: false,
+            is_trigger: false,
+            animation: None,
+            script: None,
+            class: None,
+        };
+        match self.spawn_level_object(gl, &obj) {
+            Ok(entity) => {
+                // Two separate `insert_one` calls, not one call with a tuple:
+                // `insert_one`'s generic `T` would happily accept a tuple as
+                // a single opaque component type instead of unpacking it
+                // into two real components, silently breaking the
+                // `.without::<&NativeBehaviorDemoMarker>()` filter elsewhere.
+                let _ = self.world.insert_one(entity, BehaviorSlot(Box::new(NativeBobBehavior::new(0.4, 2.0))));
+                let _ = self.world.insert_one(entity, NativeBehaviorDemoMarker);
+            }
+            Err(err) => log::error!("failed to spawn native behavior demo cube: {err}"),
+        }
+    }
+
+    /// Spawns one rig part: `Transform` + `MeshRenderer` + `RigPart` (parent
+    /// left unwired — `spawn_rig_instance` fills it in once every part in
+    /// the rig exists) + `RigPartMeta` (so the part can be serialized back
+    /// out later). The initial `Transform` is just a reasonable placeholder;
+    /// `engine::rig::update_world_transforms` overwrites it the very next
+    /// frame regardless.
+    fn spawn_rig_part(&mut self, gl: &glow::Context, def: &RigPartDef) -> anyhow::Result<Entity> {
+        let mesh = self.resolve_mesh(gl, &def.mesh)?;
+        let texture = self.resolve_texture(gl, def.texture_path.as_deref());
+        let local_rotation_euler_deg = Vec3::from(def.local_rotation_euler_deg);
+        let local_rotation = euler_deg_to_quat(local_rotation_euler_deg);
+        let local_position = Vec3::from(def.local_position);
+
+        let entity = self.world.spawn((
+            Transform {
+                position: local_position,
+                rotation: local_rotation,
+                scale: Vec3::from(def.scale),
+            },
+            MeshRenderer { mesh, texture: Some(texture) },
+            RigPart { parent: None, local_position, local_rotation_euler_deg, local_rotation },
+            engine::rig::RigPartMeta { mesh_source: def.mesh.clone(), texture_path: def.texture_path.clone() },
+        ));
+        Ok(entity)
+    }
+
+    /// Spawns every part of `asset`, wires up the parent hierarchy by name,
+    /// and tags the root with `Rig`/`RigAnimator`/`RigRoot` — the root being
+    /// whichever part has `parent: None` (the first one found, if an asset
+    /// somehow has more than one, which authoring through the F2 panel never
+    /// produces). `instance`'s position/rotation become the root's local
+    /// pose (a root's local pose *is* its world pose).
+    fn spawn_rig_instance(&mut self, gl: &glow::Context, asset: &RigAsset, instance: &RigInstance) -> anyhow::Result<Entity> {
+        let mut parts_by_name: HashMap<String, Entity> = HashMap::with_capacity(asset.parts.len());
+        for def in &asset.parts {
+            let entity = self.spawn_rig_part(gl, def)?;
+            parts_by_name.insert(def.name.clone(), entity);
+        }
+
+        // Second pass: every part entity now exists, so parent references
+        // can be resolved regardless of authoring order in the file.
+        for def in &asset.parts {
+            let Some(&entity) = parts_by_name.get(&def.name) else { continue };
+            let parent = def.parent.as_ref().and_then(|name| parts_by_name.get(name).copied());
+            if let Ok(mut part) = self.world.get::<&mut RigPart>(entity) {
+                part.parent = parent;
+            }
+        }
+
+        let root_def = asset
+            .parts
+            .iter()
+            .find(|def| def.parent.is_none())
+            .ok_or_else(|| anyhow::anyhow!("rig '{}' has no root part (a part with parent: None)", asset.name))?;
+        let root_entity = *parts_by_name
+            .get(&root_def.name)
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve root entity for rig '{}'", asset.name))?;
+
+        let rotation_euler_deg = Vec3::from(instance.rotation_euler_deg);
+        if let Ok(mut root_part) = self.world.get::<&mut RigPart>(root_entity) {
+            root_part.local_position = Vec3::from(instance.position);
+            root_part.set_local_rotation_euler_deg(rotation_euler_deg);
+        }
+
+        let current_clip = instance
+            .playing_clip
+            .as_ref()
+            .and_then(|name| asset.clips.iter().position(|clip| &clip.name == name));
+
+        // Three separate `insert_one` calls, not one call with a tuple:
+        // `insert_one`'s generic bound would happily accept a tuple as a
+        // single opaque component instead of unpacking it, silently
+        // breaking every later single-component query/filter against these
+        // types (the same footgun documented on `spawn_native_behavior_demo`).
+        let _ = self.world.insert_one(root_entity, Rig { parts_by_name });
+        let _ = self.world.insert_one(
+            root_entity,
+            RigAnimator {
+                clips: asset.clips.clone(),
+                current_clip,
+                time: 0.0,
+                playing: current_clip.is_some(),
+                speed: 1.0,
+                ..Default::default()
+            },
+        );
+        let _ = self
+            .world
+            .insert_one(root_entity, RigRoot { name: instance.name.clone(), rig_path: instance.rig_path.clone() });
+
+        Ok(root_entity)
+    }
+
+    /// The rig-world mirror of `build_level_from_ecs`: reconstructs a
+    /// `RigAsset` from a placed instance's live entities (current part
+    /// offsets + whatever clips its `RigAnimator` holds), for "Save Rig".
+    fn build_rig_asset_from_ecs(&self, root: Entity, name: String) -> Option<RigAsset> {
+        let rig = self.world.get::<&Rig>(root).ok()?;
+        let entity_to_name: HashMap<Entity, String> =
+            rig.parts_by_name.iter().map(|(part_name, &entity)| (entity, part_name.clone())).collect();
+
+        let mut parts = Vec::new();
+        for (part_name, &entity) in &rig.parts_by_name {
+            let Ok(rig_part) = self.world.get::<&RigPart>(entity) else { continue };
+            let Ok(meta) = self.world.get::<&engine::rig::RigPartMeta>(entity) else { continue };
+            let Ok(transform) = self.world.get::<&Transform>(entity) else { continue };
+            parts.push(RigPartDef {
+                name: part_name.clone(),
+                parent: rig_part.parent.and_then(|parent_entity| entity_to_name.get(&parent_entity).cloned()),
+                mesh: meta.mesh_source.clone(),
+                texture_path: meta.texture_path.clone(),
+                local_position: rig_part.local_position.to_array(),
+                local_rotation_euler_deg: rig_part.local_rotation_euler_deg.to_array(),
+                scale: transform.scale.to_array(),
+            });
+        }
+
+        let clips = self.world.get::<&RigAnimator>(root).map(|animator| animator.clips.clone()).unwrap_or_default();
+        Some(RigAsset { name, parts, clips })
+    }
+
+    /// Finds a loaded `RigAsset` by the relative path a `RigInstance`
+    /// references it with — matched by file stem against `self.rigs`
+    /// (which, like `self.levels`/`self.profiles`, only remembers each
+    /// asset's `name`, not the path it was loaded from; `save_to_file`
+    /// always writes `rigs/<name>.ron`, so the file stem recovers it).
+    fn find_rig_asset(&self, rig_path: &Path) -> Option<&RigAsset> {
+        let stem = rig_path.file_stem()?.to_str()?;
+        self.rigs.iter().find(|rig| rig.name == stem)
     }
 
     fn build_level_from_ecs(&self) -> Level {
@@ -609,6 +1220,8 @@ impl Sandbox {
             .world
             .query::<(&Transform, &LevelObjectMeta)>()
             .without::<&Light>()
+            .without::<&ParticleEmitter>()
+            .without::<&NativeBehaviorDemoMarker>()
             .iter()
         {
             // An animated object's live `Transform` is mid-motion — save the
@@ -644,6 +1257,8 @@ impl Sandbox {
                     .get::<&Collider>(entity)
                     .is_ok_and(|collider| collider.is_trigger),
                 animation,
+                script: meta.script_path.clone(),
+                class: self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone()),
             });
         }
 
@@ -664,10 +1279,37 @@ impl Sandbox {
             });
         }
 
+        let mut particle_emitters = Vec::new();
+        for (_entity, (transform, meta, emitter)) in
+            self.world.query::<(&Transform, &LevelObjectMeta, &ParticleEmitter)>().iter()
+        {
+            particle_emitters.push(LevelParticleEmitter {
+                name: meta.name.clone(),
+                position: transform.position.to_array(),
+                def: emitter.def,
+            });
+        }
+
+        let mut rig_instances = Vec::new();
+        for (_entity, (root, part, animator)) in
+            self.world.query::<(&RigRoot, &RigPart, &RigAnimator)>().iter()
+        {
+            let playing_clip = animator.current_clip.and_then(|i| animator.clips.get(i)).map(|clip| clip.name.clone());
+            rig_instances.push(RigInstance {
+                name: root.name.clone(),
+                rig_path: root.rig_path.clone(),
+                position: part.local_position.to_array(),
+                rotation_euler_deg: part.local_rotation_euler_deg.to_array(),
+                playing_clip,
+            });
+        }
+
         Level {
             name: self.current_level_name.clone(),
             objects,
             lights,
+            particle_emitters,
+            rig_instances,
             physics: self.physics_params,
         }
     }
@@ -716,6 +1358,8 @@ impl Sandbox {
             is_dynamic: matches!(kind, PrimitiveKind::Cube),
             is_trigger: false,
             animation: None,
+            script: None,
+            class: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -738,6 +1382,8 @@ impl Sandbox {
             is_dynamic: false,
             is_trigger: true,
             animation: None,
+            script: None,
+            class: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -779,6 +1425,8 @@ impl Sandbox {
             is_dynamic: false,
             is_trigger: false,
             animation: None,
+            script: None,
+            class: None,
         };
 
         match self.spawn_level_object(gl, &obj) {
@@ -880,6 +1528,74 @@ impl Sandbox {
         log::info!("exited play mode, restored edit-time state");
     }
 
+    fn checkpoint_path(&self) -> PathBuf {
+        self.saves_dir.join("checkpoint.ron")
+    }
+
+    /// F9 — snapshots the player's position/look direction to a single
+    /// checkpoint file. Deliberately just one slot (`saves/checkpoint.ron`,
+    /// overwritten each time), not a multi-slot save system — there's no
+    /// per-object/script world state captured, so this is a "get back to
+    /// roughly where I was" checkpoint, not a full save file.
+    fn save_checkpoint(&mut self) {
+        let Some(player) = self.player_entity else {
+            log::warn!("F9: no player to checkpoint (not in Play mode?)");
+            return;
+        };
+        let Ok(position) = self.world.get::<&Transform>(player).map(|t| t.position) else {
+            return;
+        };
+        let data = SaveData {
+            level_name: self.current_level_name.clone(),
+            player_position: position.to_array(),
+            player_yaw: self.fp_camera.yaw,
+            player_pitch: self.fp_camera.pitch,
+            saved_at_elapsed: self.elapsed_time,
+        };
+        let path = self.checkpoint_path();
+        match engine::save::save_to_file(&data, &path) {
+            Ok(()) => {
+                log::info!("checkpoint saved to {path:?}");
+                self.hud.show_toast("Checkpoint saved", 1.5);
+            }
+            Err(err) => log::error!("failed to save checkpoint: {err}"),
+        }
+    }
+
+    /// F10 — loads the checkpoint and re-applies its player position/look
+    /// direction, entering Play mode first if needed (there's no player
+    /// entity to reposition in Edit mode). Does not re-load a different
+    /// level if the checkpoint was saved in one — out of scope for a
+    /// checkpoint this simple, just logged as a heads-up.
+    fn load_checkpoint(&mut self, ctx: &mut Context) {
+        let path = self.checkpoint_path();
+        let data = match engine::save::load_from_file(&path) {
+            Ok(data) => data,
+            Err(err) => {
+                log::warn!("F10: no checkpoint to load ({err})");
+                return;
+            }
+        };
+        if data.level_name != self.current_level_name {
+            log::warn!(
+                "checkpoint was saved in level '{}', but '{}' is currently loaded — repositioning within the current level anyway",
+                data.level_name, self.current_level_name
+            );
+        }
+        if self.mode == EditorMode::Edit {
+            self.enter_play_mode(ctx);
+        }
+        if let Some(player) = self.player_entity {
+            if let Ok(mut transform) = self.world.get::<&mut Transform>(player) {
+                transform.position = Vec3::from(data.player_position);
+            }
+        }
+        self.fp_camera.yaw = data.player_yaw;
+        self.fp_camera.pitch = data.player_pitch;
+        log::info!("checkpoint loaded from {path:?}");
+        self.hud.show_toast("Checkpoint loaded", 1.5);
+    }
+
     /// Reads input each frame in Play mode and drives the player: mouse-look,
     /// WASD movement, Space to jump. **This is the place to add your own
     /// game's input handling** — swap the movement scheme, add sprint/crouch,
@@ -968,12 +1684,17 @@ impl Sandbox {
             return;
         };
 
+        // Eligible targets are anything with a `RigidBody` (the original
+        // "push it" demo) *or* a `BehaviorSlot` (a scripted/native object
+        // that wants its own `on_interact`) — a plain query tuple can't
+        // express "either," so the eligibility check is inline instead.
         let mut nearest: Option<(Entity, f32)> = None;
-        for (entity, (transform, _meta, _body)) in self
-            .world
-            .query::<(&Transform, &LevelObjectMeta, &RigidBody)>()
-            .iter()
-        {
+        for (entity, (transform, _meta)) in self.world.query::<(&Transform, &LevelObjectMeta)>().iter() {
+            let interactable = self.world.get::<&RigidBody>(entity).is_ok()
+                || self.world.get::<&BehaviorSlot>(entity).is_ok();
+            if !interactable {
+                continue;
+            }
             let distance = transform.position.distance(player_position);
             if distance <= controller.interact_radius
                 && nearest.is_none_or(|(_, best)| distance < best)
@@ -985,6 +1706,14 @@ impl Sandbox {
         let Some((entity, distance)) = nearest else {
             return;
         };
+
+        // A scripted/native-behavior object handles its own interaction
+        // instead of the generic push — it opted in by having a `Behavior`.
+        if self.with_behavior(entity, |behavior, api| behavior.on_interact(api)) {
+            log::info!("interacted with a behavior-driven object {distance:.2}m away");
+            return;
+        }
+
         let mut pushed = false;
         if let Ok(mut query) = self.world.query_one::<(&Transform, &mut RigidBody)>(entity) {
             if let Some((transform, body)) = query.get() {
@@ -1000,14 +1729,33 @@ impl Sandbox {
         }
         if pushed {
             self.play_tone(220.0, 0.1);
+            if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                self.spawn_burst_at(position, ParticleEmitterDef { rate_per_sec: 0.0, ..ParticleEmitterDef::default() }, 12);
+            }
+            self.hud.show_toast("Pushed!", 1.5);
         }
+    }
+
+    /// Spawns a transient, self-cleaning burst of particles at `position` —
+    /// no `LevelObjectMeta` (so it never shows up in Scene Objects or gets
+    /// saved as level data) and no mesh/texture of its own, just a
+    /// `ParticleEmitter` that `engine::particles::step` despawns once every
+    /// particle it made has aged out (see `Game::update`). Ties particles +
+    /// physics + the `interact` hook together, the same demo spirit as the
+    /// jump/push tones.
+    fn spawn_burst_at(&mut self, position: Vec3, def: ParticleEmitterDef, count: u32) {
+        let mut emitter = ParticleEmitter::new(def);
+        emitter.spawn_burst(position, count);
+        self.world.spawn((Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE }, emitter));
     }
 
     /// Sibling to `interact` for the other kind of "things that happen when
     /// the player does something": entering/exiting a non-solid trigger
     /// zone. Replace this with your own game's trigger logic (checkpoints,
-    /// level transitions, damage zones, ...).
-    fn on_trigger_entered(&self, trigger: Entity) {
+    /// level transitions, damage zones, ...). Also dispatches to the
+    /// trigger's `Behavior`, if it has one — script-driven trigger logic
+    /// alongside the built-in log+tone demo.
+    fn on_trigger_entered(&mut self, trigger: Entity) {
         let name = self
             .world
             .get::<&LevelObjectMeta>(trigger)
@@ -1015,9 +1763,10 @@ impl Sandbox {
             .unwrap_or_else(|_| "Trigger".to_string());
         log::info!("entered trigger '{name}'");
         self.play_tone(880.0, 0.08);
+        self.with_behavior(trigger, |behavior, api| behavior.on_trigger_enter(api, "Player"));
     }
 
-    fn on_trigger_exited(&self, trigger: Entity) {
+    fn on_trigger_exited(&mut self, trigger: Entity) {
         let name = self
             .world
             .get::<&LevelObjectMeta>(trigger)
@@ -1025,6 +1774,7 @@ impl Sandbox {
             .unwrap_or_else(|_| "Trigger".to_string());
         log::info!("exited trigger '{name}'");
         self.play_tone(440.0, 0.08);
+        self.with_behavior(trigger, |behavior, api| behavior.on_trigger_exit(api, "Player"));
     }
 
     fn draw_level_editor_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context) {
@@ -1086,6 +1836,16 @@ impl Sandbox {
             let entity = self.spawn_level_light(&light);
             self.selected_entity = Some(entity);
         }
+        if ui.button("Add Particle Emitter").clicked() {
+            let count = self.world.query::<&ParticleEmitter>().iter().count();
+            let emitter = LevelParticleEmitter {
+                name: format!("{}_{}", self.particle_emitter_new_name, count + 1),
+                position: [0.0, 1.5, 0.0],
+                def: ParticleEmitterDef::default(),
+            };
+            let entity = self.spawn_level_particle_emitter(&emitter);
+            self.selected_entity = Some(entity);
+        }
 
         ui.separator();
         ui.heading("Scene Objects");
@@ -1112,12 +1872,104 @@ impl Sandbox {
         }
 
         ui.separator();
+        ui.heading("Rigs");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.rig_new_name);
+            if ui.button("New Rig").clicked() {
+                self.create_new_rig(gl);
+            }
+        });
+        if !self.rigs.is_empty() {
+            ui.label("Add instance of:");
+            let mut add_instance_of = None;
+            for (i, rig) in self.rigs.iter().enumerate() {
+                if ui.selectable_label(false, &rig.name).clicked() {
+                    add_instance_of = Some(i);
+                }
+            }
+            if let Some(i) = add_instance_of {
+                self.add_rig_instance(gl, i);
+            }
+        }
+
+        let mut clicked_rig = None;
+        for (entity, root) in self.world.query::<&RigRoot>().iter() {
+            let selected = self.selected_rig == Some(entity);
+            if ui.selectable_label(selected, &root.name).clicked() {
+                clicked_rig = Some(entity);
+            }
+        }
+        if let Some(entity) = clicked_rig {
+            self.selected_rig = Some(entity);
+            self.selected_rig_part = None;
+        }
+
+        ui.separator();
+        if let Some(root) = self.selected_rig {
+            if self.world.contains(root) {
+                self.draw_selected_rig_ui(ui, gl, root);
+            } else {
+                self.selected_rig = None;
+                self.selected_rig_part = None;
+            }
+        } else {
+            ui.label("No rig selected.");
+        }
+
+        ui.separator();
+        ui.heading("Classes");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.class_new_name);
+            if ui.button("New Class").clicked() {
+                self.create_new_class();
+            }
+        });
+        let mut clicked_class = None;
+        let mut add_instance_of_class = None;
+        for (i, class) in self.classes.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.selected_class == Some(i), &class.name).clicked() {
+                    clicked_class = Some(i);
+                }
+                if ui.small_button("+ Instance").clicked() {
+                    add_instance_of_class = Some(i);
+                }
+            });
+        }
+        if let Some(i) = clicked_class {
+            self.selected_class = Some(i);
+        }
+        if let Some(i) = add_instance_of_class {
+            self.spawn_object_from_class(gl, i);
+        }
+
+        ui.separator();
+        if let Some(index) = self.selected_class {
+            if index < self.classes.len() {
+                self.draw_class_editor_ui(ui, gl, index);
+            } else {
+                self.selected_class = None;
+            }
+        } else {
+            ui.label("No class selected.");
+        }
+
+        ui.separator();
         ui.small("F2 toggle level editor \u{b7} F3 play/stop \u{b7} click an object below to select it");
     }
 
     fn draw_selected_object_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context, entity: Entity) {
         if self.world.get::<&Light>(entity).is_ok() {
             self.draw_selected_light_ui(ui, entity);
+            return;
+        }
+        if self.world.get::<&ParticleEmitter>(entity).is_ok() {
+            self.draw_selected_particle_emitter_ui(ui, entity);
+            return;
+        }
+        let classed_path = self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone());
+        if let Some(class_path) = classed_path {
+            self.draw_classed_object_ui(ui, entity, &class_path);
             return;
         }
 
@@ -1163,6 +2015,13 @@ impl Sandbox {
         let mut anim_changed = false;
         let mut base_position = Vec3::ZERO;
         let mut base_rotation = Quat::IDENTITY;
+
+        let mut script_attach = false;
+        let mut script_reload = false;
+        let mut script_save_inline = false;
+        let mut script_open_editor = false;
+        let mut script_inline_just_opened = false;
+        let mut current_script_path: Option<PathBuf> = None;
 
         {
             if let Ok(mut query) =
@@ -1254,6 +2113,43 @@ impl Sandbox {
                     base_position = transform.position;
                     base_rotation = transform.rotation;
 
+                    ui.label("Script");
+                    current_script_path = meta.script_path.clone();
+                    ui.label(
+                        meta.script_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "None".to_string()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Attach/Change Script...").clicked() {
+                            script_attach = true;
+                        }
+                        if meta.script_path.is_some() && ui.button("Reload").clicked() {
+                            script_reload = true;
+                        }
+                    });
+                    if meta.script_path.is_some() {
+                        if ui.checkbox(&mut self.script_editor_open, "Edit Inline").changed()
+                            && self.script_editor_open
+                        {
+                            script_inline_just_opened = true;
+                        }
+                        if self.script_editor_open {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.script_editor_buffer)
+                                    .desired_rows(12)
+                                    .code_editor(),
+                            );
+                            if ui.button("Save").clicked() {
+                                script_save_inline = true;
+                            }
+                        }
+                        if ui.button("Open in Script Editor").clicked() {
+                            script_open_editor = true;
+                        }
+                    }
+
                     ui.horizontal(|ui| {
                         if ui.button("Assign Texture...").clicked() {
                             assign_texture = true;
@@ -1313,6 +2209,43 @@ impl Sandbox {
                 );
             }
         }
+        if script_inline_just_opened {
+            if let Some(path) = &current_script_path {
+                match std::fs::read_to_string(self.asset_root.join(path)) {
+                    Ok(source) => self.script_editor_buffer = source,
+                    Err(err) => log::error!("failed to read script for inline editing: {err}"),
+                }
+            }
+        }
+        if script_attach {
+            if let Some(picked) = rfd::FileDialog::new()
+                .add_filter("PS2 Script", &["pss"])
+                .set_directory(&self.asset_root)
+                .pick_file()
+            {
+                let relative = engine::level::relativize(&picked, &self.asset_root);
+                self.attach_script_to_entity(entity, &relative);
+            }
+        }
+        if script_reload {
+            if let Some(path) = current_script_path.clone() {
+                self.attach_script_to_entity(entity, &path);
+            }
+        }
+        if script_save_inline {
+            if let Some(path) = current_script_path.clone() {
+                let full_path = self.asset_root.join(&path);
+                match std::fs::write(&full_path, &self.script_editor_buffer) {
+                    Ok(()) => self.attach_script_to_entity(entity, &path),
+                    Err(err) => log::error!("failed to save script {full_path:?}: {err}"),
+                }
+            }
+        }
+        if script_open_editor {
+            if let Some(path) = &current_script_path {
+                spawn_script_editor(&self.asset_root.join(path));
+            }
+        }
         if assign_texture {
             self.assign_texture_to_entity(gl, entity);
         }
@@ -1355,6 +2288,802 @@ impl Sandbox {
                     delete = true;
                 }
             }
+        }
+        if delete {
+            let _ = self.world.despawn(entity);
+            self.selected_entity = None;
+        }
+    }
+
+    fn draw_selected_particle_emitter_ui(&mut self, ui: &mut egui::Ui, entity: Entity) {
+        let mut delete = false;
+        let mut test_burst = false;
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut LevelObjectMeta, &mut ParticleEmitter)>(entity) {
+            if let Some((transform, meta, emitter)) = query.get() {
+                let mut name = meta.name.clone();
+                if ui.text_edit_singleline(&mut name).changed() {
+                    meta.name = name;
+                }
+
+                ui.label("Position");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: "));
+                });
+
+                ui.label(format!("Live particles: {}", emitter.particles.len()));
+
+                ui.add(egui::Slider::new(&mut emitter.def.rate_per_sec, 0.0..=50.0).text("Rate/sec (0 = burst only)"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut emitter.def.lifetime_min).speed(0.05).prefix("lifetime min: "));
+                    ui.add(egui::DragValue::new(&mut emitter.def.lifetime_max).speed(0.05).prefix("max: "));
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut emitter.def.speed_min).speed(0.05).prefix("speed min: "));
+                    ui.add(egui::DragValue::new(&mut emitter.def.speed_max).speed(0.05).prefix("max: "));
+                });
+                ui.add(egui::Slider::new(&mut emitter.def.spread_deg, 0.0..=180.0).text("Spread (deg)"));
+                ui.add(egui::Slider::new(&mut emitter.def.gravity_scale, 0.0..=2.0).text("Gravity scale"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut emitter.def.start_size).speed(0.01).prefix("start size: "));
+                    ui.add(egui::DragValue::new(&mut emitter.def.end_size).speed(0.01).prefix("end size: "));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Start color");
+                    ui.color_edit_button_rgba_unmultiplied(&mut emitter.def.start_color);
+                    ui.label("End color");
+                    ui.color_edit_button_rgba_unmultiplied(&mut emitter.def.end_color);
+                });
+                let mut max_particles = emitter.def.max_particles as f32;
+                if ui.add(egui::Slider::new(&mut max_particles, 1.0..=256.0).text("Max particles")).changed() {
+                    emitter.def.max_particles = max_particles.round() as u32;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Test Burst (12)").clicked() {
+                        test_burst = true;
+                    }
+                    if ui.button("Delete").clicked() {
+                        delete = true;
+                    }
+                });
+            }
+        }
+        if test_burst {
+            if let Ok(mut query) = self.world.query_one::<(&Transform, &mut ParticleEmitter)>(entity) {
+                if let Some((transform, emitter)) = query.get() {
+                    let position = transform.position;
+                    emitter.spawn_burst(position, 12);
+                }
+            }
+        }
+        if delete {
+            let _ = self.world.despawn(entity);
+            self.selected_entity = None;
+        }
+    }
+
+    // --- Rigs ---
+
+    fn create_new_rig(&mut self, gl: &glow::Context) {
+        let name = self.rig_new_name.trim().to_string();
+        if name.is_empty() {
+            log::warn!("cannot create a rig with an empty name");
+            return;
+        }
+        if self.rigs.iter().any(|rig| rig.name == name) {
+            log::warn!("a rig named '{name}' already exists");
+            return;
+        }
+        let asset = RigAsset {
+            name: name.clone(),
+            parts: vec![RigPartDef {
+                name: "Root".to_string(),
+                parent: None,
+                mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+                texture_path: None,
+                local_position: [0.0, 0.0, 0.0],
+                local_rotation_euler_deg: [0.0, 0.0, 0.0],
+                scale: [0.4, 0.4, 0.4],
+            }],
+            clips: Vec::new(),
+        };
+        let path = self.rigs_dir.join(format!("{name}.ron"));
+        if let Err(err) = engine::rig::save_to_file(&asset, &path) {
+            log::error!("failed to save new rig '{name}': {err}");
+            return;
+        }
+        self.rigs.push(asset);
+        let index = self.rigs.len() - 1;
+        self.add_rig_instance(gl, index);
+    }
+
+    /// Places a new instance of `self.rigs[asset_index]`, offset along X by
+    /// however many instances already exist so repeated clicks don't stack
+    /// on top of each other.
+    fn add_rig_instance(&mut self, gl: &glow::Context, asset_index: usize) {
+        let Some(asset) = self.rigs.get(asset_index).cloned() else { return };
+        let count = self.world.query::<&RigRoot>().iter().count();
+        let instance = RigInstance {
+            name: format!("{}_{}", asset.name, count + 1),
+            rig_path: PathBuf::from(format!("rigs/{}.ron", asset.name)),
+            position: [count as f32 * 1.5, 1.0, 2.0],
+            rotation_euler_deg: [0.0, 0.0, 0.0],
+            playing_clip: None,
+        };
+        match self.spawn_rig_instance(gl, &asset, &instance) {
+            Ok(root) => {
+                self.selected_rig = Some(root);
+                self.selected_rig_part = None;
+            }
+            Err(err) => log::error!("failed to add rig instance: {err}"),
+        }
+    }
+
+    /// Spawns a new part (always a `Cube` primitive — resize/retexture it
+    /// afterward via its own Local Position/Scale, same as any other
+    /// primitive) parented to `self.new_part_parent`, falling back to the
+    /// rig's root if that name doesn't match any existing part. Registers
+    /// it in the root's `Rig::parts_by_name` immediately so it's selectable
+    /// and animatable without needing a reload.
+    fn add_rig_part(&mut self, gl: &glow::Context, root: Entity, root_name: &str) {
+        let name = self.new_part_name.trim().to_string();
+        if name.is_empty() {
+            log::warn!("cannot add a rig part with an empty name");
+            return;
+        }
+        let valid_parents: HashSet<String> = self
+            .world
+            .get::<&Rig>(root)
+            .map(|rig| rig.parts_by_name.keys().cloned().collect())
+            .unwrap_or_default();
+        let parent_name = if valid_parents.contains(&self.new_part_parent) {
+            self.new_part_parent.clone()
+        } else {
+            root_name.to_string()
+        };
+
+        let def = RigPartDef {
+            name: name.clone(),
+            parent: Some(parent_name.clone()),
+            mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+            texture_path: None,
+            local_position: [0.0, 0.3, 0.0],
+            local_rotation_euler_deg: [0.0, 0.0, 0.0],
+            scale: [0.2, 0.2, 0.2],
+        };
+        let entity = match self.spawn_rig_part(gl, &def) {
+            Ok(entity) => entity,
+            Err(err) => {
+                log::error!("failed to add rig part '{name}': {err}");
+                return;
+            }
+        };
+
+        let parent_entity = self.world.get::<&Rig>(root).ok().and_then(|rig| rig.parts_by_name.get(&parent_name).copied());
+        if let Ok(mut part) = self.world.get::<&mut RigPart>(entity) {
+            part.parent = parent_entity;
+        }
+        if let Ok(mut rig) = self.world.get::<&mut Rig>(root) {
+            rig.parts_by_name.insert(name, entity);
+        }
+        self.selected_rig_part = Some(entity);
+    }
+
+    /// Upserts a keyframe at the current scrub time for the selected part,
+    /// into the selected clip's track for that part (creating the track if
+    /// this is its first keyframe) — the entire keyframe-authoring workflow
+    /// boils down to: pause, pose a part by hand, click this.
+    fn set_keyframe_for_selected_part(&mut self, root: Entity) {
+        let Some(part_entity) = self.selected_rig_part else { return };
+        let Some(part_name) = self.world.get::<&Rig>(root).ok().and_then(|rig| {
+            rig.parts_by_name.iter().find(|(_, &e)| e == part_entity).map(|(name, _)| name.clone())
+        }) else {
+            log::warn!("selected part is not registered on this rig");
+            return;
+        };
+        let Some(local_rotation_euler_deg) = self.world.get::<&RigPart>(part_entity).ok().map(|part| part.local_rotation_euler_deg) else {
+            return;
+        };
+
+        let Ok(mut animator) = self.world.get::<&mut RigAnimator>(root) else { return };
+        let Some(clip_index) = animator.current_clip else {
+            log::warn!("select or create a clip before setting a keyframe");
+            return;
+        };
+        let time = animator.time;
+        let Some(clip) = animator.clips.get_mut(clip_index) else { return };
+
+        let keyframe = Keyframe { time, rotation_euler_deg: local_rotation_euler_deg.to_array() };
+        match clip.tracks.iter_mut().find(|track| track.joint_name == part_name) {
+            Some(track) => match track.keyframes.iter_mut().find(|k| (k.time - time).abs() < 1e-3) {
+                Some(existing) => *existing = keyframe,
+                None => {
+                    track.keyframes.push(keyframe);
+                    track.keyframes.sort_by(|a, b| a.time.total_cmp(&b.time));
+                }
+            },
+            None => clip.tracks.push(JointTrack { joint_name: part_name.clone(), keyframes: vec![keyframe] }),
+        }
+        log::info!("set keyframe for '{part_name}' at t={time:.2}");
+    }
+
+    fn draw_selected_rig_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context, root: Entity) {
+        // Distinct from `rig_name` (the *instance*'s display name, e.g.
+        // "Humanoid"): `asset_name` is the underlying `RigAsset`'s own name
+        // (e.g. "humanoid", derived from `RigRoot::rig_path`'s file stem —
+        // the same convention `find_rig_asset` uses), and `root_part_name`
+        // is the root *part*'s name within the rig (e.g. "Torso"). Using
+        // the instance name for either by mistake previously corrupted the
+        // saved asset file's `name` field (breaking `find_rig_asset` for
+        // any instance renamed differently from its asset) and could parent
+        // a new part to a nonexistent "part" named after the instance.
+        let mut asset_name = String::new();
+        let mut root_part_name = String::new();
+        let mut add_part = false;
+        let mut new_clip = false;
+        let mut save_rig = false;
+        let mut delete_rig = false;
+
+        {
+            if let Ok(mut query) = self.world.query_one::<(&mut RigPart, &mut RigAnimator, &Rig, &RigRoot)>(root) {
+                if let Some((root_part, animator, rig, rig_root)) = query.get() {
+                    let rig_name = rig_root.name.clone();
+                    asset_name = rig_root
+                        .rig_path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| rig_name.clone());
+                    root_part_name = rig
+                        .parts_by_name
+                        .iter()
+                        .find(|(_, &entity)| entity == root)
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_else(|| rig_name.clone());
+                    let mut part_names: Vec<String> = rig.parts_by_name.keys().cloned().collect();
+                    part_names.sort();
+
+                    ui.label(format!("Rig: {rig_name}"));
+                    ui.label("Root Local Position");
+                    ui.horizontal(|ui| {
+                        let mut pos = root_part.local_position;
+                        let mut changed = false;
+                        changed |= ui.add(egui::DragValue::new(&mut pos.x).speed(0.05).prefix("x: ")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut pos.y).speed(0.05).prefix("y: ")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut pos.z).speed(0.05).prefix("z: ")).changed();
+                        if changed {
+                            root_part.local_position = pos;
+                        }
+                    });
+                    ui.label("Root Local Rotation (deg)");
+                    ui.horizontal(|ui| {
+                        let mut rot = root_part.local_rotation_euler_deg;
+                        let mut changed = false;
+                        changed |= ui.add(egui::DragValue::new(&mut rot.x).speed(1.0).prefix("x: ")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut rot.y).speed(1.0).prefix("y: ")).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut rot.z).speed(1.0).prefix("z: ")).changed();
+                        if changed {
+                            root_part.set_local_rotation_euler_deg(rot);
+                        }
+                    });
+
+                    ui.separator();
+                    ui.heading("Clips");
+                    let mut clicked_clip = None;
+                    for (i, clip) in animator.clips.iter().enumerate() {
+                        if ui.selectable_label(animator.current_clip == Some(i), &clip.name).clicked() {
+                            clicked_clip = Some(i);
+                        }
+                    }
+                    if let Some(i) = clicked_clip {
+                        animator.play_clip(i);
+                        animator.playing = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.new_clip_name);
+                        if ui.button("New Clip").clicked() {
+                            new_clip = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut self.new_clip_duration).speed(0.1).prefix("duration: "));
+                        ui.checkbox(&mut self.new_clip_looping, "looping");
+                    });
+
+                    if let Some(i) = animator.current_clip {
+                        let playing = animator.playing;
+                        if let Some(clip) = animator.clips.get_mut(i) {
+                            ui.horizontal(|ui| {
+                                if ui.button(if playing { "Pause" } else { "Play" }).clicked() {
+                                    animator.playing = !playing;
+                                }
+                                ui.checkbox(&mut clip.looping, "Loop");
+                            });
+                            ui.add(egui::Slider::new(&mut animator.speed, 0.0..=3.0).text("Speed"));
+                            let mut time = animator.time;
+                            let max_time = clip.duration.max(0.01);
+                            if ui.add(egui::Slider::new(&mut time, 0.0..=max_time).text("Time (scrub)")).changed() {
+                                animator.time = time;
+                                animator.playing = false;
+                            }
+                        }
+                    }
+
+                    ui.separator();
+                    ui.heading("Parts");
+                    let mut clicked_part = None;
+                    for name in &part_names {
+                        if let Some(&entity) = rig.parts_by_name.get(name) {
+                            if ui.selectable_label(self.selected_rig_part == Some(entity), name).clicked() {
+                                clicked_part = Some(entity);
+                            }
+                        }
+                    }
+                    if let Some(entity) = clicked_part {
+                        self.selected_rig_part = Some(entity);
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.new_part_name);
+                        egui::ComboBox::from_id_salt("new_part_parent")
+                            .selected_text(if self.new_part_parent.is_empty() { rig_name.as_str() } else { self.new_part_parent.as_str() })
+                            .show_ui(ui, |ui| {
+                                for name in &part_names {
+                                    ui.selectable_value(&mut self.new_part_parent, name.clone(), name);
+                                }
+                            });
+                        if ui.button("Add Part").clicked() {
+                            add_part = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Save Rig").clicked() {
+                            save_rig = true;
+                        }
+                        if ui.button("Delete Rig Instance").clicked() {
+                            delete_rig = true;
+                        }
+                    });
+                }
+            }
+        }
+
+        if let Some(part_entity) = self.selected_rig_part {
+            if self.world.contains(part_entity) {
+                ui.separator();
+                ui.label("Selected Part");
+                let mut set_keyframe = false;
+                if let Ok(mut query) = self.world.query_one::<&mut RigPart>(part_entity) {
+                    if let Some(part) = query.get() {
+                        ui.label("Local Position");
+                        ui.horizontal(|ui| {
+                            let mut pos = part.local_position;
+                            let mut changed = false;
+                            changed |= ui.add(egui::DragValue::new(&mut pos.x).speed(0.05).prefix("x: ")).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut pos.y).speed(0.05).prefix("y: ")).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut pos.z).speed(0.05).prefix("z: ")).changed();
+                            if changed {
+                                part.local_position = pos;
+                            }
+                        });
+                        ui.label("Local Rotation (deg)");
+                        ui.horizontal(|ui| {
+                            let mut rot = part.local_rotation_euler_deg;
+                            let mut changed = false;
+                            changed |= ui.add(egui::DragValue::new(&mut rot.x).speed(1.0).prefix("x: ")).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut rot.y).speed(1.0).prefix("y: ")).changed();
+                            changed |= ui.add(egui::DragValue::new(&mut rot.z).speed(1.0).prefix("z: ")).changed();
+                            if changed {
+                                part.set_local_rotation_euler_deg(rot);
+                            }
+                        });
+                    }
+                }
+                if ui.button("Set Keyframe Here").clicked() {
+                    set_keyframe = true;
+                }
+                if set_keyframe {
+                    self.set_keyframe_for_selected_part(root);
+                }
+            } else {
+                self.selected_rig_part = None;
+            }
+        }
+
+        if new_clip {
+            let name = self.new_clip_name.trim().to_string();
+            if name.is_empty() {
+                log::warn!("cannot create a clip with an empty name");
+            } else if let Ok(mut animator) = self.world.get::<&mut RigAnimator>(root) {
+                animator.clips.push(RigClip {
+                    name,
+                    duration: self.new_clip_duration.max(0.1),
+                    looping: self.new_clip_looping,
+                    tracks: Vec::new(),
+                });
+                animator.current_clip = Some(animator.clips.len() - 1);
+                animator.time = 0.0;
+            }
+        }
+        if add_part {
+            self.add_rig_part(gl, root, &root_part_name);
+        }
+        if save_rig {
+            if let Some(asset) = self.build_rig_asset_from_ecs(root, asset_name) {
+                let path = self.rigs_dir.join(format!("{}.ron", asset.name));
+                match engine::rig::save_to_file(&asset, &path) {
+                    Ok(()) => {
+                        log::info!("saved rig '{}' to {path:?}", asset.name);
+                        match self.rigs.iter_mut().find(|rig| rig.name == asset.name) {
+                            Some(existing) => *existing = asset,
+                            None => self.rigs.push(asset),
+                        }
+                    }
+                    Err(err) => log::error!("failed to save rig: {err}"),
+                }
+            }
+        }
+        if delete_rig {
+            let part_entities: Vec<Entity> = self
+                .world
+                .get::<&Rig>(root)
+                .map(|rig| rig.parts_by_name.values().copied().collect())
+                .unwrap_or_default();
+            for entity in part_entities {
+                let _ = self.world.despawn(entity);
+            }
+            let _ = self.world.despawn(root);
+            self.selected_rig = None;
+            self.selected_rig_part = None;
+        }
+    }
+
+    // --- Classes ---
+
+    fn create_new_class(&mut self) {
+        let name = self.class_new_name.trim().to_string();
+        if name.is_empty() {
+            log::warn!("cannot create a class with an empty name");
+            return;
+        }
+        if self.classes.iter().any(|class| class.name == name) {
+            log::warn!("a class named '{name}' already exists");
+            return;
+        }
+        let class = ObjectClass {
+            name: name.clone(),
+            mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+            texture_path: None,
+            scale: [1.0, 1.0, 1.0],
+            is_dynamic: false,
+            is_trigger: false,
+            animation: None,
+            script: None,
+        };
+        let path = self.classes_dir.join(format!("{name}.ron"));
+        if let Err(err) = engine::class::save_to_file(&class, &path) {
+            log::error!("failed to save new class '{name}': {err}");
+            return;
+        }
+        self.classes.push(class);
+        self.selected_class = Some(self.classes.len() - 1);
+    }
+
+    /// Places a new `LevelObject` referencing `self.classes[class_index]` —
+    /// its look/behavior come entirely from the class; only name/position
+    /// are this instance's own.
+    fn spawn_object_from_class(&mut self, gl: &glow::Context, class_index: usize) {
+        let Some(class) = self.classes.get(class_index).cloned() else { return };
+        let count = self.world.query::<&ClassMember>().iter().count();
+        let obj = LevelObject {
+            name: format!("{}_{}", class.name, count + 1),
+            mesh: class.mesh.clone(),
+            texture_path: class.texture_path.clone(),
+            position: [count as f32 * 1.5 - 1.5, 1.0, 5.5],
+            rotation_euler_deg: [0.0, 0.0, 0.0],
+            scale: class.scale,
+            is_dynamic: class.is_dynamic,
+            is_trigger: class.is_trigger,
+            animation: class.animation,
+            script: class.script.clone(),
+            class: Some(PathBuf::from(format!("classes/{}.ron", class.name))),
+        };
+        match self.spawn_level_object(gl, &obj) {
+            Ok(entity) => self.selected_entity = Some(entity),
+            Err(err) => log::error!("failed to spawn instance of class '{}': {err}", class.name),
+        }
+    }
+
+    fn assign_texture_to_class(&mut self, index: usize) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .set_directory(&self.asset_root)
+            .pick_file()
+        else {
+            return;
+        };
+        let relative_path = engine::level::relativize(&path, &self.asset_root);
+        if let Some(class) = self.classes.get_mut(index) {
+            class.texture_path = Some(relative_path);
+        }
+    }
+
+    /// Re-resolves mesh/texture/scale/trigger-flag/dynamic-flag/animation/
+    /// script for every live `ClassMember` entity referencing this class —
+    /// the "edit the class, every instance updates" behavior, run only when
+    /// explicitly asked for (not continuous live-binding).
+    fn apply_class_to_instances(&mut self, gl: &glow::Context, index: usize) {
+        let Some(class) = self.classes.get(index).cloned() else { return };
+        // Asset-root-relative, matching the convention `spawn_object_from_class`
+        // and saved level files store `ClassMember::class_path`/`LevelObject::class` in.
+        let class_path = PathBuf::from(format!("classes/{}.ron", class.name));
+
+        let entities: Vec<Entity> = self
+            .world
+            .query::<&ClassMember>()
+            .iter()
+            .filter(|(_, member)| member.class_path == class_path)
+            .map(|(entity, _)| entity)
+            .collect();
+
+        for entity in entities {
+            let mesh = match self.resolve_mesh(gl, &class.mesh) {
+                Ok(mesh) => mesh,
+                Err(err) => {
+                    log::error!("failed to apply class '{}' to an instance: {err}", class.name);
+                    continue;
+                }
+            };
+            let texture = if class.is_trigger {
+                Arc::new(solid_color_texture(gl, TRIGGER_COLOR))
+            } else {
+                self.resolve_texture(gl, class.texture_path.as_deref())
+            };
+            let half_extents = collider_half_extents(&class.mesh, class.scale);
+
+            if let Ok(mut query) = self
+                .world
+                .query_one::<(&mut Transform, &mut MeshRenderer, &mut LevelObjectMeta, &mut Collider)>(entity)
+            {
+                if let Some((transform, renderer, meta, collider)) = query.get() {
+                    transform.scale = Vec3::from(class.scale);
+                    renderer.mesh = mesh;
+                    renderer.texture = Some(texture);
+                    meta.mesh_source = class.mesh.clone();
+                    meta.texture_path = class.texture_path.clone();
+                    collider.shape = ColliderShape::Aabb { half_extents };
+                    collider.is_trigger = class.is_trigger;
+                }
+            }
+
+            if class.is_dynamic {
+                let _ = self.world.insert_one(entity, RigidBody::default());
+            } else {
+                let _ = self.world.remove_one::<RigidBody>(entity);
+            }
+
+            if let Some(spec) = class.animation {
+                let kind = match spec {
+                    AnimationSpec::Orbit { axis, speed_deg_per_sec } => {
+                        AnimationKind::Orbit { axis: Vec3::from(axis), speed_deg_per_sec }
+                    }
+                    AnimationSpec::Bob { axis, amplitude, period_secs } => {
+                        AnimationKind::Bob { axis: Vec3::from(axis), amplitude, period_secs }
+                    }
+                };
+                // Preserve the entity's current position/rotation as the
+                // animation base — re-applying a class shouldn't teleport
+                // an already-placed instance back to the class's origin.
+                let base = self.world.get::<&Transform>(entity).ok().map(|t| (t.position, t.rotation));
+                if let Some((base_position, base_rotation)) = base {
+                    let _ = self.world.insert_one(entity, Animator { kind, base_position, base_rotation, elapsed: 0.0 });
+                }
+            } else {
+                let _ = self.world.remove_one::<Animator>(entity);
+            }
+
+            if let Some(script_path) = &class.script {
+                self.attach_script_to_entity(entity, script_path);
+            } else {
+                let _ = self.world.remove_one::<BehaviorSlot>(entity);
+            }
+        }
+
+        log::info!("applied class '{}' to its instances", class.name);
+    }
+
+    fn draw_class_editor_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context, index: usize) {
+        let mut assign_texture = false;
+        let mut apply_to_instances = false;
+        let mut save_class = false;
+
+        {
+            let Some(class) = self.classes.get_mut(index) else { return };
+            ui.label(format!("Class: {}", class.name));
+
+            ui.label("Mesh");
+            ui.horizontal(|ui| {
+                if ui.selectable_label(matches!(class.mesh, MeshSource::Primitive(PrimitiveKind::Cube)), "Cube").clicked() {
+                    class.mesh = MeshSource::Primitive(PrimitiveKind::Cube);
+                }
+                if ui.selectable_label(matches!(class.mesh, MeshSource::Primitive(PrimitiveKind::Plane)), "Plane").clicked() {
+                    class.mesh = MeshSource::Primitive(PrimitiveKind::Plane);
+                }
+            });
+            ui.label(format!(
+                "Texture: {}",
+                class.texture_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "None".to_string())
+            ));
+            if ui.button("Assign Texture...").clicked() {
+                assign_texture = true;
+            }
+
+            ui.label("Scale");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut class.scale[0]).speed(0.02).prefix("x: "));
+                ui.add(egui::DragValue::new(&mut class.scale[1]).speed(0.02).prefix("y: "));
+                ui.add(egui::DragValue::new(&mut class.scale[2]).speed(0.02).prefix("z: "));
+            });
+
+            ui.checkbox(&mut class.is_dynamic, "Dynamic Rigid Body");
+            ui.checkbox(&mut class.is_trigger, "Is Trigger (non-solid)");
+
+            let mut anim_selected: usize = match class.animation {
+                None => 0,
+                Some(AnimationSpec::Orbit { .. }) => 1,
+                Some(AnimationSpec::Bob { .. }) => 2,
+            };
+            let mut anim_axis: [f32; 3] = match class.animation {
+                Some(AnimationSpec::Orbit { axis, .. }) => axis,
+                Some(AnimationSpec::Bob { axis, .. }) => axis,
+                None => [0.0, 1.0, 0.0],
+            };
+            let mut anim_speed: f32 = match class.animation {
+                Some(AnimationSpec::Orbit { speed_deg_per_sec, .. }) => speed_deg_per_sec,
+                _ => 90.0,
+            };
+            let mut anim_amplitude: f32 = match class.animation {
+                Some(AnimationSpec::Bob { amplitude, .. }) => amplitude,
+                _ => 0.5,
+            };
+            let mut anim_period: f32 = match class.animation {
+                Some(AnimationSpec::Bob { period_secs, .. }) => period_secs,
+                _ => 2.0,
+            };
+            ui.label("Animation");
+            egui::ComboBox::from_id_salt("class_animation_kind")
+                .selected_text(match anim_selected {
+                    1 => "Orbit",
+                    2 => "Bob",
+                    _ => "None",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut anim_selected, 0, "None");
+                    ui.selectable_value(&mut anim_selected, 1, "Orbit");
+                    ui.selectable_value(&mut anim_selected, 2, "Bob");
+                });
+            if anim_selected != 0 {
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut anim_axis[0]).speed(0.05).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut anim_axis[1]).speed(0.05).prefix("y: "));
+                    ui.add(egui::DragValue::new(&mut anim_axis[2]).speed(0.05).prefix("z: "));
+                });
+            }
+            if anim_selected == 1 {
+                ui.add(egui::Slider::new(&mut anim_speed, -360.0..=360.0).text("Speed (deg/s)"));
+            } else if anim_selected == 2 {
+                ui.add(egui::Slider::new(&mut anim_amplitude, 0.0..=5.0).text("Amplitude"));
+                ui.add(egui::Slider::new(&mut anim_period, 0.1..=10.0).text("Period (s)"));
+            }
+            class.animation = match anim_selected {
+                1 => Some(AnimationSpec::Orbit { axis: anim_axis, speed_deg_per_sec: anim_speed }),
+                2 => Some(AnimationSpec::Bob { axis: anim_axis, amplitude: anim_amplitude, period_secs: anim_period }),
+                _ => None,
+            };
+
+            ui.label(format!(
+                "Script: {}",
+                class.script.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "None".to_string())
+            ));
+            if ui.button("Attach Script...").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PS2 Script", &["pss"])
+                    .set_directory(&self.asset_root)
+                    .pick_file()
+                {
+                    class.script = Some(engine::level::relativize(&path, &self.asset_root));
+                }
+            }
+            if class.script.is_some() && ui.button("Clear Script").clicked() {
+                class.script = None;
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Save Class").clicked() {
+                    save_class = true;
+                }
+                if ui.button("Apply to All Instances").clicked() {
+                    apply_to_instances = true;
+                }
+            });
+        }
+
+        if assign_texture {
+            self.assign_texture_to_class(index);
+        }
+        if save_class {
+            if let Some(class) = self.classes.get(index) {
+                let path = self.classes_dir.join(format!("{}.ron", class.name));
+                match engine::class::save_to_file(class, &path) {
+                    Ok(()) => log::info!("saved class '{}' to {path:?}", class.name),
+                    Err(err) => log::error!("failed to save class '{}': {err}", class.name),
+                }
+            }
+        }
+        if apply_to_instances {
+            self.apply_class_to_instances(gl, index);
+        }
+    }
+
+    /// The selected-object panel for an entity spawned from a class: only
+    /// Name/Position/Rotation are directly editable (the rest is inherited
+    /// from the class) plus a way to jump to the class or detach from it.
+    fn draw_classed_object_ui(&mut self, ui: &mut egui::Ui, entity: Entity, class_path: &Path) {
+        let mut delete = false;
+        let mut unlink = false;
+        let mut edit_class = false;
+
+        {
+            if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut LevelObjectMeta)>(entity) {
+                if let Some((transform, meta)) = query.get() {
+                    let mut name = meta.name.clone();
+                    if ui.text_edit_singleline(&mut name).changed() {
+                        meta.name = name;
+                    }
+
+                    ui.label("Position");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: "));
+                        ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: "));
+                        ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: "));
+                    });
+
+                    ui.label("Rotation (deg)");
+                    let mut rot_changed = false;
+                    ui.horizontal(|ui| {
+                        rot_changed |= ui.add(egui::DragValue::new(&mut meta.rotation_euler_deg.x).speed(1.0).prefix("x: ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut meta.rotation_euler_deg.y).speed(1.0).prefix("y: ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut meta.rotation_euler_deg.z).speed(1.0).prefix("z: ")).changed();
+                    });
+                    if rot_changed {
+                        transform.rotation = euler_deg_to_quat(meta.rotation_euler_deg);
+                    }
+                }
+            }
+        }
+
+        let class_name = self.find_class(class_path).map(|c| c.name.clone()).unwrap_or_else(|| "?".to_string());
+        ui.label(format!("Class: {class_name}"));
+        ui.horizontal(|ui| {
+            if ui.button("Edit Class").clicked() {
+                edit_class = true;
+            }
+            if ui.button("Unlink from Class").clicked() {
+                unlink = true;
+            }
+            if ui.button("Delete").clicked() {
+                delete = true;
+            }
+        });
+
+        if edit_class {
+            self.selected_class = self.classes.iter().position(|c| c.name == class_name);
+        }
+        if unlink {
+            let _ = self.world.remove_one::<ClassMember>(entity);
         }
         if delete {
             let _ = self.world.despawn(entity);
@@ -1412,7 +3141,7 @@ impl Sandbox {
 
         ui.separator();
         ui.small(
-            "F1 toggle UI \u{b7} F2 level editor \u{b7} F3 play/stop \u{b7} Tab cycle profile \u{b7} F5 save \u{b7} Esc quit",
+            "F1 toggle UI \u{b7} F2 level editor \u{b7} F3 play/stop \u{b7} Tab cycle profile \u{b7} F5 save \u{b7} F9/F10 checkpoint save/load \u{b7} Esc quit",
         );
     }
 }
@@ -1447,6 +3176,34 @@ impl Game for Sandbox {
         self.profiles = Some(cycler);
 
         self.ui = Some(EguiState::new(ctx.gl_arc())?);
+
+        std::fs::create_dir_all(&self.rigs_dir)?;
+        let mut rigs = engine::rig::load_dir(&self.rigs_dir)?;
+        if rigs.is_empty() {
+            log::info!("no rigs found in {:?}; writing default demo rig", self.rigs_dir);
+            let rig = default_rig_asset();
+            let path = self.rigs_dir.join(format!("{}.ron", rig.name));
+            engine::rig::save_to_file(&rig, &path)?;
+            rigs = vec![rig];
+        }
+        self.rigs = rigs;
+
+        std::fs::create_dir_all(&self.classes_dir)?;
+        let mut classes = engine::class::load_dir(&self.classes_dir)?;
+        if classes.is_empty() {
+            log::info!("no object classes found in {:?}; writing default demo class", self.classes_dir);
+            let class = default_barrel_class();
+            let path = self.classes_dir.join(format!("{}.ron", class.name));
+            engine::class::save_to_file(&class, &path)?;
+            classes = vec![class];
+        }
+        self.classes = classes;
+
+        // No bootstrap content here (unlike profiles/rigs/classes/levels) —
+        // there's nothing sensible to pre-populate a checkpoint with before
+        // the player's ever played, so this just ensures F9 has somewhere
+        // to write.
+        std::fs::create_dir_all(&self.saves_dir)?;
 
         std::fs::create_dir_all(&self.levels_dir)?;
         let mut levels = engine::level::load_dir(&self.levels_dir)?;
@@ -1530,6 +3287,20 @@ impl Game for Sandbox {
                 EditorMode::Play => self.exit_play_mode(ctx),
             },
             Event::KeyDown {
+                keycode: Some(Keycode::F9),
+                repeat: false,
+                ..
+            } if self.mode == EditorMode::Play => {
+                self.save_checkpoint();
+            }
+            Event::KeyDown {
+                keycode: Some(Keycode::F10),
+                repeat: false,
+                ..
+            } => {
+                self.load_checkpoint(ctx);
+            }
+            Event::KeyDown {
                 keycode: Some(Keycode::Tab),
                 repeat: false,
                 ..
@@ -1567,12 +3338,37 @@ impl Game for Sandbox {
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
+        self.elapsed_time = ctx.time.elapsed;
+
         // Runs in both Edit and Play mode — a live preview while editing
         // costs nothing extra and is a nice default.
         engine::animation::step(&mut self.world, dt);
+        // Sample playing rig clips into each part's local rotation, then
+        // resolve every rig part's world `Transform` from its parent chain
+        // — same "always on, live preview" philosophy, and order matters:
+        // a clip sampled this frame should be reflected in this frame's
+        // rendered pose, not lag one frame behind.
+        engine::rig::step_rig_animation(&mut self.world, dt);
+        engine::rig::update_world_transforms(&mut self.world);
+        // Transient one-shot burst emitters (see `spawn_burst_at`) despawn
+        // themselves once every particle they made has aged out — they
+        // aren't level data, so nothing else would ever clean them up.
+        for entity in engine::particles::step(&mut self.world, dt) {
+            let _ = self.world.despawn(entity);
+        }
 
         if self.mode == EditorMode::Play {
+            self.hud.tick(dt);
             self.update_player_input(ctx, dt);
+
+            // Collected up front (mirrors the physics-collider pattern
+            // above) so dispatching `on_update` can freely use `&mut self`
+            // per entity without holding this query's borrow of `world`.
+            let scripted: Vec<Entity> = self.world.query::<&BehaviorSlot>().iter().map(|(entity, _)| entity).collect();
+            for entity in scripted {
+                self.with_behavior(entity, |behavior, api| behavior.on_update(api, dt));
+            }
+
             let overlaps = engine::physics::step(&mut self.world, dt, &self.physics_params);
 
             let Some(player) = self.player_entity else {
@@ -1636,7 +3432,15 @@ impl Game for Sandbox {
         unsafe {
             gl.clear_color(params.fog_color[0], params.fog_color[1], params.fog_color[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        }
 
+        // Drawn first, depth-write disabled, so mesh geometry drawn after
+        // this always occludes it normally — see `SkyboxPass` for why no
+        // cubemap/dome mesh is needed.
+        let inv_view_proj = (proj * view).inverse();
+        renderer.draw_skybox(gl, inv_view_proj.to_cols_array(), params.sky_horizon_color, params.sky_zenith_color);
+
+        unsafe {
             gl.use_program(Some(program));
             gl.uniform_matrix_4_f32_slice(uniforms.view.as_ref(), false, &view.to_cols_array());
             gl.uniform_matrix_4_f32_slice(uniforms.proj.as_ref(), false, &proj.to_cols_array());
@@ -1708,6 +3512,26 @@ impl Game for Sandbox {
             }
         }
 
+        // Camera-facing (billboarded) particles, drawn after opaque meshes
+        // so they blend over the already-drawn scene. `view.inverse()`'s
+        // rotation is the camera's own world-space orientation — applying
+        // it to every particle's quad makes it face the viewer regardless
+        // of camera angle.
+        if self.particle_quad_mesh.is_none() {
+            self.particle_quad_mesh = Some(Arc::new(GpuMesh::upload(gl, &primitives::quad())?));
+        }
+        let quad_mesh = self.particle_quad_mesh.as_ref().unwrap().clone();
+        let (_, billboard_rotation, _) = view.inverse().to_scale_rotation_translation();
+        let mut particle_draws: Vec<(Arc<GpuMesh>, [f32; 16], [f32; 4])> = Vec::new();
+        for (_entity, (_transform, emitter)) in self.world.query::<(&Transform, &ParticleEmitter)>().iter() {
+            for particle in &emitter.particles {
+                let (size, color) = emitter.appearance(particle);
+                let model = Mat4::from_scale_rotation_translation(Vec3::splat(size), billboard_rotation, particle.position);
+                particle_draws.push((quad_mesh.clone(), model.to_cols_array(), color));
+            }
+        }
+        renderer.draw_particles(gl, &view.to_cols_array(), &proj.to_cols_array(), particle_draws.into_iter());
+
         renderer.present(
             gl,
             drawable_size,
@@ -1729,14 +3553,18 @@ impl Game for Sandbox {
                 egui::SidePanel::left("level_editor")
                     .default_width(280.0)
                     .show(egui_ctx, |ui| {
-                        self.draw_level_editor_ui(ui, gl);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            self.draw_level_editor_ui(ui, gl);
+                        });
                     });
             }
             if ui_visible {
                 egui::SidePanel::right("editor")
                     .default_width(300.0)
                     .show(egui_ctx, |ui| {
-                        self.draw_shader_editor_ui(ui, gl, drawable_size);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            self.draw_shader_editor_ui(ui, gl, drawable_size);
+                        });
                     });
             }
             if playing {
@@ -1744,9 +3572,12 @@ impl Game for Sandbox {
                     .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
                     .show(egui_ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label("Play Mode \u{2014} F3 or Esc to stop \u{b7} WASD + mouse \u{b7} Space jump \u{b7} E interact");
+                            ui.label("Play Mode \u{2014} F3 or Esc to stop \u{b7} WASD + mouse \u{b7} Space jump \u{b7} E interact \u{b7} F9 checkpoint \u{b7} F10 load checkpoint");
                         });
                     });
+                // HUD only makes sense with a player around to show progress
+                // for — mirrors the play_mode_indicator's own gating.
+                draw_hud(egui_ctx, &self.hud);
             }
         });
         ui_state.paint(drawable_size, full_output);

@@ -455,6 +455,458 @@ was built carefully against SDL2's documented event/API surface and the app
 was confirmed to start up cleanly with the subsystem initialized, but
 **please confirm on real hardware** before relying on it.
 
+## Scripting
+
+A small custom scripting language — `.pss` files ("PS2 Script") — lets you
+attach programmable behavior to a level object without recompiling the
+engine. It's deliberately minimal: a hand-written lexer/parser/tree-walking
+interpreter (`engine::script`), not an embedded crate like Lua/Rhai, and
+not a general-purpose language — just enough to write per-object game
+logic.
+
+### Language
+
+```
+let phase = 0.0;          // top-level `let` = the script's persistent state
+let amplitude = 0.4;       // ("fields" that survive across separate calls)
+
+fn ready() { }             // called once when the script is attached/loaded
+fn update(dt) { }          // called every frame in Play mode
+fn interact() { }          // called when the player interacts (E / gamepad X)
+fn trigger_enter(other) { }// called when something enters this trigger
+fn trigger_exit(other) { } // called when something exits this trigger
+
+fn update(dt) {
+    phase = phase + dt;                  // assignment (no `let`) updates an
+    if phase > 10.0 { phase = 0.0; }     // existing variable, local or global
+    let wave = sin(phase);               // function-local `let`
+    move_by(0.0, wave * amplitude, 0.0);
+}
+```
+
+Keywords: `let fn if else while return true false nil and or not`. Operators:
+`+ - * / % == != < <= > >=`, `//` line comments. Built-in math (no host
+needed): `sin cos abs sqrt min max floor`. There are no closures, classes,
+or arrays — a script is one flat set of globals plus top-level functions,
+which is all the hooks above need. All five hook functions are optional; a
+script that doesn't define e.g. `interact` just does nothing when
+interacted with.
+
+**Standard library** (everything a script can call besides built-in math):
+`log(msg, ...)`, `get_x()`/`get_y()`/`get_z()`, `set_position(x,y,z)`,
+`move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `time()`,
+`hud_bar(name, fraction)`, `toast(message, seconds)`. Position is three
+scalar calls rather than one call returning a triple — the language has no
+vector/tuple type. `hud_bar`/`toast` drive the in-game HUD (see "In-game
+HUD" below) — a script can update a named progress bar or pop a fading
+toast the same way a native `Behavior` can.
+
+### `Behavior`/`ScriptApi` — using Rust the same way a script would
+
+```rust
+// engine::behavior
+pub trait ScriptApi {
+    fn log(&mut self, message: &str);
+    fn position(&self) -> (f32, f32, f32);
+    fn set_position(&mut self, x: f32, y: f32, z: f32);
+    fn move_by(&mut self, dx: f32, dy: f32, dz: f32);
+    fn play_tone(&mut self, frequency_hz: f32, duration_secs: f32);
+    fn elapsed(&self) -> f32;
+    fn set_hud_bar(&mut self, name: &str, fraction: f32);
+    fn show_toast(&mut self, message: &str, seconds: f32);
+}
+pub trait Behavior: Send + Sync {
+    fn on_ready(&mut self, api: &mut dyn ScriptApi) { }
+    fn on_update(&mut self, api: &mut dyn ScriptApi, dt: f32) { }
+    fn on_interact(&mut self, api: &mut dyn ScriptApi) { }
+    fn on_trigger_enter(&mut self, api: &mut dyn ScriptApi, other_name: &str) { }
+    fn on_trigger_exit(&mut self, api: &mut dyn ScriptApi, other_name: &str) { }
+}
+pub struct BehaviorSlot(pub Box<dyn Behavior>);  // the ECS component
+```
+
+`ScriptBehavior` implements `Behavior` by running a compiled `.pss` script
+against these same five hooks. Crucially, **a plain Rust type can implement
+`Behavior` directly** — see `engine::behavior::NativeBobBehavior` — and gets
+attached to an entity via the exact same `BehaviorSlot` component. The game
+dispatches through the `Behavior` trait uniformly and never needs to know
+whether a given entity's logic came from a script or from compiled Rust.
+That's the whole point: **prototype as a script, port to native Rust later
+for performance or complex logic, and nothing about how it's wired into the
+game has to change** — same trait, same hooks, same attach point.
+
+The default level's **"Script Demo Cube"** (running `scripts/bob_demo.pss`)
+and **"Native Behavior Cube"** (running `NativeBobBehavior`, spawned in
+`Sandbox::spawn_native_behavior_demo`) stand side by side and do the
+identical sine-bob motion + interact log/tone — one from a script, one from
+compiled Rust — to make the parity concrete. Note the native one is a
+compiled-in demo, not saved level data (`NativeBehaviorDemoMarker` tells
+`build_level_from_ecs` to skip it) — that's the actual tradeoff: a script
+can be authored, saved, and reloaded as level data; a native `Behavior` has
+to be wired up in code. Use a script when you want data-driven, editable
+logic; port to native Rust when a script becomes a performance bottleneck
+or needs something the language can't express.
+
+### Runtime wiring (`games/sandbox/src/main.rs`)
+
+- `LevelObject.script: Option<PathBuf>` points at a `.pss` file;
+  `spawn_level_object` compiles it and attaches a `BehaviorSlot` if present
+  (a parse/read failure is logged and the object still spawns, just without
+  behavior — same tolerance as a missing texture falling back to white).
+- `Sandbox::with_behavior(entity, |behavior, api| ...)` is the one place
+  that bridges `Behavior`/`ScriptApi` to the ECS: it fetches
+  `(&mut Transform, &mut BehaviorSlot)` for one entity via the same
+  "combined tuple `query_one`" idiom used everywhere else in this file, and
+  builds a `ScriptApi` scoped to just that entity.
+- `on_update` is dispatched for every `BehaviorSlot` entity once per frame,
+  **Play mode only** (like physics and player input — a script's `update`
+  is generally written assuming the game is actually running).
+  `on_interact` extends the existing `interact()` hook: a nearby entity
+  with a `BehaviorSlot` gets its own `on_interact` called *instead of* the
+  generic "push it" demo. `on_trigger_enter`/`on_trigger_exit` extend the
+  existing trigger log+tone the same way, additively.
+
+### F2 panel
+
+The selected object's panel gains a **Script** section: the current path
+(or "None"), **Attach/Change Script...** (a `.pss` file picker),
+**Reload** (re-reads and re-compiles from disk, re-firing `ready`), an
+**Edit Inline** checkbox that reveals a monospace text box + **Save**
+(writes the file and reloads), and **Open in Script Editor**, which
+launches the standalone editor below pointed at the file.
+
+### The standalone editor (`tools/script_editor`)
+
+A separate app — build/run it with `cargo run -p script_editor [path]`.
+It reuses `engine::app`/`engine::ui` (the same `Platform`/`EguiState` as the
+game) rather than a different windowing stack, and draws no 3D content at
+all — proof those pieces of `engine` are reusable outside a "real" game.
+New / Open / Save / Save As, a full-window monospace text box, and
+**Check Syntax**, which calls `engine::script::Interpreter::compile`
+directly (no `Host`/`ScriptApi` needed — it only type-checks, it can't run
+a script against a game) and reports every parse error with a line number.
+No token syntax-highlighting yet — plain text editing, noted here as a
+known simplification, easy to add later via a custom egui `LayoutJob`.
+
+The F2 panel's "Open in Script Editor" button launches this as a sibling
+process (`std::process::Command`), assuming `script_editor(.exe)` sits next
+to the game's own executable — true when both are built from this
+workspace's `target/{profile}/` folder, which is a dev-time convenience
+only; it's not something a shipped game needs to carry.
+
+## Character rigs
+
+`engine::rig` gives level objects skeletal-*ish* animation using the classic
+PS1/PS2-era technique: a character is several separate rigid meshes (torso,
+head, arms, legs) parented in a hierarchy, each moving as a whole — **not**
+per-vertex skin deformation. Joints don't bend smoothly (a raised arm is a
+rigid box swinging from its shoulder, not a soft-deforming sleeve); that's
+an inherent limitation of the technique, not a bug, and it's why this is
+the right-sized approach for a lightweight PS2-style engine rather than
+importing pre-skinned glTF characters or building an in-engine
+weight-painting tool.
+
+### Data shapes
+
+```rust
+// engine::rig — a reusable character definition, its own `rigs/*.ron` files
+pub struct RigPartDef { pub name: String, pub parent: Option<String>, pub mesh: MeshSource, pub texture_path: Option<PathBuf>, pub local_position: [f32; 3], pub local_rotation_euler_deg: [f32; 3], pub scale: [f32; 3] }
+pub struct Keyframe { pub time: f32, pub rotation_euler_deg: [f32; 3] }
+pub struct JointTrack { pub joint_name: String, pub keyframes: Vec<Keyframe> }
+pub struct RigClip { pub name: String, pub duration: f32, pub looping: bool, pub tracks: Vec<JointTrack> }
+pub struct RigAsset { pub name: String, pub parts: Vec<RigPartDef>, pub clips: Vec<RigClip> }
+
+// runtime ECS components
+pub struct RigPart { pub parent: Option<Entity>, pub local_position: Vec3, pub local_rotation_euler_deg: Vec3, pub local_rotation: Quat }
+pub struct Rig { pub parts_by_name: HashMap<String, Entity> }       // lives on the root entity
+pub struct RigAnimator {
+    pub clips: Vec<RigClip>, pub current_clip: Option<usize>, pub time: f32, pub playing: bool, pub speed: f32,
+    // blend-out state for whatever clip `current_clip` just replaced — see "Clip blending" below
+    pub previous_clip: Option<usize>, pub previous_time: f32, pub blend_elapsed: f32, pub blend_duration: f32,
+}
+```
+
+A rig part is just an entity with a `Transform` + `MeshRenderer`, exactly
+like any other level object — the render loop needed **zero changes** for
+this feature. The only new problem was computing each part's *world*
+transform from its parent chain: `RigPart::local_position`/
+`local_rotation` are the authoritative local pose (set at spawn, hand-posed
+in the F2 panel, or driven by clip playback); `Transform` is treated as
+pure output for a rigged entity, overwritten every frame — the same
+pattern `Animator` already uses for `base_position`/`base_rotation` vs. the
+live `Transform`.
+
+Two systems, both run unconditionally every frame from `Game::update`
+(Edit and Play mode, same "live preview" philosophy as
+`engine::animation::step`):
+
+- `step_rig_animation` advances each playing `RigAnimator`'s clock
+  (wrapping or clamping against the clip's `duration`) and **slerps**
+  between a track's two bracketing keyframes (not raw Euler lerp — avoids
+  gimbal artifacts), writing the sampled rotation into the named part's
+  `RigPart::local_rotation`. It's gated on `playing` specifically:
+  pausing lets you hand-pose a part via the F2 panel without the sampler
+  immediately overwriting it — that hand-pose *is* the keyframe-authoring
+  workflow.
+- `update_world_transforms` resolves every `RigPart`'s world
+  position/rotation via a memoized parent-first recursive walk
+  (`parent_world_pos + parent_world_rot * local_pos`, `parent_world_rot *
+  local_rot`; a root's world pose *is* its local pose) and writes it into
+  `Transform`.
+
+### The F2 workflow
+
+The level editor panel gains a **Rigs** section, below Scene Objects:
+
+- **New Rig** (name + button) creates a fresh `RigAsset` with one root
+  part named "Root", saves it to `rigs/<name>.ron`, and places an instance
+  immediately so there's something to build on.
+- **Add instance of: \<rig name\>** places another instance of an
+  already-loaded rig asset.
+- Clicking a placed instance's name opens its panel: **Root Local
+  Position/Rotation** (editing `RigPart` directly, *not* `Transform` —
+  same reasoning as animated objects, since `update_world_transforms`
+  overwrites `Transform` every frame), a **Clips** list with **New
+  Clip...**, **Play/Pause**, a **Loop** checkbox, a **Speed** slider, and a
+  **Time (scrub)** slider (dragging it pauses playback, since scrubbing
+  against a running clip is useless), a **Parts** list, **Add Part...**
+  (always a `Cube` primitive — resize/retexture afterward like any other
+  primitive; picks a parent from the rig's existing part names, falling
+  back to the root if the name doesn't match one), **Save Rig**, and
+  **Delete Rig Instance**.
+- Selecting a part shows *its* Local Position/Rotation and a **Set
+  Keyframe Here** button that upserts `(current scrub time, current local
+  rotation)` into the selected clip's track for that part. The whole
+  authoring loop is: pause the clip, scrub to a time, pose a part by hand
+  with the drag-values, click **Set Keyframe Here**, scrub to the next
+  time, repeat, **Save Rig**.
+
+`engine::level::RigInstance` (a *placement*: name, `rig_path`, position,
+rotation, which clip is playing) is a sibling list on `Level` —
+`Level.rig_instances`, the same pattern as `Level.lights` — since a rig is
+structurally a multi-entity hierarchy, not a single mesh like
+`LevelObject`. No per-instance scale: scale is authored per-part inside
+the rig asset itself, since scaling only the root's own mesh (not the
+whole hierarchy's offsets) would be more confusing than useful.
+
+### Clip blending
+
+Switching clips instantly (cutting `current_clip` and `time` straight to
+the new values) makes every part's pose jump on the very next frame — a
+visible pop, worst on a part mid-swing. `RigAnimator::play_clip(index)`
+avoids that by snapshotting whatever was playing (`previous_clip`,
+`previous_time`) before switching, then blending: for `blend_duration`
+seconds (default 0.2), `step_rig_animation` samples **both** the old
+clip (frozen at `previous_time` — it isn't advancing anymore, just
+providing a fixed starting pose) and the new clip (advancing normally)
+per track and `Quat::slerp`s between them by `blend_elapsed /
+blend_duration`. Once the blend window elapses, `previous_clip` is
+cleared and the part reads purely from the new clip. Calling `play_clip`
+with the already-current clip index is a no-op — nothing to blend from
+itself.
+
+The F2 panel's clip list routes through `play_clip` when you click a
+different clip, so hand-testing an authored transition always gets the
+blend; nothing else needed it (the "Time (scrub)" slider still snaps
+`time` directly within one clip — scrubbing is meant to jump exactly
+where you drag it, not ease into it). Since a full blend finishes inside
+0.2 seconds, verifying the interpolation visually frame-by-frame isn't
+practical — see `engine::rig`'s `play_clip_blends_smoothly_instead_of_popping`
+unit test for the actual verification: it steps the simulation at fixed
+`dt`s and asserts the sampled rotation sits at the old pose right at the
+switch, at the slerp midpoint halfway through the blend window, and
+exactly at the new pose once it's elapsed.
+
+## Object classes
+
+`engine::class` lets many placed objects share one definition — a
+**class** — instead of duplicating mesh/texture/scale/physics/animation/
+script settings on every instance by hand. It mirrors `engine::profile`'s
+save/load pattern exactly, its own `classes/*.ron` folder:
+
+```rust
+pub struct ObjectClass {
+    pub name: String,
+    pub mesh: MeshSource,
+    pub texture_path: Option<PathBuf>,
+    pub scale: [f32; 3],
+    pub is_dynamic: bool,
+    pub is_trigger: bool,
+    pub animation: Option<AnimationSpec>,
+    pub script: Option<PathBuf>,
+}
+```
+
+`LevelObject` gains `class: Option<PathBuf>`. When set, `spawn_level_object`
+resolves mesh/texture/scale/dynamic/trigger/animation/script **from the
+class** instead of the object's own copies of those fields — only
+position/rotation/name stay per-instance. A `ClassMember` marker component
+tags every class-spawned entity so the game can find them again later.
+
+Editing a class does **not** live-update its instances automatically —
+that would make "why did this object just change?" hard to reason about.
+Instead, **Apply to All Instances** (F2 panel) is an explicit action: click
+it after editing a class and every live `ClassMember` entity referencing
+that class path is re-resolved from the new values. Until you click it,
+existing instances keep whatever they were spawned with.
+
+### F2 workflow
+
+A **Classes** section (below Rigs) gives you: **New Class** (name +
+button), a list of loaded classes with a **+ Instance** button per row
+(spawns a new object referencing that class at a default position), and a
+per-class editor (mesh/texture/scale/dynamic/trigger/animation/script —
+the same fields the plain object editor exposes, plus **Save Class** and
+**Apply to All Instances**).
+
+Selecting a class-spawned object in Scene Objects shows a reduced panel —
+Name/Position/Rotation plus "Class: `<name>`", **Edit Class** (jumps to it
+in the Classes section), and **Unlink from Class** (clears `class`,
+freezing the object's current resolved values as its own independent
+copy — from then on it's a plain object again).
+
+## Skybox
+
+A simple vertical-gradient sky, drawn as `engine::renderer::SkyboxPass` —
+no cubemap or dome mesh. It reuses the fullscreen-triangle trick already
+in `post.rs`'s `CompositePass`: a single triangle covering the whole
+screen via `gl_VertexID`, no vertex buffer needed. The fragment shader
+reconstructs each pixel's world-space view ray from the inverse
+view-projection matrix and mixes a horizon color and a zenith color by the
+ray's Y component.
+
+Drawn **first**, before any mesh, with `gl.depth_mask(false)` so it never
+writes depth — normal opaque geometry drawn afterward occludes it exactly
+like it would occlude a real sky. It renders into the same low-res
+offscreen target as everything else, so it's pixelated/dithered along
+with the rest of the scene rather than looking like a crisp UI overlay.
+
+`RenderParams` gains `sky_horizon_color`/`sky_zenith_color: [f32; 3]`,
+editable in the Render Params panel's new **Sky** section. Both are
+`#[serde(default)]` (falling back to black) so profiles saved before this
+feature still load — re-save them once to pick up the default blue
+gradient.
+
+## Particle effects
+
+`engine::particles` is a small, non-instanced particle system — each live
+particle is one draw call, deliberately simple and PS2-chunky rather than
+built for thousands of particles at once (easy to swap for instancing
+later if a scene needs that).
+
+```rust
+pub struct ParticleEmitterDef {
+    pub rate_per_sec: f32,                      // 0 = burst-only, never auto-emits
+    pub lifetime_min: f32, pub lifetime_max: f32,
+    pub speed_min: f32, pub speed_max: f32,
+    pub spread_deg: f32,                         // cone half-angle around +Y
+    pub gravity_scale: f32,
+    pub start_size: f32, pub end_size: f32,
+    pub start_color: [f32; 4], pub end_color: [f32; 4],  // lerped by age
+    pub max_particles: u32,
+}
+```
+
+A `ParticleEmitter` runtime component owns a `Vec<Particle>` pool and a
+tiny hand-rolled xorshift32 PRNG (seeded from the OS via
+`std::hash::RandomState` — no `rand` dependency for something this small).
+`engine::particles::step(world, dt) -> Vec<Entity>` ages/culls particles,
+auto-emits for continuous emitters (`rate_per_sec > 0`), and returns
+one-shot burst emitters (`rate_per_sec <= 0`) that have gone empty, so
+`Game::update` can despawn them — this is how a triggered burst cleans
+itself up without becoming permanent level clutter.
+
+Rendering (`engine::renderer::ParticlePass`) draws each particle as a
+camera-facing billboarded quad (`mesh::primitives::quad()`), rotation
+taken from the camera's world-space orientation (extracted from the
+inverse view matrix), with GL blending enabled around just this pass — the
+**first thing in the engine to use blending** — so particles fade instead
+of punching hard-edged holes in whatever's behind them.
+
+Placed emitters live in `Level.particle_emitters`
+(`LevelParticleEmitter { name, position, def }`), the same
+sibling-list-on-`Level` pattern as lights/rig instances. The F2 panel gets
+**Add Particle Emitter**; selecting one shows every `ParticleEmitterDef`
+field as sliders/drag-values, a live **"Live particles: N"** count, a
+**Test Burst (12)** button, and **Delete**. `Sandbox::spawn_burst_at` is
+the transient-burst path used by `interact()`'s push demo — no
+`LevelObjectMeta`, so it never shows up as level data, just particles that
+age out and clean themselves up.
+
+## In-game HUD
+
+`engine::hud::HudState` is deliberately tiny — a title, named progress
+bars, and fading toast messages:
+
+```rust
+pub struct HudState {
+    pub title: Option<String>,
+    pub bars: Vec<(String, f32)>,   // (name, fraction 0..=1)
+    // toasts: private — go through set_bar/show_toast/tick
+}
+impl HudState {
+    pub fn set_bar(&mut self, name: &str, fraction: f32);   // clamped 0..=1
+    pub fn show_toast(&mut self, message: &str, seconds: f32);
+    pub fn tick(&mut self, dt: f32);                        // ages/removes expired toasts
+}
+```
+
+`engine::ui::draw_hud(ctx, hud)` renders it as a fixed top-left
+`egui::Area` — title, each bar as an `egui::ProgressBar`, toasts stacked
+below and fading out as their remaining time runs low. The sandbox calls
+it from `Game::render`'s egui closure **gated to Play mode only** — the
+one deliberate gap in the "editor panels only show in Edit mode" rule,
+since a HUD is a gameplay thing with nothing to show while you're editing.
+`Sandbox::update` only calls `self.hud.tick(dt)` inside the Play-mode
+branch too, so a toast's timer doesn't run out while the game is paused in
+Edit mode.
+
+Both scripts and native `Behavior`s reach the HUD through the same
+`ScriptApi` trait everything else in the scripting story uses —
+`set_hud_bar`/`show_toast` are two more required methods alongside
+`log`/`move_by`/etc., and `HostAdapter::call_native` forwards a script's
+`hud_bar(name, value)`/`toast(message, seconds)` calls to them. See the
+Script Demo Cube's `update` (sets a "Wobble" bar from its bob phase) and
+`interact()`'s push demo (`show_toast("Pushed!", 1.5)`) for one example
+from each call site.
+
+## Save/load (checkpoints)
+
+`engine::save` is intentionally small — a single gameplay checkpoint, not a
+full save-file system:
+
+```rust
+pub struct SaveData {
+    pub level_name: String,
+    pub player_position: [f32; 3],
+    pub player_yaw: f32,
+    pub player_pitch: f32,
+    pub saved_at_elapsed: f32,
+}
+```
+
+Same `load_from_file`/`save_to_file` RON pattern as every other asset type
+in the engine, written to a game's `saves/` folder — but unlike
+profiles/rigs/classes/levels, there's exactly one file
+(`saves/checkpoint.ron`), overwritten each time, since this is "get back
+to roughly where I was," not a multi-slot save system. **Per-object or
+per-script custom state (inventory, world flags, quest progress, ...) is
+explicitly out of scope** — add it once a concrete game actually needs
+that, rather than guessing at a shape now that would likely be wrong for
+whatever that game turns out to be.
+
+**F9** saves — Play mode only, since there's no player entity to snapshot
+in Edit mode. **F10** loads, entering Play mode first if you're currently
+in Edit mode (re-using the exact same `enter_play_mode` the F3 hotkey
+calls, so a loaded checkpoint gets a freshly spawned player/physics state
+under it, not a stale one). Both show a HUD toast ("Checkpoint saved"/
+"Checkpoint loaded") so the otherwise-silent snapshot is visible — the
+same `hud.show_toast` call site as the interact-push demo. If the
+checkpoint's `level_name` doesn't match whatever level is currently
+loaded, F10 logs a warning and repositions the player anyway rather than
+switching levels for you — a checkpoint this simple isn't trying to
+reconstruct "which level should be active," just where you were standing.
+
 ## Adding a new, separate game
 
 1. Create the folder and manifest:

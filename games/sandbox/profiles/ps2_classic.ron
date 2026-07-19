@@ -16,5 +16,7 @@
         vertex_snap_amount: 0.0,
         affine_texture_mapping: false,
         texture_filter: Nearest,
+        sky_horizon_color: (0.55, 0.65, 0.75),
+        sky_zenith_color: (0.1, 0.2, 0.45),
     ),
 )

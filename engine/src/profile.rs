@@ -33,6 +33,14 @@ pub struct RenderParams {
     pub vertex_snap_amount: f32,
     pub affine_texture_mapping: bool,
     pub texture_filter: TextureFilterMode,
+    /// The skybox gradient — mixed by the view ray's Y component, horizon
+    /// at the bottom, zenith at the top. `#[serde(default)]` (falling back
+    /// to black) so profiles saved before this field existed still load;
+    /// re-save to pick up a real sky.
+    #[serde(default)]
+    pub sky_horizon_color: [f32; 3],
+    #[serde(default)]
+    pub sky_zenith_color: [f32; 3],
 }
 
 impl Default for RenderParams {
@@ -50,6 +58,8 @@ impl Default for RenderParams {
             vertex_snap_amount: 0.0,
             affine_texture_mapping: false,
             texture_filter: TextureFilterMode::Nearest,
+            sky_horizon_color: [0.55, 0.65, 0.75],
+            sky_zenith_color: [0.1, 0.2, 0.45],
         }
     }
 }

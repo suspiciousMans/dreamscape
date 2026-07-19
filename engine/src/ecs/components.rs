@@ -1,11 +1,24 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{EulerRot, Mat4, Quat, Vec3};
 
 use crate::level::MeshSource;
 use crate::mesh::GpuMesh;
 use crate::texture::GpuTexture;
+
+/// Converts GUI-edited Euler degrees to the quaternion `Transform::rotation`
+/// actually stores. Kept as one shared function (rather than each caller
+/// rolling its own) so every Euler-authoring path — level objects, rig
+/// parts — agrees on axis order.
+pub fn euler_deg_to_quat(euler_deg: Vec3) -> Quat {
+    Quat::from_euler(
+        EulerRot::XYZ,
+        euler_deg.x.to_radians(),
+        euler_deg.y.to_radians(),
+        euler_deg.z.to_radians(),
+    )
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
@@ -85,6 +98,11 @@ pub struct LevelObjectMeta {
     pub mesh_source: MeshSource,
     pub texture_path: Option<PathBuf>,
     pub rotation_euler_deg: Vec3,
+    /// Path to the `.pss` script backing this object's `BehaviorSlot`, if
+    /// any — kept here (mirroring `texture_path`) so the F2 panel and
+    /// `build_level_from_ecs` can round-trip it without inspecting the
+    /// `BehaviorSlot` component itself.
+    pub script_path: Option<PathBuf>,
 }
 
 /// Tags the player entity in Play mode. Plain tunable fields — this is the
