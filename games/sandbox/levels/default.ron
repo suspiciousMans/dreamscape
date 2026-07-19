@@ -222,6 +222,23 @@
             playing_clip: Some("Wave"),
         ),
     ],
+    characters: [
+        (
+            name: "Wanderer",
+            position: (2.5, 1.0, -1.0),
+            scale: (0.6, 0.6, 0.6),
+            color: (0.3, 0.8, 0.4),
+            disposition: Passive,
+            move_speed: 2.0,
+            wander_radius: 2.5,
+            sight_range: 4.0,
+            max_health: None,
+            damage: None,
+            attack_range: 1.0,
+            attack_cooldown_secs: 1.0,
+            dialogue: [],
+        ),
+    ],
     physics: (
         gravity: 9.8,
         linear_damping: 0.15,

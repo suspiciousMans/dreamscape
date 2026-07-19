@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai::Disposition;
 use crate::camera::CameraShakeSpec;
 use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;
@@ -148,6 +149,33 @@ pub struct LevelParticleEmitter {
     pub def: ParticleEmitterDef,
 }
 
+/// A placed character (enemy/NPC/passive) — a sibling list on `Level` like
+/// `RigInstance`/`LevelLight`, since a character's shape (disposition,
+/// combat/dialogue config) doesn't fit `LevelObject`'s generic mesh/
+/// texture/trigger schema. Spawned as a solid-colored cube (see
+/// `Sandbox::spawn_character`) rather than an imported mesh/rig.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CharacterInstance {
+    pub name: String,
+    pub position: [f32; 3],
+    pub scale: [f32; 3],
+    pub color: [f32; 3],
+    pub disposition: Disposition,
+    pub move_speed: f32,
+    pub wander_radius: f32,
+    pub sight_range: f32,
+    #[serde(default)]
+    pub max_health: Option<f32>,
+    #[serde(default)]
+    pub damage: Option<f32>,
+    #[serde(default)]
+    pub attack_range: f32,
+    #[serde(default)]
+    pub attack_cooldown_secs: f32,
+    #[serde(default)]
+    pub dialogue: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Level {
     pub name: String,
@@ -158,6 +186,8 @@ pub struct Level {
     pub particle_emitters: Vec<LevelParticleEmitter>,
     #[serde(default)]
     pub rig_instances: Vec<RigInstance>,
+    #[serde(default)]
+    pub characters: Vec<CharacterInstance>,
     #[serde(default)]
     pub physics: PhysicsParams,
     /// Background music for this level, relative to the asset root — looped

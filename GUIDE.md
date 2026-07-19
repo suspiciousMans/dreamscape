@@ -495,6 +495,97 @@ plays the effect immediately without entering Play mode. The shipped
 default level demonstrates this: "Trigger Zone" flashes cyan (matching its
 own render color) and "Level Exit" flashes white alongside its level swap.
 
+## Characters and AI
+
+`engine::pathfinding::NavGrid` bakes a walkability grid (XZ plane, default
+cell size `0.5`) from every **static** (no `RigidBody`), non-trigger
+`Collider` in the world — `Sandbox::apply_level` calls
+`NavGrid::bake(&self.world, 0.5)` once per level load, after every other
+spawn loop, and stores it on `Sandbox.nav_grid`. A collider only counts as
+an obstruction if its Y half-extent (or sphere radius) is at least `0.3` —
+this is what keeps a paper-thin floor plane from blocking every cell while
+walls/pillars still block correctly. `NavGrid::find_path(start, goal)` runs
+8-directional A* (octile heuristic, no cutting a corner diagonally through
+two blocked orthogonal cells) and returns waypoint centers in world space,
+or `None` if unreachable.
+
+`engine::ai` is the character framework, deliberately reusing existing
+systems rather than building parallel ones — feedback goes through
+`ScreenEffectState`/`CameraShakeState`, dialogue/health through `HudState`,
+and death particles through `spawn_burst_at`:
+
+- **`Disposition`** — `Passive` (wanders, flees the player), `Hostile`
+  (wanders, chases and attacks), `Friendly` (wanders, but only ever reacts
+  to `interact()` — never chases or flees).
+- **`CharacterMeta`** — the authored tuning (name, color, disposition,
+  move speed, wander radius, sight range, and combat fields `damage`/
+  `attack_range`/`attack_cooldown_secs`, `damage: None` meaning the
+  character never attacks). Round-tripped into
+  `engine::level::CharacterInstance`.
+- **`CharacterBrain`** — runtime-only state machine (`Idle`/`Wandering`/
+  `Chasing`/`Fleeing`/`Attacking`), never serialized. Perception is a plain
+  distance check against the player's position (not a line-of-sight
+  raycast) with hysteresis on losing track (keeps tracking out to
+  `1.5 × sight_range` before giving up, so a target sitting right at the
+  boundary doesn't flicker between states).
+- **`Health`** — `current`/`max` hit points, used for the player too (the
+  player gets one via `Health::new(100.0)` at spawn, in both
+  `enter_play_mode` and `transition_to_level`). `damage()`/`is_dead()`/
+  `fraction()` (for HUD bars).
+- **`Dialogue`** — a cycling list of lines for `Friendly` characters,
+  advanced by `interact()`.
+- **`engine::ai::step(world, dt, player_position, nav_grid) ->
+  Vec<AiEvent>`** — advances every `CharacterBrain`'s perception/state/
+  steering (writes horizontal `RigidBody.velocity`; physics' existing
+  gravity/collision handles the rest, same as the player), then scans every
+  `Health` for `is_dead()`. Mirrors `physics::step`'s "return events, let
+  the caller handle them" contract: `AiEvent::AttackedPlayer { damage }`
+  and `AiEvent::CharacterDied { entity, position }` — the caller (not this
+  function) despawns a dead entity, since it also needs the position for
+  death feedback first.
+
+**Game-side wiring** (`games/*/src/main.rs`, same shape in both games):
+`Game::update`'s Play-mode block calls `engine::ai::step` right after
+`update_player_input` (steering decided before `physics::step` applies it
+that same frame, the same ordering `update_player_input` itself uses), then
+handles the returned events — `AttackedPlayer` damages the player's
+`Health`, triggers a red `ScreenEffectSpec` + `CameraShakeSpec`, and on
+death shows a toast and calls `restart_level`; `CharacterDied` despawns the
+entity, spawns a particle burst, and plays a tone. The player's `Health`
+fraction is written to `hud.set_bar("Health", ...)` every Play-mode frame,
+rendered by the existing generic HUD bar UI — no new UI code needed there.
+`interact()`'s nearest-target search also scans `CharacterMeta` entities:
+a character with `Dialogue` shows/advances its next line as a toast; a
+`Hostile` character with `Health` takes a fixed `10.0` damage instead (the
+only player-facing damage source in this vertical slice — there's no
+dedicated attack input, so the interact key doubles as a melee hit).
+
+A placed character is authored as `engine::level::CharacterInstance` — a
+sibling list on `Level` (`Level.characters`) like `RigInstance`/
+`LevelLight`, since a character's shape doesn't fit `LevelObject`'s generic
+mesh/texture/trigger schema. `Sandbox::spawn_character` spawns it as a
+solid-colored cube — a sphere `Collider` (matching the player's own
+convention) + `RigidBody` (an ordinary dynamic body, no special-casing
+needed in `engine::physics`) + `CharacterMeta`/`CharacterBrain`, plus
+`Health`/`Dialogue` if the instance was authored with combat/dialogue.
+
+**F2 panel**: a **"Characters"** section (mirrors "Rigs") — **Add
+Character**, a clickable outliner, and for the selected character: name,
+position, color, a disposition dropdown, move speed/wander radius/sight
+range drag values, an **Add/Clear Combat** pair (damage/attack range/
+cooldown, same optional-field pattern as a trigger's Screen Effect/Camera
+Shake), an **Add/Clear Health** pair, and an **Add/Clear Dialogue** pair
+with a growable line list and a "Preview" button.
+
+**Stated simplifications**: perception is distance-only (no line-of-sight
+raycast); the `NavGrid` bakes once per level load and never re-bakes
+mid-level, so it assumes static rooms, not moving/destructible geometry.
+
+Mushroom Man's dungeon demonstrates all three dispositions: a `Friendly`
+"Cave Sprite" near the entrance spawn point (dialogue hints at the Bounce
+gate), a `Passive` "Tunnel Crawler" wandering the tunnels corridor, and a
+`Hostile` "Spore Guardian" guarding the approach to the Heart of the Grove.
+
 ## Animation
 
 `engine::animation` gives level objects procedural motion — two kinds, not a

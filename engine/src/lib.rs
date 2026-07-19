@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod animation;
 pub mod app;
 pub mod audio;
@@ -10,6 +11,7 @@ pub mod input;
 pub mod level;
 pub mod mesh;
 pub mod particles;
+pub mod pathfinding;
 pub mod physics;
 pub mod platform;
 pub mod profile;

@@ -49,6 +49,7 @@
     ],
     particle_emitters: [],
     rig_instances: [],
+    characters: [],
     physics: (
         gravity: 9.8,
         linear_damping: 0.15,

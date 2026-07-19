@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use engine::ai::{AiEvent, CharacterBrain, CharacterMeta, Dialogue, Disposition, Health};
 use engine::animation::{AnimationKind, Animator};
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
@@ -20,11 +21,12 @@ use engine::hud::HudState;
 use engine::screen_effect::{ScreenEffectSpec, ScreenEffectState};
 use engine::glam::{Mat4, Quat, Vec3};
 use engine::glow::{self, HasContext};
-use engine::level::{AnimationSpec, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance};
+use engine::level::{AnimationSpec, CharacterInstance, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance};
 use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
 use engine::save::SaveData;
 use engine::mesh::{load_obj, primitives, GpuMesh};
 use engine::particles::{ParticleEmitter, ParticleEmitterDef};
+use engine::pathfinding::NavGrid;
 use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
 use engine::profile::{LightingMode, ProfileCycler, RenderParams, ShaderProfile, TextureFilterMode};
 use engine::renderer::{PostParams, Renderer};
@@ -297,6 +299,25 @@ fn default_level() -> Level {
         def: ParticleEmitterDef::default(),
     };
 
+    // A minimal demo touch for the character/AI system, matching every
+    // other feature's presence here — a `Passive` critter that wanders
+    // near the cubes and flees if the player approaches.
+    let wanderer = CharacterInstance {
+        name: "Wanderer".to_string(),
+        position: [2.5, 1.0, -1.0],
+        scale: [0.6, 0.6, 0.6],
+        color: [0.3, 0.8, 0.4],
+        disposition: Disposition::Passive,
+        move_speed: 2.0,
+        wander_radius: 2.5,
+        sight_range: 4.0,
+        max_health: None,
+        damage: None,
+        attack_range: 1.0,
+        attack_cooldown_secs: 1.0,
+        dialogue: Vec::new(),
+    };
+
     Level {
         name: "default".to_string(),
         objects: vec![
@@ -314,6 +335,7 @@ fn default_level() -> Level {
         lights: vec![demo_light],
         particle_emitters: vec![sparkle_emitter],
         rig_instances: vec![humanoid_instance],
+        characters: vec![wanderer],
         physics: PhysicsParams::default(),
         music_path: Some(PathBuf::from("music/demo_ambient.wav")),
     }
@@ -377,6 +399,7 @@ fn second_room_level() -> Level {
         lights: vec![light],
         particle_emitters: Vec::new(),
         rig_instances: Vec::new(),
+        characters: Vec::new(),
         physics: PhysicsParams::default(),
         music_path: None,
     }
@@ -843,6 +866,15 @@ struct Sandbox {
     /// section rather than sharing the flat Scene Objects outliner.
     selected_rig: Option<Entity>,
     selected_rig_part: Option<Entity>,
+    /// Baked from static level geometry in `apply_level` — `None` only
+    /// before the first level ever loads. Used by `engine::ai::step` for
+    /// character pathfinding.
+    nav_grid: Option<NavGrid>,
+    /// F2 panel: the currently selected character entity, mirroring
+    /// `selected_rig` — characters get their own "Characters" section
+    /// rather than sharing the flat Scene Objects outliner, since they
+    /// have no `LevelObjectMeta`.
+    selected_character: Option<Entity>,
     rig_new_name: String,
     new_part_name: String,
     new_part_parent: String,
@@ -932,6 +964,8 @@ impl Sandbox {
             rigs: Vec::new(),
             selected_rig: None,
             selected_rig_part: None,
+            nav_grid: None,
+            selected_character: None,
             rig_new_name: String::from("humanoid"),
             new_part_name: String::from("Part"),
             new_part_parent: String::new(),
@@ -1329,11 +1363,54 @@ impl Sandbox {
         ))
     }
 
+    /// Spawns a placed character: `Transform` + physics (sphere `Collider`,
+    /// matching the player's own convention, plus `RigidBody` so it's a
+    /// dynamic body physics already treats like any other) + `MeshRenderer`
+    /// (a solid-colored cube — the "simple color primitives" visual style)
+    /// + `CharacterMeta`/`CharacterBrain`, plus `Health`/`Dialogue` if the
+    /// instance was authored with combat/dialogue.
+    fn spawn_character(&mut self, gl: &glow::Context, instance: &CharacterInstance) -> anyhow::Result<Entity> {
+        let mesh = self.resolve_mesh(gl, &MeshSource::Primitive(PrimitiveKind::Cube))?;
+        let rgba = [
+            (instance.color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (instance.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (instance.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            255,
+        ];
+        let position = Vec3::from(instance.position);
+        let entity = self.world.spawn((
+            Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
+            Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
+            RigidBody::default(),
+            CharacterMeta {
+                name: instance.name.clone(),
+                color: instance.color,
+                disposition: instance.disposition,
+                move_speed: instance.move_speed,
+                wander_radius: instance.wander_radius,
+                sight_range: instance.sight_range,
+                damage: instance.damage,
+                attack_range: instance.attack_range,
+                attack_cooldown_secs: instance.attack_cooldown_secs,
+            },
+            CharacterBrain::new(position),
+        ));
+        if let Some(max_health) = instance.max_health {
+            let _ = self.world.insert_one(entity, Health::new(max_health));
+        }
+        if !instance.dialogue.is_empty() {
+            let _ = self.world.insert_one(entity, Dialogue::new(instance.dialogue.clone()));
+        }
+        Ok(entity)
+    }
+
     fn apply_level(&mut self, gl: &glow::Context, level: &Level) -> anyhow::Result<()> {
         self.world.clear();
         self.selected_entity = None;
         self.selected_rig = None;
         self.selected_rig_part = None;
+        self.selected_character = None;
         for obj in &level.objects {
             if let Err(err) = self.spawn_level_object(gl, obj) {
                 log::error!("failed to spawn level object '{}': {err}", obj.name);
@@ -1358,7 +1435,16 @@ impl Sandbox {
                 log::error!("failed to spawn rig instance '{}': {err}", instance.name);
             }
         }
+        for instance in &level.characters {
+            if let Err(err) = self.spawn_character(gl, instance) {
+                log::error!("failed to spawn character '{}': {err}", instance.name);
+            }
+        }
         self.spawn_native_behavior_demo(gl);
+        // Baked last so it sees the level's full static geometry —
+        // characters themselves are dynamic bodies, so they're excluded
+        // from the bake regardless of spawn order (see `NavGrid::bake`).
+        self.nav_grid = Some(NavGrid::bake(&self.world, 0.5));
         self.current_level_name = level.name.clone();
         self.physics_params = level.physics;
         self.current_music_path = level.music_path.clone();
@@ -1376,12 +1462,13 @@ impl Sandbox {
             }
         }
         log::info!(
-            "loaded level '{}' ({} objects, {} lights, {} particle emitters, {} rig instances)",
+            "loaded level '{}' ({} objects, {} lights, {} particle emitters, {} rig instances, {} characters)",
             level.name,
             level.objects.len(),
             level.lights.len(),
             level.particle_emitters.len(),
-            level.rig_instances.len()
+            level.rig_instances.len(),
+            level.characters.len()
         );
         Ok(())
     }
@@ -1649,12 +1736,34 @@ impl Sandbox {
             });
         }
 
+        let mut characters = Vec::new();
+        for (entity, (transform, meta)) in self.world.query::<(&Transform, &CharacterMeta)>().iter() {
+            let max_health = self.world.get::<&Health>(entity).ok().map(|health| health.max);
+            let dialogue = self.world.get::<&Dialogue>(entity).map(|d| d.lines.clone()).unwrap_or_default();
+            characters.push(CharacterInstance {
+                name: meta.name.clone(),
+                position: transform.position.to_array(),
+                scale: transform.scale.to_array(),
+                color: meta.color,
+                disposition: meta.disposition,
+                move_speed: meta.move_speed,
+                wander_radius: meta.wander_radius,
+                sight_range: meta.sight_range,
+                max_health,
+                damage: meta.damage,
+                attack_range: meta.attack_range,
+                attack_cooldown_secs: meta.attack_cooldown_secs,
+                dialogue,
+            });
+        }
+
         Level {
             name: self.current_level_name.clone(),
             objects,
             lights,
             particle_emitters,
             rig_instances,
+            characters,
             physics: self.physics_params,
             music_path: self.current_music_path.clone(),
         }
@@ -1890,6 +1999,7 @@ impl Sandbox {
                 is_trigger: false,
             },
             PlayerController::default(),
+            Health::new(100.0),
         ));
         self.player_entity = Some(entity);
 
@@ -2169,9 +2279,61 @@ impl Sandbox {
             }
         }
 
+        // Characters aren't `LevelObjectMeta` objects, so they need their
+        // own scan folded into the same `nearest` search.
+        for (entity, transform) in self.world.query::<&Transform>().with::<&CharacterMeta>().iter() {
+            let distance = transform.position.distance(player_position);
+            if distance <= controller.interact_radius
+                && nearest.is_none_or(|(_, best)| distance < best)
+            {
+                nearest = Some((entity, distance));
+            }
+        }
+
         let Some((entity, distance)) = nearest else {
             return;
         };
+
+        if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+            if let Some(dialogue) = query.get() {
+                let line = dialogue.next().to_string();
+                self.hud.show_toast(&line, 3.0);
+                log::info!("talked to a character {distance:.2}m away");
+                return;
+            }
+        }
+
+        // A `Hostile` character with `Health` is a fight, not a push — the
+        // only player-facing damage source in this vertical slice, reusing
+        // the interact key rather than adding a dedicated attack input.
+        // Actual death handling (despawn/particles/tone) happens next frame
+        // via `engine::ai::step`'s `AiEvent::CharacterDied`, the same path
+        // a character's own attacks use to notice the player died.
+        const PLAYER_ATTACK_DAMAGE: f32 = 10.0;
+        let is_hostile = self
+            .world
+            .get::<&CharacterMeta>(entity)
+            .is_ok_and(|meta| meta.disposition == Disposition::Hostile);
+        if is_hostile {
+            let hit = {
+                let mut query = self.world.query_one::<&mut Health>(entity);
+                match query.as_mut().ok().and_then(|q| q.get()) {
+                    Some(health) => {
+                        health.damage(PLAYER_ATTACK_DAMAGE);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if hit {
+                log::info!("hit a hostile character {distance:.2}m away for {PLAYER_ATTACK_DAMAGE}");
+                self.play_tone(180.0, 0.08);
+                if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                    self.spawn_burst_at(position, ParticleEmitterDef::default(), 8);
+                }
+                return;
+            }
+        }
 
         // A scripted/native-behavior object handles its own interaction
         // instead of the generic push — it opted in by having a `Behavior`.
@@ -2300,6 +2462,7 @@ impl Sandbox {
                 is_trigger: false,
             },
             PlayerController::default(),
+            Health::new(100.0),
         ));
         self.player_entity = Some(entity);
         self.fp_camera.pitch = 0.0;
@@ -2482,6 +2645,52 @@ impl Sandbox {
             }
         } else {
             ui.label("No rig selected.");
+        }
+
+        ui.separator();
+        ui.heading("Characters");
+        if ui.button("Add Character").clicked() {
+            let count = self.world.query::<&CharacterMeta>().iter().count();
+            let instance = CharacterInstance {
+                name: format!("Character_{}", count + 1),
+                position: [0.0, 1.0, 0.0],
+                scale: [0.8, 1.6, 0.8],
+                color: [0.8, 0.2, 0.2],
+                disposition: Disposition::Passive,
+                move_speed: 2.0,
+                wander_radius: 3.0,
+                sight_range: 6.0,
+                max_health: None,
+                damage: None,
+                attack_range: 1.2,
+                attack_cooldown_secs: 1.0,
+                dialogue: Vec::new(),
+            };
+            match self.spawn_character(gl, &instance) {
+                Ok(entity) => self.selected_character = Some(entity),
+                Err(err) => log::error!("failed to add character: {err}"),
+            }
+        }
+        let mut clicked_character = None;
+        for (entity, meta) in self.world.query::<&CharacterMeta>().iter() {
+            let selected = self.selected_character == Some(entity);
+            if ui.selectable_label(selected, &meta.name).clicked() {
+                clicked_character = Some(entity);
+            }
+        }
+        if let Some(entity) = clicked_character {
+            self.selected_character = Some(entity);
+        }
+
+        ui.separator();
+        if let Some(entity) = self.selected_character {
+            if self.world.contains(entity) {
+                self.draw_selected_character_ui(ui, entity);
+            } else {
+                self.selected_character = None;
+            }
+        } else {
+            ui.label("No character selected.");
         }
 
         ui.separator();
@@ -2909,6 +3118,148 @@ impl Sandbox {
         if delete {
             let _ = self.world.despawn(entity);
             self.selected_entity = None;
+        }
+    }
+
+    /// Sibling to `draw_selected_object_ui`/`draw_selected_light_ui` for a
+    /// placed character — name/position/AI tuning, plus the same optional-
+    /// field Add/Clear pattern `screen_effect`/`camera_shake` use, applied
+    /// here to combat (`CharacterMeta::damage`) and to `Health`/`Dialogue`.
+    fn draw_selected_character_ui(&mut self, ui: &mut egui::Ui, entity: Entity) {
+        let mut delete = false;
+        let mut preview_line: Option<String> = None;
+
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut CharacterMeta)>(entity) {
+            if let Some((transform, meta)) = query.get() {
+                let mut name = meta.name.clone();
+                if ui.text_edit_singleline(&mut name).changed() {
+                    meta.name = name;
+                }
+
+                ui.label("Position");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: "));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    ui.color_edit_button_rgb(&mut meta.color);
+                });
+
+                ui.label("Disposition");
+                egui::ComboBox::from_id_salt("character_disposition")
+                    .selected_text(match meta.disposition {
+                        Disposition::Passive => "Passive",
+                        Disposition::Hostile => "Hostile",
+                        Disposition::Friendly => "Friendly",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut meta.disposition, Disposition::Passive, "Passive");
+                        ui.selectable_value(&mut meta.disposition, Disposition::Hostile, "Hostile");
+                        ui.selectable_value(&mut meta.disposition, Disposition::Friendly, "Friendly");
+                    });
+
+                ui.add(egui::DragValue::new(&mut meta.move_speed).speed(0.1).range(0.0..=20.0).prefix("Move speed: "));
+                ui.add(egui::DragValue::new(&mut meta.wander_radius).speed(0.1).range(0.0..=50.0).prefix("Wander radius: "));
+                ui.add(egui::DragValue::new(&mut meta.sight_range).speed(0.1).range(0.0..=50.0).prefix("Sight range: "));
+
+                ui.separator();
+                ui.label("Combat");
+                if let Some(damage) = &mut meta.damage {
+                    ui.add(egui::DragValue::new(damage).speed(0.5).range(0.0..=100.0).prefix("Damage: "));
+                    ui.add(egui::DragValue::new(&mut meta.attack_range).speed(0.1).range(0.0..=20.0).prefix("Attack range: "));
+                    ui.add(
+                        egui::DragValue::new(&mut meta.attack_cooldown_secs)
+                            .speed(0.05)
+                            .range(0.1..=10.0)
+                            .prefix("Attack cooldown (s): "),
+                    );
+                    if ui.button("Clear Combat").clicked() {
+                        meta.damage = None;
+                    }
+                } else if ui.button("Add Combat").clicked() {
+                    meta.damage = Some(10.0);
+                    meta.attack_range = 1.2;
+                    meta.attack_cooldown_secs = 1.0;
+                }
+            }
+        }
+
+        ui.separator();
+        ui.label("Health");
+        if self.world.get::<&Health>(entity).is_ok() {
+            let mut max = self.world.get::<&Health>(entity).map(|health| health.max).unwrap_or(20.0);
+            if ui.add(egui::DragValue::new(&mut max).speed(1.0).range(1.0..=1000.0).prefix("Max health: ")).changed() {
+                if let Ok(mut query) = self.world.query_one::<&mut Health>(entity) {
+                    if let Some(health) = query.get() {
+                        health.max = max;
+                        health.current = max;
+                    }
+                }
+            }
+            if ui.button("Clear Health").clicked() {
+                let _ = self.world.remove_one::<Health>(entity);
+            }
+        } else if ui.button("Add Health").clicked() {
+            let _ = self.world.insert_one(entity, Health::new(20.0));
+        }
+
+        ui.separator();
+        ui.label("Dialogue");
+        if self.world.get::<&Dialogue>(entity).is_ok() {
+            let mut lines = self.world.get::<&Dialogue>(entity).map(|d| d.lines.clone()).unwrap_or_default();
+            let mut changed = false;
+            let mut remove_index = None;
+            for (i, line) in lines.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    changed |= ui.text_edit_singleline(line).changed();
+                    if ui.small_button("x").clicked() {
+                        remove_index = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove_index {
+                lines.remove(i);
+                changed = true;
+            }
+            if ui.button("+ Line").clicked() {
+                lines.push(String::new());
+                changed = true;
+            }
+            if changed {
+                if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                    if let Some(dialogue) = query.get() {
+                        dialogue.lines = lines;
+                    }
+                }
+            }
+            if ui.button("Preview").clicked() {
+                if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                    if let Some(dialogue) = query.get() {
+                        preview_line = Some(dialogue.next().to_string());
+                    }
+                }
+            }
+            if ui.button("Clear Dialogue").clicked() {
+                let _ = self.world.remove_one::<Dialogue>(entity);
+            }
+        } else if ui.button("Add Dialogue").clicked() {
+            let _ = self.world.insert_one(entity, Dialogue::new(vec!["...".to_string()]));
+        }
+
+        ui.separator();
+        if ui.button("Delete").clicked() {
+            delete = true;
+        }
+
+        if let Some(line) = preview_line {
+            self.hud.show_toast(&line, 3.0);
+        }
+        if delete {
+            let _ = self.world.despawn(entity);
+            self.selected_character = None;
         }
     }
 
@@ -4118,6 +4469,58 @@ impl Game for Sandbox {
             let scripted: Vec<Entity> = self.world.query::<&BehaviorSlot>().iter().map(|(entity, _)| entity).collect();
             for entity in scripted {
                 self.with_behavior(entity, |behavior, api| behavior.on_update(api, dt));
+            }
+
+            // `nav_grid` is taken out (rather than borrowed) for the
+            // duration of `ai::step` so handling its returned events below
+            // — which can call `restart_level` (needs the whole `&mut
+            // self`) — never fights a live borrow of `self.nav_grid`.
+            if let Some(nav_grid) = self.nav_grid.take() {
+                let player_position = self
+                    .player_entity
+                    .and_then(|entity| self.world.get::<&Transform>(entity).ok())
+                    .map(|transform| transform.position)
+                    .unwrap_or(Vec3::ZERO);
+                let events = engine::ai::step(&mut self.world, dt, player_position, &nav_grid);
+                self.nav_grid = Some(nav_grid);
+
+                for event in events {
+                    match event {
+                        AiEvent::AttackedPlayer { damage, .. } => {
+                            let Some(player) = self.player_entity else { continue };
+                            let mut died = false;
+                            if let Ok(mut query) = self.world.query_one::<&mut Health>(player) {
+                                if let Some(health) = query.get() {
+                                    health.damage(damage);
+                                    died = health.is_dead();
+                                }
+                            }
+                            self.screen_effects.trigger(ScreenEffectSpec {
+                                color: [0.9, 0.15, 0.1],
+                                strength: 0.6,
+                                fade_in_secs: 0.02,
+                                hold_secs: 0.05,
+                                fade_out_secs: 0.25,
+                            });
+                            self.camera_shake.trigger(CameraShakeSpec { intensity: 0.12, duration_secs: 0.3 });
+                            if died {
+                                self.hud.show_toast("You died...", 2.0);
+                                self.restart_level(ctx);
+                                break;
+                            }
+                        }
+                        AiEvent::CharacterDied { entity, position } => {
+                            let _ = self.world.despawn(entity);
+                            self.spawn_burst_at(position, ParticleEmitterDef::default(), 16);
+                            self.play_tone(220.0, 0.15);
+                        }
+                    }
+                }
+
+                if let Some(player) = self.player_entity {
+                    let fraction = self.world.get::<&Health>(player).map(|health| health.fraction()).unwrap_or(1.0);
+                    self.hud.set_bar("Health", fraction);
+                }
             }
 
             // Captured before `step` resolves collisions — landing zeroes
