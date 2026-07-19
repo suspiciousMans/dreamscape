@@ -402,6 +402,96 @@ instead of its assigned/white texture, in both Edit and Play mode, so it
 stays visually identifiable — true see-through would need alpha blending,
 which the render pipeline doesn't have yet (a known simplification).
 
+### Level transitions
+
+A trigger can also load a *different* level and place the player at a
+specific spot in it — e.g. a doorway that leads from one room's level file
+into another's. This reuses the exact same `on_trigger_entered` extension
+point above rather than adding a parallel mechanism: it's just one more
+thing that method does after the log/tone/behavior dispatch, if the trigger
+entity has a transition configured.
+
+```rust
+pub struct LevelTransition {
+    pub target_level: String,   // matched against Level::name, same as the F2 "Load:" list
+    pub spawn_position: [f32; 3],
+    pub spawn_yaw_deg: f32,
+}
+```
+
+`LevelObject.level_transition: Option<LevelTransition>` (`#[serde(default)]`)
+saves/loads it with the level, mirrored onto `LevelObjectMeta` the same way
+`script_path` is, so the F2 panel and `build_level_from_ecs` can round-trip
+it. Only meaningful when `is_trigger` is true.
+
+When `on_trigger_entered` finds a `LevelTransition` on the entered trigger,
+`Sandbox::transition_to_level` looks up `target_level` by name in
+`self.levels`, calls `apply_level` (the same full level swap the F2 "Load:"
+list uses — wipes the world, respawns objects/lights/rigs, switches music),
+then respawns the player at `spawn_position` facing `spawn_yaw_deg` and
+shows a toast. `pre_play_snapshot` (what F3/Escape-stop restores) is
+deliberately left pointing at whichever level Play mode actually started
+from, so stopping mid-transition returns the editor to the level you were
+editing, not wherever the player ended up.
+
+**F2 panel**: selecting a trigger object shows a **"Level Transition"**
+section — a target-level picker (same list as the Level section's "Load:"),
+`DragValue`s for spawn position and yaw, and "Add"/"Clear Transition"
+buttons. The shipped default level demonstrates this: its "Level Exit"
+trigger leads to a small "second_room" level, whose own "Return" trigger
+leads back.
+
+### Screen effects
+
+A trigger (or a script/native `Behavior`) can also flash a full-screen
+color tint — a damage flash, a fade, a "portal" flash on a level
+transition, etc. — composited directly into the rendered frame rather than
+drawn as UI on top of it, so it stays native to the posterize/dither retro
+look instead of reading as a crisp modern overlay.
+
+```rust
+// engine::screen_effect
+pub struct ScreenEffectSpec {
+    pub color: [f32; 3],
+    pub strength: f32,        // peak tint strength, 0..1
+    pub fade_in_secs: f32,
+    pub hold_secs: f32,
+    pub fade_out_secs: f32,
+}
+```
+
+`ScreenEffectState` (owned by `Sandbox` as `screen_effects`, like `hud`)
+holds at most one playing effect, ticked once per frame alongside
+`hud.tick(dt)`. Its `current()` evaluates the fade-in/hold/fade-out
+envelope into a `(color, strength)` pair, fed into `PostParams` right
+before `renderer.present(...)` in `render()`. `CompositePass`/
+`post_composite.frag` mix the tint into the color **before** the
+posterize/dither step, so a flash gets quantized/dithered along with
+everything else rather than looking pasted on. A custom composite shader
+that doesn't declare the `uTintColor`/`uTintStrength` uniforms just no-ops
+the tint (missing uniform locations are already handled as `Option`s) —
+no crash, the effect simply doesn't show under that profile.
+
+`LevelObject.screen_effect: Option<ScreenEffectSpec>` (`#[serde(default)]`)
+saves/loads it with the level, mirrored onto `LevelObjectMeta` the same way
+`level_transition` is. Only meaningful when `is_trigger` is true, and
+independent of `level_transition` — a trigger can have either, both, or
+neither. `on_trigger_entered` checks for a `screen_effect` right alongside
+its `level_transition` check (before it, so a portal trigger flashes and
+then swaps levels) and calls `self.screen_effects.trigger(...)`.
+
+Scripts and native `Behavior`s can fire the same effect directly via
+`screen_flash(r, g, b, strength, fade_in, hold, fade_out)` (see
+"Scripting" below) — useful for e.g. a damage flash driven by gameplay
+logic rather than authored on a trigger.
+
+**F2 panel**: selecting a trigger object shows a **"Screen Effect"**
+section — a color picker, a strength slider, `DragValue`s for fade-in/
+hold/fade-out, and "Add"/"Preview"/"Clear Screen Effect" buttons. "Preview"
+plays the effect immediately without entering Play mode. The shipped
+default level demonstrates this: "Trigger Zone" flashes cyan (matching its
+own render color) and "Level Exit" flashes white alongside its level swap.
+
 ## Animation
 
 `engine::animation` gives level objects procedural motion — two kinds, not a
@@ -602,11 +692,14 @@ interacted with.
 **Standard library** (everything a script can call besides built-in math):
 `log(msg, ...)`, `get_x()`/`get_y()`/`get_z()`, `set_position(x,y,z)`,
 `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `time()`,
-`hud_bar(name, fraction)`, `toast(message, seconds)`. Position is three
+`hud_bar(name, fraction)`, `toast(message, seconds)`,
+`screen_flash(r,g,b,strength,fade_in,hold,fade_out)`. Position is three
 scalar calls rather than one call returning a triple — the language has no
 vector/tuple type. `hud_bar`/`toast` drive the in-game HUD (see "In-game
 HUD" below) — a script can update a named progress bar or pop a fading
-toast the same way a native `Behavior` can.
+toast the same way a native `Behavior` can. `screen_flash` fires a
+full-screen color tint (see "Screen effects" above) the same way a trigger's
+`screen_effect` does.
 
 ### `Behavior`/`ScriptApi` — using Rust the same way a script would
 
@@ -621,6 +714,7 @@ pub trait ScriptApi {
     fn elapsed(&self) -> f32;
     fn set_hud_bar(&mut self, name: &str, fraction: f32);
     fn show_toast(&mut self, message: &str, seconds: f32);
+    fn screen_flash(&mut self, r: f32, g: f32, b: f32, strength: f32, fade_in_secs: f32, hold_secs: f32, fade_out_secs: f32);
 }
 pub trait Behavior: Send + Sync {
     fn on_ready(&mut self, api: &mut dyn ScriptApi) { }

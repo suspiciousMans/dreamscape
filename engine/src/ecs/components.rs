@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
-use crate::level::MeshSource;
+use crate::level::{LevelTransition, MeshSource};
 use crate::mesh::GpuMesh;
+use crate::screen_effect::ScreenEffectSpec;
 use crate::texture::GpuTexture;
 
 /// Converts GUI-edited Euler degrees to the quaternion `Transform::rotation`
@@ -103,6 +104,14 @@ pub struct LevelObjectMeta {
     /// `build_level_from_ecs` can round-trip it without inspecting the
     /// `BehaviorSlot` component itself.
     pub script_path: Option<PathBuf>,
+    /// Mirrors `LevelObject::level_transition` for the same reason as
+    /// `script_path` — round-trippable by the F2 panel and
+    /// `build_level_from_ecs` without inspecting other components.
+    pub level_transition: Option<LevelTransition>,
+    /// Mirrors `LevelObject::screen_effect` for the same reason as
+    /// `level_transition` — round-trippable by the F2 panel and
+    /// `build_level_from_ecs` without inspecting other components.
+    pub screen_effect: Option<ScreenEffectSpec>,
 }
 
 /// Tags the player entity in Play mode. Plain tunable fields — this is the

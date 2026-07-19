@@ -5,6 +5,8 @@ out vec4 FragColor;
 uniform sampler2D uSourceTex;
 uniform float uColorLevels;
 uniform float uDitherStrength;
+uniform vec3 uTintColor;
+uniform float uTintStrength;
 
 // Values 0..15 arranged for a reasonably well-spread ordered-dither pattern.
 const mat4 kBayer = mat4(
@@ -20,8 +22,10 @@ void main() {
     ivec2 cell = ivec2(mod(gl_FragCoord.xy, 4.0));
     float threshold = kBayer[cell.x][cell.y] - 0.5;
 
+    vec3 tinted = mix(color.rgb, uTintColor, uTintStrength);
+
     float levels = max(uColorLevels, 1.0);
-    vec3 dithered = color.rgb + threshold * uDitherStrength / levels;
+    vec3 dithered = tinted + threshold * uDitherStrength / levels;
     vec3 quantized = floor(dithered * levels + 0.5) / levels;
 
     FragColor = vec4(clamp(quantized, 0.0, 1.0), color.a);

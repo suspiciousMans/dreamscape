@@ -16,6 +16,7 @@ pub mod profile;
 pub mod renderer;
 pub mod rig;
 pub mod save;
+pub mod screen_effect;
 pub mod script;
 pub mod shader;
 pub mod texture;

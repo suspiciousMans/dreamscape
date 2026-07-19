@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;
+use crate::screen_effect::ScreenEffectSpec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrimitiveKind {
@@ -32,6 +33,19 @@ pub enum AnimationSpec {
         amplitude: f32,
         period_secs: f32,
     },
+}
+
+/// A trigger's "on enter, load a different level" behavior — the
+/// connective piece between `Level`s and trigger volumes. `target_level`
+/// is matched against `Level::name`, the same way the F2 panel's "Load:"
+/// list picks a level; `spawn_position`/`spawn_yaw_deg` place the player
+/// in the new level the way `enter_play_mode`'s own initial spawn does.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LevelTransition {
+    pub target_level: String,
+    pub spawn_position: [f32; 3],
+    #[serde(default)]
+    pub spawn_yaw_deg: f32,
 }
 
 /// One placed object in a level: what it looks like (mesh/texture) and its
@@ -74,6 +88,21 @@ pub struct LevelObject {
     /// load (as `None`/unclassed).
     #[serde(default)]
     pub class: Option<PathBuf>,
+    /// Only meaningful when `is_trigger` is true: loads a different level
+    /// and repositions the player when the player enters this trigger —
+    /// see `Sandbox::on_trigger_entered`/`transition_to_level`.
+    /// `#[serde(default)]` so levels saved before this field existed still
+    /// load (as `None`/no transition).
+    #[serde(default)]
+    pub level_transition: Option<LevelTransition>,
+    /// Only meaningful when `is_trigger` is true: plays a full-screen color
+    /// flash/tint when the player enters this trigger — see
+    /// `Sandbox::on_trigger_entered`/`engine::screen_effect::ScreenEffectState`.
+    /// Independent of `level_transition`: a trigger can have either, both, or
+    /// neither. `#[serde(default)]` so levels saved before this field existed
+    /// still load (as `None`/no effect).
+    #[serde(default)]
+    pub screen_effect: Option<ScreenEffectSpec>,
 }
 
 /// A placed point light: a separate shape from `LevelObject` because a light

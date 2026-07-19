@@ -21,6 +21,20 @@ pub trait ScriptApi {
     fn set_hud_bar(&mut self, name: &str, fraction: f32);
     /// Shows a transient HUD message that fades after `seconds`.
     fn show_toast(&mut self, message: &str, seconds: f32);
+    /// Fades a full-screen color tint in over `fade_in_secs`, holds it for
+    /// `hold_secs`, then fades it back out over `fade_out_secs` — composited
+    /// into the frame alongside the posterize/dither post effect. `strength`
+    /// is the peak tint strength, `0.0..=1.0`.
+    fn screen_flash(
+        &mut self,
+        r: f32,
+        g: f32,
+        b: f32,
+        strength: f32,
+        fade_in_secs: f32,
+        hold_secs: f32,
+        fade_out_secs: f32,
+    );
 }
 
 /// Programmable per-entity behavior. The exact same trait is implemented
@@ -102,7 +116,8 @@ impl Behavior for ScriptBehavior {
 /// `ScriptApi` calls. This is the entire "standard library" a `.pss` script
 /// can see: `log(...)`, `get_x/get_y/get_z()`, `set_position(x,y,z)`,
 /// `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `play_sfx(path)`,
-/// `time()`, `hud_bar(name,fraction)`, `toast(message,seconds)`. `Value` has
+/// `time()`, `hud_bar(name,fraction)`, `toast(message,seconds)`,
+/// `screen_flash(r,g,b,strength,fade_in,hold,fade_out)`. `Value` has
 /// no vector/tuple type, so position is read as three separate scalar calls
 /// rather than one call returning a triple.
 struct HostAdapter<'a> {
@@ -162,6 +177,18 @@ impl Host for HostAdapter<'_> {
                     return Err(ScriptError { message: "'toast' expects a string message first".to_string(), line: 0 });
                 };
                 self.api.show_toast(message, num(args, 1, name)?);
+                Ok(Value::Nil)
+            }
+            "screen_flash" => {
+                self.api.screen_flash(
+                    num(args, 0, name)?,
+                    num(args, 1, name)?,
+                    num(args, 2, name)?,
+                    num(args, 3, name)?,
+                    num(args, 4, name)?,
+                    num(args, 5, name)?,
+                    num(args, 6, name)?,
+                );
                 Ok(Value::Nil)
             }
             _ => Err(ScriptError { message: format!("unknown function '{name}'"), line: 0 }),

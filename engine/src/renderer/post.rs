@@ -34,6 +34,8 @@ pub struct CompositePass {
     uniform_source_tex: Option<glow::UniformLocation>,
     uniform_color_levels: Option<glow::UniformLocation>,
     uniform_dither_strength: Option<glow::UniformLocation>,
+    uniform_tint_color: Option<glow::UniformLocation>,
+    uniform_tint_strength: Option<glow::UniformLocation>,
 }
 
 /// Values applied by the composite pass's posterize/dither stage. Levels this
@@ -41,6 +43,11 @@ pub struct CompositePass {
 pub struct PostParams {
     pub color_levels: f32,
     pub dither_strength: f32,
+    /// A full-screen color tint (e.g. a damage flash), mixed in before the
+    /// posterize/dither stage so it still reads as native to the retro look
+    /// rather than a crisp overlay. See `engine::screen_effect`.
+    pub tint_color: [f32; 3],
+    pub tint_strength: f32,
 }
 
 impl Default for PostParams {
@@ -48,6 +55,8 @@ impl Default for PostParams {
         Self {
             color_levels: 256.0,
             dither_strength: 0.0,
+            tint_color: [0.0; 3],
+            tint_strength: 0.0,
         }
     }
 }
@@ -59,6 +68,8 @@ impl CompositePass {
         let uniform_color_levels = unsafe { gl.get_uniform_location(program, "uColorLevels") };
         let uniform_dither_strength =
             unsafe { gl.get_uniform_location(program, "uDitherStrength") };
+        let uniform_tint_color = unsafe { gl.get_uniform_location(program, "uTintColor") };
+        let uniform_tint_strength = unsafe { gl.get_uniform_location(program, "uTintStrength") };
         let empty_vao = unsafe { gl.create_vertex_array().map_err(anyhow::Error::msg)? };
 
         Ok(Self {
@@ -67,6 +78,8 @@ impl CompositePass {
             uniform_source_tex,
             uniform_color_levels,
             uniform_dither_strength,
+            uniform_tint_color,
+            uniform_tint_strength,
         })
     }
 
@@ -82,6 +95,13 @@ impl CompositePass {
                 self.uniform_dither_strength.as_ref(),
                 params.dither_strength,
             );
+            gl.uniform_3_f32(
+                self.uniform_tint_color.as_ref(),
+                params.tint_color[0],
+                params.tint_color[1],
+                params.tint_color[2],
+            );
+            gl.uniform_1_f32(self.uniform_tint_strength.as_ref(), params.tint_strength);
             gl.bind_vertex_array(Some(self.empty_vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.enable(glow::DEPTH_TEST);

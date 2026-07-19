@@ -14,9 +14,10 @@ use engine::camera::{FirstPersonCamera, OrbitCamera};
 use engine::class::ObjectClass;
 use engine::ecs::{euler_deg_to_quat, Entity, Light, LevelObjectMeta, LightKind, MeshRenderer, PlayerController, Transform, World};
 use engine::hud::HudState;
+use engine::screen_effect::{ScreenEffectSpec, ScreenEffectState};
 use engine::glam::{Mat4, Quat, Vec3};
 use engine::glow::{self, HasContext};
-use engine::level::{AnimationSpec, Level, LevelLight, LevelObject, LevelParticleEmitter, MeshSource, PrimitiveKind, RigInstance};
+use engine::level::{AnimationSpec, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance};
 use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
 use engine::save::SaveData;
 use engine::mesh::{load_obj, primitives, GpuMesh};
@@ -113,6 +114,8 @@ fn default_level() -> Level {
         animation: None,
         script: None,
         class: None,
+        level_transition: None,
+        screen_effect: None,
     };
 
     let floor = LevelObject {
@@ -131,6 +134,8 @@ fn default_level() -> Level {
         animation: None,
         script: None,
         class: None,
+        level_transition: None,
+        screen_effect: None,
     };
 
     // Static (no RigidBody) but animated — demonstrates that an animated
@@ -151,6 +156,8 @@ fn default_level() -> Level {
         }),
         script: None,
         class: None,
+        level_transition: None,
+        screen_effect: None,
     };
 
     let demo_light = LevelLight {
@@ -175,6 +182,17 @@ fn default_level() -> Level {
         animation: None,
         script: None,
         class: None,
+        level_transition: None,
+        // A quick cyan flash matching the trigger's own render color —
+        // demonstrates screen effects the moment a player reaches Play
+        // mode's first trigger, no extra geometry needed.
+        screen_effect: Some(ScreenEffectSpec {
+            color: [0.2, 0.8, 1.0],
+            strength: 0.5,
+            fade_in_secs: 0.05,
+            hold_secs: 0.05,
+            fade_out_secs: 0.35,
+        }),
     };
 
     // Bobs via `scripts/bob_demo.pss` — stands next to the compiled-in
@@ -192,6 +210,39 @@ fn default_level() -> Level {
         animation: None,
         script: Some(PathBuf::from("scripts/bob_demo.pss")),
         class: None,
+        level_transition: None,
+        screen_effect: None,
+    };
+
+    // Past the demo cubes/rig, in the player's forward path — demonstrates
+    // level transitions: walking in loads "second_room" and lands the
+    // player just inside its own "Return" trigger (see `second_room_level`).
+    let level_exit = LevelObject {
+        name: "Level Exit".to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        position: [0.0, 1.0, -4.5],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale: [1.5, 1.0, 1.5],
+        is_dynamic: false,
+        is_trigger: true,
+        animation: None,
+        script: None,
+        class: None,
+        level_transition: Some(LevelTransition {
+            target_level: "second_room".to_string(),
+            spawn_position: [0.0, 1.0, 1.5],
+            spawn_yaw_deg: 0.0,
+        }),
+        // A quick white flash makes the level swap read as a proper
+        // "portal" transition rather than an abrupt cut.
+        screen_effect: Some(ScreenEffectSpec {
+            color: [1.0, 1.0, 1.0],
+            strength: 0.7,
+            fade_in_secs: 0.05,
+            hold_secs: 0.05,
+            fade_out_secs: 0.3,
+        }),
     };
 
     let humanoid_instance = RigInstance {
@@ -219,6 +270,8 @@ fn default_level() -> Level {
         animation: None,
         script: None,
         class: Some(PathBuf::from("classes/barrel.ron")),
+        level_transition: None,
+        screen_effect: None,
     };
 
     // A small continuous sparkle jet — placed near the light so it reads as
@@ -239,6 +292,7 @@ fn default_level() -> Level {
             trigger,
             orbiting_cube,
             script_demo_cube,
+            level_exit,
             make_barrel("Barrel 1", -0.7),
             make_barrel("Barrel 2", 0.7),
         ],
@@ -247,6 +301,67 @@ fn default_level() -> Level {
         rig_instances: vec![humanoid_instance],
         physics: PhysicsParams::default(),
         music_path: Some(PathBuf::from("music/demo_ambient.wav")),
+    }
+}
+
+/// A small second level demonstrating level-to-level transitions:
+/// `default_level`'s "Level Exit" trigger lands here, and this room's own
+/// "Return" trigger goes back — see `Sandbox::transition_to_level`.
+fn second_room_level() -> Level {
+    let floor = LevelObject {
+        name: "Second Room Floor".to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Plane),
+        texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
+        position: [0.0, 0.0, 0.0],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale: [4.0, 1.0, 4.0],
+        is_dynamic: false,
+        is_trigger: false,
+        animation: None,
+        script: None,
+        class: None,
+        level_transition: None,
+        screen_effect: None,
+    };
+
+    let light = LevelLight {
+        name: "Second Room Light".to_string(),
+        position: [0.0, 2.5, 0.0],
+        color: [0.6, 0.75, 1.0],
+        intensity: 1.5,
+        range: 6.0,
+    };
+
+    // Set back from the arrival spawn point so walking in doesn't
+    // instantly re-trigger the return; walking forward reaches it.
+    let return_trigger = LevelObject {
+        name: "Return".to_string(),
+        mesh: MeshSource::Primitive(PrimitiveKind::Cube),
+        texture_path: None,
+        position: [0.0, 1.0, -1.5],
+        rotation_euler_deg: [0.0, 0.0, 0.0],
+        scale: [1.5, 1.0, 1.5],
+        is_dynamic: false,
+        is_trigger: true,
+        animation: None,
+        script: None,
+        class: None,
+        level_transition: Some(LevelTransition {
+            target_level: "default".to_string(),
+            spawn_position: [0.0, 1.0, -3.0],
+            spawn_yaw_deg: 0.0,
+        }),
+        screen_effect: None,
+    };
+
+    Level {
+        name: "second_room".to_string(),
+        objects: vec![floor, return_trigger],
+        lights: vec![light],
+        particle_emitters: Vec::new(),
+        rig_instances: Vec::new(),
+        physics: PhysicsParams::default(),
+        music_path: None,
     }
 }
 
@@ -423,6 +538,7 @@ struct SandboxScriptApi<'a> {
     audio: Option<&'a AudioContext>,
     elapsed: f32,
     hud: &'a mut HudState,
+    screen_effects: &'a mut ScreenEffectState,
     asset_root: &'a Path,
 }
 
@@ -468,6 +584,25 @@ impl ScriptApi for SandboxScriptApi<'_> {
 
     fn show_toast(&mut self, message: &str, seconds: f32) {
         self.hud.show_toast(message, seconds);
+    }
+
+    fn screen_flash(
+        &mut self,
+        r: f32,
+        g: f32,
+        b: f32,
+        strength: f32,
+        fade_in_secs: f32,
+        hold_secs: f32,
+        fade_out_secs: f32,
+    ) {
+        self.screen_effects.trigger(ScreenEffectSpec {
+            color: [r, g, b],
+            strength,
+            fade_in_secs,
+            hold_secs,
+            fade_out_secs,
+        });
     }
 }
 
@@ -682,6 +817,11 @@ struct Sandbox {
     /// In-game HUD state (title/bars/toasts) — drawn in Play mode only,
     /// mutated by scripts/native `Behavior`s through `ScriptApi`.
     hud: HudState,
+    /// The currently-playing full-screen color flash/tint, if any — ticked
+    /// every frame and composited into the frame in `render()`. Triggered by
+    /// scripts/native `Behavior`s via `ScriptApi::screen_flash` or by a
+    /// trigger's `LevelObjectMeta::screen_effect`.
+    screen_effects: ScreenEffectState,
     saves_dir: PathBuf,
     /// The current level's background music, if any — mirrors
     /// `Level::music_path` and is set/cleared by `apply_level`, edited via
@@ -752,6 +892,7 @@ impl Sandbox {
             class_new_name: String::from("class_1"),
             particle_emitter_new_name: String::from("Sparkles"),
             hud: HudState::default(),
+            screen_effects: ScreenEffectState::default(),
             current_music_path: None,
             music_volume: 1.0,
             audio: match AudioContext::new() {
@@ -780,10 +921,11 @@ impl Sandbox {
         let elapsed = self.elapsed_time;
         let audio = self.audio.as_ref();
         let hud = &mut self.hud;
+        let screen_effects = &mut self.screen_effects;
         let asset_root = self.asset_root.as_path();
         if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut BehaviorSlot)>(entity) {
             if let Some((transform, BehaviorSlot(behavior))) = query.get() {
-                let mut api = SandboxScriptApi { transform, audio, elapsed, hud, asset_root };
+                let mut api = SandboxScriptApi { transform, audio, elapsed, hud, screen_effects, asset_root };
                 f(behavior.as_mut(), &mut api);
                 return true;
             }
@@ -1023,6 +1165,8 @@ impl Sandbox {
                 texture_path: obj.texture_path.clone(),
                 rotation_euler_deg,
                 script_path: obj.script.clone(),
+                level_transition: obj.level_transition.clone(),
+                screen_effect: obj.screen_effect.clone(),
             },
             Collider {
                 shape: ColliderShape::Aabb { half_extents },
@@ -1100,6 +1244,8 @@ impl Sandbox {
                 texture_path: None,
                 rotation_euler_deg: Vec3::ZERO,
                 script_path: None,
+                level_transition: None,
+        screen_effect: None,
             },
         ))
     }
@@ -1122,6 +1268,8 @@ impl Sandbox {
                 texture_path: None,
                 rotation_euler_deg: Vec3::ZERO,
                 script_path: None,
+                level_transition: None,
+        screen_effect: None,
             },
         ))
     }
@@ -1204,6 +1352,8 @@ impl Sandbox {
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+        screen_effect: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => {
@@ -1395,6 +1545,8 @@ impl Sandbox {
                 animation,
                 script: meta.script_path.clone(),
                 class: self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone()),
+                level_transition: meta.level_transition.clone(),
+                screen_effect: meta.screen_effect.clone(),
             });
         }
 
@@ -1497,6 +1649,8 @@ impl Sandbox {
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+        screen_effect: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -1521,6 +1675,8 @@ impl Sandbox {
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+        screen_effect: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -1564,6 +1720,8 @@ impl Sandbox {
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+        screen_effect: None,
         };
 
         match self.spawn_level_object(gl, &obj) {
@@ -1946,10 +2104,14 @@ impl Sandbox {
     /// Sibling to `interact` for the other kind of "things that happen when
     /// the player does something": entering/exiting a non-solid trigger
     /// zone. Replace this with your own game's trigger logic (checkpoints,
-    /// level transitions, damage zones, ...). Also dispatches to the
-    /// trigger's `Behavior`, if it has one — script-driven trigger logic
-    /// alongside the built-in log+tone demo.
-    fn on_trigger_entered(&mut self, trigger: Entity) {
+    /// damage zones, ...). Also dispatches to the trigger's `Behavior`, if
+    /// it has one — script-driven trigger logic alongside the built-in
+    /// log+tone demo, and (if the trigger has one) a level transition —
+    /// see `transition_to_level`. Returns `true` if a transition fired, so
+    /// the caller knows this frame's trigger-overlap bookkeeping (computed
+    /// against a world that `transition_to_level` just wiped) is stale and
+    /// must be skipped rather than applied.
+    fn on_trigger_entered(&mut self, gl: &glow::Context, trigger: Entity) -> bool {
         let name = self
             .world
             .get::<&LevelObjectMeta>(trigger)
@@ -1958,6 +2120,72 @@ impl Sandbox {
         log::info!("entered trigger '{name}'");
         self.play_tone(880.0, 0.08);
         self.with_behavior(trigger, |behavior, api| behavior.on_trigger_enter(api, "Player"));
+
+        let effect = self
+            .world
+            .get::<&LevelObjectMeta>(trigger)
+            .ok()
+            .and_then(|meta| meta.screen_effect);
+        if let Some(effect) = effect {
+            self.screen_effects.trigger(effect);
+        }
+
+        let transition = self
+            .world
+            .get::<&LevelObjectMeta>(trigger)
+            .ok()
+            .and_then(|meta| meta.level_transition.clone());
+        if let Some(transition) = transition {
+            self.transition_to_level(gl, &transition);
+            return true;
+        }
+        false
+    }
+
+    /// Loads `transition.target_level` and repositions the player at
+    /// `transition.spawn_position`/`spawn_yaw_deg` — the level-transition
+    /// half of a trigger's job (see `on_trigger_entered`). Deliberately
+    /// leaves `pre_play_snapshot` untouched: it still points at whatever
+    /// level Play mode was entered from, so F3/Escape-stop after a mid-play
+    /// transition correctly returns the editor to the level being edited,
+    /// not wherever the player ended up.
+    fn transition_to_level(&mut self, gl: &glow::Context, transition: &LevelTransition) {
+        let Some(level) = self.levels.iter().find(|l| l.name == transition.target_level).cloned() else {
+            log::error!(
+                "level transition: no level named '{}' is loaded",
+                transition.target_level
+            );
+            return;
+        };
+        if let Err(err) = self.apply_level(gl, &level) {
+            log::error!("level transition to '{}' failed: {err}", transition.target_level);
+            return;
+        }
+
+        // `apply_level` just wiped the player along with everything else —
+        // respawn one at the transition's spawn point, mirroring
+        // `enter_play_mode`'s own initial spawn exactly.
+        let entity = self.world.spawn((
+            Transform {
+                position: Vec3::from(transition.spawn_position),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            RigidBody::default(),
+            Collider {
+                shape: ColliderShape::Sphere { radius: 0.4 },
+                is_trigger: false,
+            },
+            PlayerController::default(),
+        ));
+        self.player_entity = Some(entity);
+        self.fp_camera.pitch = 0.0;
+        self.fp_camera.yaw = transition.spawn_yaw_deg.to_radians();
+        // The old trigger entities this set refers to no longer exist —
+        // leaving it stale risks a dead `Entity` aliasing a freshly-spawned
+        // one after `world.clear()` resets id generations.
+        self.trigger_overlaps.clear();
+        self.hud.show_toast(&format!("Entering {}", level.name), 1.5);
     }
 
     fn on_trigger_exited(&mut self, trigger: Entity) {
@@ -2200,6 +2428,7 @@ impl Sandbox {
             .is_ok_and(|collider| collider.is_trigger);
         let mut trigger_changed = false;
         let mut texture_path_for_trigger_toggle = None;
+        let mut preview_screen_effect: Option<ScreenEffectSpec> = None;
 
         let existing_animator = self.world.get::<&Animator>(entity).ok().map(|animator| animator.kind);
         let existing_base = self
@@ -2289,6 +2518,69 @@ impl Sandbox {
                         collider.is_trigger = is_trigger;
                         trigger_changed = true;
                         texture_path_for_trigger_toggle = meta.texture_path.clone();
+                    }
+
+                    if is_trigger {
+                        ui.separator();
+                        ui.label("Level Transition");
+                        if let Some(transition) = &mut meta.level_transition {
+                            ui.label("Target level:");
+                            let mut clicked_target = None;
+                            for level in &self.levels {
+                                if ui
+                                    .selectable_label(transition.target_level == level.name, &level.name)
+                                    .clicked()
+                                {
+                                    clicked_target = Some(level.name.clone());
+                                }
+                            }
+                            if let Some(target) = clicked_target {
+                                transition.target_level = target;
+                            }
+                            ui.label("Spawn Position");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut transition.spawn_position[0]).speed(0.1).prefix("x: "));
+                                ui.add(egui::DragValue::new(&mut transition.spawn_position[1]).speed(0.1).prefix("y: "));
+                                ui.add(egui::DragValue::new(&mut transition.spawn_position[2]).speed(0.1).prefix("z: "));
+                            });
+                            ui.add(egui::DragValue::new(&mut transition.spawn_yaw_deg).speed(1.0).prefix("Spawn yaw (deg): "));
+                            if ui.button("Clear Transition").clicked() {
+                                meta.level_transition = None;
+                            }
+                        } else if ui.button("Add Level Transition").clicked() {
+                            meta.level_transition = Some(LevelTransition {
+                                target_level: self.levels.first().map(|l| l.name.clone()).unwrap_or_default(),
+                                spawn_position: [0.0, 1.0, 0.0],
+                                spawn_yaw_deg: 0.0,
+                            });
+                        }
+
+                        ui.separator();
+                        ui.label("Screen Effect");
+                        if let Some(effect) = &mut meta.screen_effect {
+                            ui.horizontal(|ui| {
+                                ui.label("Color:");
+                                ui.color_edit_button_rgb(&mut effect.color);
+                            });
+                            ui.add(egui::Slider::new(&mut effect.strength, 0.0..=1.0).text("Strength"));
+                            ui.add(egui::DragValue::new(&mut effect.fade_in_secs).speed(0.05).range(0.0..=10.0).prefix("Fade in (s): "));
+                            ui.add(egui::DragValue::new(&mut effect.hold_secs).speed(0.05).range(0.0..=10.0).prefix("Hold (s): "));
+                            ui.add(egui::DragValue::new(&mut effect.fade_out_secs).speed(0.05).range(0.0..=10.0).prefix("Fade out (s): "));
+                            if ui.button("Preview").clicked() {
+                                preview_screen_effect = Some(*effect);
+                            }
+                            if ui.button("Clear Screen Effect").clicked() {
+                                meta.screen_effect = None;
+                            }
+                        } else if ui.button("Add Screen Effect").clicked() {
+                            meta.screen_effect = Some(ScreenEffectSpec {
+                                color: [1.0, 1.0, 1.0],
+                                strength: 0.6,
+                                fade_in_secs: 0.05,
+                                hold_secs: 0.05,
+                                fade_out_secs: 0.3,
+                            });
+                        }
                     }
 
                     ui.label("Animation");
@@ -2406,6 +2698,9 @@ impl Sandbox {
                     renderer.texture = Some(new_texture);
                 }
             }
+        }
+        if let Some(effect) = preview_screen_effect {
+            self.screen_effects.trigger(effect);
         }
         if anim_changed {
             if anim_selected == 0 {
@@ -3007,6 +3302,8 @@ impl Sandbox {
             animation: class.animation,
             script: class.script.clone(),
             class: Some(PathBuf::from(format!("classes/{}.ron", class.name))),
+            level_transition: None,
+        screen_effect: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -3453,6 +3750,13 @@ impl Game for Sandbox {
             engine::level::save_to_file(&level, &path)?;
             levels = vec![level];
         }
+        if !levels.iter().any(|l| l.name == "second_room") {
+            log::info!("no 'second_room' level found in {:?}; writing it", self.levels_dir);
+            let level = second_room_level();
+            let path = self.levels_dir.join(format!("{}.ron", level.name));
+            engine::level::save_to_file(&level, &path)?;
+            levels.push(level);
+        }
         let first_level = levels[0].clone();
         {
             let gl = ctx.gl();
@@ -3604,6 +3908,7 @@ impl Game for Sandbox {
                 let _ = self.world.despawn(entity);
             }
             self.hud.tick(dt);
+            self.screen_effects.tick(dt);
         }
 
         if self.mode == EditorMode::Play && !self.paused {
@@ -3637,13 +3942,25 @@ impl Game for Sandbox {
                 .map(|&(_player, trigger)| trigger)
                 .collect();
 
+            // If a trigger causes a level transition mid-loop, the world it
+            // was computed against is gone — stop processing this frame's
+            // remaining trigger events and skip overwriting
+            // `trigger_overlaps` with a now-stale snapshot (`transition_to_level`
+            // already cleared it).
+            let gl = ctx.gl();
+            let mut transitioned = false;
             for trigger in entered {
-                self.on_trigger_entered(trigger);
+                if self.on_trigger_entered(gl, trigger) {
+                    transitioned = true;
+                    break;
+                }
             }
-            for trigger in exited {
-                self.on_trigger_exited(trigger);
+            if !transitioned {
+                for trigger in exited {
+                    self.on_trigger_exited(trigger);
+                }
+                self.trigger_overlaps = current;
             }
-            self.trigger_overlaps = current;
         }
         Ok(())
     }
@@ -3792,12 +4109,15 @@ impl Game for Sandbox {
         }
         renderer.draw_particles(gl, &view.to_cols_array(), &proj.to_cols_array(), particle_draws.into_iter());
 
+        let (tint_color, tint_strength) = self.screen_effects.current();
         renderer.present(
             gl,
             drawable_size,
             &PostParams {
                 color_levels: params.color_levels as f32,
                 dither_strength: params.dither_strength,
+                tint_color,
+                tint_strength,
             },
         );
 
