@@ -1,7 +1,7 @@
 (
     name: "barrel",
     mesh: Primitive(Cube),
-    texture_path: None,
+    texture_path: Some("assets/textures/test_diffuse.png"),
     scale: (0.8, 0.8, 0.8),
     is_dynamic: true,
     is_trigger: false,

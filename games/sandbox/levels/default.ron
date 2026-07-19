@@ -4,7 +4,7 @@
         (
             name: "Floor",
             mesh: Primitive(Plane),
-            texture_path: None,
+            texture_path: Some("assets/textures/test_diffuse.png"),
             position: (0.0, 0.0, 0.0),
             rotation_euler_deg: (0.0, 0.0, 0.0),
             scale: (8.0, 1.0, 8.0),
@@ -69,7 +69,7 @@
         (
             name: "Orbiting Cube",
             mesh: Primitive(Cube),
-            texture_path: None,
+            texture_path: Some("assets/textures/test_diffuse.png"),
             position: (0.0, 3.0, -2.0),
             rotation_euler_deg: (0.0, 0.0, 0.0),
             scale: (0.6, 0.6, 0.6),
@@ -85,7 +85,7 @@
         (
             name: "Script Demo Cube",
             mesh: Primitive(Cube),
-            texture_path: None,
+            texture_path: Some("assets/textures/test_diffuse.png"),
             position: (-2.4, 1.0, -2.0),
             rotation_euler_deg: (0.0, 0.0, 0.0),
             scale: (0.6, 0.6, 0.6),

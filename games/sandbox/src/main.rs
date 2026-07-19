@@ -118,7 +118,11 @@ fn default_level() -> Level {
     let floor = LevelObject {
         name: "Floor".to_string(),
         mesh: MeshSource::Primitive(PrimitiveKind::Plane),
-        texture_path: None,
+        // Textured (not the default white fallback) so it doesn't read as a
+        // blank patch butted up against the checkerboard cubes — a plain
+        // white prop right next to a textured one is what actually made
+        // things look "hollow"/broken, not a mesh or shader bug.
+        texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
         position: [0.0, 0.0, 0.0],
         rotation_euler_deg: [0.0, 0.0, 0.0],
         scale: [8.0, 1.0, 8.0],
@@ -135,7 +139,7 @@ fn default_level() -> Level {
     let orbiting_cube = LevelObject {
         name: "Orbiting Cube".to_string(),
         mesh: MeshSource::Primitive(PrimitiveKind::Cube),
-        texture_path: None,
+        texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
         position: [0.0, 3.0, -2.0],
         rotation_euler_deg: [0.0, 0.0, 0.0],
         scale: [0.6, 0.6, 0.6],
@@ -179,7 +183,7 @@ fn default_level() -> Level {
     let script_demo_cube = LevelObject {
         name: "Script Demo Cube".to_string(),
         mesh: MeshSource::Primitive(PrimitiveKind::Cube),
-        texture_path: None,
+        texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
         position: [-2.4, 1.0, -2.0],
         rotation_euler_deg: [0.0, 0.0, 0.0],
         scale: [0.6, 0.6, 0.6],
@@ -372,7 +376,10 @@ fn default_barrel_class() -> ObjectClass {
     ObjectClass {
         name: "barrel".to_string(),
         mesh: MeshSource::Primitive(PrimitiveKind::Cube),
-        texture_path: None,
+        // Same reasoning as the floor: an untextured (solid white) prop
+        // standing right next to the checkerboard cubes read as a hollow/
+        // broken box rather than a separate plain object.
+        texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
         scale: [0.8, 0.8, 0.8],
         is_dynamic: true,
         is_trigger: false,
@@ -1188,7 +1195,7 @@ impl Sandbox {
         let obj = LevelObject {
             name: "Native Behavior Cube".to_string(),
             mesh: MeshSource::Primitive(PrimitiveKind::Cube),
-            texture_path: None,
+            texture_path: Some(PathBuf::from("assets/textures/test_diffuse.png")),
             position: [2.4, 1.0, -2.0],
             rotation_euler_deg: [0.0, 0.0, 0.0],
             scale: [0.6, 0.6, 0.6],
