@@ -30,7 +30,7 @@ use engine::sdl2::keyboard::Keycode;
 use engine::sdl2::mouse::MouseButton;
 use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
-use engine::ui::{draw_hud, render_params_editor, EguiState};
+use engine::ui::{draw_hud, draw_pause_menu, render_params_editor, EguiState, PauseMenuAction};
 
 fn default_demo_profiles() -> Vec<ShaderProfile> {
     let make = |name: &str, render: RenderParams| ShaderProfile {
@@ -242,7 +242,83 @@ fn default_level() -> Level {
         particle_emitters: vec![sparkle_emitter],
         rig_instances: vec![humanoid_instance],
         physics: PhysicsParams::default(),
+        music_path: Some(PathBuf::from("music/demo_ambient.wav")),
     }
+}
+
+/// Hand-rolls a minimal mono 16-bit PCM WAV file (RIFF/fmt/data chunks) —
+/// no crate needed just to generate a couple of small placeholder sounds
+/// for the demo level. Not a general-purpose encoder: fixed to
+/// mono/16-bit, which is all `generate_blip_samples`/`generate_ambient_samples`
+/// below need.
+fn write_wav(path: &Path, samples: &[i16], sample_rate: u32) -> anyhow::Result<()> {
+    let data_size = (samples.len() * 2) as u32;
+    let byte_rate = sample_rate * 2;
+    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // block align (mono, 16-bit)
+    bytes.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_size.to_le_bytes());
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// A short sine blip with a linear fade in/out (avoids an audible click at
+/// the start/end of a one-shot sound) — the placeholder played by
+/// `bob_demo.pss`'s `interact()` alongside its existing procedural `play_tone`.
+fn generate_blip_samples(sample_rate: u32) -> Vec<i16> {
+    let duration_secs = 0.15;
+    let freq = 880.0;
+    let fade_secs = 0.01;
+    let count = (sample_rate as f32 * duration_secs) as usize;
+    let fade_samples = ((sample_rate as f32 * fade_secs) as usize).max(1);
+    (0..count)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            let envelope = if i < fade_samples {
+                i as f32 / fade_samples as f32
+            } else if i >= count - fade_samples {
+                (count - i) as f32 / fade_samples as f32
+            } else {
+                1.0
+            };
+            let value = (t * freq * std::f32::consts::TAU).sin() * envelope * 0.3;
+            (value * i16::MAX as f32) as i16
+        })
+        .collect()
+}
+
+/// A soft three-note chord (a root, its octave, and its fifth) sized to
+/// loop seamlessly: every component completes a whole number of cycles
+/// within `duration_secs`, so the waveform's value and slope match at the
+/// loop point with no audible click — no fade needed the way a one-shot
+/// sound needs one.
+fn generate_ambient_samples(sample_rate: u32) -> Vec<i16> {
+    let duration_secs = 2.0;
+    let count = (sample_rate as f32 * duration_secs) as usize;
+    (0..count)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            let wave = |freq: f32| (t * freq * std::f32::consts::TAU).sin();
+            let value = (wave(110.0) * 0.4 + wave(220.0) * 0.3 + wave(330.0) * 0.2) * 0.25;
+            (value * i16::MAX as f32) as i16
+        })
+        .collect()
 }
 
 /// The starting rig: a simple 6-part cube humanoid (Torso root + Head, two
@@ -340,6 +416,7 @@ struct SandboxScriptApi<'a> {
     audio: Option<&'a AudioContext>,
     elapsed: f32,
     hud: &'a mut HudState,
+    asset_root: &'a Path,
 }
 
 impl ScriptApi for SandboxScriptApi<'_> {
@@ -362,6 +439,15 @@ impl ScriptApi for SandboxScriptApi<'_> {
     fn play_tone(&mut self, frequency_hz: f32, duration_secs: f32) {
         if let Some(audio) = self.audio {
             audio.play_tone(frequency_hz, duration_secs);
+        }
+    }
+
+    fn play_sfx(&mut self, path: &str) {
+        if let Some(audio) = self.audio {
+            let full_path = self.asset_root.join(path);
+            if let Err(err) = audio.play_sfx_file(&full_path) {
+                log::warn!("failed to play sfx {full_path:?}: {err}");
+            }
         }
     }
 
@@ -484,6 +570,17 @@ enum EditorMode {
     Play,
 }
 
+/// Whether the dev-time level/shader editor should ever be reachable —
+/// `true` in debug builds, `false` in release. `cargo build --release`
+/// (what `package.ps1` already uses for shipping) is treated as "this is
+/// the game a player gets," so it never enters `EditorMode::Edit`: no
+/// panels, no F1/F2/Tab/F5/F3, no orbit-camera drag. `cfg!()` is a
+/// compile-time constant, so every `if editor_available()` branch below
+/// is dead code in a release build, not just an unreachable runtime path.
+fn editor_available() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// Tags the compiled-in native-behavior demo cube so `build_level_from_ecs`
 /// can exclude it — it isn't level data, just always re-added by
 /// `spawn_native_behavior_demo`.
@@ -529,6 +626,11 @@ struct Sandbox {
     particle_quad_mesh: Option<Arc<GpuMesh>>,
     physics_params: PhysicsParams,
     mode: EditorMode,
+    /// Only meaningful while `mode == EditorMode::Play` — freezes gameplay
+    /// simulation (see `Game::update`) and shows the pause menu overlay
+    /// (see `Game::render`) without despawning the player or restoring the
+    /// pre-Play snapshot the way `exit_play_mode` does.
+    paused: bool,
     fp_camera: FirstPersonCamera,
     player_entity: Option<Entity>,
     pre_play_snapshot: Option<Level>,
@@ -574,6 +676,15 @@ struct Sandbox {
     /// mutated by scripts/native `Behavior`s through `ScriptApi`.
     hud: HudState,
     saves_dir: PathBuf,
+    /// The current level's background music, if any — mirrors
+    /// `Level::music_path` and is set/cleared by `apply_level`, edited via
+    /// the F2 panel's "Assign Music.../Stop Music", and written back out by
+    /// `build_level_from_ecs`.
+    current_music_path: Option<PathBuf>,
+    /// Persists the F2 panel's volume slider across level loads, since
+    /// `play_music_file` itself has no volume parameter — re-applied via
+    /// `set_music_volume` every time music (re)starts.
+    music_volume: f32,
 }
 
 impl Sandbox {
@@ -612,6 +723,7 @@ impl Sandbox {
             plane_mesh: None,
             physics_params: PhysicsParams::default(),
             mode: EditorMode::Edit,
+            paused: false,
             fp_camera: FirstPersonCamera::new(),
             player_entity: None,
             pre_play_snapshot: None,
@@ -633,6 +745,8 @@ impl Sandbox {
             class_new_name: String::from("class_1"),
             particle_emitter_new_name: String::from("Sparkles"),
             hud: HudState::default(),
+            current_music_path: None,
+            music_volume: 1.0,
             audio: match AudioContext::new() {
                 Ok(audio) => Some(audio),
                 Err(err) => {
@@ -659,9 +773,10 @@ impl Sandbox {
         let elapsed = self.elapsed_time;
         let audio = self.audio.as_ref();
         let hud = &mut self.hud;
+        let asset_root = self.asset_root.as_path();
         if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut BehaviorSlot)>(entity) {
             if let Some((transform, BehaviorSlot(behavior))) = query.get() {
-                let mut api = SandboxScriptApi { transform, audio, elapsed, hud };
+                let mut api = SandboxScriptApi { transform, audio, elapsed, hud, asset_root };
                 f(behavior.as_mut(), &mut api);
                 return true;
             }
@@ -1036,6 +1151,20 @@ impl Sandbox {
         self.spawn_native_behavior_demo(gl);
         self.current_level_name = level.name.clone();
         self.physics_params = level.physics;
+        self.current_music_path = level.music_path.clone();
+        let music_volume = self.music_volume;
+        if let Some(audio) = self.audio.as_mut() {
+            match &self.current_music_path {
+                Some(path) => {
+                    let full_path = self.asset_root.join(path);
+                    match audio.play_music_file(&full_path, true) {
+                        Ok(()) => audio.set_music_volume(music_volume),
+                        Err(err) => log::warn!("failed to play music {full_path:?}: {err}"),
+                    }
+                }
+                None => audio.stop_music(),
+            }
+        }
         log::info!(
             "loaded level '{}' ({} objects, {} lights, {} particle emitters, {} rig instances)",
             level.name,
@@ -1311,6 +1440,7 @@ impl Sandbox {
             particle_emitters,
             rig_instances,
             physics: self.physics_params,
+            music_path: self.current_music_path.clone(),
         }
     }
 
@@ -1438,6 +1568,35 @@ impl Sandbox {
         }
     }
 
+    /// F2 "Assign Music..." — picks an audio file, starts it looping
+    /// immediately (so the change is audible right away, matching how
+    /// "Assign Texture..." updates the live entity), and records it as
+    /// `current_music_path` so it round-trips when the level is saved.
+    fn assign_music(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Audio", &["wav", "ogg", "mp3", "flac"])
+            .set_directory(&self.asset_root)
+            .pick_file()
+        else {
+            return;
+        };
+        self.current_music_path = Some(engine::level::relativize(&path, &self.asset_root));
+        let volume = self.music_volume;
+        if let Some(audio) = self.audio.as_mut() {
+            match audio.play_music_file(&path, true) {
+                Ok(()) => audio.set_music_volume(volume),
+                Err(err) => log::error!("failed to play music {path:?}: {err}"),
+            }
+        }
+    }
+
+    fn stop_current_music(&mut self) {
+        self.current_music_path = None;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stop_music();
+        }
+    }
+
     fn assign_texture_to_entity(&mut self, gl: &glow::Context, entity: Entity) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg"])
@@ -1505,6 +1664,7 @@ impl Sandbox {
 
         ctx.platform.sdl.mouse().set_relative_mouse_mode(true);
         self.mode = EditorMode::Play;
+        self.paused = false;
         log::info!("entered play mode");
     }
 
@@ -1525,7 +1685,34 @@ impl Sandbox {
         }
         ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
         self.mode = EditorMode::Edit;
+        self.paused = false;
         log::info!("exited play mode, restored edit-time state");
+    }
+
+    /// Freezes gameplay simulation (see the `paused` check in `Game::update`)
+    /// and releases the mouse so the pause menu's buttons are clickable —
+    /// Play mode's relative-mouse-mode FPS look would otherwise swallow
+    /// clicks instead of moving a real cursor.
+    fn pause(&mut self, ctx: &mut Context) {
+        self.paused = true;
+        ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
+    }
+
+    /// Re-captures the mouse and lets gameplay simulation resume.
+    fn resume(&mut self, ctx: &mut Context) {
+        self.paused = false;
+        ctx.platform.sdl.mouse().set_relative_mouse_mode(true);
+    }
+
+    /// Pause menu's "Restart Level" (offered instead of "Exit to Editor"
+    /// when there's no editor to exit to — see `draw_pause_menu`) — reuses
+    /// the existing snapshot/restore pair to reset the current Play
+    /// session. Briefly passes through `EditorMode::Edit` inside this one
+    /// call, but that's never rendered: no frame happens between the two
+    /// calls.
+    fn restart_level(&mut self, ctx: &mut Context) {
+        self.exit_play_mode(ctx);
+        self.enter_play_mode(ctx);
     }
 
     fn checkpoint_path(&self) -> PathBuf {
@@ -1805,6 +1992,29 @@ impl Sandbox {
                 if let Err(err) = self.apply_level(gl, &level) {
                     log::error!("failed to load level '{}': {err}", level.name);
                 }
+            }
+        }
+
+        ui.separator();
+        ui.heading("Music");
+        ui.label(format!(
+            "Track: {}",
+            self.current_music_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "None".to_string())
+        ));
+        ui.horizontal(|ui| {
+            if ui.button("Assign Music...").clicked() {
+                self.assign_music();
+            }
+            if self.current_music_path.is_some() && ui.button("Stop Music").clicked() {
+                self.stop_current_music();
+            }
+        });
+        if self.current_music_path.is_some()
+            && ui.add(egui::Slider::new(&mut self.music_volume, 0.0..=1.0).text("Volume")).changed()
+        {
+            let volume = self.music_volume;
+            if let Some(audio) = self.audio.as_mut() {
+                audio.set_music_volume(volume);
             }
         }
 
@@ -3205,6 +3415,25 @@ impl Game for Sandbox {
         // to write.
         std::fs::create_dir_all(&self.saves_dir)?;
 
+        // Placeholder audio the demo level references (a push-interact blip
+        // and a looping ambient track) — hand-generated rather than shipped
+        // as binary assets, same bootstrap-if-missing convention as
+        // profiles/rigs/classes/levels above.
+        let demo_sfx_path = self.asset_root.join("sfx/demo_blip.wav");
+        if !demo_sfx_path.exists() {
+            log::info!("no demo sfx found at {demo_sfx_path:?}; generating a placeholder blip");
+            if let Err(err) = write_wav(&demo_sfx_path, &generate_blip_samples(44100), 44100) {
+                log::error!("failed to write demo sfx: {err}");
+            }
+        }
+        let demo_music_path = self.asset_root.join("music/demo_ambient.wav");
+        if !demo_music_path.exists() {
+            log::info!("no demo music found at {demo_music_path:?}; generating a placeholder ambient loop");
+            if let Err(err) = write_wav(&demo_music_path, &generate_ambient_samples(44100), 44100) {
+                log::error!("failed to write demo music: {err}");
+            }
+        }
+
         std::fs::create_dir_all(&self.levels_dir)?;
         let mut levels = engine::level::load_dir(&self.levels_dir)?;
         if levels.is_empty() {
@@ -3224,6 +3453,12 @@ impl Game for Sandbox {
         }
         self.levels = levels;
 
+        // A shipped/release build has no editor to land in — go straight
+        // to Play so the very first frame a player sees is the game.
+        if !editor_available() {
+            self.enter_play_mode(ctx);
+        }
+
         Ok(())
     }
 
@@ -3242,7 +3477,7 @@ impl Game for Sandbox {
             .map(|ui| ui.wants_keyboard_input())
             .unwrap_or(false);
 
-        let editing = self.mode == EditorMode::Edit;
+        let editing = editor_available() && self.mode == EditorMode::Edit;
 
         match *event {
             Event::MouseMotion { xrel, yrel, .. }
@@ -3257,13 +3492,11 @@ impl Game for Sandbox {
                 keycode: Some(Keycode::Escape),
                 repeat: false,
                 ..
-            } => {
-                if self.mode == EditorMode::Play {
-                    self.exit_play_mode(ctx);
-                } else {
-                    ctx.should_quit = true;
-                }
-            }
+            } => match self.mode {
+                EditorMode::Play if !self.paused => self.pause(ctx),
+                EditorMode::Play => self.resume(ctx),
+                EditorMode::Edit => ctx.should_quit = true,
+            },
             Event::KeyDown {
                 keycode: Some(Keycode::F1),
                 repeat: false,
@@ -3282,7 +3515,7 @@ impl Game for Sandbox {
                 keycode: Some(Keycode::F3),
                 repeat: false,
                 ..
-            } => match self.mode {
+            } if editor_available() => match self.mode {
                 EditorMode::Edit => self.enter_play_mode(ctx),
                 EditorMode::Play => self.exit_play_mode(ctx),
             },
@@ -3290,7 +3523,7 @@ impl Game for Sandbox {
                 keycode: Some(Keycode::F9),
                 repeat: false,
                 ..
-            } if self.mode == EditorMode::Play => {
+            } if self.mode == EditorMode::Play && !self.paused => {
                 self.save_checkpoint();
             }
             Event::KeyDown {
@@ -3325,11 +3558,11 @@ impl Game for Sandbox {
                 keycode: Some(Keycode::E),
                 repeat: false,
                 ..
-            } if self.mode == EditorMode::Play => {
+            } if self.mode == EditorMode::Play && !self.paused => {
                 self.interact();
             }
             Event::ControllerButtonDown { button: ControllerButton::X, .. }
-                if self.mode == EditorMode::Play =>
+                if self.mode == EditorMode::Play && !self.paused =>
             {
                 self.interact();
             }
@@ -3341,24 +3574,32 @@ impl Game for Sandbox {
         self.elapsed_time = ctx.time.elapsed;
 
         // Runs in both Edit and Play mode — a live preview while editing
-        // costs nothing extra and is a nice default.
-        engine::animation::step(&mut self.world, dt);
-        // Sample playing rig clips into each part's local rotation, then
-        // resolve every rig part's world `Transform` from its parent chain
-        // — same "always on, live preview" philosophy, and order matters:
-        // a clip sampled this frame should be reflected in this frame's
-        // rendered pose, not lag one frame behind.
-        engine::rig::step_rig_animation(&mut self.world, dt);
-        engine::rig::update_world_transforms(&mut self.world);
-        // Transient one-shot burst emitters (see `spawn_burst_at`) despawn
-        // themselves once every particle they made has aged out — they
-        // aren't level data, so nothing else would ever clean them up.
-        for entity in engine::particles::step(&mut self.world, dt) {
-            let _ = self.world.despawn(entity);
+        // costs nothing extra and is a nice default. The one exception is a
+        // genuinely *paused* Play session: unlike Edit mode, that's meant to
+        // freeze everything, not just player input, so particles/rig clips/
+        // HUD countdowns actually stop rather than keep animating behind
+        // the pause menu.
+        let paused_in_play = self.mode == EditorMode::Play && self.paused;
+        if !paused_in_play {
+            engine::animation::step(&mut self.world, dt);
+            // Sample playing rig clips into each part's local rotation, then
+            // resolve every rig part's world `Transform` from its parent
+            // chain — same "always on, live preview" philosophy, and order
+            // matters: a clip sampled this frame should be reflected in this
+            // frame's rendered pose, not lag one frame behind.
+            engine::rig::step_rig_animation(&mut self.world, dt);
+            engine::rig::update_world_transforms(&mut self.world);
+            // Transient one-shot burst emitters (see `spawn_burst_at`)
+            // despawn themselves once every particle they made has aged out
+            // — they aren't level data, so nothing else would ever clean
+            // them up.
+            for entity in engine::particles::step(&mut self.world, dt) {
+                let _ = self.world.despawn(entity);
+            }
+            self.hud.tick(dt);
         }
 
-        if self.mode == EditorMode::Play {
-            self.hud.tick(dt);
+        if self.mode == EditorMode::Play && !self.paused {
             self.update_player_input(ctx, dt);
 
             // Collected up front (mirrors the physics-collider pattern
@@ -3544,10 +3785,11 @@ impl Game for Sandbox {
         // Editor overlay, drawn on top of the final (already-pixelated) image
         // at full window resolution so the UI itself stays crisp.
         let mut ui_state = self.ui.take().expect("ui set up in init");
-        let editing = self.mode == EditorMode::Edit;
+        let editing = editor_available() && self.mode == EditorMode::Edit;
         let ui_visible = self.ui_visible && editing;
         let level_ui_visible = self.level_ui_visible && editing;
         let playing = self.mode == EditorMode::Play;
+        let mut pause_menu_action: Option<PauseMenuAction> = None;
         let full_output = ui_state.run(drawable_size, |egui_ctx| {
             if level_ui_visible {
                 egui::SidePanel::left("level_editor")
@@ -3572,16 +3814,33 @@ impl Game for Sandbox {
                     .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
                     .show(egui_ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label("Play Mode \u{2014} F3 or Esc to stop \u{b7} WASD + mouse \u{b7} Space jump \u{b7} E interact \u{b7} F9 checkpoint \u{b7} F10 load checkpoint");
+                            let escape_hint = if self.paused { "Esc to resume" } else { "Esc to pause" };
+                            let f3_hint = if editor_available() { " \u{b7} F3 stop" } else { "" };
+                            ui.label(format!(
+                                "Play Mode \u{2014} {escape_hint}{f3_hint} \u{b7} WASD + mouse \u{b7} Space jump \u{b7} E interact \u{b7} F9 checkpoint \u{b7} F10 load checkpoint"
+                            ));
                         });
                     });
                 // HUD only makes sense with a player around to show progress
-                // for — mirrors the play_mode_indicator's own gating.
+                // for — mirrors the play_mode_indicator's own gating. Left
+                // visible (though frozen, see `Game::update`) while paused,
+                // same as the rest of the frozen world behind the menu.
                 draw_hud(egui_ctx, &self.hud);
+                if self.paused {
+                    pause_menu_action = draw_pause_menu(egui_ctx, editor_available());
+                }
             }
         });
         ui_state.paint(drawable_size, full_output);
         self.ui = Some(ui_state);
+
+        match pause_menu_action {
+            Some(PauseMenuAction::Resume) => self.resume(ctx),
+            Some(PauseMenuAction::ExitToEditor) => self.exit_play_mode(ctx),
+            Some(PauseMenuAction::RestartLevel) => self.restart_level(ctx),
+            Some(PauseMenuAction::QuitGame) => ctx.should_quit = true,
+            None => {}
+        }
 
         Ok(())
     }

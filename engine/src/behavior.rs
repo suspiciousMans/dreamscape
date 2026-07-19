@@ -10,6 +10,9 @@ pub trait ScriptApi {
     fn set_position(&mut self, x: f32, y: f32, z: f32);
     fn move_by(&mut self, dx: f32, dy: f32, dz: f32);
     fn play_tone(&mut self, frequency_hz: f32, duration_secs: f32);
+    /// Plays a sound file once, fire-and-forget. `path` is relative to the
+    /// game's asset root, same convention as script/texture paths.
+    fn play_sfx(&mut self, path: &str);
     /// Seconds since the game started — handy for scripts driving their own
     /// motion (`sin(time() * speed)`) without tracking a local phase.
     fn elapsed(&self) -> f32;
@@ -98,9 +101,9 @@ impl Behavior for ScriptBehavior {
 /// Translates the interpreter's generic native-call mechanism into concrete
 /// `ScriptApi` calls. This is the entire "standard library" a `.pss` script
 /// can see: `log(...)`, `get_x/get_y/get_z()`, `set_position(x,y,z)`,
-/// `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `time()`,
-/// `hud_bar(name,fraction)`, `toast(message,seconds)`. `Value` has no
-/// vector/tuple type, so position is read as three separate scalar calls
+/// `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `play_sfx(path)`,
+/// `time()`, `hud_bar(name,fraction)`, `toast(message,seconds)`. `Value` has
+/// no vector/tuple type, so position is read as three separate scalar calls
 /// rather than one call returning a triple.
 struct HostAdapter<'a> {
     api: &'a mut dyn ScriptApi,
@@ -137,6 +140,13 @@ impl Host for HostAdapter<'_> {
             }
             "play_tone" => {
                 self.api.play_tone(num(args, 0, name)?, num(args, 1, name)?);
+                Ok(Value::Nil)
+            }
+            "play_sfx" => {
+                let Some(Value::Str(path)) = args.first() else {
+                    return Err(ScriptError { message: "'play_sfx' expects a string path first".to_string(), line: 0 });
+                };
+                self.api.play_sfx(path);
                 Ok(Value::Nil)
             }
             "time" => Ok(Value::Number(self.api.elapsed() as f64)),

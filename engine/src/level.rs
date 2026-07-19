@@ -123,6 +123,11 @@ pub struct Level {
     pub rig_instances: Vec<RigInstance>,
     #[serde(default)]
     pub physics: PhysicsParams,
+    /// Background music for this level, relative to the asset root — looped
+    /// automatically whenever the level is applied. `None` means silence
+    /// (and stops whatever the previously-loaded level was playing).
+    #[serde(default)]
+    pub music_path: Option<PathBuf>,
 }
 
 pub fn load_from_file(path: &Path) -> anyhow::Result<Level> {

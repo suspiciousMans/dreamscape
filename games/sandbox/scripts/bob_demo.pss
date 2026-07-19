@@ -27,4 +27,7 @@ fn update(dt) {
 fn interact() {
     log("Scripted cube says hi!");
     play_tone(500.0, 0.1);
+    // Demonstrates a script playing a real decoded sample file, side by
+    // side with the procedural tone above.
+    play_sfx("sfx/demo_blip.wav");
 }

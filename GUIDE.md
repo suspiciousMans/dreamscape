@@ -306,6 +306,59 @@ the currently-loaded `Level` (`Level::physics`), so gravity/damping save,
 load, and revert together with everything else — edit them live under
 **Physics** in the F1 panel.
 
+## Audio
+
+`engine::audio::AudioContext` wraps `rodio` (with its `symphonia-all`
+feature, which already decodes WAV/OGG/MP3/FLAC — no extra dependency
+needed) behind a small, purpose-specific API:
+
+```rust
+pub fn new() -> anyhow::Result<Self>;                       // fails if no output device
+pub fn play_sfx_file(&self, path: &Path) -> anyhow::Result<()>;   // one-shot, fire-and-forget
+pub fn play_tone(&self, frequency_hz: f32, duration_secs: f32);   // procedural sine blip, no file
+pub fn play_music_file(&mut self, path: &Path, looped: bool) -> anyhow::Result<()>;
+pub fn stop_music(&mut self);
+pub fn set_music_volume(&mut self, volume: f32);
+```
+
+`play_tone` needs no asset at all (a `SineWave` source built on the fly) —
+handy while prototyping a jump/interact/UI sound before a real asset
+exists, and what the jump/push demos still use. `play_sfx_file`/
+`play_music_file` decode a real file via `rodio::Decoder`; looped music is
+fully decoded into an in-memory `SamplesBuffer` and repeated (fine for
+typical track lengths, not streamed). `Sandbox.audio: Option<AudioContext>`
+degrades silently if `AudioContext::new()` fails (no output device) —
+every call site checks `Some` first, so a game runs fine, just silent, on
+a machine with no audio hardware.
+
+**Scripts and native `Behavior`s** reach SFX through the same `ScriptApi`
+trait as everything else: `play_sfx(path)` (a script call) /
+`ScriptApi::play_sfx(&mut self, path: &str)` (native), resolved relative to
+the asset root the same way script/texture paths are. See
+`bob_demo.pss`'s `interact()`, which calls both `play_tone` and
+`play_sfx("sfx/demo_blip.wav")` side by side — procedural and
+sample-based, from the same script.
+
+**Background music is level-wide**, not per-object: `Level.music_path:
+Option<PathBuf>` (`#[serde(default)]`). `apply_level` starts it looping
+whenever a level loads (or calls `stop_music()` if `None`, so switching to
+a level without music doesn't leak the previous track), and
+`Sandbox.current_music_path` mirrors it so `build_level_from_ecs` writes
+it back out. **F2 panel**: the **Level** section gains "Assign Music..."
+(same `rfd` file-picker pattern as "Assign Texture..."), "Stop Music", and
+a volume slider — `Sandbox.music_volume` persists across level loads since
+`play_music_file` itself has no volume parameter.
+
+**Demo content**: no audio assets shipped in the repo, and pulling in an
+encoder crate just for placeholder sounds isn't worth a new dependency —
+`games/sandbox/src/main.rs`'s `write_wav`/`generate_blip_samples`/
+`generate_ambient_samples` hand-roll a minimal mono 16-bit PCM WAV file
+instead (a short faded sine blip, and a three-note chord sized to loop
+with no click — every frequency completes a whole number of cycles within
+the loop duration). Generated once into `sfx/demo_blip.wav`/
+`music/demo_ambient.wav` if missing, same bootstrap-if-empty convention as
+profiles/rigs/classes/levels.
+
 ## Trigger volumes
 
 A `Collider` can be marked `is_trigger: true` — it's never physically solid:
@@ -392,8 +445,9 @@ hitting Play in a normal game engine:
 - The level is **snapshotted** before entering Play (`build_level_from_ecs`)
   and **restored exactly** on Stop (`apply_level` with that snapshot) — physics
   knocking objects around, or you pushing them, never corrupts your edits.
-  `F3` again or **Escape** both stop; plain `Escape` only quits the app while
-  already in Edit mode.
+  **F3** always stops immediately, back to the editor. Plain **Escape**
+  pauses instead of stopping (see "Pausing" below) while in Play, and quits
+  the app while already in Edit mode.
 - Both GUI panels hide automatically (F1/F2/Tab/F5/orbit-drag are gated to
   Edit mode) and a small "Play Mode" banner appears instead. The mouse is
   captured (SDL2 relative mouse mode) for unbounded FPS look, released again
@@ -405,6 +459,45 @@ hitting Play in a normal game engine:
 - **WASD** moves relative to look direction, **mouse** looks freely, **Space**
   jumps when `RigidBody::grounded` is true, **E** interacts. A connected
   **gamepad** blends in automatically — see "Gamepad support" below.
+
+### Pausing
+
+**Escape** while playing pauses instead of stopping — `Sandbox::pause`/
+`resume` flip a `paused: bool` (only meaningful while `mode ==
+EditorMode::Play`) and release/re-capture the mouse so a real cursor can
+click the pause menu's buttons (relative mouse mode otherwise swallows
+clicks as look-deltas). `engine::ui::draw_pause_menu` — a small, stateless
+function in the same spirit as `draw_hud`, just returning whichever button
+was clicked — draws a centered **Resume** / **Exit to Editor** / **Quit
+Game** window.
+
+Pausing is a real freeze, not just an input lock: `Game::update`'s
+"always on, live preview" block (`animation::step`, rig clip stepping,
+`particles::step`, `hud.tick`) — which normally *also* runs in Edit mode
+so editing has a live preview — skips entirely while `mode == Play &&
+paused`, so particles/rig poses/HUD toast timers actually stop rather
+than keep animating behind the menu. The frozen HUD and world are still
+drawn, though, so pausing looks exactly like hitting pause, not like the
+screen going blank. F9 checkpoint-save, **E** interact, and the gamepad
+interact button are all disabled while paused, alongside the existing
+Play-mode-only gating.
+
+**Exit to Editor** calls the same `exit_play_mode` F3 already uses (player
+despawned, pre-Play snapshot restored). **Quit Game** sets
+`ctx.should_quit`. Both are here so a pause menu built this way behaves
+like a real shipped game's, not just a debug convenience. In a release
+build there's no editor to exit to, so that button becomes **"Restart
+Level"** instead (`Sandbox::restart_level`) — see "Exporting a game"
+below for exactly when that switch happens.
+
+A forced title/start screen before Edit mode was considered and
+deliberately left out: a debug build boots straight into the dev-time
+level editor by design, and a menu you have to click through on every
+launch would fight that workflow (a release build already skips it,
+straight to Play — see "Exporting a game" below). The pause menu
+demonstrates the same reusable `engine::ui` modal-overlay pattern a title
+or game-over screen would reuse — add one the same way once a game built
+on this engine actually needs it.
 
 **This is the place to add your own game's input** — two methods on
 `Sandbox` in `games/sandbox/src/main.rs`, both heavily commented as the
@@ -960,10 +1053,15 @@ No scaffolding CLI exists (yet) — the sandbox is the template; copy from it.
 ```
 
 This builds `-p sandbox` in release mode and assembles `dist/sandbox/` with
-the `.exe`, its `assets/`, and its `profiles/` sitting next to each other —
-zip that folder (or hand it to an installer builder like Inno Setup/WiX if
-you want a "Setup.exe") and it runs standalone on another machine. Substitute
-your own game's crate name for `-Game`.
+the `.exe` and every asset folder that exists next to it — `assets/`,
+`profiles/`, `levels/`, `rigs/`, `classes/`, `scripts/`, `sfx/`, `music/`
+(not `saves/`: checkpoints are pure runtime state, re-created empty on
+first launch, so shipping the dev's own `checkpoint.ron` would just hand
+players a stale position instead of a fresh game) — zip that folder (or
+hand it to an installer builder like Inno Setup/WiX if you want a
+"Setup.exe") and it runs standalone on another machine. Substitute your
+own game's crate name for `-Game`; if your game adds its own asset
+subfolder beyond this list, add it to `package.ps1`'s copy loop too.
 
 A few things make this work, already wired up for every game in the workspace:
 
@@ -994,10 +1092,21 @@ A few things make this work, already wired up for every game in the workspace:
   and add the same `build.rs` + `winres` build-dependency pattern from
   `games/sandbox/build.rs`/`Cargo.toml` — it embeds the icon if present and
   silently falls back to the default icon (with a build warning) if not.
+- **The level/shader editor is automatically gone in release.** `main.rs`'s
+  `editor_available()` returns `cfg!(debug_assertions)`, and every editor
+  affordance (both `SidePanel`s, F1/F2/Tab/F5/F3, orbit-camera drag/zoom)
+  was already gated on "currently in `EditorMode::Edit`" — so a release
+  build, which never enters `Edit` mode (`Sandbox::init` calls
+  `enter_play_mode` immediately when `!editor_available()`), simply never
+  reaches any of it. `package.ps1` already builds `--release`, so this
+  needs no packaging changes: what a player gets is exactly the game,
+  booting straight into Play. The pause menu's middle button becomes
+  **"Restart Level"** instead of "Exit to Editor" (see "Pausing" above) —
+  there being no editor to exit to.
 
 Caveat: the in-game editors save profiles/levels back into the `profiles/`/
 `levels/` folders next to the `.exe`. If you install to a location that needs
 admin rights (e.g. `Program Files`), those writes will fail for a normal
-user — ship to a user-writable folder (Desktop, `Documents`, a portable zip)
-or, for a real release where you don't want players editing shaders/levels at
-all, gate the editor panels behind a debug-only flag before shipping.
+user in a *debug* build — ship to a user-writable folder (Desktop,
+`Documents`, a portable zip), which is moot for a real `--release` shipment
+anyway since the editor (and its writes) aren't reachable there at all.

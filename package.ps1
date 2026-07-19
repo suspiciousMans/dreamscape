@@ -39,7 +39,11 @@ New-Item -ItemType Directory -Path $distDir | Out-Null
 
 Copy-Item $exePath $distDir
 
-foreach ($folder in @("assets", "profiles")) {
+# Every folder a game's asset root can hold, except "saves" — checkpoints
+# are pure runtime state (re-created empty on first launch, see
+# Sandbox::init), so shipping the dev's own checkpoint.ron would just hand
+# players a stale position instead of a fresh game.
+foreach ($folder in @("assets", "profiles", "levels", "rigs", "classes", "scripts", "sfx", "music")) {
     $src = Join-Path $gameDir $folder
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $distDir $folder) -Recurse
