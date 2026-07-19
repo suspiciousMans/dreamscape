@@ -1016,6 +1016,19 @@ reconstruct "which level should be active," just where you were standing.
 
 ## Adding a new, separate game
 
+**Fastest path:** `.\new_game.ps1 -Name mygame` copies `games/sandbox` as a
+template, renames its crate to `mygame`, registers it in the workspace
+root `Cargo.toml`, retitles its window/error-dialog strings, and builds it
+to confirm the scaffold actually compiles. Everything comes along except
+the bootstrap-generated `profiles/`/`levels/`/`rigs/`/`classes/`/`sfx/`/
+`music/`/`saves/` folders (those regenerate fresh for the new game via the
+same `default_level()`/`default_demo_profiles()`/etc. functions it
+inherits in `src/main.rs`) — so `cargo run -p mygame` gives you the
+sandbox's full working demo scene as a starting point to replace piece by
+piece, rather than a truly blank slate.
+
+**From scratch instead**, if you don't want any of the demo content:
+
 1. Create the folder and manifest:
    ```
    games/mygame/
@@ -1057,8 +1070,6 @@ reconstruct "which level should be active," just where you were standing.
    hand-write one `.ron` file matching the `ShaderProfile`/`RenderParams`
    shape in `engine::profile`, or the `Level`/`LevelObject` shape in
    `engine::level`).
-
-No scaffolding CLI exists (yet) — the sandbox is the template; copy from it.
 
 ## Exporting a game (shipping a standalone `.exe`)
 
