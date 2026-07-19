@@ -41,6 +41,15 @@ pub struct RenderParams {
     pub sky_horizon_color: [f32; 3],
     #[serde(default)]
     pub sky_zenith_color: [f32; 3],
+    /// Skips drawing the side of a triangle facing away from the camera —
+    /// for a closed mesh this changes nothing visible from outside it (the
+    /// front face already occludes the back one via the depth buffer), but
+    /// it's what keeps the camera from seeing a wall's/object's *interior*
+    /// surface when it clips very close to or slightly inside solid
+    /// geometry. `#[serde(default)]` (false) so profiles saved before this
+    /// field existed keep their exact old look; re-save to opt in.
+    #[serde(default)]
+    pub backface_culling: bool,
 }
 
 impl Default for RenderParams {
@@ -60,6 +69,7 @@ impl Default for RenderParams {
             texture_filter: TextureFilterMode::Nearest,
             sky_horizon_color: [0.55, 0.65, 0.75],
             sky_zenith_color: [0.1, 0.2, 0.45],
+            backface_culling: true,
         }
     }
 }

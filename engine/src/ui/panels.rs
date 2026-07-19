@@ -69,6 +69,10 @@ pub fn render_params_editor(ui: &mut egui::Ui, params: &mut RenderParams) -> boo
     changed |= ui
         .checkbox(&mut params.affine_texture_mapping, "Affine texture mapping")
         .changed();
+    changed |= ui
+        .checkbox(&mut params.backface_culling, "Backface culling")
+        .on_hover_text("Hides a triangle's interior-facing side — stops seeing inside solid geometry when the camera clips into it")
+        .changed();
     egui::ComboBox::from_label("Texture filter")
         .selected_text(format!("{:?}", params.texture_filter))
         .show_ui(ui, |ui| {

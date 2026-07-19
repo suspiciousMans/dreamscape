@@ -3689,6 +3689,16 @@ impl Game for Sandbox {
         renderer.draw_skybox(gl, inv_view_proj.to_cols_array(), params.sky_horizon_color, params.sky_zenith_color);
 
         unsafe {
+            // Scoped to just this opaque mesh loop — left untouched for the
+            // skybox (a single fullscreen triangle already drawn above) and
+            // for particle billboards (drawn after, via their own begin/end).
+            if params.backface_culling {
+                gl.enable(glow::CULL_FACE);
+                gl.cull_face(glow::BACK);
+            } else {
+                gl.disable(glow::CULL_FACE);
+            }
+
             gl.use_program(Some(program));
             gl.uniform_matrix_4_f32_slice(uniforms.view.as_ref(), false, &view.to_cols_array());
             gl.uniform_matrix_4_f32_slice(uniforms.proj.as_ref(), false, &proj.to_cols_array());
@@ -3758,6 +3768,8 @@ impl Game for Sandbox {
 
                 mesh_renderer.mesh.draw(gl);
             }
+
+            gl.disable(glow::CULL_FACE);
         }
 
         // Camera-facing (billboarded) particles, drawn after opaque meshes

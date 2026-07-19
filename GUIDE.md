@@ -144,6 +144,20 @@ stays crisp regardless of how retro the 3D looks.
 | `vertex_snap_amount` | Clip-space grid size vertices are quantized to (0 = off); PS1-style geometric wobble |
 | `affine_texture_mapping` | Toggles `noperspective` UV interpolation — the classic warped-texture look |
 | `texture_filter` | `Nearest` (crisp/blocky) or `Bilinear` (smoothed) |
+| `backface_culling` | Skips drawing a triangle's interior-facing side — see below |
+
+**`backface_culling`**, when on, wraps just the opaque mesh loop in
+`Sandbox::render` with `gl.enable(CULL_FACE)`/`gl.cull_face(BACK)` (off
+again before particles draw — skybox and particles are unaffected either
+way). For a closed mesh this changes nothing visible from a normal
+distance — the front face already occludes the back one via the depth
+buffer — but it's what keeps the camera from rendering a wall's or
+object's *interior* surface when it clips very close to or slightly
+inside solid geometry (the simple collision resolver in `engine::physics`
+doesn't guarantee zero interpenetration, so this happens in practice).
+`#[serde(default)]` (`false`) so profiles saved before this field existed
+keep their exact old look; the checkbox lives in the F1 panel's
+**Geometry / Texturing** section, right under "Affine texture mapping".
 
 ## Shader profiles
 
