@@ -15,6 +15,7 @@
             class: None,
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Glow Mushroom",
@@ -30,6 +31,7 @@
             class: Some("classes/mushroom_glow.ron"),
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cave Pillar 1",
@@ -45,6 +47,7 @@
             class: None,
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cave Pillar 2",
@@ -60,6 +63,7 @@
             class: None,
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cave Pillar 3",
@@ -75,6 +79,7 @@
             class: None,
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cave Pillar 4",
@@ -90,6 +95,7 @@
             class: None,
             level_transition: None,
             screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Heart of the Grove",
@@ -113,6 +119,10 @@
                 fade_in_secs: 0.1,
                 hold_secs: 0.2,
                 fade_out_secs: 0.6,
+            )),
+            camera_shake: Some((
+                intensity: 0.08,
+                duration_secs: 0.4,
             )),
         ),
     ],

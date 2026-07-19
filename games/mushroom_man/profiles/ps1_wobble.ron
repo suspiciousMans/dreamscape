@@ -13,6 +13,7 @@
         dither_strength: 0.2,
         lighting_mode: VertexLit,
         ambient_color: (0.2, 0.2, 0.25),
+        light_dir: (0.4, 0.8, 0.5),
         vertex_snap_amount: 0.06,
         affine_texture_mapping: true,
         texture_filter: Nearest,

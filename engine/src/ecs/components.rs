@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
+use crate::camera::CameraShakeSpec;
 use crate::level::{LevelTransition, MeshSource};
 use crate::mesh::GpuMesh;
 use crate::screen_effect::ScreenEffectSpec;
@@ -112,6 +113,10 @@ pub struct LevelObjectMeta {
     /// `level_transition` — round-trippable by the F2 panel and
     /// `build_level_from_ecs` without inspecting other components.
     pub screen_effect: Option<ScreenEffectSpec>,
+    /// Mirrors `LevelObject::camera_shake` for the same reason as
+    /// `screen_effect` — round-trippable by the F2 panel and
+    /// `build_level_from_ecs` without inspecting other components.
+    pub camera_shake: Option<CameraShakeSpec>,
 }
 
 /// Tags the player entity in Play mode. Plain tunable fields — this is the

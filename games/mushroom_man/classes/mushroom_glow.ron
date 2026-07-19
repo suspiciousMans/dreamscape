@@ -5,6 +5,9 @@
     scale: (0.5, 0.5, 0.5),
     is_dynamic: false,
     is_trigger: true,
-    animation: None,
+    animation: Some(Orbit(
+        axis: (0.0, 1.0, 0.0),
+        speed_deg_per_sec: 90.0,
+    )),
     script: None,
 )

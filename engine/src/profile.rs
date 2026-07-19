@@ -30,6 +30,13 @@ pub struct RenderParams {
     pub dither_strength: f32,
     pub lighting_mode: LightingMode,
     pub ambient_color: [f32; 3],
+    /// Direction *toward* the directional "sun" light (not normalized on
+    /// save — the shader normalizes it itself, same as the old hardcoded
+    /// constant this replaces). `#[serde(default)]` so profiles saved
+    /// before this field existed still load with the same look they always
+    /// had, rather than snapping to black/no directional light.
+    #[serde(default = "default_light_dir")]
+    pub light_dir: [f32; 3],
     pub vertex_snap_amount: f32,
     pub affine_texture_mapping: bool,
     pub texture_filter: TextureFilterMode,
@@ -52,6 +59,10 @@ pub struct RenderParams {
     pub backface_culling: bool,
 }
 
+fn default_light_dir() -> [f32; 3] {
+    [0.4, 0.8, 0.5]
+}
+
 impl Default for RenderParams {
     fn default() -> Self {
         Self {
@@ -64,6 +75,7 @@ impl Default for RenderParams {
             dither_strength: 0.0,
             lighting_mode: LightingMode::VertexLit,
             ambient_color: [0.25, 0.25, 0.3],
+            light_dir: default_light_dir(),
             vertex_snap_amount: 0.0,
             affine_texture_mapping: false,
             texture_filter: TextureFilterMode::Nearest,

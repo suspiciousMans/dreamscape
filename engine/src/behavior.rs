@@ -35,6 +35,9 @@ pub trait ScriptApi {
         hold_secs: f32,
         fade_out_secs: f32,
     );
+    /// Jostles the camera's eye position for `duration_secs`, decaying
+    /// linearly from `intensity` (world units) back to zero.
+    fn camera_shake(&mut self, intensity: f32, duration_secs: f32);
 }
 
 /// Programmable per-entity behavior. The exact same trait is implemented
@@ -117,9 +120,10 @@ impl Behavior for ScriptBehavior {
 /// can see: `log(...)`, `get_x/get_y/get_z()`, `set_position(x,y,z)`,
 /// `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `play_sfx(path)`,
 /// `time()`, `hud_bar(name,fraction)`, `toast(message,seconds)`,
-/// `screen_flash(r,g,b,strength,fade_in,hold,fade_out)`. `Value` has
-/// no vector/tuple type, so position is read as three separate scalar calls
-/// rather than one call returning a triple.
+/// `screen_flash(r,g,b,strength,fade_in,hold,fade_out)`,
+/// `camera_shake(intensity,duration)`. `Value` has no vector/tuple type, so
+/// position is read as three separate scalar calls rather than one call
+/// returning a triple.
 struct HostAdapter<'a> {
     api: &'a mut dyn ScriptApi,
 }
@@ -189,6 +193,10 @@ impl Host for HostAdapter<'_> {
                     num(args, 5, name)?,
                     num(args, 6, name)?,
                 );
+                Ok(Value::Nil)
+            }
+            "camera_shake" => {
+                self.api.camera_shake(num(args, 0, name)?, num(args, 1, name)?);
                 Ok(Value::Nil)
             }
             _ => Err(ScriptError { message: format!("unknown function '{name}'"), line: 0 }),

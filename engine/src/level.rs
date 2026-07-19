@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::camera::CameraShakeSpec;
 use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;
 use crate::screen_effect::ScreenEffectSpec;
@@ -103,6 +104,13 @@ pub struct LevelObject {
     /// still load (as `None`/no effect).
     #[serde(default)]
     pub screen_effect: Option<ScreenEffectSpec>,
+    /// Only meaningful when `is_trigger` is true: jostles the camera when
+    /// the player enters this trigger — see `Sandbox::on_trigger_entered`/
+    /// `engine::camera::CameraShakeState`. Independent of `screen_effect`/
+    /// `level_transition`. `#[serde(default)]` so levels saved before this
+    /// field existed still load (as `None`/no shake).
+    #[serde(default)]
+    pub camera_shake: Option<CameraShakeSpec>,
 }
 
 /// A placed point light: a separate shape from `LevelObject` because a light

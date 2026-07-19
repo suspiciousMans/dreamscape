@@ -10,7 +10,10 @@ use engine::animation::{AnimationKind, Animator};
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
 use engine::behavior::{Behavior, BehaviorSlot, NativeBobBehavior, ScriptApi, ScriptBehavior};
-use engine::camera::{FirstPersonCamera, OrbitCamera};
+use engine::camera::{
+    CameraShakeSpec, CameraShakeState, FirstPersonCamera, HeadBob, LandingDip, OrbitCamera, SpeedFov,
+    StrafeTilt,
+};
 use engine::class::ObjectClass;
 use engine::ecs::{euler_deg_to_quat, Entity, Light, LevelObjectMeta, LightKind, MeshRenderer, PlayerController, Transform, World};
 use engine::hud::HudState;
@@ -116,6 +119,7 @@ fn default_level() -> Level {
         class: None,
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     let floor = LevelObject {
@@ -136,6 +140,7 @@ fn default_level() -> Level {
         class: None,
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     // Static (no RigidBody) but animated — demonstrates that an animated
@@ -158,6 +163,7 @@ fn default_level() -> Level {
         class: None,
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     let demo_light = LevelLight {
@@ -193,6 +199,12 @@ fn default_level() -> Level {
             hold_secs: 0.05,
             fade_out_secs: 0.35,
         }),
+        // A light rumble alongside the flash — demonstrates camera shake
+        // the same free way the flash demonstrates screen effects.
+        camera_shake: Some(CameraShakeSpec {
+            intensity: 0.06,
+            duration_secs: 0.3,
+        }),
     };
 
     // Bobs via `scripts/bob_demo.pss` — stands next to the compiled-in
@@ -212,6 +224,7 @@ fn default_level() -> Level {
         class: None,
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     // Past the demo cubes/rig, in the player's forward path — demonstrates
@@ -243,6 +256,7 @@ fn default_level() -> Level {
             hold_secs: 0.05,
             fade_out_secs: 0.3,
         }),
+        camera_shake: None,
     };
 
     let humanoid_instance = RigInstance {
@@ -272,6 +286,7 @@ fn default_level() -> Level {
         class: Some(PathBuf::from("classes/barrel.ron")),
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     // A small continuous sparkle jet — placed near the light so it reads as
@@ -322,6 +337,7 @@ fn second_room_level() -> Level {
         class: None,
         level_transition: None,
         screen_effect: None,
+        camera_shake: None,
     };
 
     let light = LevelLight {
@@ -352,6 +368,7 @@ fn second_room_level() -> Level {
             spawn_yaw_deg: 0.0,
         }),
         screen_effect: None,
+        camera_shake: None,
     };
 
     Level {
@@ -539,6 +556,7 @@ struct SandboxScriptApi<'a> {
     elapsed: f32,
     hud: &'a mut HudState,
     screen_effects: &'a mut ScreenEffectState,
+    camera_shake: &'a mut CameraShakeState,
     asset_root: &'a Path,
 }
 
@@ -603,6 +621,10 @@ impl ScriptApi for SandboxScriptApi<'_> {
             hold_secs,
             fade_out_secs,
         });
+    }
+
+    fn camera_shake(&mut self, intensity: f32, duration_secs: f32) {
+        self.camera_shake.trigger(CameraShakeSpec { intensity, duration_secs });
     }
 }
 
@@ -753,7 +775,6 @@ struct Sandbox {
     world: World,
     camera: OrbitCamera,
     renderer: Option<Renderer>,
-    light_dir: Vec3,
     profiles: Option<ProfileCycler>,
     ui: Option<EguiState>,
     ui_visible: bool,
@@ -774,6 +795,30 @@ struct Sandbox {
     /// pre-Play snapshot the way `exit_play_mode` does.
     paused: bool,
     fp_camera: FirstPersonCamera,
+    /// Optional walking view-bob, applied on top of `fp_camera` in
+    /// `player_eye_position`. Toggle/tune live via the F1 panel's "Camera"
+    /// section.
+    head_bob: HeadBob,
+    /// Momentary camera jitter — fired via `ScriptApi::camera_shake` or a
+    /// trigger's `LevelObjectMeta::camera_shake`, applied in
+    /// `player_eye_position` alongside `head_bob`/`landing_dip`.
+    camera_shake: CameraShakeState,
+    /// Camera roll while strafing, eased toward a target each frame in
+    /// `update_player_input` and written into `fp_camera.roll`.
+    strafe_tilt: StrafeTilt,
+    /// Additive FOV widening at speed, added on top of `base_fov_radians`
+    /// each frame rather than writing `fp_camera.fov_y_radians` directly.
+    speed_fov: SpeedFov,
+    /// The FOV `speed_fov`'s kick is added on top of each frame.
+    base_fov_radians: f32,
+    /// Camera dip-and-recover spring, kicked by `land()` (see the landing-
+    /// detection check around `engine::physics::step` in `Game::update`).
+    landing_dip: LandingDip,
+    /// `RigidBody::grounded` as of last frame — compared against this
+    /// frame's value (after `physics::step`) to detect the exact frame the
+    /// player lands, since `grounded` alone doesn't say whether it just
+    /// became true.
+    was_grounded: bool,
     player_entity: Option<Entity>,
     pre_play_snapshot: Option<Level>,
     // `None` if no audio output device was available — degrades silently
@@ -855,7 +900,6 @@ impl Sandbox {
             world: World::new(),
             camera: OrbitCamera::new(Vec3::ZERO, 4.0),
             renderer: None,
-            light_dir: Vec3::new(0.4, 0.8, 0.5).normalize(),
             profiles: None,
             ui: None,
             ui_visible: true,
@@ -872,6 +916,13 @@ impl Sandbox {
             mode: EditorMode::Edit,
             paused: false,
             fp_camera: FirstPersonCamera::new(),
+            head_bob: HeadBob::new(),
+            camera_shake: CameraShakeState::default(),
+            strafe_tilt: StrafeTilt::new(),
+            speed_fov: SpeedFov::new(),
+            base_fov_radians: 60f32.to_radians(),
+            landing_dip: LandingDip::new(),
+            was_grounded: false,
             player_entity: None,
             pre_play_snapshot: None,
             trigger_overlaps: HashSet::new(),
@@ -922,10 +973,11 @@ impl Sandbox {
         let audio = self.audio.as_ref();
         let hud = &mut self.hud;
         let screen_effects = &mut self.screen_effects;
+        let camera_shake = &mut self.camera_shake;
         let asset_root = self.asset_root.as_path();
         if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut BehaviorSlot)>(entity) {
             if let Some((transform, BehaviorSlot(behavior))) = query.get() {
-                let mut api = SandboxScriptApi { transform, audio, elapsed, hud, screen_effects, asset_root };
+                let mut api = SandboxScriptApi { transform, audio, elapsed, hud, screen_effects, camera_shake, asset_root };
                 f(behavior.as_mut(), &mut api);
                 return true;
             }
@@ -1167,6 +1219,7 @@ impl Sandbox {
                 script_path: obj.script.clone(),
                 level_transition: obj.level_transition.clone(),
                 screen_effect: obj.screen_effect.clone(),
+                camera_shake: obj.camera_shake.clone(),
             },
             Collider {
                 shape: ColliderShape::Aabb { half_extents },
@@ -1246,6 +1299,7 @@ impl Sandbox {
                 script_path: None,
                 level_transition: None,
         screen_effect: None,
+        camera_shake: None,
             },
         ))
     }
@@ -1270,6 +1324,7 @@ impl Sandbox {
                 script_path: None,
                 level_transition: None,
         screen_effect: None,
+        camera_shake: None,
             },
         ))
     }
@@ -1354,6 +1409,7 @@ impl Sandbox {
             class: None,
             level_transition: None,
         screen_effect: None,
+        camera_shake: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => {
@@ -1547,6 +1603,7 @@ impl Sandbox {
                 class: self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone()),
                 level_transition: meta.level_transition.clone(),
                 screen_effect: meta.screen_effect.clone(),
+                camera_shake: meta.camera_shake.clone(),
             });
         }
 
@@ -1651,6 +1708,7 @@ impl Sandbox {
             class: None,
             level_transition: None,
         screen_effect: None,
+        camera_shake: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -1677,6 +1735,7 @@ impl Sandbox {
             class: None,
             level_transition: None,
         screen_effect: None,
+        camera_shake: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -1722,6 +1781,7 @@ impl Sandbox {
             class: None,
             level_transition: None,
         screen_effect: None,
+        camera_shake: None,
         };
 
         match self.spawn_level_object(gl, &obj) {
@@ -1795,7 +1855,13 @@ impl Sandbox {
     fn player_eye_position(&self) -> Vec3 {
         self.player_entity
             .and_then(|entity| self.world.get::<&Transform>(entity).ok())
-            .map(|transform| transform.position + Vec3::new(0.0, Self::PLAYER_EYE_HEIGHT, 0.0))
+            .map(|transform| {
+                transform.position
+                    + Vec3::new(0.0, Self::PLAYER_EYE_HEIGHT, 0.0)
+                    + self.head_bob.offset(self.fp_camera.right())
+                    + self.landing_dip.offset()
+                    + self.camera_shake.offset(self.fp_camera.right(), Vec3::Y)
+            })
             .unwrap_or(Vec3::ZERO)
     }
 
@@ -1995,12 +2061,24 @@ impl Sandbox {
         move_dir += forward_flat * -left_stick_y + right_flat * left_stick_x;
         move_dir = move_dir.normalize_or_zero();
 
+        // How much of this frame's movement is sideways, -1 (left) to 1
+        // (right) — reused as-is for the strafe-tilt target rather than
+        // tracking A/D separately, so diagonal movement tilts proportionally.
+        let strafe_input = move_dir.dot(right_flat);
+        self.strafe_tilt.update(strafe_input, dt);
+        self.fp_camera.roll = self.strafe_tilt.roll_radians();
+        self.camera_shake.tick(dt);
+        self.landing_dip.update(dt);
+
         let mut jumped = false;
         if let Ok(mut query) = self.world.query_one::<(&mut RigidBody, &PlayerController)>(player) {
             if let Some((body, controller)) = query.get() {
                 let horizontal_velocity = move_dir * controller.move_speed;
                 body.velocity.x = horizontal_velocity.x;
                 body.velocity.z = horizontal_velocity.z;
+                self.head_bob.update(horizontal_velocity.length(), body.grounded, dt);
+                self.speed_fov.update(horizontal_velocity.length(), dt);
+                self.fp_camera.fov_y_radians = self.base_fov_radians + self.speed_fov.kick_radians();
 
                 let jump_pressed = ctx.input.just_pressed(Keycode::Space)
                     || ctx.input.controller_just_pressed(ControllerButton::A);
@@ -2013,6 +2091,42 @@ impl Sandbox {
         if jumped {
             self.play_tone(660.0, 0.12);
         }
+    }
+
+    const EDITOR_CAMERA_MOVE_SPEED: f32 = 6.0;
+
+    /// WASD flies the Edit-mode `OrbitCamera`'s orbit target around on the
+    /// horizontal plane (mirrors `update_player_input`'s WASD-relative-to-
+    /// look-direction handling, flattened the same way so looking up/down
+    /// doesn't change how fast you glide); Space/Shift raise/lower it
+    /// straight along world Y. Mouse-drag orbit and scroll zoom are
+    /// unaffected — this only moves what the camera orbits *around*.
+    fn update_editor_camera_input(&mut self, ctx: &mut Context, dt: f32) {
+        let forward = self.camera.forward();
+        let right = self.camera.right();
+        let forward_flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+        let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+
+        let mut move_dir = Vec3::ZERO;
+        if ctx.input.is_key_down(Keycode::W) {
+            move_dir += forward_flat;
+        }
+        if ctx.input.is_key_down(Keycode::S) {
+            move_dir -= forward_flat;
+        }
+        if ctx.input.is_key_down(Keycode::D) {
+            move_dir += right_flat;
+        }
+        if ctx.input.is_key_down(Keycode::A) {
+            move_dir -= right_flat;
+        }
+        if ctx.input.is_key_down(Keycode::Space) {
+            move_dir += Vec3::Y;
+        }
+        if ctx.input.is_key_down(Keycode::LShift) || ctx.input.is_key_down(Keycode::RShift) {
+            move_dir -= Vec3::Y;
+        }
+        self.camera.target += move_dir.normalize_or_zero() * Self::EDITOR_CAMERA_MOVE_SPEED * dt;
     }
 
     /// Pushes the nearest dynamic level object within reach with an outward
@@ -2128,6 +2242,15 @@ impl Sandbox {
             .and_then(|meta| meta.screen_effect);
         if let Some(effect) = effect {
             self.screen_effects.trigger(effect);
+        }
+
+        let shake = self
+            .world
+            .get::<&LevelObjectMeta>(trigger)
+            .ok()
+            .and_then(|meta| meta.camera_shake);
+        if let Some(shake) = shake {
+            self.camera_shake.trigger(shake);
         }
 
         let transition = self
@@ -2429,6 +2552,7 @@ impl Sandbox {
         let mut trigger_changed = false;
         let mut texture_path_for_trigger_toggle = None;
         let mut preview_screen_effect: Option<ScreenEffectSpec> = None;
+        let mut preview_camera_shake: Option<CameraShakeSpec> = None;
 
         let existing_animator = self.world.get::<&Animator>(entity).ok().map(|animator| animator.kind);
         let existing_base = self
@@ -2581,6 +2705,24 @@ impl Sandbox {
                                 fade_out_secs: 0.3,
                             });
                         }
+
+                        ui.separator();
+                        ui.label("Camera Shake");
+                        if let Some(shake) = &mut meta.camera_shake {
+                            ui.add(egui::Slider::new(&mut shake.intensity, 0.0..=0.5).text("Intensity"));
+                            ui.add(egui::DragValue::new(&mut shake.duration_secs).speed(0.05).range(0.0..=5.0).prefix("Duration (s): "));
+                            if ui.button("Preview").clicked() {
+                                preview_camera_shake = Some(*shake);
+                            }
+                            if ui.button("Clear Camera Shake").clicked() {
+                                meta.camera_shake = None;
+                            }
+                        } else if ui.button("Add Camera Shake").clicked() {
+                            meta.camera_shake = Some(CameraShakeSpec {
+                                intensity: 0.1,
+                                duration_secs: 0.4,
+                            });
+                        }
                     }
 
                     ui.label("Animation");
@@ -2701,6 +2843,9 @@ impl Sandbox {
         }
         if let Some(effect) = preview_screen_effect {
             self.screen_effects.trigger(effect);
+        }
+        if let Some(shake) = preview_camera_shake {
+            self.camera_shake.trigger(shake);
         }
         if anim_changed {
             if anim_selected == 0 {
@@ -3304,6 +3449,7 @@ impl Sandbox {
             class: Some(PathBuf::from(format!("classes/{}.ron", class.name))),
             level_transition: None,
         screen_effect: None,
+        camera_shake: None,
         };
         match self.spawn_level_object(gl, &obj) {
             Ok(entity) => self.selected_entity = Some(entity),
@@ -3654,6 +3800,51 @@ impl Sandbox {
         ui.small("Saved/loaded with the level (F2 panel), not the shader profile.");
 
         ui.separator();
+        ui.heading("Camera");
+        ui.checkbox(&mut self.head_bob.enabled, "Head bob");
+        ui.add(
+            egui::Slider::new(&mut self.head_bob.amplitude, 0.0..=0.15).text("Bob amplitude"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.head_bob.sway_amplitude, 0.0..=0.1).text("Sway amplitude"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.head_bob.cycles_per_unit, 0.1..=2.0)
+                .text("Bob cycles per unit walked"),
+        );
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.landing_dip.enabled, "Landing dip");
+        ui.add(
+            egui::Slider::new(&mut self.landing_dip.fall_speed_to_dip, 0.0..=0.1)
+                .text("Dip per fall speed"),
+        );
+        ui.add(egui::Slider::new(&mut self.landing_dip.max_dip, 0.0..=0.6).text("Max dip"));
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.strafe_tilt.enabled, "Strafe tilt");
+        ui.add(
+            egui::Slider::new(&mut self.strafe_tilt.max_roll_deg, 0.0..=15.0)
+                .text("Max roll (deg)"),
+        );
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.speed_fov.enabled, "Sprint FOV kick");
+        ui.add(
+            egui::Slider::new(&mut self.speed_fov.max_kick_deg, 0.0..=20.0).text("Max FOV kick (deg)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.speed_fov.speed_for_max_kick, 0.5..=20.0)
+                .text("Speed for max kick"),
+        );
+
+        ui.add_space(6.0);
+        if ui.button("Test camera shake").clicked() {
+            self.camera_shake.trigger(CameraShakeSpec { intensity: 0.15, duration_secs: 0.5 });
+        }
+        ui.small("Play-session settings, not saved with the level or profile.");
+
+        ui.separator();
         ui.small(
             "F1 toggle UI \u{b7} F2 level editor \u{b7} F3 play/stop \u{b7} Tab cycle profile \u{b7} F5 save \u{b7} F9/F10 checkpoint save/load \u{b7} Esc quit",
         );
@@ -3911,6 +4102,13 @@ impl Game for Sandbox {
             self.screen_effects.tick(dt);
         }
 
+        if self.mode == EditorMode::Edit {
+            let ui_wants_keyboard = self.ui.as_ref().map(|ui| ui.wants_keyboard_input()).unwrap_or(false);
+            if !ui_wants_keyboard {
+                self.update_editor_camera_input(ctx, dt);
+            }
+        }
+
         if self.mode == EditorMode::Play && !self.paused {
             self.update_player_input(ctx, dt);
 
@@ -3922,11 +4120,27 @@ impl Game for Sandbox {
                 self.with_behavior(entity, |behavior, api| behavior.on_update(api, dt));
             }
 
+            // Captured before `step` resolves collisions — landing zeroes
+            // out the vertical velocity component, so this is the only
+            // point where "how fast were we falling" is still readable.
+            let pre_step_fall_speed = self
+                .player_entity
+                .and_then(|entity| self.world.get::<&RigidBody>(entity).ok())
+                .map(|body| body.velocity.y)
+                .unwrap_or(0.0);
+
             let overlaps = engine::physics::step(&mut self.world, dt, &self.physics_params);
 
             let Some(player) = self.player_entity else {
                 return Ok(());
             };
+
+            let now_grounded = self.world.get::<&RigidBody>(player).map(|body| body.grounded).unwrap_or(false);
+            if now_grounded && !self.was_grounded && pre_step_fall_speed < -0.1 {
+                self.landing_dip.land(-pre_step_fall_speed);
+            }
+            self.was_grounded = now_grounded;
+
             let current: HashSet<(Entity, Entity)> = overlaps
                 .into_iter()
                 .filter(|&(dynamic, _other)| dynamic == player)
@@ -4019,11 +4233,12 @@ impl Game for Sandbox {
             gl.use_program(Some(program));
             gl.uniform_matrix_4_f32_slice(uniforms.view.as_ref(), false, &view.to_cols_array());
             gl.uniform_matrix_4_f32_slice(uniforms.proj.as_ref(), false, &proj.to_cols_array());
+            let light_dir = Vec3::from(params.light_dir).normalize_or_zero();
             gl.uniform_3_f32(
                 uniforms.light_dir.as_ref(),
-                self.light_dir.x,
-                self.light_dir.y,
-                self.light_dir.z,
+                light_dir.x,
+                light_dir.y,
+                light_dir.z,
             );
             gl.uniform_3_f32(
                 uniforms.ambient_color.as_ref(),

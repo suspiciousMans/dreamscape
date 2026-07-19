@@ -5,6 +5,10 @@
     scale: (0.5, 0.5, 0.5),
     is_dynamic: false,
     is_trigger: true,
-    animation: None,
+    animation: Some(Bob(
+        axis: (0.0, 1.0, 0.0),
+        amplitude: 0.5,
+        period_secs: 1.0,
+    )),
     script: None,
 )

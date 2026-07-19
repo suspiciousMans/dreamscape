@@ -13,6 +13,9 @@
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cube 1",
@@ -26,6 +29,9 @@
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cube 2",
@@ -39,6 +45,9 @@
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Cube 3",
@@ -52,6 +61,9 @@
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Trigger Zone",
@@ -65,12 +77,17 @@
             animation: None,
             script: None,
             class: None,
+            level_transition: None,
             screen_effect: Some((
                 color: (0.2, 0.8, 1.0),
                 strength: 0.5,
                 fade_in_secs: 0.05,
                 hold_secs: 0.05,
                 fade_out_secs: 0.35,
+            )),
+            camera_shake: Some((
+                intensity: 0.06,
+                duration_secs: 0.3,
             )),
         ),
         (
@@ -88,6 +105,9 @@
             )),
             script: None,
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Script Demo Cube",
@@ -101,6 +121,9 @@
             animation: None,
             script: Some("scripts/bob_demo.pss"),
             class: None,
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Level Exit",
@@ -126,6 +149,7 @@
                 hold_secs: 0.05,
                 fade_out_secs: 0.3,
             )),
+            camera_shake: None,
         ),
         (
             name: "Barrel 1",
@@ -139,6 +163,9 @@
             animation: None,
             script: None,
             class: Some("classes/barrel.ron"),
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Barrel 2",
@@ -152,6 +179,9 @@
             animation: None,
             script: None,
             class: Some("classes/barrel.ron"),
+            level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
     ],
     lights: [
@@ -196,4 +226,5 @@
         gravity: 9.8,
         linear_damping: 0.15,
     ),
+    music_path: Some("music/demo_ambient.wav"),
 )

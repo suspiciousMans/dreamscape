@@ -49,7 +49,9 @@ vendored SDL2 (an old CMake-version pin plus a C-standard flag for the GCC
 toolchain) — you don't need to set anything yourself. The first build compiles
 SDL2 from source and is slow (a minute or two); subsequent builds are fast.
 
-**Controls** (Edit mode): left-drag orbits the camera, scroll wheel zooms,
+**Controls** (Edit mode): left-drag orbits the camera, **WASD** flies the
+orbit target around on the horizontal plane (relative to the direction
+you're looking), **Space**/**Shift** raise/lower it, scroll wheel zooms,
 **F1** toggles the shader-profile panel, **F2** toggles the level editor
 panel, **Tab** cycles shader profiles, **F5** saves the current profile,
 **F3** enters Play mode (see "Running the game" below), **Escape** quits.
@@ -141,6 +143,7 @@ stays crisp regardless of how retro the 3D looks.
 | `dither_strength` | Ordered-dither blended into the posterize step (breaks up banding) |
 | `lighting_mode` | `Unlit` or `VertexLit` (Lambertian, computed per-vertex — flat "faceted" look) |
 | `ambient_color` | Added to lit surfaces so shadowed faces aren't pure black |
+| `light_dir` | Direction *toward* the directional "sun" light used by `VertexLit` shading (not required to be normalized — the shader normalizes it) |
 | `vertex_snap_amount` | Clip-space grid size vertices are quantized to (0 = off); PS1-style geometric wobble |
 | `affine_texture_mapping` | Toggles `noperspective` UV interpolation — the classic warped-texture look |
 | `texture_filter` | `Nearest` (crisp/blocky) or `Bilinear` (smoothed) |
@@ -559,10 +562,56 @@ hitting Play in a normal game engine:
 - An invisible player (a sphere `Collider` + `RigidBody` + `PlayerController`,
   no mesh) spawns above the level and falls onto whatever's there. The camera
   becomes `engine::camera::FirstPersonCamera`, positioned at the player's
-  `Transform::position` plus a fixed eye-height offset each frame.
+  `Transform::position` plus a fixed eye-height offset each frame, plus an
+  optional walking view-bob (see below).
 - **WASD** moves relative to look direction, **mouse** looks freely, **Space**
   jumps when `RigidBody::grounded` is true, **E** interacts. A connected
   **gamepad** blends in automatically — see "Gamepad support" below.
+
+**Head bob** (`engine::camera::HeadBob`): a vertical bob plus a lighter
+side-to-side sway, added to the eye position in `player_eye_position`. It's
+driven by *actual* horizontal speed and `grounded` (updated once per frame
+in `update_player_input`, right where movement velocity is set), not just
+"is a key held," so it naturally speeds up/slows down with movement and
+eases in/out via an internal `intensity` value rather than snapping on/off
+or freezing mid-cycle when you stop. `enabled` toggles it off as a strict
+no-op with zero per-frame cost. Toggle and tune `enabled`/`amplitude`/
+`sway_amplitude`/`cycles_per_unit` live in the F1 panel's **Camera**
+section — a play-session setting, not saved with the level or profile.
+
+**Three more `engine::camera` FX**, all applied the same way (added into
+`player_eye_position` or written onto `fp_camera` each frame in
+`update_player_input`), each an `enabled` toggle plus a couple of tuning
+fields, live-editable in the same F1 **Camera** section:
+
+- **`LandingDip`** — a critically-damped spring, kicked downward by
+  `land(fall_speed)` the exact frame `RigidBody::grounded` transitions
+  false→true (detected in `Game::update`, right around the
+  `engine::physics::step` call — landing zeroes out `velocity.y` as part of
+  collision resolution, so the fall speed has to be captured *before*
+  `step` runs), then `update(dt)`'d every frame regardless of grounded
+  state so it always settles back to rest rather than getting stuck.
+- **`StrafeTilt`** — eases `fp_camera.roll` toward a target proportional to
+  how much of the current frame's movement is sideways
+  (`move_dir.dot(right_flat)`, the same signed value that already blends
+  WASD/left-stick input), and back to level when you stop strafing.
+- **`SpeedFov`** — an additive FOV kick at speed, deliberately *not*
+  written straight into `fp_camera.fov_y_radians` (that field is instead
+  driven by `base_fov_radians + speed_fov.kick_radians()` each frame) so it
+  never fights with a game's own ability/zoom logic that might want to set
+  a different base FOV outright.
+
+**`CameraShakeSpec`/`CameraShakeState`** (also `engine::camera`): a
+momentary jitter, mirroring `engine::screen_effect::ScreenEffectSpec`'s
+role but for the eye position instead of a color tint — a few
+incommensurate sine waves rather than a `rand` dependency, decaying
+linearly to zero over `duration_secs`. Fireable three ways, all converging
+on the same `CameraShakeState::trigger`: a trigger's
+`LevelObjectMeta::camera_shake` (checked in `on_trigger_entered` right
+alongside `screen_effect`), `ScriptApi::camera_shake(intensity, duration)`
+from a script or native `Behavior`, or the F1 panel's "Test camera shake"
+button. The F2 panel's per-trigger inspector has a matching **Camera
+Shake** section (Add/Preview/Clear), right under **Screen Effect**.
 
 ### Pausing
 
@@ -693,13 +742,15 @@ interacted with.
 `log(msg, ...)`, `get_x()`/`get_y()`/`get_z()`, `set_position(x,y,z)`,
 `move_by(dx,dy,dz)`, `play_tone(freq,duration)`, `time()`,
 `hud_bar(name, fraction)`, `toast(message, seconds)`,
-`screen_flash(r,g,b,strength,fade_in,hold,fade_out)`. Position is three
-scalar calls rather than one call returning a triple — the language has no
-vector/tuple type. `hud_bar`/`toast` drive the in-game HUD (see "In-game
-HUD" below) — a script can update a named progress bar or pop a fading
-toast the same way a native `Behavior` can. `screen_flash` fires a
-full-screen color tint (see "Screen effects" above) the same way a trigger's
-`screen_effect` does.
+`screen_flash(r,g,b,strength,fade_in,hold,fade_out)`,
+`camera_shake(intensity,duration)`. Position is three scalar calls rather
+than one call returning a triple — the language has no vector/tuple type.
+`hud_bar`/`toast` drive the in-game HUD (see "In-game HUD" below) — a
+script can update a named progress bar or pop a fading toast the same way
+a native `Behavior` can. `screen_flash` fires a full-screen color tint (see
+"Screen effects" above) the same way a trigger's `screen_effect` does;
+`camera_shake` jostles the view the same way a trigger's `camera_shake`
+does (see "Play mode" above).
 
 ### `Behavior`/`ScriptApi` — using Rust the same way a script would
 
@@ -715,6 +766,7 @@ pub trait ScriptApi {
     fn set_hud_bar(&mut self, name: &str, fraction: f32);
     fn show_toast(&mut self, message: &str, seconds: f32);
     fn screen_flash(&mut self, r: f32, g: f32, b: f32, strength: f32, fade_in_secs: f32, hold_secs: f32, fade_out_secs: f32);
+    fn camera_shake(&mut self, intensity: f32, duration_secs: f32);
 }
 pub trait Behavior: Send + Sync {
     fn on_ready(&mut self, api: &mut dyn ScriptApi) { }

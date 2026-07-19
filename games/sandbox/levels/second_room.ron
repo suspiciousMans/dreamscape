@@ -14,6 +14,8 @@
             script: None,
             class: None,
             level_transition: None,
+            screen_effect: None,
+            camera_shake: None,
         ),
         (
             name: "Return",
@@ -32,6 +34,8 @@
                 spawn_position: (0.0, 1.0, -3.0),
                 spawn_yaw_deg: 0.0,
             )),
+            screen_effect: None,
+            camera_shake: None,
         ),
     ],
     lights: [
