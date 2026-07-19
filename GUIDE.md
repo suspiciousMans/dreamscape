@@ -1,4 +1,4 @@
-# PS2 Engine Guide
+# Jame Engine Guide
 
 A lightweight Rust game engine (SDL2 + OpenGL) for building multiple games with
 a PS2-era visual style: low internal resolution upscaled with nearest-neighbor

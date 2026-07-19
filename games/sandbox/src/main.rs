@@ -3900,7 +3900,7 @@ fn show_fatal_error_dialog(message: &str) {
     #[cfg(not(debug_assertions))]
     {
         rfd::MessageDialog::new()
-            .set_title("PS2 Engine Sandbox - Error")
+            .set_title("Jame Engine Sandbox - Error")
             .set_description(message)
             .set_level(rfd::MessageLevel::Error)
             .show();
@@ -3919,7 +3919,7 @@ fn main() -> anyhow::Result<()> {
         show_fatal_error_dialog(&info.to_string());
     }));
 
-    let result = App::run("PS2 Engine Sandbox", 1280, 720, Sandbox::new());
+    let result = App::run("Jame Engine Sandbox", 1280, 720, Sandbox::new());
     if let Err(err) = &result {
         log::error!("fatal error: {err:?}");
         show_fatal_error_dialog(&format!("{err:?}"));

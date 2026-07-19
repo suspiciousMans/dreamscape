@@ -13,7 +13,7 @@ use engine::sdl2::event::Event;
 use engine::ui::EguiState;
 
 fn default_source() -> String {
-    "// A new PS2 Engine script.\n\
+    "// A new Jame Engine script.\n\
      fn update(dt) {\n\
      }\n\
      \n\
@@ -242,5 +242,5 @@ impl Game for ScriptEditorApp {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    App::run("PS2 Script Editor", 900, 700, ScriptEditorApp::new())
+    App::run("Jame Engine Script Editor", 900, 700, ScriptEditorApp::new())
 }
