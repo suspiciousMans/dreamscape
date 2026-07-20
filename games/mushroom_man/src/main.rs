@@ -26,6 +26,10 @@ use engine::level::{AnimationSpec, CharacterInstance, Level, LevelLight, LevelOb
 use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
 use engine::save::SaveData;
 use engine::mesh::{load_gltf, load_obj, primitives, GpuMesh};
+use engine::net::{
+    spawn_ring_offset, CharacterSnapshot, InputState, NetClient, NetHost, NetId, ObjectSnapshot, PlayerSnapshot,
+    ServerMessage,
+};
 use engine::particles::{ParticleEmitter, ParticleEmitterDef};
 use engine::pathfinding::NavGrid;
 use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
@@ -995,6 +999,36 @@ struct ClassMember {
     class_path: PathBuf,
 }
 
+/// A host-assigned network identity, attached to any entity whose state
+/// needs to be replicated to other peers — players, `CharacterMeta`
+/// characters, dynamic props. Static level geometry never gets one: it's
+/// already fully described by the `Level` sent in `Welcome`/
+/// `LevelTransition`, which `apply_level` reconstructs identically on
+/// every peer (see `engine::net`'s "Entity replication model").
+struct Networked(NetId);
+
+/// Tags a host-side entity representing a connected client's avatar —
+/// distinguishes it from the host's own local `player_entity` (which has
+/// no mesh, being first-person) and from NPCs (`CharacterMeta`). Only
+/// ever exists under `NetMode::Host`; look it up by `NetId` via
+/// `Sandbox::remote_players` rather than querying for this marker.
+struct RemotePlayer;
+
+/// Client-side: the latest authoritative position/rotation for a
+/// networked entity OTHER than the local player, nudged toward every
+/// frame (`Sandbox::smooth_networked_transforms`) instead of snapped to
+/// instantly on arrival — snapshots land at a fixed 20Hz, and a hard
+/// `Transform` overwrite reads as visible stepping for anything the
+/// player is watching move (another player, an AI character, a pushed
+/// physics prop). The local player's own entity is handled separately
+/// (see `update_player_input`'s dead reckoning plus `net_local_target`
+/// for the correction it layers on top), since it has real per-frame
+/// local input to stay responsive to.
+struct NetTarget {
+    position: Vec3,
+    rotation: Option<Quat>,
+}
+
 struct Sandbox {
     asset_root: PathBuf,
     profiles_dir: PathBuf,
@@ -1175,6 +1209,76 @@ struct Sandbox {
     /// `play_music_file` itself has no volume parameter — re-applied via
     /// `set_music_volume` every time music (re)starts.
     music_volume: f32,
+    /// Which side of a listen-server session this instance is playing,
+    /// if any — see `engine::net`. `Offline` is the default (unchanged
+    /// single-player behavior).
+    net_mode: NetMode,
+    /// Client-side: maps a replicated entity's host-assigned `NetId` to
+    /// this process's own local `hecs::Entity` for it — built from
+    /// `ServerMessage::Welcome`'s `named_net_ids` after `apply_level`, and
+    /// extended as `PlayerJoined`/`CharacterSpawned` events arrive.
+    net_id_to_entity: HashMap<NetId, Entity>,
+    /// Host-side: maps a connected client's `NetId` to the `RemotePlayer`
+    /// entity spawned for them, so `NetHost::poll_inputs()`'s results can
+    /// be applied to the right entity each frame.
+    remote_players: HashMap<NetId, Entity>,
+    /// F2-panel-style transient input buffers for the multiplayer panel's
+    /// "Address"/"Name" fields, persisted across frames the same way
+    /// `level_save_as_name` already is.
+    net_join_address: String,
+    net_player_name: String,
+    /// Host-side: `NetId`s of networked characters/objects despawned since
+    /// the last `Snapshot` broadcast — flushed into that snapshot's
+    /// `removed` list and cleared, so clients despawn the matching local
+    /// entity instead of leaving a stale cube behind forever.
+    net_removed: Vec<NetId>,
+    /// Client-side sibling to `active_dialogue` — dialogue state itself is
+    /// host-authoritative under `NetMode::Client`, so instead of reading a
+    /// local `Dialogue` component, `draw_dialogue_choices` and the number-
+    /// key handler read this instead: `(speaker, text, choices)` from the
+    /// last `ServerMessage::Dialogue`, cleared by `DialogueClosed` or a
+    /// picked choice.
+    net_dialogue: Option<(NetId, String, Vec<(String, usize)>)>,
+    /// Client-side smoothing target for the local player's own position
+    /// — the latest authoritative value from `Snapshot`, nudged toward
+    /// every frame the same way `NetTarget` smooths every other entity,
+    /// rather than hard-snapped. A hard snap on every snapshot arrival
+    /// was tried first and made the joining client's own view visibly
+    /// wobble every ~50ms, since even tiny natural client/host timing
+    /// differences (not just real collisions) show up as a full pop;
+    /// smoothing hides that jitter while still correcting real drift
+    /// (e.g. the host stopping the player at a wall) within a few
+    /// frames. Applied on top of `update_player_input`'s per-frame X/Z
+    /// dead reckoning, which stays instantly responsive to input.
+    /// `None` until the first `Snapshot` arrives.
+    net_local_target: Option<Vec3>,
+    /// Host-side: `NetId`s of connected players granted permission to
+    /// trigger a level transition themselves by walking into an exit —
+    /// by default only the host's own local player can (see
+    /// `Game::update`'s trigger-overlap handling), since a remote
+    /// player's physical overlap is otherwise never checked at all.
+    /// Toggled per-player from the multiplayer panel's player list.
+    remote_level_switch_permission: HashMap<NetId, bool>,
+    /// Client-side: attempts left in an automatic reconnect sequence
+    /// after an unexpected drop (see `update_networking`'s
+    /// `!client.is_connected()` handling) — `0` means no sequence is
+    /// active. Reuses `net_join_address`/`net_player_name`, the same
+    /// values `join_game` reads from the multiplayer panel's text
+    /// fields, so it retries the exact same connection the player
+    /// originally made.
+    net_reconnect_attempts_left: u32,
+    /// Seconds until the next automatic reconnect attempt.
+    net_reconnect_timer: f32,
+}
+
+/// Which side of a listen-server multiplayer session `Sandbox` is
+/// currently playing, if any — see the `engine::net` module for the
+/// underlying transport. `Host`/`Client` wrap the connection state;
+/// `Offline` (the default) is unchanged single-player behavior.
+enum NetMode {
+    Offline,
+    Host(NetHost),
+    Client(NetClient),
 }
 
 impl Sandbox {
@@ -1260,6 +1364,17 @@ impl Sandbox {
             despawned_since_load: Vec::new(),
             current_music_path: None,
             music_volume: 1.0,
+            net_mode: NetMode::Offline,
+            net_id_to_entity: HashMap::new(),
+            remote_players: HashMap::new(),
+            net_join_address: format!("127.0.0.1:{}", engine::net::DEFAULT_PORT),
+            net_player_name: String::from("Player"),
+            net_removed: Vec::new(),
+            net_dialogue: None,
+            net_local_target: None,
+            remote_level_switch_permission: HashMap::new(),
+            net_reconnect_attempts_left: 0,
+            net_reconnect_timer: 0.0,
             audio: match AudioContext::new() {
                 Ok(audio) => Some(audio),
                 Err(err) => {
@@ -1787,6 +1902,124 @@ impl Sandbox {
             let _ = self.world.insert_one(entity, Dialogue::new(instance.dialogue_nodes.clone()));
         }
         Ok(entity)
+    }
+
+    /// Spawns a visible avatar for a newly-joined remote player — same
+    /// physical shape as the host's own local player (`enter_play_mode`'s
+    /// spawn: sphere `Collider`, `RigidBody`, 100 HP) plus a `MeshRenderer`
+    /// cube, since unlike the local player (first-person, no mesh) a
+    /// remote player needs to actually be visible to everyone else.
+    /// Positioned via `spawn_ring_offset` around `base_position` so 2-4
+    /// players sharing one spawn point (an initial join, or everyone
+    /// landing at a level transition's `spawn_position`) don't stack on
+    /// top of each other. Tagged `Networked`/`RemotePlayer` so disconnect
+    /// handling and the snapshot broadcast can find it by `NetId`.
+    fn spawn_remote_player_at(
+        &mut self,
+        gl: &glow::Context,
+        net_id: NetId,
+        base_position: Vec3,
+        base_yaw_deg: f32,
+    ) -> anyhow::Result<Entity> {
+        let mesh = self.resolve_mesh(gl, &MeshSource::Primitive(PrimitiveKind::Cube))?;
+        let (position, _) = spawn_ring_offset(base_position, base_yaw_deg, net_id);
+        let entity = self.world.spawn((
+            Transform { position, rotation: Quat::IDENTITY, scale: Vec3::new(0.8, 1.6, 0.8) },
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, [200, 200, 200, 255]))) },
+            Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+            RigidBody::default(),
+            PlayerController::default(),
+            Health::new(100.0),
+            Networked(net_id),
+            RemotePlayer,
+        ));
+        Ok(entity)
+    }
+
+    /// Host-side: applies a remote player's latest `InputState` directly
+    /// to their `RigidBody`/facing — the same "set horizontal velocity,
+    /// jump if grounded" shape `update_player_input` applies to the local
+    /// player, except `move_dir` arrives pre-computed (already
+    /// camera-relative, in world space) from the client rather than being
+    /// derived from `ctx.input` here, since the host has no camera/input
+    /// state for a remote player. `physics::step`'s existing all-entities
+    /// query then resolves gravity/collision for this `RigidBody` exactly
+    /// like any other — no changes needed there.
+    fn apply_remote_input(&mut self, entity: Entity, input: &InputState) {
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut RigidBody, &PlayerController)>(entity) {
+            if let Some((transform, body, controller)) = query.get() {
+                let move_dir = Vec3::new(input.move_dir[0], 0.0, input.move_dir[1]);
+                body.velocity.x = move_dir.x * controller.move_speed;
+                body.velocity.z = move_dir.z * controller.move_speed;
+                transform.rotation = Quat::from_rotation_y(input.yaw_deg.to_radians());
+                if input.jump && body.grounded {
+                    body.velocity.y = controller.jump_speed;
+                }
+            }
+        }
+    }
+
+    /// Client-side: matches a name carried in `ServerMessage::Welcome`'s
+    /// `named_net_ids` against the entity `apply_level` just spawned for
+    /// it, so `net_id_to_entity` can be built without needing `Level`'s
+    /// shape itself to carry any multiplayer-specific data. Searches
+    /// `LevelObjectMeta` then `CharacterMeta` — the two component kinds
+    /// that carry a `name` at all.
+    fn find_entity_by_name(&self, name: &str) -> Option<Entity> {
+        for (entity, meta) in self.world.query::<&LevelObjectMeta>().iter() {
+            if meta.name == name {
+                return Some(entity);
+            }
+        }
+        for (entity, meta) in self.world.query::<&CharacterMeta>().iter() {
+            if meta.name == name {
+                return Some(entity);
+            }
+        }
+        None
+    }
+
+    /// Host-side: every currently-`Networked` character/object's name and
+    /// `NetId`, for `ServerMessage::Welcome`'s `named_net_ids` — matched
+    /// back up against the client's own freshly-`apply_level`'d entities
+    /// via `find_entity_by_name`. Players are deliberately excluded (they
+    /// have no `CharacterMeta`/`LevelObjectMeta` to match against anyway,
+    /// and are announced separately via `PlayerJoined`).
+    fn build_named_net_ids(&self) -> Vec<(String, NetId)> {
+        let mut named = Vec::new();
+        for (_entity, (meta, networked)) in self.world.query::<(&CharacterMeta, &Networked)>().iter() {
+            named.push((meta.name.clone(), networked.0));
+        }
+        for (_entity, (meta, networked)) in self.world.query::<(&LevelObjectMeta, &Networked)>().iter() {
+            named.push((meta.name.clone(), networked.0));
+        }
+        named
+    }
+
+    /// If hosting, allocates a fresh `NetId` and tags `entity` with it —
+    /// a no-op returning `None` under `Offline`/`Client` (only the host
+    /// assigns identities). `self.net_mode` is taken out for the
+    /// duration, the same "take-before-mutate" shape `update_networking`
+    /// uses, since inserting a component needs `&mut self.world` while
+    /// `NetHost` is borrowed from `self.net_mode`.
+    fn assign_net_id_if_hosting(&mut self, entity: Entity) -> Option<NetId> {
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        let assigned = if let NetMode::Host(host) = &mut net_mode {
+            let net_id = host.allocate_net_id();
+            let _ = self.world.insert_one(entity, Networked(net_id));
+            Some(net_id)
+        } else {
+            None
+        };
+        self.net_mode = net_mode;
+        assigned
+    }
+
+    /// Broadcasts `msg` if hosting; a silent no-op under `Offline`/`Client`.
+    fn broadcast_if_hosting(&mut self, msg: &ServerMessage) {
+        if let NetMode::Host(host) = &mut self.net_mode {
+            host.broadcast(msg);
+        }
     }
 
     /// Spawns a placed periodic spawner: `Transform` (its position is where
@@ -2689,6 +2922,673 @@ impl Sandbox {
         ctx.platform.sdl.mouse().set_relative_mouse_mode(true);
     }
 
+    /// One-line status the multiplayer panel shows above its buttons.
+    fn net_status_text(&self) -> String {
+        if self.net_reconnect_attempts_left > 0 {
+            return format!("Reconnecting... ({} attempts left)", self.net_reconnect_attempts_left);
+        }
+        match &self.net_mode {
+            NetMode::Offline => "Offline".to_string(),
+            NetMode::Host(host) => format!("Hosting ({}/{})", host.player_count(), engine::net::MAX_PLAYERS),
+            NetMode::Client(client) if client.is_connected() => {
+                format!("Connected to {}", self.net_join_address)
+            }
+            NetMode::Client(_) => "Disconnected".to_string(),
+        }
+    }
+
+    /// Multiplayer panel's "Host Game" button.
+    fn start_hosting(&mut self) {
+        match NetHost::bind(engine::net::DEFAULT_PORT) {
+            Ok(mut host) => {
+                log::info!("hosting on port {}", engine::net::DEFAULT_PORT);
+                // The multiplayer panel only appears while already in Play
+                // mode (paused), so `player_entity` is guaranteed to exist
+                // here — tag it so it shows up in the (future) snapshot
+                // broadcast the same as any other replicated entity.
+                if let Some(player) = self.player_entity {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(player, Networked(net_id));
+                }
+                // Tag every character/dynamic prop already in the level
+                // too, so they show up in `named_net_ids` for clients that
+                // join afterward and in the periodic `Snapshot` broadcast.
+                // New ones can only appear afterward via a spawner (F2
+                // editing is Edit-mode-only, mutually exclusive with this
+                // Play-mode-only panel) — those get tagged individually as
+                // they spawn instead, via `assign_net_id_if_hosting`.
+                let characters: Vec<Entity> = self.world.query::<&CharacterMeta>().iter().map(|(e, _)| e).collect();
+                for entity in characters {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(entity, Networked(net_id));
+                }
+                // Eligible objects are anything `interact()` itself would
+                // consider interactable — a `RigidBody` (pushable) or a
+                // `BehaviorSlot` (scripted `on_interact`) — mirrored here
+                // so a remote client's `Interact` can ever resolve to one
+                // via `find_networked_entity` (which only searches
+                // `Networked` entities).
+                let interactable_objects: Vec<Entity> = self
+                    .world
+                    .query::<&LevelObjectMeta>()
+                    .iter()
+                    .filter(|&(entity, _)| {
+                        self.world.get::<&RigidBody>(entity).is_ok()
+                            || self.world.get::<&BehaviorSlot>(entity).is_ok()
+                    })
+                    .map(|(e, _)| e)
+                    .collect();
+                for entity in interactable_objects {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(entity, Networked(net_id));
+                }
+                self.net_mode = NetMode::Host(host);
+                self.hud.show_toast("Hosting a game", 2.0);
+            }
+            Err(err) => {
+                log::error!("failed to start hosting: {err}");
+                self.hud.show_toast(&format!("Failed to host: {err}"), 3.0);
+            }
+        }
+    }
+
+    /// Multiplayer panel's "Join Game" button.
+    fn join_game(&mut self) {
+        // A manual join always supersedes any automatic reconnect
+        // sequence still counting down in the background.
+        self.net_reconnect_attempts_left = 0;
+        let Ok(addr) = self.net_join_address.parse() else {
+            log::error!("invalid address {:?}", self.net_join_address);
+            self.hud.show_toast("Invalid address", 2.0);
+            return;
+        };
+        match NetClient::connect(addr, self.net_player_name.clone(), std::time::Duration::from_secs(3)) {
+            Ok(client) => {
+                log::info!("connecting to {addr}");
+                self.net_mode = NetMode::Client(client);
+                self.hud.show_toast(&format!("Connecting to {addr}..."), 2.0);
+            }
+            Err(err) => {
+                log::error!("failed to connect to {addr}: {err}");
+                self.hud.show_toast(&format!("Failed to connect: {err}"), 3.0);
+            }
+        }
+    }
+
+    /// Multiplayer panel's "Disconnect" button — drops the host/client
+    /// state and clears the replication bookkeeping. Does not touch the
+    /// currently-loaded level or player entity; single-player play just
+    /// continues locally.
+    fn disconnect_net(&mut self) {
+        self.net_mode = NetMode::Offline;
+        self.net_id_to_entity.clear();
+        self.remote_players.clear();
+        self.net_dialogue = None;
+        self.net_local_target = None;
+        self.remote_level_switch_permission.clear();
+        // Any call to `disconnect_net` — manual or automatic — cancels a
+        // pending reconnect sequence; `update_networking`'s drop-handling
+        // re-arms it explicitly right afterward when that's actually
+        // what's happening.
+        self.net_reconnect_attempts_left = 0;
+        self.hud.show_toast("Disconnected", 1.5);
+    }
+
+    /// Multiplayer panel's "Cancel" button while an automatic reconnect
+    /// sequence is counting down.
+    fn cancel_reconnect(&mut self) {
+        self.net_reconnect_attempts_left = 0;
+        self.hud.show_toast("Reconnect cancelled", 1.5);
+    }
+
+    /// Multiplayer panel's per-player "Can switch levels" checkbox
+    /// (host-only — see `Sandbox.remote_level_switch_permission`).
+    fn set_level_switch_permission(&mut self, net_id: NetId, allowed: bool) {
+        self.remote_level_switch_permission.insert(net_id, allowed);
+    }
+
+    /// Pumps whichever side of a listen-server session is active, every
+    /// frame, regardless of pause state — see `engine::net`'s "never
+    /// blocks" framing contract. This pass handles the connection
+    /// lifecycle (accept/handshake/disconnect) plus the join bootstrap
+    /// (spawning a remote player's avatar, sending/receiving `Welcome`),
+    /// snapshot-driven player/character/object replication, dialogue
+    /// replication, and level-transition replication.
+    ///
+    /// `self.net_mode` is taken out (replaced with a placeholder
+    /// `Offline`) for the duration of this call rather than matched on
+    /// directly — spawning a remote player or applying a level needs
+    /// `&mut self` broadly, which would otherwise conflict with
+    /// `host`/`client`'s live borrow of `self.net_mode` itself (the same
+    /// "take-before-mutate" shape `self.nav_grid.take()` already uses
+    /// elsewhere, extended to a whole enum instead of an `Option`).
+    fn update_networking(&mut self, ctx: &mut Context, dt: f32) {
+        const NET_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+        const NET_RECONNECT_INTERVAL_SECS: f32 = 3.0;
+
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        let mut go_offline = false;
+        let mut start_reconnect = false;
+
+        // Ticks down between automatic reconnect attempts after an
+        // unexpected drop (see the `!client.is_connected()` branch
+        // below) — reuses `net_join_address`/`net_player_name` and the
+        // exact same `NetClient::connect` call `join_game` makes from a
+        // button click, just fired on a timer instead. A no-op whenever
+        // no reconnect sequence is active.
+        if self.net_reconnect_attempts_left > 0 {
+            self.net_reconnect_timer -= dt;
+            if self.net_reconnect_timer <= 0.0 {
+                self.net_reconnect_attempts_left -= 1;
+                let attempts_left = self.net_reconnect_attempts_left;
+                match self.net_join_address.parse() {
+                    Ok(addr) => match NetClient::connect(
+                        addr,
+                        self.net_player_name.clone(),
+                        std::time::Duration::from_secs(2),
+                    ) {
+                        Ok(client) => {
+                            log::info!("reconnected to {addr}");
+                            net_mode = NetMode::Client(client);
+                            self.net_reconnect_attempts_left = 0;
+                            self.hud.show_toast("Reconnected", 2.0);
+                        }
+                        Err(err) => {
+                            log::warn!("reconnect attempt failed: {err}");
+                            if attempts_left == 0 {
+                                self.hud.show_toast("Could not reconnect", 2.5);
+                            } else {
+                                self.net_reconnect_timer = NET_RECONNECT_INTERVAL_SECS;
+                                self.hud.show_toast(&format!("Reconnecting... ({attempts_left} left)"), 2.0);
+                            }
+                        }
+                    },
+                    Err(_) => self.net_reconnect_attempts_left = 0,
+                }
+            }
+        }
+
+        match &mut net_mode {
+            NetMode::Offline => {}
+            NetMode::Host(host) => {
+                for (net_id, name) in host.poll_new_connections() {
+                    let gl = ctx.gl();
+                    match self.spawn_remote_player_at(gl, net_id, Vec3::new(0.0, 3.0, 4.0), 0.0) {
+                        Ok(entity) => {
+                            self.remote_players.insert(net_id, entity);
+                            let level = self.build_level_from_ecs();
+                            let named_net_ids = self.build_named_net_ids();
+                            host.send_to(
+                                net_id,
+                                &ServerMessage::Welcome {
+                                    your_net_id: net_id,
+                                    level,
+                                    named_net_ids,
+                                    tick_rate: engine::net::SNAPSHOT_RATE_HZ,
+                                },
+                            );
+                            // Catch the new client up on everyone already in
+                            // the session (the host's own player + any
+                            // other already-connected remote players) —
+                            // they arrived before this client did, so no
+                            // `PlayerJoined` broadcast ever reached it.
+                            if let Some(local_player) = self.player_entity {
+                                if let Ok(networked) = self.world.get::<&Networked>(local_player) {
+                                    host.send_to(
+                                        net_id,
+                                        &ServerMessage::PlayerJoined {
+                                            net_id: networked.0,
+                                            name: self.net_player_name.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            for other_id in host.connected_ids() {
+                                if other_id == net_id {
+                                    continue;
+                                }
+                                if let Some(other_name) = host.player_name(other_id) {
+                                    host.send_to(
+                                        net_id,
+                                        &ServerMessage::PlayerJoined { net_id: other_id, name: other_name.to_string() },
+                                    );
+                                }
+                            }
+                            host.broadcast(&ServerMessage::PlayerJoined { net_id, name: name.clone() });
+                            log::info!("{name} joined as {net_id:?}");
+                            self.hud.show_toast(&format!("{name} joined"), 2.0);
+                        }
+                        Err(err) => log::error!("failed to spawn a remote player for {name}: {err}"),
+                    }
+                }
+
+                for (net_id, input) in host.poll_inputs() {
+                    if let Some(&entity) = self.remote_players.get(&net_id) {
+                        self.apply_remote_input(entity, &input);
+                    }
+                }
+                for (requester, target) in host.poll_interacts() {
+                    let Some(entity) = self.find_networked_entity(target) else { continue };
+                    let has_dialogue = self.world.get::<&Dialogue>(entity).is_ok();
+                    if has_dialogue {
+                        if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                            if let Some(dialogue) = query.get() {
+                                let text = dialogue.current_text().to_string();
+                                let choices = dialogue.current_choices().to_vec();
+                                if choices.is_empty() {
+                                    // Mirrors `interact()`'s local behavior:
+                                    // no choices means linear cycling, so
+                                    // advance immediately rather than waiting
+                                    // on a pick that will never come.
+                                    dialogue.advance();
+                                }
+                                host.send_to(requester, &ServerMessage::Dialogue { speaker: target, text, choices });
+                            }
+                        }
+                        continue;
+                    }
+
+                    // A `Hostile` character with `Health` is a fight, not
+                    // a push — same rule `interact()` uses locally.
+                    // Death handling happens next frame via
+                    // `AiEvent::CharacterDied`, the same path a
+                    // character's own attack uses.
+                    const PLAYER_ATTACK_DAMAGE: f32 = 10.0;
+                    let is_hostile = self
+                        .world
+                        .get::<&CharacterMeta>(entity)
+                        .is_ok_and(|meta| meta.disposition == Disposition::Hostile);
+                    if is_hostile {
+                        let hit = {
+                            let mut query = self.world.query_one::<&mut Health>(entity);
+                            match query.as_mut().ok().and_then(|q| q.get()) {
+                                Some(health) => {
+                                    health.damage(PLAYER_ATTACK_DAMAGE);
+                                    true
+                                }
+                                None => false,
+                            }
+                        };
+                        if hit {
+                            self.play_tone(180.0, 0.08);
+                            if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                                self.spawn_burst_at(position, ParticleEmitterDef::default(), 8);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // A scripted/native-behavior object handles its own
+                    // interaction instead of the generic push — mirrors
+                    // `interact()`'s own ordering. Only reachable at all
+                    // if it was tagged `Networked` while hosting (see
+                    // `start_hosting`/`transition_to_level`'s
+                    // `interactable_objects` tagging, which includes
+                    // `BehaviorSlot` objects specifically so this can
+                    // resolve).
+                    if self.with_behavior(entity, |behavior, api| behavior.on_interact(api)) {
+                        continue;
+                    }
+
+                    // Nothing else claimed it — treat it as the
+                    // requesting client's own version of `interact()`'s
+                    // "push the nearest dynamic object" action, using the
+                    // requester's own remote avatar as the push origin
+                    // (not the host's own local player). The resulting
+                    // `RigidBody.velocity` change reaches every client
+                    // for free via the next periodic `Snapshot` — no
+                    // extra broadcast needed.
+                    let Some(&requester_entity) = self.remote_players.get(&requester) else { continue };
+                    let Some(requester_position) =
+                        self.world.get::<&Transform>(requester_entity).ok().map(|t| t.position)
+                    else {
+                        continue;
+                    };
+                    let Some(controller) =
+                        self.world.get::<&PlayerController>(requester_entity).ok().map(|c| *c)
+                    else {
+                        continue;
+                    };
+                    let mut pushed = false;
+                    if let Ok(mut query) = self.world.query_one::<(&Transform, &mut RigidBody)>(entity) {
+                        if let Some((transform, body)) = query.get() {
+                            let mut push_dir = transform.position - requester_position;
+                            push_dir.y = 0.0;
+                            let push_dir = push_dir.normalize_or_zero();
+                            let push_dir = if push_dir == Vec3::ZERO { Vec3::X } else { push_dir };
+                            body.velocity += push_dir * controller.interact_impulse
+                                + Vec3::Y * (controller.interact_impulse * 0.3);
+                            pushed = true;
+                        }
+                    }
+                    if pushed {
+                        self.play_tone(220.0, 0.1);
+                        if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                            self.spawn_burst_at(
+                                position,
+                                ParticleEmitterDef { rate_per_sec: 0.0, ..ParticleEmitterDef::default() },
+                                12,
+                            );
+                        }
+                    }
+                }
+                for (requester, speaker, index) in host.poll_dialogue_choices() {
+                    let Some(entity) = self.find_networked_entity(speaker) else { continue };
+                    if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                        if let Some(dialogue) = query.get() {
+                            if dialogue.choose(index) {
+                                let text = dialogue.current_text().to_string();
+                                let choices = dialogue.current_choices().to_vec();
+                                host.send_to(requester, &ServerMessage::Dialogue { speaker, text, choices });
+                            }
+                        }
+                    }
+                }
+                for net_id in host.take_disconnected() {
+                    if let Some(entity) = self.remote_players.remove(&net_id) {
+                        let _ = self.world.despawn(entity);
+                    }
+                    self.remote_level_switch_permission.remove(&net_id);
+                    host.broadcast(&ServerMessage::PlayerLeft { net_id });
+                    log::info!("{net_id:?} disconnected");
+                    self.hud.show_toast("A player disconnected", 2.0);
+                }
+
+                if host.should_send_snapshot(dt) {
+                    // Keep the host's own avatar's facing in sync with its
+                    // camera — the local player never otherwise touches its
+                    // own `Transform.rotation` (first-person, no mesh to
+                    // rotate), so without this every `PlayerSnapshot` for
+                    // the host would report a stale/identity yaw.
+                    if let Some(local_player) = self.player_entity {
+                        if let Ok(mut transform) = self.world.get::<&mut Transform>(local_player) {
+                            transform.rotation = Quat::from_rotation_y(self.fp_camera.yaw);
+                        }
+                    }
+
+                    let mut players = Vec::new();
+                    for (_entity, (transform, networked, _controller, health)) in self
+                        .world
+                        .query::<(&Transform, &Networked, &PlayerController, Option<&Health>)>()
+                        .iter()
+                    {
+                        let (yaw, _, _) = transform.rotation.to_euler(engine::glam::EulerRot::YXZ);
+                        players.push(PlayerSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            yaw_deg: yaw.to_degrees(),
+                            health: health.map(|h| (h.current, h.max)),
+                        });
+                    }
+
+                    let mut characters = Vec::new();
+                    for (_entity, (transform, networked, _meta, health)) in self
+                        .world
+                        .query::<(&Transform, &Networked, &CharacterMeta, Option<&Health>)>()
+                        .iter()
+                    {
+                        characters.push(CharacterSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            health: health.map(|h| (h.current, h.max)),
+                        });
+                    }
+
+                    let mut objects = Vec::new();
+                    for (_entity, (transform, networked, _meta)) in
+                        self.world.query::<(&Transform, &Networked, &LevelObjectMeta)>().iter()
+                    {
+                        objects.push(ObjectSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            rotation: transform.rotation.to_array(),
+                        });
+                    }
+
+                    host.broadcast(&ServerMessage::Snapshot {
+                        tick: 0,
+                        players,
+                        characters,
+                        objects,
+                        removed: std::mem::take(&mut self.net_removed),
+                    });
+                }
+            }
+            NetMode::Client(client) => {
+                for msg in client.poll_messages() {
+                    match msg {
+                        ServerMessage::Reject { reason } => {
+                            log::error!("host rejected connection: {reason}");
+                            self.hud.show_toast(&format!("Connection rejected: {reason}"), 3.0);
+                            go_offline = true;
+                        }
+                        ServerMessage::Welcome { your_net_id, level, named_net_ids, .. } => {
+                            let gl = ctx.gl();
+                            if let Err(err) = self.apply_level(gl, &level) {
+                                log::error!("failed to apply the host's level: {err}");
+                            }
+                            self.net_id_to_entity.clear();
+                            for (name, net_id) in named_net_ids {
+                                if let Some(entity) = self.find_entity_by_name(&name) {
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                    // Without this, entities that already
+                                    // existed in the level at join time
+                                    // (as opposed to arriving later via
+                                    // `CharacterSpawned`) are tracked in
+                                    // `net_id_to_entity` but never actually
+                                    // tagged `Networked` — `interact_or_send`'s
+                                    // nearest-target search queries for
+                                    // `&Networked`, so it silently found
+                                    // nothing for any pre-placed NPC.
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                }
+                            }
+                            // `apply_level` just cleared the whole world,
+                            // including whatever single-player
+                            // `player_entity` existed before — spawn a
+                            // fresh one for this client's own avatar. Its
+                            // position/rotation are host-authoritative from
+                            // here on (see the `Snapshot` handling below);
+                            // only look direction (`fp_camera`) stays local.
+                            let position = Vec3::new(0.0, 3.0, 4.0);
+                            let entity = self.world.spawn((
+                                Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                                RigidBody::default(),
+                                Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+                                PlayerController::default(),
+                                Health::new(100.0),
+                                Networked(your_net_id),
+                            ));
+                            self.player_entity = Some(entity);
+                            self.net_id_to_entity.insert(your_net_id, entity);
+                            self.fp_camera = FirstPersonCamera::new();
+                            self.resume(ctx);
+                            log::info!("joined as {your_net_id:?}");
+                            self.hud.show_toast("Joined the game", 2.0);
+                        }
+                        ServerMessage::PlayerJoined { net_id, name } => {
+                            if Some(net_id) != client.my_net_id() && !self.net_id_to_entity.contains_key(&net_id) {
+                                let gl = ctx.gl();
+                                match self.spawn_remote_player_at(gl, net_id, Vec3::new(0.0, 3.0, 4.0), 0.0) {
+                                    Ok(entity) => {
+                                        self.net_id_to_entity.insert(net_id, entity);
+                                        log::info!("{name} joined ({net_id:?})");
+                                    }
+                                    Err(err) => log::error!("failed to spawn an avatar for {name}: {err}"),
+                                }
+                            }
+                        }
+                        ServerMessage::PlayerLeft { net_id } => {
+                            if let Some(entity) = self.net_id_to_entity.remove(&net_id) {
+                                let _ = self.world.despawn(entity);
+                            }
+                        }
+                        ServerMessage::CharacterSpawned { net_id, instance } => {
+                            let gl = ctx.gl();
+                            match self.spawn_character(gl, &instance) {
+                                Ok(entity) => {
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                }
+                                Err(err) => log::error!("failed to spawn '{}': {err}", instance.name),
+                            }
+                        }
+                        ServerMessage::Snapshot { players, characters, objects, removed, .. } => {
+                            for player in players {
+                                let Some(&entity) = self.net_id_to_entity.get(&player.net_id) else {
+                                    continue;
+                                };
+                                if Some(entity) == self.player_entity {
+                                    // Stored as a smoothing target, not
+                                    // applied directly — see
+                                    // `net_local_target`'s doc comment
+                                    // and `update_player_input`'s
+                                    // per-frame blend.
+                                    self.net_local_target = Some(Vec3::from(player.position));
+                                } else {
+                                    let _ = self.world.insert_one(
+                                        entity,
+                                        NetTarget {
+                                            position: Vec3::from(player.position),
+                                            rotation: Some(Quat::from_rotation_y(player.yaw_deg.to_radians())),
+                                        },
+                                    );
+                                }
+                                if let Some((current, max)) = player.health {
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(entity) {
+                                        health.current = current;
+                                        health.max = max;
+                                    }
+                                }
+                            }
+                            for character in characters {
+                                let Some(&entity) = self.net_id_to_entity.get(&character.net_id) else {
+                                    continue;
+                                };
+                                let _ = self.world.insert_one(
+                                    entity,
+                                    NetTarget { position: Vec3::from(character.position), rotation: None },
+                                );
+                                if let Some((current, max)) = character.health {
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(entity) {
+                                        health.current = current;
+                                        health.max = max;
+                                    }
+                                }
+                            }
+                            for object in objects {
+                                let Some(&entity) = self.net_id_to_entity.get(&object.net_id) else {
+                                    continue;
+                                };
+                                let _ = self.world.insert_one(
+                                    entity,
+                                    NetTarget {
+                                        position: Vec3::from(object.position),
+                                        rotation: Some(Quat::from_array(object.rotation)),
+                                    },
+                                );
+                            }
+                            for net_id in removed {
+                                if let Some(entity) = self.net_id_to_entity.remove(&net_id) {
+                                    let _ = self.world.despawn(entity);
+                                }
+                            }
+                        }
+                        ServerMessage::Dialogue { speaker, text, choices } => {
+                            self.hud.show_toast(&text, 3.0);
+                            self.net_dialogue = if choices.is_empty() { None } else { Some((speaker, text, choices)) };
+                        }
+                        ServerMessage::DialogueClosed => {
+                            self.net_dialogue = None;
+                        }
+                        ServerMessage::LevelTransition { level, spawn_position, spawn_yaw_deg, named_net_ids } => {
+                            let gl = ctx.gl();
+                            if let Err(err) = self.apply_level(gl, &level) {
+                                log::error!("failed to apply the host's level transition: {err}");
+                            }
+                            self.net_id_to_entity.clear();
+                            for (name, net_id) in named_net_ids {
+                                if let Some(entity) = self.find_entity_by_name(&name) {
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                }
+                            }
+                            // Same "spawn a fresh local avatar, position/
+                            // rotation host-authoritative from here" shape
+                            // as the initial `Welcome` handling — `apply_level`
+                            // just wiped the old one. Position is a
+                            // deterministic offset from the shared spawn
+                            // point (see `spawn_ring_offset`) computed
+                            // identically host- and client-side from just
+                            // this client's own `NetId`, so no extra data
+                            // needs to travel over the wire for it.
+                            if let Some(my_net_id) = client.my_net_id() {
+                                let (position, yaw_deg) =
+                                    spawn_ring_offset(Vec3::from(spawn_position), spawn_yaw_deg, my_net_id);
+                                let entity = self.world.spawn((
+                                    Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                                    RigidBody::default(),
+                                    Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+                                    PlayerController::default(),
+                                    Health::new(100.0),
+                                    Networked(my_net_id),
+                                ));
+                                self.player_entity = Some(entity);
+                                self.net_id_to_entity.insert(my_net_id, entity);
+                                self.fp_camera.pitch = 0.0;
+                                self.fp_camera.yaw = yaw_deg.to_radians();
+                            }
+                            self.hud.show_toast(&format!("Entering {}", level.name), 1.5);
+                        }
+                        ServerMessage::ParticleBurst { position, def, count } => {
+                            self.spawn_burst_at(Vec3::from(position), def, count);
+                        }
+                    }
+                }
+                if !client.is_connected() {
+                    log::warn!("disconnected from host — will attempt to reconnect");
+                    go_offline = true;
+                    start_reconnect = true;
+                }
+            }
+        }
+
+        self.net_mode = net_mode;
+        if go_offline {
+            self.disconnect_net();
+            if start_reconnect {
+                self.net_reconnect_attempts_left = NET_RECONNECT_MAX_ATTEMPTS;
+                self.net_reconnect_timer = NET_RECONNECT_INTERVAL_SECS;
+                self.hud.show_toast("Connection lost — reconnecting...", 2.0);
+            }
+            // Surface the disconnect immediately rather than leaving the
+            // player wondering why nothing else is moving anymore —
+            // pausing (if not already) brings up the pause menu, and with
+            // it the multiplayer panel showing the current status
+            // ("Reconnecting..." or "Offline"). No host migration: if
+            // the host quits, the session still ends for everyone.
+            if !self.paused {
+                self.pause(ctx);
+            }
+        }
+    }
+
+    /// Client-side: nudges every `NetTarget`-tagged entity's rendered
+    /// `Transform` toward its latest `Snapshot` value instead of snapping
+    /// to it instantly — see `NetTarget`'s doc comment for why. A no-op
+    /// in single-player/hosting, since nothing there is ever tagged
+    /// `NetTarget` (only client-side `Snapshot` handling inserts one).
+    fn smooth_networked_transforms(&mut self, dt: f32) {
+        const NET_REMOTE_SMOOTH_RATE: f32 = 15.0;
+        let alpha = (NET_REMOTE_SMOOTH_RATE * dt).min(1.0);
+        for (_entity, (transform, target)) in self.world.query::<(&mut Transform, &NetTarget)>().iter() {
+            transform.position = transform.position.lerp(target.position, alpha);
+            if let Some(rotation) = target.rotation {
+                transform.rotation = transform.rotation.slerp(rotation, alpha);
+            }
+        }
+    }
+
     /// Pause menu's "Restart Level" (offered instead of "Exit to Editor"
     /// when there's no editor to exit to — see `draw_pause_menu`) — reuses
     /// the existing snapshot/restore pair to reset the current Play
@@ -2810,27 +3710,12 @@ impl Sandbox {
         self.hud.show_toast("Checkpoint loaded", 1.5);
     }
 
-    /// Reads input each frame in Play mode and drives the player: mouse-look,
-    /// WASD movement, Space to jump. **This is the place to add your own
-    /// game's input handling** — swap the movement scheme, add sprint/crouch,
-    /// wire up new keys, etc. `interact` below is the sibling hook for
-    /// one-shot actions (currently bound to E).
-    fn update_player_input(&mut self, ctx: &mut Context, dt: f32) {
-        let Some(player) = self.player_entity else {
-            return;
-        };
-
-        // Gamepad right stick blends additively with mouse look — whichever
-        // is actually being used drives the camera, no mode switch needed.
-        // `CONTROLLER_LOOK_SPEED` is in radians/sec at full stick deflection.
-        const CONTROLLER_LOOK_SPEED: f32 = 2.5;
-        let (mouse_dx, mouse_dy) = ctx.input.mouse_delta();
-        let (right_stick_x, right_stick_y) = ctx.input.right_stick();
-        self.fp_camera.look(
-            mouse_dx as f32 * 0.0025 + right_stick_x * CONTROLLER_LOOK_SPEED * dt,
-            -mouse_dy as f32 * 0.0025 - right_stick_y * CONTROLLER_LOOK_SPEED * dt,
-        );
-
+    /// This frame's camera-relative horizontal move direction (WASD +
+    /// left-stick, blended, normalized, Y always 0) — factored out of
+    /// `update_player_input` so a `NetMode::Client` can send the exact
+    /// same world-space direction to the host via `ClientMessage::Input`
+    /// instead of re-deriving movement from raw key state a second way.
+    fn compute_move_dir(&self, ctx: &Context) -> Vec3 {
         let forward = self.fp_camera.forward();
         let right = self.fp_camera.right();
         // Flatten to the horizontal plane so looking up/down doesn't change ground speed.
@@ -2855,7 +3740,33 @@ impl Sandbox {
         // positive-down convention, so forward is `-left_stick_y`.
         let (left_stick_x, left_stick_y) = ctx.input.left_stick();
         move_dir += forward_flat * -left_stick_y + right_flat * left_stick_x;
-        move_dir = move_dir.normalize_or_zero();
+        move_dir.normalize_or_zero()
+    }
+
+    /// Reads input each frame in Play mode and drives the player: mouse-look,
+    /// WASD movement, Space to jump. **This is the place to add your own
+    /// game's input handling** — swap the movement scheme, add sprint/crouch,
+    /// wire up new keys, etc. `interact` below is the sibling hook for
+    /// one-shot actions (currently bound to E).
+    fn update_player_input(&mut self, ctx: &mut Context, dt: f32) {
+        let Some(player) = self.player_entity else {
+            return;
+        };
+
+        // Gamepad right stick blends additively with mouse look — whichever
+        // is actually being used drives the camera, no mode switch needed.
+        // `CONTROLLER_LOOK_SPEED` is in radians/sec at full stick deflection.
+        const CONTROLLER_LOOK_SPEED: f32 = 2.5;
+        let (mouse_dx, mouse_dy) = ctx.input.mouse_delta();
+        let (right_stick_x, right_stick_y) = ctx.input.right_stick();
+        self.fp_camera.look(
+            mouse_dx as f32 * 0.0025 + right_stick_x * CONTROLLER_LOOK_SPEED * dt,
+            -mouse_dy as f32 * 0.0025 - right_stick_y * CONTROLLER_LOOK_SPEED * dt,
+        );
+
+        let right = self.fp_camera.right();
+        let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+        let move_dir = self.compute_move_dir(ctx);
 
         // How much of this frame's movement is sideways, -1 (left) to 1
         // (right) — reused as-is for the strafe-tilt target rather than
@@ -2867,11 +3778,56 @@ impl Sandbox {
         self.landing_dip.update(dt);
 
         let mut jumped = false;
-        if let Ok(mut query) = self.world.query_one::<(&mut RigidBody, &PlayerController)>(player) {
-            if let Some((body, controller)) = query.get() {
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut RigidBody, &PlayerController)>(player) {
+            if let Some((transform, body, controller)) = query.get() {
                 let horizontal_velocity = move_dir * controller.move_speed;
                 body.velocity.x = horizontal_velocity.x;
                 body.velocity.z = horizontal_velocity.z;
+                // Under `NetMode::Client`, `physics::step` never runs
+                // locally (see `Game::update`'s `is_client` gate), so
+                // without this the camera's eye position (`player_eye_position`
+                // reads `Transform.position` directly) would only ever
+                // advance once per incoming `Snapshot` — 20Hz — making
+                // movement look stepped/frozen every frame in between.
+                // Dead reckoning smooths that out for X/Z; a gentle blend
+                // toward the latest `Snapshot` (all three axes, since Y
+                // has no local prediction of its own) corrects any drift
+                // every frame instead of either freezing between
+                // snapshots or hard-snapping on arrival — a hard snap
+                // was tried first and reproduced a visible wobble every
+                // ~50ms, since even tiny natural client/host timing
+                // differences show up as a full pop that way. See
+                // `net_local_target`'s doc comment.
+                if matches!(self.net_mode, NetMode::Client(_)) {
+                    transform.position.x += horizontal_velocity.x * dt;
+                    transform.position.z += horizontal_velocity.z * dt;
+                    if let Some(target) = self.net_local_target {
+                        const NET_LOCAL_SMOOTH_RATE: f32 = 10.0;
+                        let alpha = (NET_LOCAL_SMOOTH_RATE * dt).min(1.0);
+                        // X/Z: dead reckoning above already tracks the
+                        // host closely in the common case — continuously
+                        // blending toward a target that's merely a few
+                        // frames stale (ordinary network latency, not a
+                        // real desync) fights the player's own forward
+                        // momentum every frame and reads as a persistent
+                        // wobble/drag instead of smooth motion. Only
+                        // reconcile once the gap exceeds a small
+                        // tolerance, which only happens on a genuine
+                        // desync (e.g. the host stopped the player at a
+                        // wall the local prediction doesn't know about).
+                        const NET_LOCAL_XZ_DEADZONE: f32 = 0.3;
+                        let xz_error = Vec3::new(target.x - transform.position.x, 0.0, target.z - transform.position.z);
+                        if xz_error.length() > NET_LOCAL_XZ_DEADZONE {
+                            transform.position.x += xz_error.x * alpha;
+                            transform.position.z += xz_error.z * alpha;
+                        }
+                        // Y (jump/fall) has no local prediction to fight
+                        // — always blended, not gated behind a
+                        // tolerance, or it'd reintroduce the choppy
+                        // step-then-catch-up motion this replaced.
+                        transform.position.y += (target.y - transform.position.y) * alpha;
+                    }
+                }
                 self.head_bob.update(horizontal_velocity.length(), body.grounded, dt);
                 self.speed_fov.update(horizontal_velocity.length(), dt);
                 self.fp_camera.fov_y_radians = self.base_fov_radians + self.speed_fov.kick_radians();
@@ -2923,6 +3879,65 @@ impl Sandbox {
             move_dir -= Vec3::Y;
         }
         self.camera.target += move_dir.normalize_or_zero() * Self::EDITOR_CAMERA_MOVE_SPEED * dt;
+    }
+
+    /// `E`/gamepad-X dispatcher — offline or hosting, runs the normal local
+    /// `interact()` below unchanged (the host is always authoritative for
+    /// its own actions). Under `NetMode::Client`, every flavor of
+    /// interaction replicates — dialogue, hitting a hostile character,
+    /// a scripted object's own `on_interact`, and pushing a dynamic
+    /// object: it searches the client's own locally-mirrored `Networked`
+    /// characters/objects for the nearest one in range — the same
+    /// combined search `interact()` does locally, just against
+    /// replicated positions — and sends `ClientMessage::Interact` instead
+    /// of touching any component directly, since the actual state (a
+    /// `Dialogue`'s current node, a `Health`, a pushed object's
+    /// `RigidBody.velocity`) lives host-side only. The host resolves
+    /// which flavor applies (see `update_networking`'s `poll_interacts`
+    /// handling) using the exact same dispatch order `interact()` uses.
+    fn interact_or_send(&mut self) {
+        if self.net_dialogue.is_some() {
+            return;
+        }
+        let NetMode::Client(client) = &mut self.net_mode else {
+            self.interact();
+            return;
+        };
+        let Some(player) = self.player_entity else { return };
+        let Some(player_position) = self.world.get::<&Transform>(player).ok().map(|t| t.position) else {
+            return;
+        };
+        let Some(controller) = self.world.get::<&PlayerController>(player).ok().map(|c| *c) else {
+            return;
+        };
+
+        let mut nearest: Option<(NetId, f32)> = None;
+        for (_entity, (transform, networked, _meta)) in
+            self.world.query::<(&Transform, &Networked, &CharacterMeta)>().iter()
+        {
+            let distance = transform.position.distance(player_position);
+            if distance <= controller.interact_radius && nearest.is_none_or(|(_, best)| distance < best) {
+                nearest = Some((networked.0, distance));
+            }
+        }
+        for (_entity, (transform, networked, _meta)) in
+            self.world.query::<(&Transform, &Networked, &LevelObjectMeta)>().iter()
+        {
+            let distance = transform.position.distance(player_position);
+            if distance <= controller.interact_radius && nearest.is_none_or(|(_, best)| distance < best) {
+                nearest = Some((networked.0, distance));
+            }
+        }
+        if let Some((target, _)) = nearest {
+            client.send_interact(target);
+        }
+    }
+
+    /// Host-side: finds the entity currently tagged with `net_id`, if any
+    /// — a linear scan, fine at this engine's entity-count scale (see the
+    /// plan's stated simplifications for `NetId` lookups in general).
+    fn find_networked_entity(&self, net_id: NetId) -> Option<Entity> {
+        self.world.query::<&Networked>().iter().find(|(_, networked)| networked.0 == net_id).map(|(e, _)| e)
     }
 
     /// Pushes the nearest dynamic level object within reach with an outward
@@ -3082,16 +4097,34 @@ impl Sandbox {
         }
     }
 
-    /// Draws the choice-picker overlay while `active_dialogue` is set —
-    /// bottom-center, numbered to match the 1-9 key hints. A no-op (and
-    /// self-healing) if the character despawned or its current node no
-    /// longer has choices; `active_dialogue` itself is only cleared by
-    /// `choose_dialogue_option`, so a stale reference just draws nothing
-    /// here until the next successful/failed pick clears it.
+    /// Client-side sibling to `choose_dialogue_option` — sends the pick to
+    /// the host instead of resolving it locally, since under
+    /// `NetMode::Client` the `Dialogue` component itself lives host-side
+    /// only. Clears `net_dialogue` regardless of connection state, same
+    /// "the prompt was only ever for this one pick" reasoning.
+    fn choose_net_dialogue_option(&mut self, index: usize) {
+        let Some((speaker, _, _)) = self.net_dialogue.take() else { return };
+        if let NetMode::Client(client) = &mut self.net_mode {
+            client.send_dialogue_choice(speaker, index);
+        }
+    }
+
+    /// Draws the choice-picker overlay while `active_dialogue` (offline/
+    /// host) or `net_dialogue` (client) is set — bottom-center, numbered to
+    /// match the 1-9 key hints. A no-op (and self-healing) if the character
+    /// despawned or its current node no longer has choices; `active_dialogue`
+    /// itself is only cleared by `choose_dialogue_option`, so a stale
+    /// reference just draws nothing here until the next successful/failed
+    /// pick clears it.
     fn draw_dialogue_choices(&self, egui_ctx: &egui::Context) {
-        let Some(entity) = self.active_dialogue else { return };
-        let Ok(dialogue) = self.world.get::<&Dialogue>(entity) else { return };
-        let choices = dialogue.current_choices();
+        let choices: Vec<(String, usize)> = if let Some(entity) = self.active_dialogue {
+            let Ok(dialogue) = self.world.get::<&Dialogue>(entity) else { return };
+            dialogue.current_choices().to_vec()
+        } else if let Some((_, _, choices)) = &self.net_dialogue {
+            choices.clone()
+        } else {
+            return;
+        };
         if choices.is_empty() {
             return;
         }
@@ -3113,10 +4146,22 @@ impl Sandbox {
     /// particle it made has aged out (see `Game::update`). Ties particles +
     /// physics + the `interact` hook together, the same demo spirit as the
     /// jump/push tones.
+    ///
+    /// If hosting, also broadcasts the burst to every connected client —
+    /// a purely cosmetic effect like this has no `Networked` entity of
+    /// its own to ride along on a `Snapshot`, so without this, particle
+    /// feedback for a network-triggered action (a client pushing an
+    /// object, a hostile character dying) would only ever show up on the
+    /// *host's* screen. Every call site gets this for free, host-only
+    /// (`broadcast_if_hosting` is a silent no-op offline/as a client);
+    /// the client-side `ServerMessage::ParticleBurst` handler calls this
+    /// same function to actually spawn the effect, so there's no
+    /// separate client-side particle-spawning path to keep in sync.
     fn spawn_burst_at(&mut self, position: Vec3, def: ParticleEmitterDef, count: u32) {
         let mut emitter = ParticleEmitter::new(def);
         emitter.spawn_burst(position, count);
         self.world.spawn((Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE }, emitter));
+        self.broadcast_if_hosting(&ServerMessage::ParticleBurst { position: position.to_array(), def, count });
     }
 
     /// Sibling to `interact` for the other kind of "things that happen when
@@ -3302,6 +4347,103 @@ impl Sandbox {
         // one after `world.clear()` resets id generations.
         self.trigger_overlaps.clear();
         self.hud.show_toast(&format!("Entering {}", level.name), 1.5);
+
+        // Only the host's own local player can trigger a transition at all
+        // (a remote player physically overlapping the same trigger in the
+        // host's simulation is never checked — see the plan's stated
+        // simplifications), so if hosting, this is always host-initiated:
+        // `apply_level` above just wiped every remote player's avatar and
+        // every character/object's `Networked` tag along with everything
+        // else — rebuild both and tell every connected client to follow.
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        if let NetMode::Host(host) = &mut net_mode {
+            let net_id = host.allocate_net_id();
+            let _ = self.world.insert_one(entity, Networked(net_id));
+
+            let characters: Vec<Entity> = self.world.query::<&CharacterMeta>().iter().map(|(e, _)| e).collect();
+            for char_entity in characters {
+                let net_id = host.allocate_net_id();
+                let _ = self.world.insert_one(char_entity, Networked(net_id));
+            }
+            let interactable_objects: Vec<Entity> = self
+                .world
+                .query::<&LevelObjectMeta>()
+                .iter()
+                .filter(|&(entity, _)| {
+                    self.world.get::<&RigidBody>(entity).is_ok() || self.world.get::<&BehaviorSlot>(entity).is_ok()
+                })
+                .map(|(e, _)| e)
+                .collect();
+            for obj_entity in interactable_objects {
+                let net_id = host.allocate_net_id();
+                let _ = self.world.insert_one(obj_entity, Networked(net_id));
+            }
+
+            let remote_ids = host.connected_ids();
+            self.remote_players.clear();
+            for remote_id in remote_ids {
+                match self.spawn_remote_player_at(
+                    gl,
+                    remote_id,
+                    Vec3::from(transition.spawn_position),
+                    transition.spawn_yaw_deg,
+                ) {
+                    Ok(remote_entity) => {
+                        self.remote_players.insert(remote_id, remote_entity);
+                    }
+                    Err(err) => log::error!("failed to respawn a remote player after transition: {err}"),
+                }
+            }
+
+            let named_net_ids = self.build_named_net_ids();
+            host.broadcast(&ServerMessage::LevelTransition {
+                level,
+                spawn_position: transition.spawn_position,
+                spawn_yaw_deg: transition.spawn_yaw_deg,
+                named_net_ids,
+            });
+        }
+        self.net_mode = net_mode;
+    }
+
+    /// Host-side: permitted remote players (see
+    /// `Sandbox.remote_level_switch_permission` and the multiplayer
+    /// panel's per-player "Can switch levels" checkbox) can also trigger
+    /// a level transition — checked separately from the host's own
+    /// trigger-overlap bookkeeping in `Game::update`
+    /// (`trigger_overlaps`/`on_trigger_entered`), since firing the full
+    /// generic trigger dispatch for a remote player's overlap would
+    /// wrongly flash/shake the *host's* own screen and log/play a sound
+    /// for something only the remote player is near. No enter/exit
+    /// diffing here (unlike `trigger_overlaps`) — mirrors the same
+    /// acceptable one-frame re-trigger risk the host's own transition
+    /// already has (`trigger_overlaps` is cleared by
+    /// `transition_to_level` too), since a transition wipes the whole
+    /// world anyway. Returns `true` if a transition fired.
+    fn check_remote_level_switch_triggers(&mut self, gl: &glow::Context, overlaps: &[(Entity, Entity)]) -> bool {
+        if !matches!(self.net_mode, NetMode::Host(_)) {
+            return false;
+        }
+        let permitted_entered: Vec<Entity> = overlaps
+            .iter()
+            .filter_map(|&(dynamic, trigger)| {
+                self.remote_players
+                    .iter()
+                    .find(|&(_, &entity)| entity == dynamic)
+                    .map(|(&net_id, _)| (net_id, trigger))
+            })
+            .filter(|(net_id, _)| self.remote_level_switch_permission.get(net_id).copied().unwrap_or(false))
+            .map(|(_, trigger)| trigger)
+            .collect();
+        for trigger in permitted_entered {
+            let transition =
+                self.world.get::<&LevelObjectMeta>(trigger).ok().and_then(|meta| meta.level_transition.clone());
+            if let Some(transition) = transition {
+                self.transition_to_level(gl, &transition);
+                return true;
+            }
+        }
+        false
     }
 
     fn on_trigger_exited(&mut self, trigger: Entity) {
@@ -5672,21 +6814,28 @@ impl Game for Sandbox {
                 repeat: false,
                 ..
             } if self.mode == EditorMode::Play && !self.paused => {
-                self.interact();
+                self.interact_or_send();
             }
             Event::KeyDown {
                 keycode: Some(keycode),
                 repeat: false,
                 ..
-            } if self.mode == EditorMode::Play && !self.paused && self.active_dialogue.is_some() => {
+            } if self.mode == EditorMode::Play
+                && !self.paused
+                && (self.active_dialogue.is_some() || self.net_dialogue.is_some()) =>
+            {
                 if let Some(choice_index) = number_key_index(keycode) {
-                    self.choose_dialogue_option(choice_index);
+                    if self.net_dialogue.is_some() {
+                        self.choose_net_dialogue_option(choice_index);
+                    } else {
+                        self.choose_dialogue_option(choice_index);
+                    }
                 }
             }
             Event::ControllerButtonDown { button: ControllerButton::X, .. }
                 if self.mode == EditorMode::Play && !self.paused =>
             {
-                self.interact();
+                self.interact_or_send();
             }
             _ => {}
         }
@@ -5703,6 +6852,12 @@ impl Game for Sandbox {
         if !hot_reload_changes.is_empty() {
             self.handle_hot_reload(ctx, &hot_reload_changes);
         }
+
+        // Network I/O is polled unconditionally, every frame, regardless of
+        // `paused`/Edit-vs-Play — sockets never block (see `engine::net`),
+        // and a paused game shouldn't stop noticing a dropped connection or
+        // a newly-joined player.
+        self.update_networking(ctx, dt);
 
         // Runs in both Edit and Play mode — a live preview while editing
         // costs nothing extra and is a nice default. The one exception is a
@@ -5729,6 +6884,7 @@ impl Game for Sandbox {
             }
             self.hud.tick(dt);
             self.screen_effects.tick(dt);
+            self.smooth_networked_transforms(dt);
         }
 
         if self.mode == EditorMode::Edit {
@@ -5741,6 +6897,30 @@ impl Game for Sandbox {
         if self.mode == EditorMode::Play && !self.paused {
             self.update_player_input(ctx, dt);
 
+            // `update_player_input` above still runs unconditionally — it
+            // drives local camera feel (look, head bob, strafe tilt, FOV
+            // kick) and sets `RigidBody.velocity` on `player_entity`, but
+            // that velocity is simply never consumed client-side (physics
+            // isn't stepped there, see below), so it's harmless. A client
+            // additionally reports its intent to the host instead of
+            // simulating locally.
+            let is_client = matches!(self.net_mode, NetMode::Client(_));
+            if is_client {
+                let move_dir = self.compute_move_dir(ctx);
+                let jump = ctx.input.just_pressed(Keycode::Space)
+                    || ctx.input.controller_just_pressed(ControllerButton::A);
+                let input = InputState {
+                    move_dir: [move_dir.x, move_dir.z],
+                    yaw_deg: self.fp_camera.yaw.to_degrees(),
+                    pitch_deg: self.fp_camera.pitch.to_degrees(),
+                    jump,
+                };
+                if let NetMode::Client(client) = &mut self.net_mode {
+                    client.send_input(&input);
+                }
+            }
+
+        if !is_client {
             // Collected up front (mirrors the physics-collider pattern
             // above) so dispatching `on_update` can freely use `&mut self`
             // per entity without holding this query's borrow of `world`.
@@ -5754,24 +6934,53 @@ impl Game for Sandbox {
             // — which can call `restart_level` (needs the whole `&mut
             // self`) — never fights a live borrow of `self.nav_grid`.
             if let Some(nav_grid) = self.nav_grid.take() {
-                let player_position = self
+                // Every player currently in the session — the host's own
+                // local player plus every connected remote player's
+                // avatar (see `engine::net`) — so hostile/passive AI
+                // reacts to whichever one is actually nearest instead of
+                // being blind to everyone but the host.
+                let player_positions: Vec<(Entity, Vec3)> = self
                     .player_entity
-                    .and_then(|entity| self.world.get::<&Transform>(entity).ok())
-                    .map(|transform| transform.position)
-                    .unwrap_or(Vec3::ZERO);
-                let events = engine::ai::step(&mut self.world, dt, player_position, &nav_grid);
+                    .iter()
+                    .chain(self.remote_players.values())
+                    .filter_map(|&entity| self.world.get::<&Transform>(entity).ok().map(|t| (entity, t.position)))
+                    .collect();
+                let events = engine::ai::step(&mut self.world, dt, &player_positions, &nav_grid);
                 self.nav_grid = Some(nav_grid);
 
                 for event in events {
                     match event {
-                        AiEvent::AttackedPlayer { damage, .. } => {
-                            let Some(player) = self.player_entity else { continue };
+                        AiEvent::AttackedPlayer { player, damage, .. } => {
                             let mut died = false;
                             if let Ok(mut query) = self.world.query_one::<&mut Health>(player) {
                                 if let Some(health) = query.get() {
                                     health.damage(damage);
                                     died = health.is_dead();
                                 }
+                            }
+                            // Only flash/shake the HOST's own screen when
+                            // the host's own local player was the one
+                            // hit — a remote player taking damage has no
+                            // bearing on what the host is looking at
+                            // (mirrors `check_remote_level_switch_triggers`'s
+                            // same reasoning).
+                            if Some(player) != self.player_entity {
+                                if died {
+                                    // No shared death/respawn flow exists
+                                    // yet for anyone but the host's own
+                                    // local player (see the multiplayer
+                                    // plan's stated simplifications) — a
+                                    // full heal in place is the simplest
+                                    // reasonable outcome, rather than
+                                    // leaving them stuck at 0 HP forever
+                                    // or restarting the level for
+                                    // everyone over one player's death.
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(player) {
+                                        health.current = health.max;
+                                    }
+                                    self.hud.show_toast("A player was knocked out and recovered", 2.0);
+                                }
+                                continue;
                             }
                             self.screen_effects.trigger(ScreenEffectSpec {
                                 color: [0.9, 0.15, 0.1],
@@ -5790,6 +6999,14 @@ impl Game for Sandbox {
                         AiEvent::CharacterDied { entity, position } => {
                             if let Ok(meta) = self.world.get::<&CharacterMeta>(entity) {
                                 self.despawned_since_load.push(meta.name.clone());
+                            }
+                            // Captured before despawn so the next `Snapshot`
+                            // broadcast tells clients to despawn their copy
+                            // too, instead of leaving a dead character's
+                            // cube standing forever (`Networked` only
+                            // exists at all while hosting).
+                            if let Ok(networked) = self.world.get::<&Networked>(entity) {
+                                self.net_removed.push(networked.0);
                             }
                             let _ = self.world.despawn(entity);
                             self.spawn_burst_at(position, ParticleEmitterDef::default(), 16);
@@ -5819,6 +7036,18 @@ impl Game for Sandbox {
                                     state.track_spawned(entity);
                                 }
                             }
+                            // If hosting, this new character needs an
+                            // identity and an announcement — a joined
+                            // client only ever learns about entities that
+                            // existed at `Welcome` time (via
+                            // `named_net_ids`) or arrive afterward through
+                            // an explicit event like this one.
+                            if let Some(net_id) = self.assign_net_id_if_hosting(entity) {
+                                self.broadcast_if_hosting(&ServerMessage::CharacterSpawned {
+                                    net_id,
+                                    instance: request.instance.clone(),
+                                });
+                            }
                         }
                         Err(err) => log::error!("spawner failed to spawn character: {err}"),
                     }
@@ -5847,7 +7076,8 @@ impl Game for Sandbox {
             self.was_grounded = now_grounded;
 
             let current: HashSet<(Entity, Entity)> = overlaps
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|&(dynamic, _other)| dynamic == player)
                 .collect();
 
@@ -5875,11 +7105,15 @@ impl Game for Sandbox {
                 }
             }
             if !transitioned {
+                transitioned = self.check_remote_level_switch_triggers(gl, &overlaps);
+            }
+            if !transitioned {
                 for trigger in exited {
                     self.on_trigger_exited(trigger);
                 }
                 self.trigger_overlaps = current;
             }
+        }
         }
         Ok(())
     }
@@ -6076,6 +7310,25 @@ impl Game for Sandbox {
         let level_ui_visible = self.level_ui_visible && editing;
         let playing = self.mode == EditorMode::Play;
         let mut pause_menu_action: Option<PauseMenuAction> = None;
+        let mut multiplayer_action: Option<engine::ui::MultiplayerAction> = None;
+        let net_status_text = self.net_status_text();
+        let net_connected = matches!(self.net_mode, NetMode::Host(_))
+            || matches!(&self.net_mode, NetMode::Client(client) if client.is_connected());
+        // Host-only roster for the multiplayer panel's player list — a
+        // client sees `&[]` (see `draw_multiplayer_panel`'s doc comment).
+        let net_players: Vec<(NetId, String, bool)> = if let NetMode::Host(host) = &self.net_mode {
+            host.connected_ids()
+                .into_iter()
+                .filter_map(|net_id| {
+                    host.player_name(net_id).map(|name| {
+                        let allowed = self.remote_level_switch_permission.get(&net_id).copied().unwrap_or(false);
+                        (net_id, name.to_string(), allowed)
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut picked_texture: Option<PathBuf> = None;
         let full_output = ui_state.run(drawable_size, |egui_ctx| {
             if profiler_visible {
@@ -6124,6 +7377,15 @@ impl Game for Sandbox {
                 self.draw_dialogue_choices(egui_ctx);
                 if self.paused {
                     pause_menu_action = draw_pause_menu(egui_ctx, editor_available());
+                    multiplayer_action = engine::ui::draw_multiplayer_panel(
+                        egui_ctx,
+                        &net_status_text,
+                        net_connected,
+                        self.net_reconnect_attempts_left > 0,
+                        &mut self.net_join_address,
+                        &mut self.net_player_name,
+                        &net_players,
+                    );
                 }
             }
         });
@@ -6180,6 +7442,17 @@ impl Game for Sandbox {
             Some(PauseMenuAction::ExitToEditor) => self.exit_play_mode(ctx),
             Some(PauseMenuAction::RestartLevel) => self.restart_level(ctx),
             Some(PauseMenuAction::QuitGame) => ctx.should_quit = true,
+            None => {}
+        }
+
+        match multiplayer_action {
+            Some(engine::ui::MultiplayerAction::Host) => self.start_hosting(),
+            Some(engine::ui::MultiplayerAction::Join) => self.join_game(),
+            Some(engine::ui::MultiplayerAction::Disconnect) => self.disconnect_net(),
+            Some(engine::ui::MultiplayerAction::SetLevelSwitchPermission { net_id, allowed }) => {
+                self.set_level_switch_permission(net_id, allowed);
+            }
+            Some(engine::ui::MultiplayerAction::CancelReconnect) => self.cancel_reconnect(),
             None => {}
         }
 

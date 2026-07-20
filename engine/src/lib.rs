@@ -11,6 +11,7 @@ pub mod hud;
 pub mod input;
 pub mod level;
 pub mod mesh;
+pub mod net;
 pub mod particles;
 pub mod pathfinding;
 pub mod physics;

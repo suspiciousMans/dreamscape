@@ -1471,6 +1471,231 @@ cargo run -p sandbox -- --smoke-test scripts/smoke/basic_playthrough.pss
 cargo run -p mushroom_man -- --smoke-test scripts/smoke/talk_to_sprite.pss
 ```
 
+## Multiplayer
+
+`engine::net` adds listen-server multiplayer — one player's own instance
+hosts (`NetHost`), 2-4 total players connect directly over LAN
+(`NetClient`), full world state syncs so everyone sees the same AI
+characters, physics props, dialogue, and level transitions. No dedicated
+server, no NAT traversal/matchmaking, no async runtime: plain non-blocking
+`std::net::{TcpListener, TcpStream}`, polled once per `Game::update()` call
+alongside everything else in the engine's single-threaded frame loop.
+
+**Transport & framing**: length-prefixed `bincode` frames (`u32` LE length
++ payload) over TCP — TCP's head-of-line blocking is a non-issue at LAN
+latencies and a 20Hz snapshot rate, and its built-in ordering/reliability
+is free, so there's no hand-rolled UDP netcode. `engine::net::framing::NetConnection`
+wraps one `TcpStream`: reads accumulate into a buffer (`WouldBlock` just
+means "nothing more this frame," not an error) and drain complete frames,
+leaving any trailing partial frame for next frame; writes queue into a
+`VecDeque<Vec<u8>>` and drain opportunistically, so a send never blocks.
+Same "poll once per frame, never block" contract as `HotReloadWatcher::poll_events`.
+
+**Protocol** (`engine::net::protocol`): `ClientMessage::{Hello, Input,
+Interact, DialogueChoice, Disconnect}` and `ServerMessage::{Welcome,
+Reject, PlayerJoined, PlayerLeft, CharacterSpawned, Snapshot, Dialogue,
+DialogueClosed, LevelTransition}`. `Hello`/`Welcome` carry a
+`PROTOCOL_VERSION` that must match exactly — unlike `Level`/`SaveData`'s
+RON + `#[serde(default)]` fields, `bincode`'s wire format is positional,
+so there's no cross-version compatibility; a mismatch gets `Reject`.
+`Snapshot` broadcasts host→all at a fixed **20 Hz** (`NetHost::should_send_snapshot`'s
+own `dt` accumulator, decoupled from render frame rate) with **full state,
+no delta compression** — the simplest thing that works at 2-4 players.
+
+**Entity replication**: `NetId(u32)` is a host-assigned identity,
+independent of `hecs::Entity` (which is process-local and not
+serde-serializable). Every player, `CharacterMeta` character, and dynamic
+physics prop gets one via a `Networked(NetId)` component; static level
+geometry never does — the `Level` sent whole in `Welcome`/`LevelTransition`
+plus the existing `apply_level` already reconstructs it identically on
+every peer. A joining/transitioning client learns which of its own
+freshly-`apply_level`'d entities map to which `NetId` via `Welcome`/
+`LevelTransition`'s `named_net_ids: Vec<(String, NetId)>` side-list,
+matched by name (`Sandbox::find_entity_by_name`) rather than spawn order —
+robust to `apply_level`'s internal ordering, at the cost of requiring
+object/character names to be unique within a level (not currently
+enforced by the F2 editor). Despawned networked entities (an
+`AiEvent::CharacterDied`) get flushed into the next `Snapshot`'s `removed`
+list via `Sandbox.net_removed`.
+
+**Movement is host-authoritative**, but a straight 20Hz-snapshot-only
+approach read as visibly choppy, so two layers of client-side smoothing
+sit on top of it:
+
+- **The local player's own X/Z** is dead-reckoned every frame: a client
+  computes its own camera-relative `move_dir` (`Sandbox::compute_move_dir`,
+  factored out of `update_player_input`) and both sends it as
+  `ClientMessage::Input` *and* integrates it directly into its own
+  `Transform.position` locally, so movement feels instantly responsive
+  instead of stepping once per snapshot. Both X/Z and **Y** (jump/fall,
+  which has no local prediction of its own) are then reconciled against
+  the latest `Snapshot`'s value (`Sandbox.net_local_target`, updated in
+  `update_networking`), but not the same way: a hard snap on arrival was
+  tried first and made the joining client's own view visibly wobble
+  every ~50ms (even tiny natural client/host timing differences show up
+  as a full pop that way); a continuous per-frame blend toward the
+  target was tried next and *still* wobbled, because dead reckoning
+  keeps pushing X/Z forward every frame while the blend simultaneously
+  pulls it back toward a target that's merely a few frames stale —
+  fighting the player's own momentum reads as a persistent drag/wobble
+  even with no real desync at all. The fix (`update_player_input`):
+  **Y** blends every frame unconditionally (`NET_LOCAL_SMOOTH_RATE`),
+  since it has nothing else pulling on it; **X/Z** only blends once the
+  gap from `net_local_target` exceeds a small dead zone
+  (`NET_LOCAL_XZ_DEADZONE`), so ordinary tracking noise is left alone
+  entirely and correction only ever kicks in for a genuine desync — the
+  host stopping the player at a wall the local prediction doesn't know
+  about.
+- **Everything else** (other players, AI characters, dynamic physics
+  props) gets a `NetTarget` component instead of a hard `Transform`
+  overwrite: `Sandbox::smooth_networked_transforms` lerps position/rotation
+  toward the latest snapshot value every frame, so a pushed box or a
+  remote player's avatar reads as continuous motion instead of a 20Hz
+  flipbook.
+
+A client's own `fp_camera.yaw`/`pitch` still update instantly and locally
+(pure view direction, nothing to reconcile).
+
+**Join flow**: host clicks **Host Game** (new multiplayer panel, drawn
+alongside the pause menu — `engine::ui::draw_multiplayer_panel`) →
+`NetHost::bind(engine::net::DEFAULT_PORT)`. A joiner types `IP:port`,
+clicks **Join** → `NetClient::connect` (one bounded ~2s blocking call on
+the button click, not per-frame — an acceptable one-time hitch). The
+client sends `Hello`; the host checks `PROTOCOL_VERSION` and
+`engine::net::MAX_PLAYERS` (4), assigns a `NetId`, spawns a visible
+`RemotePlayer`-tagged avatar (`Sandbox::spawn_remote_player_at` — same
+physical shape as the local player plus a cube `MeshRenderer`, since a
+remote player needs to actually be seen), and replies `Welcome` with the
+host's current `Level` plus `named_net_ids`. The host also synthesizes
+`PlayerJoined` for its own player and every other already-connected remote,
+so a late joiner learns about everyone. `spawn_ring_offset(base_position,
+base_yaw_deg, net_id)` gives every player a small deterministic spread
+around a shared spawn point (initial join or a level transition) so 2-4
+players don't stack on top of each other — computed identically host- and
+client-side from just a `NetId`, so no extra position data travels over
+the wire for it.
+
+**Level transitions are host-only authoritative by default**, and this
+falls out of existing code almost for free: `transition_to_level` was
+already only ever triggered by `player_entity`-specific trigger-overlap
+checks, so a remote player's entity overlapping the same trigger in the
+host's own simulation was never checked — walking into an exit trigger as
+a non-hosting client does nothing by default. When the host's own trigger
+fires a transition, it broadcasts `ServerMessage::LevelTransition` and
+repositions every remote player via `spawn_ring_offset`, same as the
+initial join.
+
+**Per-player level-switch permission**: the host can grant individual
+connected players the ability to trigger transitions themselves, via a
+**"Players"** list in the multiplayer panel (host-only — a client isn't
+shown the roster, it just discovers the exit works once granted) with a
+**"Can switch levels"** checkbox per name, backed by
+`Sandbox.remote_level_switch_permission: HashMap<NetId, bool>`. This is
+enforced entirely host-side with no protocol change:
+`check_remote_level_switch_triggers` (called from `Game::update`
+alongside the host's own `trigger_overlaps` handling) separately checks
+whether any *permitted* remote player's entity is overlapping a
+level-transition trigger this frame, deliberately bypassing the full
+`on_trigger_entered` dispatch (sound/behavior-script/screen-flash/
+camera-shake) since those are tied to what the *host's* own screen is
+showing, not a remote player's.
+
+**AI perception is aware of every connected player**, not just the
+host's own local one: `engine::ai::step` takes `player_positions: &[(Entity,
+Vec3)]` — the host's own local player plus every `remote_players` entity
+— and each character reacts to whichever one is physically nearest,
+recomputed every call so retargeting mid-chase (or mid-attack-cooldown)
+follows whoever gets closer. `AiEvent::AttackedPlayer` now carries which
+player entity was actually hit (`player: Entity`), so damage lands on the
+right one; the host only flashes/shakes its *own* screen when its own
+local player was hit (a remote player taking damage has no bearing on
+what the host is looking at, same reasoning as the level-switch-permission
+check above). There's still no shared death/respawn flow for anyone but
+the host's own local player — a remote player reaching 0 HP is just fully
+healed in place with a toast, rather than being left stuck or restarting
+the level for everyone over one player's death.
+
+**Every flavor of `interact()` replicates** — dialogue, hitting a hostile
+character, a scripted object's own `on_interact`, and pushing a dynamic
+object — all through the same single `ClientMessage::Interact { target:
+NetId }` message. `Sandbox::interact_or_send` dispatches — offline or
+hosting, it's the normal local `interact()`; under `NetMode::Client`, it
+searches the client's own locally-mirrored `Networked` characters *and*
+objects for the nearest one in range and sends the target's `NetId`
+instead of touching anything directly. The host resolves what that
+target actually means, using the exact same order `interact()` itself
+checks locally:
+
+1. Has a `Dialogue` component → unicast dialogue (advances/replies with
+   `Dialogue`/`DialogueClosed` to just that one connection).
+2. A `Hostile` character with `Health` → the same fixed
+   `PLAYER_ATTACK_DAMAGE` hit; death is handled next frame via the usual
+   `AiEvent::CharacterDied` path, same as any other death.
+3. Has a `BehaviorSlot` → its own `on_interact` runs, exactly as if the
+   host's own player had interacted with it.
+4. Otherwise → a push, using the same outward impulse `interact()` uses
+   locally, computed from the *requesting client's own* remote-avatar
+   position (`self.remote_players.get(&requester)`) rather than the
+   host's own player, so the shove direction is correct.
+
+For a scripted/behavior object to ever be reachable this way, it has to
+be tagged `Networked` while hosting — `start_hosting`/`transition_to_level`'s
+object-tagging loop covers anything `interact()` itself would consider
+interactable (`RigidBody` *or* `BehaviorSlot`), not just dynamic physics
+props, specifically so this resolves for non-dynamic scripted objects
+too. None of these resulting state changes (`Health.current`,
+`RigidBody.velocity`, a `Dialogue`'s current node) need an extra
+broadcast — they reach every client for free via the next periodic
+`Snapshot` (or, for dialogue, the direct unicast reply above).
+`Sandbox.net_dialogue` is the client-side sibling to `active_dialogue`,
+driving the same `draw_dialogue_choices` overlay and 1-9 number-key
+handler.
+
+**Particle bursts replicate too**, via `ServerMessage::ParticleBurst
+{ position, def, count }` — a cosmetic-only `ParticleEmitter` (a pushed
+object's puff, a hostile hit, a character death) has no `Networked`
+entity of its own to ride along on a `Snapshot`, so `Sandbox::spawn_burst_at`
+itself broadcasts to every connected client whenever it's called while
+hosting (`broadcast_if_hosting` — a silent no-op offline/as a client),
+and the client's own handler for the message just calls the same
+`spawn_burst_at` again locally. Every one of `spawn_burst_at`'s existing
+call sites gets this for free with no changes needed at the call site
+itself — without it, particle feedback for a network-triggered action
+(a client pushing an object, a hostile character dying to a client's
+attack) would only ever have shown up on the *host's* own screen.
+
+**Disconnect & automatic reconnect**: the host detects a dropped
+connection, despawns that player's avatar, and broadcasts `PlayerLeft`. A
+client whose connection unexpectedly drops shows a toast and
+automatically retries — `update_networking` counts down
+`Sandbox.net_reconnect_attempts_left` (5 attempts, 3s apart) and re-runs
+the exact same `NetClient::connect` call `join_game` makes from a button
+click, reusing the last-known `net_join_address`/`net_player_name`; the
+multiplayer panel shows "Reconnecting... (N attempts left)" with a
+**Cancel** button in place of the normal buttons while this runs. A
+successful reconnect rejoins as a brand-new player (fresh avatar, fresh
+spawn point) — this is a convenience retry, not a session/identity resume,
+so no health/position/inventory state survives the drop. A manual
+**Disconnect** click, or clicking **Join**/**Host** again, always cancels
+any in-progress reconnect sequence. Deliberately rejected connections
+(`ServerMessage::Reject`, e.g. a version mismatch or a full lobby) don't
+trigger a retry, since retrying would just hit the same rejection again.
+There's still no host migration: if the host quits, the session ends for
+everyone.
+
+**Stated simplifications**: no client-side prediction/interpolation for
+anything but position (see the smoothing section above — mouse-look is
+still instant, but there's no rewind/replay reconciliation for e.g. a
+missed dodge), no delta compression, no host migration, no NAT
+traversal/matchmaking/LAN discovery (direct `IP:port` only), no F2 level
+editing while a session is active, no chat/voice, and a trust-the-LAN-peer
+model with no anti-cheat beyond what `physics::step` already imposes.
+
+`games/sandbox`, `games/mushroom_man`, and `games/walkaround_demo` all
+carry the identical implementation. To try it: run two copies of the same
+game, **Esc** to pause in one, click **Host Game**, then in the other type
+`127.0.0.1:7777` (or the host's LAN IP) and click **Join**.
+
 ## Adding a new, separate game
 
 **Fastest path:** `.\new_game.ps1 -Name mygame` copies `games/sandbox` as a
