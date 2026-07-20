@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use glam::{EulerRot, Quat};
@@ -48,23 +49,32 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
     let (document, buffers, images) = gltf::import(path)?;
     let mut meshes = Vec::new();
 
+    // Precompute `child node index -> parent's imported name` in a single
+    // pass. Only mesh-carrying parents are recorded — every `RigPartDef` in
+    // the output is itself mesh-carrying, so a reference to a non-mesh
+    // "group" node would dangle; a node parented under such a group
+    // therefore imports as a root part at its own *local* transform (a
+    // stated limitation, fine for the common "every part is its own mesh
+    // node" export). The parent's name uses the SAME synthesized fallback
+    // as `node_name` below, so a child of an *unnamed* mesh parent still
+    // links to the exact name that parent was imported under instead of
+    // losing the link. This also replaces a former O(n^2) per-node scan
+    // with an O(n) build + O(1) lookup.
+    let mut parent_name_of: HashMap<usize, String> = HashMap::new();
+    for node in document.nodes() {
+        if node.mesh().is_none() {
+            continue;
+        }
+        let name = node.name().map(str::to_string).unwrap_or_else(|| format!("node_{}", node.index()));
+        for child in node.children() {
+            parent_name_of.insert(child.index(), name.clone());
+        }
+    }
+
     for node in document.nodes() {
         let Some(mesh) = node.mesh() else { continue };
         let node_name = node.name().map(str::to_string).unwrap_or_else(|| format!("node_{}", node.index()));
-        // Only a mesh-carrying ancestor can become this part's `parent`
-        // (every `RigPartDef` in the output is itself mesh-carrying, so a
-        // reference to a non-mesh node would dangle). A node parented
-        // under a non-mesh "group" node therefore imports as a root part
-        // at its own *local* transform, not composed with the skipped
-        // group's transform — a stated limitation of this simple importer,
-        // fine for the common "every part is its own mesh node" case a
-        // typical low-poly/segmented rig export produces.
-        let parent_name = document
-            .nodes()
-            .find(|candidate| {
-                candidate.mesh().is_some() && candidate.children().any(|child| child.index() == node.index())
-            })
-            .and_then(|parent| parent.name().map(str::to_string));
+        let parent_name = parent_name_of.get(&node.index()).cloned();
 
         let (translation, rotation, scale) = node.transform().decomposed();
         let (rx, ry, rz) = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).to_euler(EulerRot::XYZ);

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use glam::{Quat, Vec3};
@@ -299,24 +299,37 @@ pub fn update_world_transforms(world: &mut hecs::World) {
         .collect();
 
     let mut resolved: HashMap<Entity, (Vec3, Quat)> = HashMap::with_capacity(snapshot.len());
+    let mut in_progress: HashSet<Entity> = HashSet::new();
 
     fn resolve(
         entity: Entity,
         snapshot: &[(Entity, Option<Entity>, Vec3, Quat)],
         resolved: &mut HashMap<Entity, (Vec3, Quat)>,
+        in_progress: &mut HashSet<Entity>,
     ) -> (Vec3, Quat) {
         if let Some(&value) = resolved.get(&entity) {
             return value;
         }
+        // Cycle guard: `RigPart.parent` links are resolved from by-name
+        // definitions with no acyclicity check, so a hand-authored/edited
+        // rig `.ron` where a part is its own ancestor (A→B→A, or a
+        // self-parent) would otherwise recurse until the native stack
+        // overflows and aborts the whole process. Re-entering a node that's
+        // already mid-resolution means we've hit such a loop — treat it as a
+        // root (identity) to break it instead.
+        if !in_progress.insert(entity) {
+            return (Vec3::ZERO, Quat::IDENTITY);
+        }
         let Some(&(_, parent, local_position, local_rotation)) =
             snapshot.iter().find(|(e, ..)| *e == entity)
         else {
+            in_progress.remove(&entity);
             return (Vec3::ZERO, Quat::IDENTITY);
         };
         let value = match parent {
             None => (local_position, local_rotation),
             Some(parent_entity) => {
-                let (parent_position, parent_rotation) = resolve(parent_entity, snapshot, resolved);
+                let (parent_position, parent_rotation) = resolve(parent_entity, snapshot, resolved, in_progress);
                 (
                     parent_position + parent_rotation * local_position,
                     parent_rotation * local_rotation,
@@ -324,11 +337,12 @@ pub fn update_world_transforms(world: &mut hecs::World) {
             }
         };
         resolved.insert(entity, value);
+        in_progress.remove(&entity);
         value
     }
 
     for &(entity, ..) in &snapshot {
-        let (world_position, world_rotation) = resolve(entity, &snapshot, &mut resolved);
+        let (world_position, world_rotation) = resolve(entity, &snapshot, &mut resolved, &mut in_progress);
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
             transform.position = world_position;
             transform.rotation = world_rotation;
@@ -403,6 +417,32 @@ mod tests {
         // The root spins the local +X offset onto roughly -Z (a 90-degree yaw).
         let child_transform = world.get::<&Transform>(child).unwrap();
         assert!(child_transform.position.abs_diff_eq(Vec3::new(0.0, 0.0, -1.0), 1e-3));
+    }
+
+    #[test]
+    fn update_world_transforms_survives_a_parent_cycle() {
+        // A hand-authored/edited rig whose part is its own ancestor must not
+        // recurse into a native stack overflow — the resolver's cycle guard
+        // breaks the loop by treating the re-entered node as a root.
+        let mut world = hecs::World::new();
+        let a = world.spawn((
+            Transform::default(),
+            RigPart {
+                parent: None,
+                local_position: Vec3::new(1.0, 0.0, 0.0),
+                local_rotation_euler_deg: Vec3::ZERO,
+                local_rotation: Quat::IDENTITY,
+            },
+        ));
+        // Make `a` its own parent — a self-loop.
+        world.get::<&mut RigPart>(a).unwrap().parent = Some(a);
+
+        // Must return rather than overflow the stack.
+        update_world_transforms(&mut world);
+
+        // With the cycle broken, `a` resolves to its own local transform.
+        let t = world.get::<&Transform>(a).unwrap();
+        assert!(t.position.abs_diff_eq(Vec3::new(1.0, 0.0, 0.0), 1e-3));
     }
 
     #[test]

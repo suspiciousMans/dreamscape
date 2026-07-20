@@ -40,7 +40,17 @@ impl GpuMesh {
             let vao = gl.create_vertex_array().map_err(anyhow::Error::msg)?;
             gl.bind_vertex_array(Some(vao));
 
-            let vbo = gl.create_buffer().map_err(anyhow::Error::msg)?;
+            // On a buffer-creation failure, delete the objects already made
+            // (the VAO, then the VBO too) before propagating — otherwise
+            // they'd be orphaned since no `GpuMesh` is returned to `destroy`.
+            let vbo = match gl.create_buffer().map_err(anyhow::Error::msg) {
+                Ok(vbo) => vbo,
+                Err(err) => {
+                    gl.bind_vertex_array(None);
+                    gl.delete_vertex_array(vao);
+                    return Err(err);
+                }
+            };
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             gl.buffer_data_u8_slice(
                 glow::ARRAY_BUFFER,
@@ -48,7 +58,15 @@ impl GpuMesh {
                 glow::STATIC_DRAW,
             );
 
-            let ebo = gl.create_buffer().map_err(anyhow::Error::msg)?;
+            let ebo = match gl.create_buffer().map_err(anyhow::Error::msg) {
+                Ok(ebo) => ebo,
+                Err(err) => {
+                    gl.bind_vertex_array(None);
+                    gl.delete_vertex_array(vao);
+                    gl.delete_buffer(vbo);
+                    return Err(err);
+                }
+            };
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
             gl.buffer_data_u8_slice(
                 glow::ELEMENT_ARRAY_BUFFER,

@@ -43,7 +43,18 @@ pub fn step(world: &mut hecs::World, dt: f32) {
         match animator.kind {
             AnimationKind::Orbit { axis, speed_deg_per_sec } => {
                 let angle = (speed_deg_per_sec * animator.elapsed).to_radians();
-                let spin = Quat::from_axis_angle(axis.normalize_or_zero(), angle);
+                // `Quat::from_axis_angle` assumes a unit axis. A degenerate
+                // (zero) axis — which `normalize_or_zero` yields rather than
+                // NaN — would produce `Quat(0,0,0,cos(angle/2))`, a non-unit
+                // quaternion that visibly *scales* the geometry as the angle
+                // sweeps instead of simply not rotating. Fall back to
+                // identity so a misconfigured zero axis is a no-op.
+                let unit_axis = axis.normalize_or_zero();
+                let spin = if unit_axis == Vec3::ZERO {
+                    Quat::IDENTITY
+                } else {
+                    Quat::from_axis_angle(unit_axis, angle)
+                };
                 transform.position = animator.base_position;
                 transform.rotation = spin * animator.base_rotation;
             }

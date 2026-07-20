@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use sdl2::controller::{Axis, Button, GameController};
-use sdl2::event::Event;
+use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
 use sdl2::GameControllerSubsystem;
@@ -123,6 +123,23 @@ impl Input {
             }
             Event::ControllerButtonUp { button, .. } => {
                 self.controller_buttons_down.remove(&button);
+            }
+            // SDL delivers no `KeyUp`/`ButtonUp` for inputs released while the
+            // window is unfocused (holding W during an alt-tab, say), which
+            // would otherwise leave them stuck "held" on return and keep the
+            // character walking. Clear all held + edge state on focus loss so
+            // nothing carries over.
+            Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+                self.keys_down.clear();
+                self.keys_pressed.clear();
+                self.keys_released.clear();
+                self.buttons_down.clear();
+                self.buttons_pressed.clear();
+                self.controller_buttons_down.clear();
+                self.controller_buttons_pressed.clear();
+                self.left_stick = (0.0, 0.0);
+                self.right_stick = (0.0, 0.0);
+                self.mouse_delta = (0, 0);
             }
             _ => {}
         }

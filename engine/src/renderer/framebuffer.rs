@@ -77,6 +77,16 @@ impl OffscreenFramebuffer {
 
             let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             if status != glow::FRAMEBUFFER_COMPLETE {
+                // Bail-out path (reachable via `resize_if_needed` if a driver
+                // rejects a new size): free the three objects created above
+                // and unbind, or they'd be orphaned with no handle to reclaim
+                // them since `Self` is never returned here.
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.delete_renderbuffer(depth_renderbuffer);
+                gl.delete_texture(color_texture);
+                gl.delete_framebuffer(fbo);
                 anyhow::bail!("offscreen framebuffer incomplete: 0x{status:x}");
             }
 

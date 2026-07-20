@@ -225,7 +225,11 @@ impl CharacterBrain {
 /// them" contract rather than reaching into `HudState`/`ScreenEffectState`/
 /// etc. directly from inside this module.
 pub enum AiEvent {
-    AttackedPlayer { entity: Entity, damage: f32 },
+    /// `entity` is the attacking character; `player` is whichever player
+    /// entity was actually nearest when the attack landed — in
+    /// multiplayer that may be a remote player, not the host's own local
+    /// one, so the caller shouldn't assume `player == self.player_entity`.
+    AttackedPlayer { entity: Entity, player: Entity, damage: f32 },
     CharacterDied { entity: Entity, position: Vec3 },
 }
 
@@ -246,16 +250,42 @@ const FLEE_DISTANCE: f32 = 4.0;
 /// entities to despawn" contract, since the caller also needs the death
 /// position for feedback before the entity is gone.
 ///
-/// Perception is a plain distance check against `player_position`, not a
-/// line-of-sight raycast — a stated simplification, matching the
-/// Glow-mushroom-darkness precedent elsewhere in this codebase.
-pub fn step(world: &mut hecs::World, dt: f32, player_position: Vec3, nav_grid: &NavGrid) -> Vec<AiEvent> {
+/// `player_positions` is every player currently in the session — in
+/// single-player that's just the one local player, but under a
+/// multiplayer host it's the local player plus every connected remote
+/// player's avatar (see `engine::net`), so hostile/passive characters
+/// react to whichever one is actually nearest rather than being blind to
+/// everyone but the host. Perception itself is still a plain distance
+/// check against the nearest one, not a line-of-sight raycast — a stated
+/// simplification, matching the Glow-mushroom-darkness precedent
+/// elsewhere in this codebase.
+pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)], nav_grid: &NavGrid) -> Vec<AiEvent> {
     let mut events = Vec::new();
 
     for (entity, (transform, body, meta, brain)) in
         world.query::<(&Transform, &mut RigidBody, &CharacterMeta, &mut CharacterBrain)>().iter()
     {
         let position = transform.position;
+        // Whichever connected player is physically nearest drives this
+        // character's perception/chasing/fleeing/attacking this frame —
+        // recomputed every call, so if a different player becomes nearer
+        // mid-chase (or mid-attack-cooldown), behavior naturally retargets
+        // rather than sticking to whoever was nearest when the state was
+        // first entered.
+        let Some(&(nearest_player_entity, player_position)) = player_positions.iter().min_by(|&&(_, a), &&(_, b)| {
+            // A remote player's position comes from network peer data, so a
+            // single NaN component would make `distance_squared` NaN and
+            // `partial_cmp` return `None` — an `unwrap()` there would panic
+            // the whole AI step (and the frame) on one malformed packet.
+            // Order NaN arbitrarily instead, the same guard `pathfinding`'s
+            // `ScoredCell` already uses.
+            position
+                .distance_squared(a)
+                .partial_cmp(&position.distance_squared(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            continue; // no players connected at all — nothing to react to
+        };
         let distance_to_player = position.distance(player_position);
         let lose_track_range = meta.sight_range * LOSE_TRACK_MULTIPLIER;
         let current_kind = brain.state.kind();
@@ -360,7 +390,7 @@ pub fn step(world: &mut hecs::World, dt: f32, player_position: Vec3, nav_grid: &
             *cooldown -= dt;
             if *cooldown <= 0.0 {
                 if let Some(damage) = meta.damage {
-                    events.push(AiEvent::AttackedPlayer { entity, damage });
+                    events.push(AiEvent::AttackedPlayer { entity, player: nearest_player_entity, damage });
                 }
                 *cooldown = meta.attack_cooldown_secs.max(0.1);
             }

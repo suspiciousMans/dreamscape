@@ -82,6 +82,13 @@ type Scope = HashMap<String, Value>;
 pub struct Interpreter {
     functions: HashMap<String, Arc<FunctionDecl>>,
     globals: HashMap<String, Value>,
+    /// Current user-function call nesting, bounded in `call` so runaway
+    /// recursion can't overflow the native stack (an uncatchable abort).
+    call_depth: u32,
+    /// Reusable block scopes, recycled by `exec_scoped` so an if/while body
+    /// that declares locals doesn't heap-allocate a fresh `HashMap` on every
+    /// entry/iteration in a per-frame script hook.
+    scope_pool: Vec<Scope>,
 }
 
 impl Interpreter {
@@ -90,7 +97,8 @@ impl Interpreter {
     /// compile time) — keep them to constants/built-in math.
     pub fn compile(source: &str) -> Result<Self, Vec<ScriptError>> {
         let statements = parse(source)?;
-        let mut interpreter = Interpreter { functions: HashMap::new(), globals: HashMap::new() };
+        let mut interpreter =
+            Interpreter { functions: HashMap::new(), globals: HashMap::new(), call_depth: 0, scope_pool: Vec::new() };
         let mut host = NoHost;
         for stmt in statements {
             match stmt {
@@ -138,12 +146,30 @@ impl Interpreter {
                 line: 0,
             });
         }
+        // Bound user-function recursion. The `while`-loop cap above stops an
+        // infinite loop from hanging the game, but there's no analogous guard
+        // on call nesting: a script like `fn ready() { ready(); }` (or any
+        // accidental mutual recursion) would recurse into native Rust stack
+        // frames until the stack overflows and *aborts the process* — an
+        // uncatchable crash the behavior layer's error-logging can't contain.
+        const MAX_CALL_DEPTH: u32 = 256;
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(ScriptError {
+                message: format!("call depth exceeded {MAX_CALL_DEPTH} (recursion too deep)"),
+                line: 0,
+            });
+        }
+        self.call_depth += 1;
+
         let mut scope = Scope::new();
         for (param, arg) in decl.params.iter().zip(args) {
             scope.insert(param.clone(), arg.clone());
         }
         let mut scopes = vec![scope];
-        match self.exec_block(&decl.body, &mut scopes, host)? {
+        let result = self.exec_block(&decl.body, &mut scopes, host);
+        self.call_depth -= 1;
+
+        match result? {
             Flow::Return(value) => Ok(value),
             Flow::Normal => Ok(Value::Nil),
         }
@@ -206,17 +232,33 @@ impl Interpreter {
                 };
                 Ok(Flow::Return(value))
             }
-            // Only top-level `fn` declarations are registered (in `compile`);
-            // encountering one mid-body is a no-op rather than an error, since
-            // nothing else in the grammar can currently nest a `fn` here.
-            Stmt::FnDecl(_) => Ok(Flow::Normal),
+            // Only top-level `fn` declarations are registered (in `compile`).
+            // A `fn` *is* grammatically allowed inside a block (fn/if/while
+            // bodies all parse through the same `block` rule), but nesting one
+            // isn't supported — it would never be registered and any later
+            // call would fail with a misleading "unknown function". Reject it
+            // loudly rather than silently discarding it.
+            Stmt::FnDecl(decl) => Err(ScriptError {
+                message: format!(
+                    "nested function declarations are not supported ('{}' must be a top-level fn)",
+                    decl.name
+                ),
+                line: 0,
+            }),
         }
     }
 
     fn exec_scoped(&mut self, statements: &[Stmt], scopes: &mut Vec<Scope>, host: &mut dyn Host) -> Result<Flow, ScriptError> {
-        scopes.push(Scope::new());
+        // Recycle a scope from the pool instead of allocating a fresh
+        // `HashMap` on every if-branch / while-iteration — pooled scopes are
+        // always returned cleared, so this one starts empty.
+        let scope = self.scope_pool.pop().unwrap_or_default();
+        scopes.push(scope);
         let result = self.exec_block(statements, scopes, host);
-        scopes.pop();
+        if let Some(mut used) = scopes.pop() {
+            used.clear();
+            self.scope_pool.push(used);
+        }
         result
     }
 
@@ -477,5 +519,23 @@ mod tests {
             Err(errors) => assert!(!errors.is_empty()),
             Ok(_) => panic!("expected a parse error"),
         }
+    }
+
+    #[test]
+    fn runaway_recursion_errors_instead_of_overflowing_the_stack() {
+        // An infinitely-recursive script must return a ScriptError (call-depth
+        // cap), not abort the whole process via a native stack overflow.
+        let mut interp = Interpreter::compile("fn recurse() { recurse(); }").unwrap();
+        let mut host = NoHost;
+        assert!(interp.call("recurse", &[], &mut host).is_err());
+    }
+
+    #[test]
+    fn nested_function_declaration_is_rejected() {
+        // Nested `fn`s parse but were never registered/callable; reaching one
+        // at runtime is now a clear error rather than a silent discard.
+        let mut interp = Interpreter::compile("fn outer() { fn inner() {} }").unwrap();
+        let mut host = NoHost;
+        assert!(interp.call("outer", &[], &mut host).is_err());
     }
 }

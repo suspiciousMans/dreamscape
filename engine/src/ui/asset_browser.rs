@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::backend::EguiState;
@@ -22,6 +22,11 @@ pub struct AssetBrowserState {
     open: bool,
     files: Vec<PathBuf>,
     thumbnails: HashMap<PathBuf, egui::TextureId>,
+    /// Files that failed to load once — negatively cached so a single
+    /// corrupt/unreadable image isn't re-read and re-decoded from disk
+    /// (with a warn log) on every frame the browser is open. Cleared on
+    /// `open` so a re-scan retries them.
+    failed: HashSet<PathBuf>,
 }
 
 impl AssetBrowserState {
@@ -34,6 +39,7 @@ impl AssetBrowserState {
     /// per game, not a large asset library.
     pub fn open(&mut self, asset_root: &Path) {
         self.files = scan_for_extensions(asset_root, &TEXTURE_EXTENSIONS);
+        self.failed.clear();
         self.open = true;
     }
 
@@ -44,15 +50,23 @@ impl AssetBrowserState {
         if !self.open {
             return;
         }
-        let missing: Vec<PathBuf> =
-            self.files.iter().filter(|path| !self.thumbnails.contains_key(*path)).cloned().collect();
+        let missing: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|path| !self.thumbnails.contains_key(*path) && !self.failed.contains(*path))
+            .cloned()
+            .collect();
         for path in missing {
             match GpuTexture::load_from_file(gl, &path, TextureFilter::Nearest) {
                 Ok(texture) => {
                     let id = ui_state.register_texture(texture.handle);
                     self.thumbnails.insert(path, id);
                 }
-                Err(err) => log::warn!("asset browser: failed to load thumbnail {path:?}: {err}"),
+                Err(err) => {
+                    log::warn!("asset browser: failed to load thumbnail {path:?}: {err}");
+                    // Negatively cache so this file isn't re-read every frame.
+                    self.failed.insert(path);
+                }
             }
         }
     }
