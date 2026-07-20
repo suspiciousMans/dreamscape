@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use glam::Vec3;
 use hecs::Entity;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,10 @@ pub enum Disposition {
 pub struct CharacterMeta {
     pub name: String,
     pub color: [f32; 3],
+    /// A texture applied to the character's cube in place of the flat
+    /// `color` fill, if assigned — `color` stays meaningful even then, as
+    /// the fallback used while the texture loads/if it fails to load.
+    pub texture_path: Option<PathBuf>,
     pub disposition: Disposition,
     pub move_speed: f32,
     /// Radius (world units) a `Wandering`/idle character roams from its

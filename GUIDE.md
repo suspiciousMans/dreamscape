@@ -668,18 +668,24 @@ A placed character is authored as `engine::level::CharacterInstance` — a
 sibling list on `Level` (`Level.characters`) like `RigInstance`/
 `LevelLight`, since a character's shape doesn't fit `LevelObject`'s generic
 mesh/texture/trigger schema. `Sandbox::spawn_character` spawns it as a
-solid-colored cube — a sphere `Collider` (matching the player's own
-convention) + `RigidBody` (an ordinary dynamic body, no special-casing
-needed in `engine::physics`) + `CharacterMeta`/`CharacterBrain`, plus
-`Health`/`Dialogue` if the instance was authored with combat/dialogue.
+cube — a sphere `Collider` (matching the player's own convention) +
+`RigidBody` (an ordinary dynamic body, no special-casing needed in
+`engine::physics`) + `CharacterMeta`/`CharacterBrain`, plus `Health`/
+`Dialogue` if the instance was authored with combat/dialogue. The cube is
+solid-`color`-filled by default; setting `CharacterMeta::texture_path`
+(mirroring `LevelObjectMeta::texture_path`) wraps it in a texture instead —
+`color` stays meaningful as the fallback used if the texture fails to load.
 
 **F2 panel**: a **"Characters"** section (mirrors "Rigs") — **Add
 Character**, a clickable outliner, and for the selected character: name,
-position, color, a disposition dropdown, move speed/wander radius/sight
-range drag values, an **Add/Clear Combat** pair (damage/attack range/
-cooldown, same optional-field pattern as a trigger's Screen Effect/Camera
-Shake), an **Add/Clear Health** pair, and an **Add/Clear Dialogue** pair
-with a growable line list and a "Preview" button.
+position, color, the current texture path (or "(solid color)") with
+**Assign Texture...** (native file picker) / **Browse Texture...** (the
+same in-editor thumbnail asset browser textures on level objects use) /
+**Clear Texture** buttons, a disposition dropdown, move speed/wander
+radius/sight range drag values, an **Add/Clear Combat** pair (damage/attack
+range/cooldown, same optional-field pattern as a trigger's Screen Effect/
+Camera Shake), an **Add/Clear Health** pair, and an **Add/Clear Dialogue**
+pair with a growable line list and a "Preview" button.
 
 **Stated simplifications**: perception is distance-only (no line-of-sight
 raycast); the `NavGrid` bakes once per level load and never re-bakes

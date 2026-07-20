@@ -301,6 +301,7 @@ fn entrance_level() -> Level {
         position: [1.6, 1.0, 3.0],
         scale: [0.6, 1.0, 0.6],
         color: [0.6, 0.9, 1.0],
+        texture_path: None,
         disposition: Disposition::Friendly,
         move_speed: 1.5,
         wander_radius: 1.0,
@@ -427,6 +428,7 @@ fn tunnels_level() -> Level {
         position: [0.8, 1.0, -0.5],
         scale: [0.5, 0.4, 0.5],
         color: [0.9, 0.8, 0.3],
+        texture_path: None,
         disposition: Disposition::Passive,
         move_speed: 2.5,
         wander_radius: 2.0,
@@ -450,6 +452,7 @@ fn tunnels_level() -> Level {
             position: [0.0, 0.0, 0.0],
             scale: [0.5, 0.4, 0.5],
             color: [0.9, 0.8, 0.3],
+            texture_path: None,
             disposition: Disposition::Passive,
             move_speed: 2.5,
             wander_radius: 2.0,
@@ -582,6 +585,7 @@ fn grotto_level() -> Level {
         position: [0.0, 1.0, -9.0],
         scale: [0.9, 1.7, 0.9],
         color: [0.55, 0.15, 0.6],
+        texture_path: None,
         disposition: Disposition::Hostile,
         move_speed: 2.2,
         wander_radius: 1.5,
@@ -945,6 +949,7 @@ enum EditorMode {
 enum PendingTexturePick {
     ForEntity(Entity),
     ForClass(usize),
+    ForCharacter(Entity),
 }
 
 /// Whether the dev-time level/shader editor should ever be reachable —
@@ -1745,15 +1750,26 @@ impl Sandbox {
             (instance.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
             255,
         ];
+        let texture = match &instance.texture_path {
+            Some(path) => match GpuTexture::load_from_file(gl, &self.asset_root.join(path), TextureFilter::Nearest) {
+                Ok(texture) => texture,
+                Err(err) => {
+                    log::error!("failed to load character texture {path:?}: {err}, falling back to solid color");
+                    solid_color_texture(gl, rgba)
+                }
+            },
+            None => solid_color_texture(gl, rgba),
+        };
         let position = Vec3::from(instance.position);
         let entity = self.world.spawn((
             Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
-            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
+            MeshRenderer { mesh, texture: Some(Arc::new(texture)) },
             Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
             RigidBody::default(),
             CharacterMeta {
                 name: instance.name.clone(),
                 color: instance.color,
+                texture_path: instance.texture_path.clone(),
                 disposition: instance.disposition,
                 move_speed: instance.move_speed,
                 wander_radius: instance.wander_radius,
@@ -2093,6 +2109,7 @@ impl Sandbox {
             position: transform.position.to_array(),
             scale: transform.scale.to_array(),
             color: meta.color,
+            texture_path: meta.texture_path.clone(),
             disposition: meta.disposition,
             move_speed: meta.move_speed,
             wander_radius: meta.wander_radius,
@@ -2194,11 +2211,35 @@ impl Sandbox {
         }
     }
 
-    fn save_current_level(&self) {
+    /// Snapshots the currently-loaded level's live ECS state back into
+    /// `self.levels`'s cached entry for it (the same `build_level_from_ecs`
+    /// round-trip `push_undo_snapshot`/`save_current_level` already use) —
+    /// call this just before switching to a *different* level (F2 "Load"
+    /// click). `self.levels` is otherwise only populated once at boot, so
+    /// without this, any in-session edit that was never explicitly saved to
+    /// disk (e.g. an assigned character texture, a moved object) is lost
+    /// the moment you swap away from the level and back — `apply_level`
+    /// would respawn from the stale boot-time snapshot instead of what's
+    /// actually on screen.
+    fn sync_current_level_into_cache(&mut self) {
+        let level = self.build_level_from_ecs();
+        if let Some(existing) = self.levels.iter_mut().find(|l| l.name == level.name) {
+            *existing = level;
+        } else {
+            self.levels.push(level);
+        }
+    }
+
+    fn save_current_level(&mut self) {
         let level = self.build_level_from_ecs();
         let path = self.levels_dir.join(format!("{}.ron", level.name));
         match engine::level::save_to_file(&level, &path) {
-            Ok(()) => log::info!("saved level '{}' to {path:?}", level.name),
+            Ok(()) => {
+                log::info!("saved level '{}' to {path:?}", level.name);
+                if let Some(existing) = self.levels.iter_mut().find(|l| l.name == level.name) {
+                    *existing = level;
+                }
+            }
             Err(err) => log::error!("failed to save level '{}': {err}", level.name),
         }
     }
@@ -2526,6 +2567,33 @@ impl Sandbox {
 
         let relative_path = engine::level::relativize(&path, &self.asset_root);
         if let Ok(mut query) = self.world.query_one::<(&mut MeshRenderer, &mut LevelObjectMeta)>(entity) {
+            if let Some((renderer, meta)) = query.get() {
+                renderer.texture = Some(texture);
+                meta.texture_path = Some(relative_path);
+            }
+        }
+    }
+
+    /// Sibling to `assign_texture_to_entity` for a placed character.
+    fn assign_texture_to_character(&mut self, gl: &glow::Context, entity: Entity) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .set_directory(&self.asset_root)
+            .pick_file()
+        else {
+            return;
+        };
+
+        let texture = match GpuTexture::load_from_file(gl, &path, TextureFilter::Nearest) {
+            Ok(tex) => Arc::new(tex),
+            Err(err) => {
+                log::error!("failed to load texture {path:?}: {err}");
+                return;
+            }
+        };
+
+        let relative_path = engine::level::relativize(&path, &self.asset_root);
+        if let Ok(mut query) = self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity) {
             if let Some((renderer, meta)) = query.get() {
                 renderer.texture = Some(texture);
                 meta.texture_path = Some(relative_path);
@@ -3289,6 +3357,7 @@ impl Sandbox {
                 }
             }
             if let Some(i) = clicked_index {
+                self.sync_current_level_into_cache();
                 let level = self.levels[i].clone();
                 if let Err(err) = self.apply_level(gl, &level) {
                     log::error!("failed to load level '{}': {err}", level.name);
@@ -3453,6 +3522,7 @@ impl Sandbox {
                 position: [0.0, 1.0, 0.0],
                 scale: [0.8, 1.6, 0.8],
                 color: [0.8, 0.2, 0.2],
+                texture_path: None,
                 disposition: Disposition::Passive,
                 move_speed: 2.0,
                 wander_radius: 3.0,
@@ -3493,7 +3563,7 @@ impl Sandbox {
         ui.separator();
         if let Some(entity) = self.selected_character {
             if self.world.contains(entity) {
-                self.draw_selected_character_ui(ui, entity);
+                self.draw_selected_character_ui(ui, gl, entity);
             } else {
                 self.selected_character = None;
             }
@@ -3514,6 +3584,7 @@ impl Sandbox {
                     position: [0.0, 1.0, 0.0],
                     scale: [0.8, 1.6, 0.8],
                     color: [0.8, 0.2, 0.2],
+                    texture_path: None,
                     disposition: Disposition::Hostile,
                     move_speed: 2.0,
                     wander_radius: 2.0,
@@ -3991,9 +4062,12 @@ impl Sandbox {
     /// placed character — name/position/AI tuning, plus the same optional-
     /// field Add/Clear pattern `screen_effect`/`camera_shake` use, applied
     /// here to combat (`CharacterMeta::damage`) and to `Health`/`Dialogue`.
-    fn draw_selected_character_ui(&mut self, ui: &mut egui::Ui, entity: Entity) {
+    fn draw_selected_character_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context, entity: Entity) {
         let mut delete = false;
         let mut preview_line: Option<String> = None;
+        let mut assign_texture = false;
+        let mut browse_texture = false;
+        let mut clear_texture = false;
 
         if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut CharacterMeta)>(entity) {
             if let Some((transform, meta)) = query.get() {
@@ -4012,6 +4086,21 @@ impl Sandbox {
                 ui.horizontal(|ui| {
                     ui.label("Color:");
                     ui.color_edit_button_rgb(&mut meta.color);
+                });
+                ui.label(match &meta.texture_path {
+                    Some(path) => format!("Texture: {}", path.display()),
+                    None => "Texture: (solid color)".to_string(),
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Assign Texture...").clicked() {
+                        assign_texture = true;
+                    }
+                    if ui.button("Browse Texture...").clicked() {
+                        browse_texture = true;
+                    }
+                    if meta.texture_path.is_some() && ui.button("Clear Texture").clicked() {
+                        clear_texture = true;
+                    }
                 });
 
                 ui.label("Disposition");
@@ -4149,6 +4238,32 @@ impl Sandbox {
 
         if let Some(line) = preview_line {
             self.hud.show_toast(&line, 3.0);
+        }
+        if assign_texture {
+            self.assign_texture_to_character(gl, entity);
+        }
+        if browse_texture {
+            self.pending_texture_pick = Some(PendingTexturePick::ForCharacter(entity));
+            self.texture_asset_browser.open(&self.asset_root);
+        }
+        if clear_texture {
+            let rgba = if let Ok(meta) = self.world.get::<&CharacterMeta>(entity) {
+                [
+                    (meta.color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (meta.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (meta.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    255,
+                ]
+            } else {
+                [255, 255, 255, 255]
+            };
+            let texture = Arc::new(solid_color_texture(gl, rgba));
+            if let Ok(mut query) = self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity) {
+                if let Some((renderer, meta)) = query.get() {
+                    renderer.texture = Some(texture);
+                    meta.texture_path = None;
+                }
+            }
         }
         if delete {
             self.push_undo_snapshot();
@@ -6037,6 +6152,23 @@ impl Game for Sandbox {
                 Some(PendingTexturePick::ForClass(index)) => {
                     if let Some(class) = self.classes.get_mut(index) {
                         class.texture_path = Some(path);
+                    }
+                }
+                Some(PendingTexturePick::ForCharacter(entity)) => {
+                    match GpuTexture::load_from_file(gl, &self.asset_root.join(&path), TextureFilter::Nearest) {
+                        Ok(texture) => {
+                            let texture = Arc::new(texture);
+                            if let Ok(mut query) =
+                                self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity)
+                            {
+                                if let Some((renderer, meta)) = query.get() {
+                                    renderer.texture = Some(texture);
+                                    meta.texture_path = Some(path.clone());
+                                }
+                            }
+                            log::info!("assigned character texture {path:?} via asset browser");
+                        }
+                        Err(err) => log::error!("failed to load texture {path:?}: {err}"),
                     }
                 }
                 None => {}
