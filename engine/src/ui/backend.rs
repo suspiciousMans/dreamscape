@@ -30,6 +30,20 @@ impl EguiState {
         })
     }
 
+    /// Registers an already-uploaded GL texture with egui's painter so it
+    /// can be drawn via `egui::Image`/`ImageButton` — used by
+    /// `engine::ui::asset_browser` for thumbnails. Must be called outside
+    /// `run`'s closure (the painter is exclusively borrowed for its
+    /// duration); see that module's doc comment. The registered texture is
+    /// never freed (`egui_glow::Painter::free_texture` would also delete
+    /// the underlying GL texture, which the caller may still own) — an
+    /// accepted small per-thumbnail leak for a dev-tool cache, not
+    /// something a shipped build ever hits (asset browsing is Edit-mode
+    /// only).
+    pub fn register_texture(&mut self, texture: glow::Texture) -> egui::TextureId {
+        self.painter.register_native_texture(texture)
+    }
+
     pub fn wants_pointer_input(&self) -> bool {
         self.ctx.wants_pointer_input()
     }

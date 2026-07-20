@@ -20,6 +20,8 @@ egui = "0.29"
 egui_glow = "0.29"
 rfd = "0.15"
 rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+notify = "6"
+gltf = { version = "1", features = ["utils"] }
 
 [profile.release]
 lto = true

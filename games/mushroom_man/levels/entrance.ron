@@ -101,10 +101,22 @@
             damage: None,
             attack_range: 1.0,
             attack_cooldown_secs: 1.0,
-            dialogue: [
-                "Oh! A visitor.",
-                "Eat the red mushroom to bounce sky-high — you\'ll need it to reach the tunnels.",
-                "Good luck down there. It gets dark.",
+            dialogue_nodes: [
+                (
+                    text: "Oh! A visitor. Need help with something?",
+                    choices: [
+                        ("Tell me about the mushroom", 1),
+                        ("No thanks, I\'m good", 2),
+                    ],
+                ),
+                (
+                    text: "Eat the red mushroom to bounce sky-high — you\'ll need it to reach the tunnels.",
+                    choices: [],
+                ),
+                (
+                    text: "Good luck down there. It gets dark.",
+                    choices: [],
+                ),
             ],
         ),
     ],

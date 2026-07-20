@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use engine::ai::{AiEvent, CharacterBrain, CharacterMeta, Dialogue, Disposition, Health};
+use engine::ai::{AiEvent, CharacterBrain, CharacterMeta, Dialogue, DialogueNode, Disposition, Health, SpawnerConfig, SpawnerState};
 use engine::animation::{AnimationKind, Animator};
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
@@ -17,14 +17,15 @@ use engine::camera::{
 };
 use engine::class::ObjectClass;
 use engine::ecs::{euler_deg_to_quat, Entity, Light, LevelObjectMeta, LightKind, MeshRenderer, PlayerController, Transform, World};
+use engine::hotreload::HotReloadWatcher;
 use engine::hud::HudState;
 use engine::screen_effect::{ScreenEffectSpec, ScreenEffectState};
 use engine::glam::{Mat4, Quat, Vec3};
 use engine::glow::{self, HasContext};
-use engine::level::{AnimationSpec, CharacterInstance, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance};
+use engine::level::{AnimationSpec, CharacterInstance, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance, SpawnerInstance};
 use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
 use engine::save::SaveData;
-use engine::mesh::{load_obj, primitives, GpuMesh};
+use engine::mesh::{load_gltf, load_obj, primitives, GpuMesh};
 use engine::particles::{ParticleEmitter, ParticleEmitterDef};
 use engine::pathfinding::NavGrid;
 use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
@@ -36,7 +37,7 @@ use engine::sdl2::keyboard::Keycode;
 use engine::sdl2::mouse::MouseButton;
 use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
-use engine::ui::{draw_hud, draw_pause_menu, render_params_editor, EguiState, PauseMenuAction};
+use engine::ui::{draw_hud, draw_pause_menu, hud_style_editor, render_params_editor, EguiState, PauseMenuAction};
 
 fn default_demo_profiles() -> Vec<ShaderProfile> {
     let make = |name: &str, render: RenderParams| ShaderProfile {
@@ -315,7 +316,7 @@ fn default_level() -> Level {
         damage: None,
         attack_range: 1.0,
         attack_cooldown_secs: 1.0,
-        dialogue: Vec::new(),
+        dialogue_nodes: Vec::new(),
     };
 
     Level {
@@ -336,6 +337,7 @@ fn default_level() -> Level {
         particle_emitters: vec![sparkle_emitter],
         rig_instances: vec![humanoid_instance],
         characters: vec![wanderer],
+        spawners: Vec::new(),
         physics: PhysicsParams::default(),
         music_path: Some(PathBuf::from("music/demo_ambient.wav")),
     }
@@ -400,6 +402,7 @@ fn second_room_level() -> Level {
         particle_emitters: Vec::new(),
         rig_instances: Vec::new(),
         characters: Vec::new(),
+        spawners: Vec::new(),
         physics: PhysicsParams::default(),
         music_path: None,
     }
@@ -757,6 +760,15 @@ enum EditorMode {
     Play,
 }
 
+/// Who requested the currently-open texture asset browser — set when a
+/// "Browse Texture..." button opens it, read (and cleared) once the user
+/// picks a thumbnail, so the picked path can be applied to the right
+/// target across however many frames the browser stays open.
+enum PendingTexturePick {
+    ForEntity(Entity),
+    ForClass(usize),
+}
+
 /// Whether the dev-time level/shader editor should ever be reachable —
 /// `true` in debug builds, `false` in release. `cargo build --release`
 /// (what `package.ps1` already uses for shipping) is treated as "this is
@@ -766,6 +778,23 @@ enum EditorMode {
 /// is dead code in a release build, not just an unreachable runtime path.
 fn editor_available() -> bool {
     cfg!(debug_assertions)
+}
+
+/// Maps the number-row keys to a 0-based index, for the dialogue
+/// choice-picker overlay (`Sandbox::draw_dialogue_choices`).
+fn number_key_index(keycode: Keycode) -> Option<usize> {
+    match keycode {
+        Keycode::Num1 => Some(0),
+        Keycode::Num2 => Some(1),
+        Keycode::Num3 => Some(2),
+        Keycode::Num4 => Some(3),
+        Keycode::Num5 => Some(4),
+        Keycode::Num6 => Some(5),
+        Keycode::Num7 => Some(6),
+        Keycode::Num8 => Some(7),
+        Keycode::Num9 => Some(8),
+        _ => None,
+    }
 }
 
 /// Tags the compiled-in native-behavior demo cube so `build_level_from_ecs`
@@ -801,6 +830,28 @@ struct Sandbox {
     profiles: Option<ProfileCycler>,
     ui: Option<EguiState>,
     ui_visible: bool,
+    /// Debug FPS/frame-time/entity/draw-call overlay, toggled from the F1
+    /// panel — always available (Edit and Play mode), unlike `draw_hud`
+    /// which is gameplay UI. `frame_times` is a small ring buffer of
+    /// recent `dt` samples, averaged each frame for a less jittery FPS
+    /// reading than a single-frame instantaneous value.
+    profiler_visible: bool,
+    frame_times: std::collections::VecDeque<f32>,
+    /// `None` if the file watcher failed to start (degrades silently, same
+    /// convention as `audio: Option<AudioContext>`) or in a shipped build
+    /// (`init` only starts it when `editor_available()`).
+    hot_reload: Option<HotReloadWatcher>,
+    /// F2 panel: in-editor texture thumbnail browser, opened by a "Browse
+    /// Texture..." button (alongside the existing OS-dialog "Assign
+    /// Texture..." button, not replacing it) and `pending_texture_pick`
+    /// tracking which entity/class it was opened for.
+    texture_asset_browser: engine::ui::AssetBrowserState,
+    pending_texture_pick: Option<PendingTexturePick>,
+    /// Play mode: set by `interact()` when the character just spoken to has
+    /// a choice pending on their current dialogue node — while set, a
+    /// choice-picker overlay is drawn and number keys 1-9 pick an option
+    /// (see `handle_event`'s `Keycode::Num1..=Num9` arm).
+    active_dialogue: Option<Entity>,
     save_as_name: String,
     levels: Vec<Level>,
     current_level_name: String,
@@ -875,6 +926,29 @@ struct Sandbox {
     /// rather than sharing the flat Scene Objects outliner, since they
     /// have no `LevelObjectMeta`.
     selected_character: Option<Entity>,
+    /// F2 panel: the currently selected spawner entity, mirroring
+    /// `selected_character` — spawners get their own "Spawners" section
+    /// since they have no `LevelObjectMeta`/`CharacterMeta`.
+    selected_spawner: Option<Entity>,
+    /// Multi-select sets for batch delete/duplicate (Ctrl+click toggles
+    /// membership; a plain click resets the set to just that one entity).
+    /// `selected_entity`/`selected_character` remain "which one's detail
+    /// panel is shown" (always the most recently clicked), independent of
+    /// how many are in the batch-operation set.
+    selected_entities: HashSet<Entity>,
+    selected_characters: HashSet<Entity>,
+    /// Undo/redo: full-level snapshots (the same `Level` shape
+    /// `build_level_from_ecs`/`apply_level` already round-trip for save/
+    /// load), pushed by `push_undo_snapshot` before a discrete edit
+    /// (add/delete/duplicate) or a selection change (bundling a
+    /// slider-drag session on one object into a single undo step). Capped
+    /// so it can't grow unbounded across a long editing session.
+    undo_stack: Vec<Level>,
+    redo_stack: Vec<Level>,
+    /// Last frame's selection tuple — compared each `draw_level_editor_ui`
+    /// call to detect "the user switched to editing something else",
+    /// which is when a fresh undo snapshot is pushed.
+    last_undo_selection: (Option<Entity>, Option<Entity>, Option<Entity>, Option<usize>),
     rig_new_name: String,
     new_part_name: String,
     new_part_parent: String,
@@ -899,6 +973,12 @@ struct Sandbox {
     /// scripts/native `Behavior`s via `ScriptApi::screen_flash` or by a
     /// trigger's `LevelObjectMeta::screen_effect`.
     screen_effects: ScreenEffectState,
+    /// Names of level entities despawned since the current level was
+    /// (re-)applied — captured into `SaveData::despawned_names` at
+    /// checkpoint time and replayed on load so a reloaded checkpoint
+    /// doesn't bring back things the player already removed. Cleared by
+    /// `apply_level`.
+    despawned_since_load: Vec<String>,
     saves_dir: PathBuf,
     /// The current level's background music, if any — mirrors
     /// `Level::music_path` and is set/cleared by `apply_level`, edited via
@@ -935,6 +1015,12 @@ impl Sandbox {
             profiles: None,
             ui: None,
             ui_visible: true,
+            profiler_visible: true,
+            frame_times: std::collections::VecDeque::new(),
+            hot_reload: None,
+            texture_asset_browser: engine::ui::AssetBrowserState::default(),
+            pending_texture_pick: None,
+            active_dialogue: None,
             save_as_name: String::from("custom"),
             levels: Vec::new(),
             current_level_name: String::from("default"),
@@ -966,6 +1052,12 @@ impl Sandbox {
             selected_rig_part: None,
             nav_grid: None,
             selected_character: None,
+            selected_spawner: None,
+            selected_entities: HashSet::new(),
+            selected_characters: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_selection: (None, None, None, None),
             rig_new_name: String::from("humanoid"),
             new_part_name: String::from("Part"),
             new_part_parent: String::new(),
@@ -978,6 +1070,7 @@ impl Sandbox {
             particle_emitter_new_name: String::from("Sparkles"),
             hud: HudState::default(),
             screen_effects: ScreenEffectState::default(),
+            despawned_since_load: Vec::new(),
             current_music_path: None,
             music_volume: 1.0,
             audio: match AudioContext::new() {
@@ -1051,6 +1144,79 @@ impl Sandbox {
         }
         self.with_behavior(entity, |behavior, api| behavior.on_ready(api));
         log::info!("attached script {relative_path:?}");
+    }
+
+    /// Compares an asset-root-relative path (as stored on `LevelObjectMeta`/
+    /// `shader_paths`) against an absolute path a `HotReloadWatcher` event
+    /// reported changed. Canonicalizes both sides when possible (handles
+    /// separator/case differences) and falls back to a direct comparison
+    /// if canonicalization fails (e.g. the file was just deleted).
+    fn hot_reload_path_matches(&self, relative: &Path, changed: &Path) -> bool {
+        let full = self.asset_root.join(relative);
+        match (full.canonicalize(), changed.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => full == *changed,
+        }
+    }
+
+    /// Reacts to a `HotReloadWatcher::poll_events` result: reapplies the
+    /// current shader profile if one of its files changed, re-attaches any
+    /// live entity's script if its `.pss` file changed, and reloads any
+    /// live entity's texture if its image file changed.
+    fn handle_hot_reload(&mut self, ctx: &mut Context, changed_paths: &[PathBuf]) {
+        let gl = ctx.gl();
+
+        let shader_changed = changed_paths.iter().any(|path| {
+            self.hot_reload_path_matches(&self.shader_paths.0, path)
+                || self.hot_reload_path_matches(&self.shader_paths.1, path)
+                || self.hot_reload_path_matches(&self.shader_paths.2, path)
+        });
+        if shader_changed {
+            if let Some(cycler) = &self.profiles {
+                let profile = cycler.current().clone();
+                let drawable_size = ctx.drawable_size();
+                match self.apply_profile(gl, drawable_size, &profile) {
+                    Ok(()) => log::info!("hot reload: reapplied shader profile '{}'", profile.name),
+                    Err(err) => log::error!("hot reload: failed to reapply shader profile: {err}"),
+                }
+            }
+        }
+
+        let scripted_entities: Vec<(Entity, PathBuf)> = self
+            .world
+            .query::<&LevelObjectMeta>()
+            .iter()
+            .filter_map(|(entity, meta)| meta.script_path.clone().map(|path| (entity, path)))
+            .collect();
+        for (entity, script_path) in scripted_entities {
+            if changed_paths.iter().any(|path| self.hot_reload_path_matches(&script_path, path)) {
+                log::info!("hot reload: reattaching script {script_path:?}");
+                self.attach_script_to_entity(entity, &script_path);
+            }
+        }
+
+        let textured_entities: Vec<(Entity, PathBuf)> = self
+            .world
+            .query::<&LevelObjectMeta>()
+            .iter()
+            .filter_map(|(entity, meta)| meta.texture_path.clone().map(|path| (entity, path)))
+            .collect();
+        for (entity, texture_path) in textured_entities {
+            if changed_paths.iter().any(|path| self.hot_reload_path_matches(&texture_path, path)) {
+                match GpuTexture::load_from_file(gl, &self.asset_root.join(&texture_path), TextureFilter::Nearest) {
+                    Ok(texture) => {
+                        let texture = Arc::new(texture);
+                        if let Ok(mut query) = self.world.query_one::<&mut MeshRenderer>(entity) {
+                            if let Some(renderer) = query.get() {
+                                renderer.texture = Some(texture);
+                            }
+                        }
+                        log::info!("hot reload: reloaded texture {texture_path:?}");
+                    }
+                    Err(err) => log::error!("hot reload: failed to reload texture {texture_path:?}: {err}"),
+                }
+            }
+        }
     }
 
     /// Loads the profile's shader files, swaps the composite shader, and
@@ -1162,6 +1328,26 @@ impl Sandbox {
                 // author multi-part OBJs as separate level objects instead.
                 let data = load_obj(&self.asset_root.join(path))?;
                 Arc::new(GpuMesh::upload(gl, &data[0])?)
+            }
+            MeshSource::GltfFile(path) => {
+                // Same "first entry only" convention as ObjFile above — a
+                // multi-node glTF is better imported as a rig (F2 panel's
+                // "Import glTF as Rig...") than collapsed into one object.
+                let scene = load_gltf(&self.asset_root.join(path))?;
+                let entry = scene
+                    .meshes
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("glTF file {path:?} has no mesh-carrying node"))?;
+                Arc::new(GpuMesh::upload(gl, &entry.mesh)?)
+            }
+            MeshSource::GltfNode { path, node } => {
+                let scene = load_gltf(&self.asset_root.join(path))?;
+                let entry = scene
+                    .meshes
+                    .iter()
+                    .find(|entry| &entry.name == node)
+                    .ok_or_else(|| anyhow::anyhow!("glTF file {path:?} has no node named '{node}'"))?;
+                Arc::new(GpuMesh::upload(gl, &entry.mesh)?)
             }
         })
     }
@@ -1399,10 +1585,31 @@ impl Sandbox {
         if let Some(max_health) = instance.max_health {
             let _ = self.world.insert_one(entity, Health::new(max_health));
         }
-        if !instance.dialogue.is_empty() {
-            let _ = self.world.insert_one(entity, Dialogue::new(instance.dialogue.clone()));
+        if !instance.dialogue_nodes.is_empty() {
+            let _ = self.world.insert_one(entity, Dialogue::new(instance.dialogue_nodes.clone()));
         }
         Ok(entity)
+    }
+
+    /// Spawns a placed periodic spawner: `Transform` (its position is where
+    /// spawned characters appear around, via `spawn_radius`) +
+    /// `SpawnerConfig`/`SpawnerState`. No mesh/collider of its own — it's a
+    /// logic-only marker, drawn nowhere, listed only in the F2 panel's own
+    /// "Spawners" outliner (mirrors how `CharacterMeta`/characters get
+    /// their own section rather than sharing "Scene Objects").
+    fn spawn_spawner(&mut self, instance: &SpawnerInstance) -> Entity {
+        self.world.spawn((
+            Transform { position: Vec3::from(instance.position), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            SpawnerConfig {
+                name: instance.name.clone(),
+                template: instance.template.clone(),
+                spawn_interval_secs: instance.spawn_interval_secs,
+                max_alive: instance.max_alive,
+                total_to_spawn: instance.total_to_spawn,
+                spawn_radius: instance.spawn_radius,
+            },
+            SpawnerState::new(),
+        ))
     }
 
     fn apply_level(&mut self, gl: &glow::Context, level: &Level) -> anyhow::Result<()> {
@@ -1411,6 +1618,10 @@ impl Sandbox {
         self.selected_rig = None;
         self.selected_rig_part = None;
         self.selected_character = None;
+        self.selected_spawner = None;
+        self.selected_entities.clear();
+        self.selected_characters.clear();
+        self.despawned_since_load.clear();
         for obj in &level.objects {
             if let Err(err) = self.spawn_level_object(gl, obj) {
                 log::error!("failed to spawn level object '{}': {err}", obj.name);
@@ -1440,6 +1651,9 @@ impl Sandbox {
                 log::error!("failed to spawn character '{}': {err}", instance.name);
             }
         }
+        for instance in &level.spawners {
+            self.spawn_spawner(instance);
+        }
         self.spawn_native_behavior_demo(gl);
         // Baked last so it sees the level's full static geometry —
         // characters themselves are dynamic bodies, so they're excluded
@@ -1447,18 +1661,25 @@ impl Sandbox {
         self.nav_grid = Some(NavGrid::bake(&self.world, 0.5));
         self.current_level_name = level.name.clone();
         self.physics_params = level.physics;
+        // Only (re)trigger music if the track actually changed — undo/redo
+        // and other same-level `apply_level` calls (e.g. restoring the
+        // pre-play snapshot) would otherwise glitch/restart music that was
+        // already playing correctly.
+        let previous_music_path = self.current_music_path.clone();
         self.current_music_path = level.music_path.clone();
         let music_volume = self.music_volume;
-        if let Some(audio) = self.audio.as_mut() {
-            match &self.current_music_path {
-                Some(path) => {
-                    let full_path = self.asset_root.join(path);
-                    match audio.play_music_file(&full_path, true) {
-                        Ok(()) => audio.set_music_volume(music_volume),
-                        Err(err) => log::warn!("failed to play music {full_path:?}: {err}"),
+        if previous_music_path != self.current_music_path {
+            if let Some(audio) = self.audio.as_mut() {
+                match &self.current_music_path {
+                    Some(path) => {
+                        let full_path = self.asset_root.join(path);
+                        match audio.play_music_file(&full_path, true) {
+                            Ok(()) => audio.set_music_volume(music_volume),
+                            Err(err) => log::warn!("failed to play music {full_path:?}: {err}"),
+                        }
                     }
+                    None => audio.stop_music(),
                 }
-                None => audio.stop_music(),
             }
         }
         log::info!(
@@ -1643,55 +1864,91 @@ impl Sandbox {
         self.rigs.iter().find(|rig| rig.name == stem)
     }
 
+    /// Reconstructs a `LevelObject` for a single entity — the same
+    /// per-entity logic `build_level_from_ecs`'s main loop uses, factored
+    /// out so it's also reusable by "duplicate selected"
+    /// (`duplicate_selected`). Returns `None` if `entity` has no
+    /// `Transform`/`LevelObjectMeta` (e.g. it's a light or particle
+    /// emitter, which have their own reconstruction below).
+    fn level_object_from_entity(&self, entity: Entity) -> Option<LevelObject> {
+        let mut query = self.world.query_one::<(&Transform, &LevelObjectMeta)>(entity).ok()?;
+        let (transform, meta) = query.get()?;
+
+        // An animated object's live `Transform` is mid-motion — save the
+        // `Animator`'s fixed base pose instead, so saving mid-animation
+        // doesn't capture a random instant.
+        let position = self
+            .world
+            .get::<&Animator>(entity)
+            .map(|animator| animator.base_position)
+            .unwrap_or(transform.position);
+
+        let animation = self.world.get::<&Animator>(entity).ok().map(|animator| match animator.kind {
+            AnimationKind::Orbit { axis, speed_deg_per_sec } => {
+                AnimationSpec::Orbit { axis: axis.to_array(), speed_deg_per_sec }
+            }
+            AnimationKind::Bob { axis, amplitude, period_secs } => {
+                AnimationSpec::Bob { axis: axis.to_array(), amplitude, period_secs }
+            }
+        });
+
+        Some(LevelObject {
+            name: meta.name.clone(),
+            mesh: meta.mesh_source.clone(),
+            texture_path: meta.texture_path.clone(),
+            position: position.to_array(),
+            rotation_euler_deg: meta.rotation_euler_deg.to_array(),
+            scale: transform.scale.to_array(),
+            is_dynamic: self.world.get::<&RigidBody>(entity).is_ok(),
+            is_trigger: self
+                .world
+                .get::<&Collider>(entity)
+                .is_ok_and(|collider| collider.is_trigger),
+            animation,
+            script: meta.script_path.clone(),
+            class: self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone()),
+            level_transition: meta.level_transition.clone(),
+            screen_effect: meta.screen_effect.clone(),
+            camera_shake: meta.camera_shake.clone(),
+        })
+    }
+
+    /// Sibling to `level_object_from_entity` for a placed character.
+    fn character_instance_from_entity(&self, entity: Entity) -> Option<CharacterInstance> {
+        let mut query = self.world.query_one::<(&Transform, &CharacterMeta)>(entity).ok()?;
+        let (transform, meta) = query.get()?;
+        let max_health = self.world.get::<&Health>(entity).ok().map(|health| health.max);
+        let dialogue_nodes = self.world.get::<&Dialogue>(entity).map(|d| d.nodes.clone()).unwrap_or_default();
+        Some(CharacterInstance {
+            name: meta.name.clone(),
+            position: transform.position.to_array(),
+            scale: transform.scale.to_array(),
+            color: meta.color,
+            disposition: meta.disposition,
+            move_speed: meta.move_speed,
+            wander_radius: meta.wander_radius,
+            sight_range: meta.sight_range,
+            max_health,
+            damage: meta.damage,
+            attack_range: meta.attack_range,
+            attack_cooldown_secs: meta.attack_cooldown_secs,
+            dialogue_nodes,
+        })
+    }
+
     fn build_level_from_ecs(&self) -> Level {
         let mut objects = Vec::new();
-        for (entity, (transform, meta)) in self
+        for (entity, _meta) in self
             .world
-            .query::<(&Transform, &LevelObjectMeta)>()
+            .query::<&LevelObjectMeta>()
             .without::<&Light>()
             .without::<&ParticleEmitter>()
             .without::<&NativeBehaviorDemoMarker>()
             .iter()
         {
-            // An animated object's live `Transform` is mid-motion — save the
-            // `Animator`'s fixed base pose instead, so saving mid-animation
-            // doesn't capture a random instant.
-            let position = self
-                .world
-                .get::<&Animator>(entity)
-                .map(|animator| animator.base_position)
-                .unwrap_or(transform.position);
-
-            let animation = self.world.get::<&Animator>(entity).ok().map(|animator| {
-                match animator.kind {
-                    AnimationKind::Orbit { axis, speed_deg_per_sec } => {
-                        AnimationSpec::Orbit { axis: axis.to_array(), speed_deg_per_sec }
-                    }
-                    AnimationKind::Bob { axis, amplitude, period_secs } => {
-                        AnimationSpec::Bob { axis: axis.to_array(), amplitude, period_secs }
-                    }
-                }
-            });
-
-            objects.push(LevelObject {
-                name: meta.name.clone(),
-                mesh: meta.mesh_source.clone(),
-                texture_path: meta.texture_path.clone(),
-                position: position.to_array(),
-                rotation_euler_deg: meta.rotation_euler_deg.to_array(),
-                scale: transform.scale.to_array(),
-                is_dynamic: self.world.get::<&RigidBody>(entity).is_ok(),
-                is_trigger: self
-                    .world
-                    .get::<&Collider>(entity)
-                    .is_ok_and(|collider| collider.is_trigger),
-                animation,
-                script: meta.script_path.clone(),
-                class: self.world.get::<&ClassMember>(entity).ok().map(|cm| cm.class_path.clone()),
-                level_transition: meta.level_transition.clone(),
-                screen_effect: meta.screen_effect.clone(),
-                camera_shake: meta.camera_shake.clone(),
-            });
+            if let Some(obj) = self.level_object_from_entity(entity) {
+                objects.push(obj);
+            }
         }
 
         let mut lights = Vec::new();
@@ -1737,23 +1994,22 @@ impl Sandbox {
         }
 
         let mut characters = Vec::new();
-        for (entity, (transform, meta)) in self.world.query::<(&Transform, &CharacterMeta)>().iter() {
-            let max_health = self.world.get::<&Health>(entity).ok().map(|health| health.max);
-            let dialogue = self.world.get::<&Dialogue>(entity).map(|d| d.lines.clone()).unwrap_or_default();
-            characters.push(CharacterInstance {
-                name: meta.name.clone(),
+        for (entity, _meta) in self.world.query::<&CharacterMeta>().iter() {
+            if let Some(instance) = self.character_instance_from_entity(entity) {
+                characters.push(instance);
+            }
+        }
+
+        let mut spawners = Vec::new();
+        for (_entity, (transform, config)) in self.world.query::<(&Transform, &SpawnerConfig)>().iter() {
+            spawners.push(SpawnerInstance {
+                name: config.name.clone(),
                 position: transform.position.to_array(),
-                scale: transform.scale.to_array(),
-                color: meta.color,
-                disposition: meta.disposition,
-                move_speed: meta.move_speed,
-                wander_radius: meta.wander_radius,
-                sight_range: meta.sight_range,
-                max_health,
-                damage: meta.damage,
-                attack_range: meta.attack_range,
-                attack_cooldown_secs: meta.attack_cooldown_secs,
-                dialogue,
+                template: config.template.clone(),
+                spawn_interval_secs: config.spawn_interval_secs,
+                max_alive: config.max_alive,
+                total_to_spawn: config.total_to_spawn,
+                spawn_radius: config.spawn_radius,
             });
         }
 
@@ -1764,6 +2020,7 @@ impl Sandbox {
             particle_emitters,
             rig_instances,
             characters,
+            spawners,
             physics: self.physics_params,
             music_path: self.current_music_path.clone(),
         }
@@ -1797,7 +2054,120 @@ impl Sandbox {
         }
     }
 
+    const UNDO_STACK_LIMIT: usize = 50;
+
+    /// Snapshots the current level state onto `undo_stack` (reusing the
+    /// exact `build_level_from_ecs` round-trip Save/Load already goes
+    /// through) and clears `redo_stack` — any new edit invalidates the old
+    /// redo history. Call *before* the edit it should let you undo.
+    fn push_undo_snapshot(&mut self) {
+        self.undo_stack.push(self.build_level_from_ecs());
+        if self.undo_stack.len() > Self::UNDO_STACK_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self, gl: &glow::Context) {
+        let Some(level) = self.undo_stack.pop() else {
+            log::info!("nothing to undo");
+            return;
+        };
+        self.redo_stack.push(self.build_level_from_ecs());
+        if let Err(err) = self.apply_level(gl, &level) {
+            log::error!("undo failed: {err}");
+        }
+        // `apply_level` just nulled every selection field — sync the
+        // change-detector to match, or next frame's "selection changed"
+        // check would fire spuriously and clear the `redo_stack` we just
+        // populated above.
+        self.last_undo_selection = (None, None, None, None);
+    }
+
+    fn redo(&mut self, gl: &glow::Context) {
+        let Some(level) = self.redo_stack.pop() else {
+            log::info!("nothing to redo");
+            return;
+        };
+        self.undo_stack.push(self.build_level_from_ecs());
+        if let Err(err) = self.apply_level(gl, &level) {
+            log::error!("redo failed: {err}");
+        }
+        self.last_undo_selection = (None, None, None, None);
+    }
+
+    /// Ctrl+D — duplicates every entity in the active multi-select set(s),
+    /// nudged along X so copies never sit flush on top of the original
+    /// (the same offset convention `add_primitive` uses for staggering new
+    /// objects). The freshly-spawned copies become the new selection.
+    fn duplicate_selected(&mut self, gl: &glow::Context) {
+        if self.selected_entities.is_empty() && self.selected_characters.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+
+        let object_copies: Vec<LevelObject> = self
+            .selected_entities
+            .iter()
+            .filter_map(|&entity| self.level_object_from_entity(entity))
+            .map(|obj| LevelObject {
+                name: format!("{} Copy", obj.name),
+                position: [obj.position[0] + 1.0, obj.position[1], obj.position[2]],
+                ..obj
+            })
+            .collect();
+        let character_copies: Vec<CharacterInstance> = self
+            .selected_characters
+            .iter()
+            .filter_map(|&entity| self.character_instance_from_entity(entity))
+            .map(|instance| CharacterInstance {
+                name: format!("{} Copy", instance.name),
+                position: [instance.position[0] + 1.0, instance.position[1], instance.position[2]],
+                ..instance
+            })
+            .collect();
+
+        self.selected_entities.clear();
+        self.selected_characters.clear();
+        for obj in &object_copies {
+            match self.spawn_level_object(gl, obj) {
+                Ok(entity) => {
+                    self.selected_entity = Some(entity);
+                    self.selected_entities.insert(entity);
+                }
+                Err(err) => log::error!("failed to duplicate object '{}': {err}", obj.name),
+            }
+        }
+        for instance in &character_copies {
+            match self.spawn_character(gl, instance) {
+                Ok(entity) => {
+                    self.selected_character = Some(entity);
+                    self.selected_characters.insert(entity);
+                }
+                Err(err) => log::error!("failed to duplicate character '{}': {err}", instance.name),
+            }
+        }
+    }
+
+    /// Delete key — removes every entity in whichever multi-select set is
+    /// non-empty (batches the existing per-object "Delete" button action).
+    fn delete_selected(&mut self) {
+        if self.selected_entities.is_empty() && self.selected_characters.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+        for entity in self.selected_entities.drain() {
+            let _ = self.world.despawn(entity);
+        }
+        for entity in self.selected_characters.drain() {
+            let _ = self.world.despawn(entity);
+        }
+        self.selected_entity = None;
+        self.selected_character = None;
+    }
+
     fn add_primitive(&mut self, gl: &glow::Context, kind: PrimitiveKind) {
+        self.push_undo_snapshot();
         let count = self.world.query::<&LevelObjectMeta>().iter().count();
         let label = match kind {
             PrimitiveKind::Cube => "Cube",
@@ -1829,6 +2199,7 @@ impl Sandbox {
     /// spawn path as `add_primitive`, but pre-configured `is_trigger: true`
     /// and rendered in a distinct cyan so it stays identifiable in the editor.
     fn add_trigger_zone(&mut self, gl: &glow::Context) {
+        self.push_undo_snapshot();
         let count = self.world.query::<&LevelObjectMeta>().iter().count();
         let obj = LevelObject {
             name: format!("Trigger_{}", count + 1),
@@ -1857,17 +2228,24 @@ impl Sandbox {
     /// clear the existing scene.
     fn import_model_as_object(&mut self, gl: &glow::Context) {
         let Some(model_path) = rfd::FileDialog::new()
-            .add_filter("Wavefront OBJ", &["obj"])
+            .add_filter("3D Models", &["obj", "gltf", "glb"])
             .set_directory(&self.asset_root)
             .pick_file()
         else {
             return;
         };
+        self.push_undo_snapshot();
+
+        let is_gltf = model_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gltf") || ext.eq_ignore_ascii_case("glb"));
 
         let texture_path = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg"])
             .set_directory(&self.asset_root)
             .pick_file();
+        let mut texture_path = texture_path.map(|path| engine::level::relativize(&path, &self.asset_root));
 
         let name = model_path
             .file_stem()
@@ -1875,11 +2253,41 @@ impl Sandbox {
             .unwrap_or_else(|| "Imported".to_string());
         let count = self.world.query::<&LevelObjectMeta>().iter().count();
 
+        let mesh = if is_gltf {
+            MeshSource::GltfFile(engine::level::relativize(&model_path, &self.asset_root))
+        } else {
+            MeshSource::ObjFile(engine::level::relativize(&model_path, &self.asset_root))
+        };
+
+        // A glTF's own embedded/referenced base-color texture is a
+        // convenience fallback, only used if the user didn't separately
+        // pick one above (matches OBJ import's "texture is always its own
+        // pick" behavior when one is provided).
+        if is_gltf && texture_path.is_none() {
+            match load_gltf(&model_path) {
+                Ok(scene) => {
+                    if let Some(image) = scene.meshes.first().and_then(|entry| entry.image.as_ref()) {
+                        let textures_dir = self.asset_root.join("textures");
+                        match std::fs::create_dir_all(&textures_dir) {
+                            Ok(()) => {
+                                let out_path = textures_dir.join(format!("{name}_basecolor.png"));
+                                match engine::texture::save_rgba8_png(&out_path, &image.rgba, image.width, image.height) {
+                                    Ok(()) => texture_path = Some(engine::level::relativize(&out_path, &self.asset_root)),
+                                    Err(err) => log::error!("failed to write extracted glTF texture: {err}"),
+                                }
+                            }
+                            Err(err) => log::error!("failed to create textures dir: {err}"),
+                        }
+                    }
+                }
+                Err(err) => log::error!("failed to load glTF for texture extraction: {err}"),
+            }
+        }
+
         let obj = LevelObject {
             name,
-            mesh: MeshSource::ObjFile(engine::level::relativize(&model_path, &self.asset_root)),
-            texture_path: texture_path
-                .map(|path| engine::level::relativize(&path, &self.asset_root)),
+            mesh,
+            texture_path,
             position: [count as f32 * 1.5 - 1.5, 0.0, 0.0],
             rotation_euler_deg: [0.0, 0.0, 0.0],
             scale: [1.0, 1.0, 1.0],
@@ -2073,12 +2481,16 @@ impl Sandbox {
         let Ok(position) = self.world.get::<&Transform>(player).map(|t| t.position) else {
             return;
         };
+        let player_health = self.world.get::<&Health>(player).ok().map(|health| (health.current, health.max));
         let data = SaveData {
             level_name: self.current_level_name.clone(),
             player_position: position.to_array(),
             player_yaw: self.fp_camera.yaw,
             player_pitch: self.fp_camera.pitch,
             saved_at_elapsed: self.elapsed_time,
+            player_health,
+            despawned_names: self.despawned_since_load.clone(),
+            extra: std::collections::HashMap::new(),
         };
         let path = self.checkpoint_path();
         match engine::save::save_to_file(&data, &path) {
@@ -2117,9 +2529,37 @@ impl Sandbox {
             if let Ok(mut transform) = self.world.get::<&mut Transform>(player) {
                 transform.position = Vec3::from(data.player_position);
             }
+            if let Some((current, max)) = data.player_health {
+                let _ = self.world.insert_one(player, Health { current, max });
+            }
         }
         self.fp_camera.yaw = data.player_yaw;
         self.fp_camera.pitch = data.player_pitch;
+
+        // Re-despawn whatever was already removed at save time —
+        // `apply_level` just freshly respawned it.
+        for name in &data.despawned_names {
+            let mut to_despawn = None;
+            for (entity, meta) in self.world.query::<&LevelObjectMeta>().iter() {
+                if &meta.name == name {
+                    to_despawn = Some(entity);
+                    break;
+                }
+            }
+            if to_despawn.is_none() {
+                for (entity, meta) in self.world.query::<&CharacterMeta>().iter() {
+                    if &meta.name == name {
+                        to_despawn = Some(entity);
+                        break;
+                    }
+                }
+            }
+            if let Some(entity) = to_despawn {
+                self.despawned_since_load.push(name.clone());
+                let _ = self.world.despawn(entity);
+            }
+        }
+
         log::info!("checkpoint loaded from {path:?}");
         self.hud.show_toast("Checkpoint loaded", 1.5);
     }
@@ -2244,6 +2684,12 @@ impl Sandbox {
     /// the physics engine and the input hook together. Replace this with
     /// your own game's interaction (pickup, dialogue, open a door, ...).
     fn interact(&mut self) {
+        // A choice prompt is already waiting on a number-key pick — resolve
+        // that first rather than letting E re-trigger the same dialogue (or
+        // push/attack whatever's now nearest) out from under it.
+        if self.active_dialogue.is_some() {
+            return;
+        }
         let Some(player) = self.player_entity else {
             return;
         };
@@ -2296,8 +2742,18 @@ impl Sandbox {
 
         if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
             if let Some(dialogue) = query.get() {
-                let line = dialogue.next().to_string();
+                let line = dialogue.current_text().to_string();
+                let has_choices = !dialogue.current_choices().is_empty();
                 self.hud.show_toast(&line, 3.0);
+                if has_choices {
+                    // Wait for a number-key pick (see `handle_event`'s
+                    // `Keycode::Num1..=Num9` arm) instead of advancing —
+                    // `Dialogue::advance` is a no-op on a choice node
+                    // anyway, but staying explicit here documents why.
+                    self.active_dialogue = Some(entity);
+                } else {
+                    dialogue.advance();
+                }
                 log::info!("talked to a character {distance:.2}m away");
                 return;
             }
@@ -2362,6 +2818,46 @@ impl Sandbox {
             }
             self.hud.show_toast("Pushed!", 1.5);
         }
+    }
+
+    /// Number-key handler for the dialogue choice-picker (see
+    /// `handle_event`'s `Keycode::Num1..=Num9` arm) — `index` is 0-based.
+    /// Clears `active_dialogue` regardless of whether the pick was valid,
+    /// since the overlay's choices were only ever for that one prompt.
+    fn choose_dialogue_option(&mut self, index: usize) {
+        let Some(entity) = self.active_dialogue.take() else { return };
+        if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+            if let Some(dialogue) = query.get() {
+                if dialogue.choose(index) {
+                    let line = dialogue.current_text().to_string();
+                    self.hud.show_toast(&line, 3.0);
+                }
+            }
+        }
+    }
+
+    /// Draws the choice-picker overlay while `active_dialogue` is set —
+    /// bottom-center, numbered to match the 1-9 key hints. A no-op (and
+    /// self-healing) if the character despawned or its current node no
+    /// longer has choices; `active_dialogue` itself is only cleared by
+    /// `choose_dialogue_option`, so a stale reference just draws nothing
+    /// here until the next successful/failed pick clears it.
+    fn draw_dialogue_choices(&self, egui_ctx: &egui::Context) {
+        let Some(entity) = self.active_dialogue else { return };
+        let Ok(dialogue) = self.world.get::<&Dialogue>(entity) else { return };
+        let choices = dialogue.current_choices();
+        if choices.is_empty() {
+            return;
+        }
+        egui::Area::new("dialogue_choices".into())
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -60.0))
+            .show(egui_ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    for (i, (label, _)) in choices.iter().enumerate() {
+                        ui.label(format!("{}. {label}", i + 1));
+                    }
+                });
+            });
     }
 
     /// Spawns a transient, self-cleaning burst of particles at `position` —
@@ -2486,7 +2982,25 @@ impl Sandbox {
     }
 
     fn draw_level_editor_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context) {
+        // Bundles a whole slider-drag editing session on one object into a
+        // single undo step: the moment the selection changes to something
+        // else, snapshot the state as it stood *before* that new object's
+        // edits begin.
+        let current_selection = (self.selected_entity, self.selected_rig, self.selected_character, self.selected_class);
+        if current_selection != self.last_undo_selection {
+            self.push_undo_snapshot();
+            self.last_undo_selection = current_selection;
+        }
+
         ui.heading("Level");
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo (Ctrl+Z)")).clicked() {
+                self.undo(gl);
+            }
+            if ui.add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo (Ctrl+Shift+Z)")).clicked() {
+                self.redo(gl);
+            }
+        });
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
                 self.save_current_level();
@@ -2556,6 +3070,7 @@ impl Sandbox {
             self.add_trigger_zone(gl);
         }
         if ui.button("Add Light").clicked() {
+            self.push_undo_snapshot();
             let count = self.world.query::<&Light>().iter().count();
             let light = LevelLight {
                 name: format!("Light_{}", count + 1),
@@ -2568,6 +3083,7 @@ impl Sandbox {
             self.selected_entity = Some(entity);
         }
         if ui.button("Add Particle Emitter").clicked() {
+            self.push_undo_snapshot();
             let count = self.world.query::<&ParticleEmitter>().iter().count();
             let emitter = LevelParticleEmitter {
                 name: format!("{}_{}", self.particle_emitter_new_name, count + 1),
@@ -2580,15 +3096,26 @@ impl Sandbox {
 
         ui.separator();
         ui.heading("Scene Objects");
+        if self.selected_entities.len() > 1 {
+            ui.small(format!("{} selected (Ctrl+click to multi-select, Ctrl+D to duplicate, Del to delete)", self.selected_entities.len()));
+        }
         let mut clicked_entity = None;
         for (entity, meta) in self.world.query::<&LevelObjectMeta>().iter() {
-            let selected = self.selected_entity == Some(entity);
+            let selected = self.selected_entities.contains(&entity);
             if ui.selectable_label(selected, &meta.name).clicked() {
                 clicked_entity = Some(entity);
             }
         }
         if let Some(entity) = clicked_entity {
             self.selected_entity = Some(entity);
+            if ui.input(|i| i.modifiers.ctrl) {
+                if !self.selected_entities.remove(&entity) {
+                    self.selected_entities.insert(entity);
+                }
+            } else {
+                self.selected_entities.clear();
+                self.selected_entities.insert(entity);
+            }
         }
 
         ui.separator();
@@ -2610,6 +3137,9 @@ impl Sandbox {
                 self.create_new_rig(gl);
             }
         });
+        if ui.button("Import glTF as Rig...").clicked() {
+            self.import_gltf_as_rig(gl);
+        }
         if !self.rigs.is_empty() {
             ui.label("Add instance of:");
             let mut add_instance_of = None;
@@ -2650,6 +3180,7 @@ impl Sandbox {
         ui.separator();
         ui.heading("Characters");
         if ui.button("Add Character").clicked() {
+            self.push_undo_snapshot();
             let count = self.world.query::<&CharacterMeta>().iter().count();
             let instance = CharacterInstance {
                 name: format!("Character_{}", count + 1),
@@ -2664,22 +3195,33 @@ impl Sandbox {
                 damage: None,
                 attack_range: 1.2,
                 attack_cooldown_secs: 1.0,
-                dialogue: Vec::new(),
+                dialogue_nodes: Vec::new(),
             };
             match self.spawn_character(gl, &instance) {
                 Ok(entity) => self.selected_character = Some(entity),
                 Err(err) => log::error!("failed to add character: {err}"),
             }
         }
+        if self.selected_characters.len() > 1 {
+            ui.small(format!("{} selected (Ctrl+click to multi-select, Ctrl+D to duplicate, Del to delete)", self.selected_characters.len()));
+        }
         let mut clicked_character = None;
         for (entity, meta) in self.world.query::<&CharacterMeta>().iter() {
-            let selected = self.selected_character == Some(entity);
+            let selected = self.selected_characters.contains(&entity);
             if ui.selectable_label(selected, &meta.name).clicked() {
                 clicked_character = Some(entity);
             }
         }
         if let Some(entity) = clicked_character {
             self.selected_character = Some(entity);
+            if ui.input(|i| i.modifiers.ctrl) {
+                if !self.selected_characters.remove(&entity) {
+                    self.selected_characters.insert(entity);
+                }
+            } else {
+                self.selected_characters.clear();
+                self.selected_characters.insert(entity);
+            }
         }
 
         ui.separator();
@@ -2691,6 +3233,59 @@ impl Sandbox {
             }
         } else {
             ui.label("No character selected.");
+        }
+
+        ui.separator();
+        ui.heading("Spawners");
+        if ui.button("Add Spawner").clicked() {
+            self.push_undo_snapshot();
+            let count = self.world.query::<&SpawnerConfig>().iter().count();
+            let instance = SpawnerInstance {
+                name: format!("Spawner_{}", count + 1),
+                position: [0.0, 1.0, 0.0],
+                template: CharacterInstance {
+                    name: "Spawned".to_string(),
+                    position: [0.0, 1.0, 0.0],
+                    scale: [0.8, 1.6, 0.8],
+                    color: [0.8, 0.2, 0.2],
+                    disposition: Disposition::Hostile,
+                    move_speed: 2.0,
+                    wander_radius: 2.0,
+                    sight_range: 6.0,
+                    max_health: Some(20.0),
+                    damage: Some(5.0),
+                    attack_range: 1.2,
+                    attack_cooldown_secs: 1.0,
+                    dialogue_nodes: Vec::new(),
+                },
+                spawn_interval_secs: 5.0,
+                max_alive: 3,
+                total_to_spawn: None,
+                spawn_radius: 2.0,
+            };
+            let entity = self.spawn_spawner(&instance);
+            self.selected_spawner = Some(entity);
+        }
+        let mut clicked_spawner = None;
+        for (entity, config) in self.world.query::<&SpawnerConfig>().iter() {
+            let selected = self.selected_spawner == Some(entity);
+            if ui.selectable_label(selected, &config.name).clicked() {
+                clicked_spawner = Some(entity);
+            }
+        }
+        if let Some(entity) = clicked_spawner {
+            self.selected_spawner = Some(entity);
+        }
+
+        ui.separator();
+        if let Some(entity) = self.selected_spawner {
+            if self.world.contains(entity) {
+                self.draw_selected_spawner_ui(ui, entity);
+            } else {
+                self.selected_spawner = None;
+            }
+        } else {
+            ui.label("No spawner selected.");
         }
 
         ui.separator();
@@ -3014,6 +3609,10 @@ impl Sandbox {
                         if ui.button("Assign Texture...").clicked() {
                             assign_texture = true;
                         }
+                        if ui.button("Browse Texture...").clicked() {
+                            self.pending_texture_pick = Some(PendingTexturePick::ForEntity(entity));
+                            self.texture_asset_browser.open(&self.asset_root);
+                        }
                         if ui.button("Delete").clicked() {
                             delete = true;
                         }
@@ -3116,6 +3715,7 @@ impl Sandbox {
             self.assign_texture_to_entity(gl, entity);
         }
         if delete {
+            self.push_undo_snapshot();
             let _ = self.world.despawn(entity);
             self.selected_entity = None;
         }
@@ -3209,36 +3809,63 @@ impl Sandbox {
         ui.separator();
         ui.label("Dialogue");
         if self.world.get::<&Dialogue>(entity).is_ok() {
-            let mut lines = self.world.get::<&Dialogue>(entity).map(|d| d.lines.clone()).unwrap_or_default();
+            let mut nodes = self.world.get::<&Dialogue>(entity).map(|d| d.nodes.clone()).unwrap_or_default();
             let mut changed = false;
-            let mut remove_index = None;
-            for (i, line) in lines.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    changed |= ui.text_edit_singleline(line).changed();
-                    if ui.small_button("x").clicked() {
-                        remove_index = Some(i);
+            let mut remove_node = None;
+            for (i, node) in nodes.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Node {i}:"));
+                        changed |= ui.text_edit_singleline(&mut node.text).changed();
+                        if ui.small_button("x").clicked() {
+                            remove_node = Some(i);
+                        }
+                    });
+                    ui.small("Choices (empty = linear, auto-advances to the next node):");
+                    let mut remove_choice = None;
+                    for (ci, (label, target)) in node.choices.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            changed |= ui.text_edit_singleline(label).changed();
+                            let mut target_i32 = *target as i32;
+                            if ui.add(egui::DragValue::new(&mut target_i32).range(0..=999).prefix("-> node ")).changed() {
+                                *target = target_i32.max(0) as usize;
+                                changed = true;
+                            }
+                            if ui.small_button("x").clicked() {
+                                remove_choice = Some(ci);
+                            }
+                        });
+                    }
+                    if let Some(ci) = remove_choice {
+                        node.choices.remove(ci);
+                        changed = true;
+                    }
+                    if ui.small_button("+ Choice").clicked() {
+                        node.choices.push((String::new(), 0));
+                        changed = true;
                     }
                 });
             }
-            if let Some(i) = remove_index {
-                lines.remove(i);
+            if let Some(i) = remove_node {
+                nodes.remove(i);
                 changed = true;
             }
-            if ui.button("+ Line").clicked() {
-                lines.push(String::new());
+            if ui.button("+ Node").clicked() {
+                nodes.push(DialogueNode { text: String::new(), choices: Vec::new() });
                 changed = true;
             }
             if changed {
                 if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
                     if let Some(dialogue) = query.get() {
-                        dialogue.lines = lines;
+                        dialogue.nodes = nodes;
                     }
                 }
             }
             if ui.button("Preview").clicked() {
                 if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
                     if let Some(dialogue) = query.get() {
-                        preview_line = Some(dialogue.next().to_string());
+                        preview_line = Some(dialogue.current_text().to_string());
+                        dialogue.advance();
                     }
                 }
             }
@@ -3246,7 +3873,7 @@ impl Sandbox {
                 let _ = self.world.remove_one::<Dialogue>(entity);
             }
         } else if ui.button("Add Dialogue").clicked() {
-            let _ = self.world.insert_one(entity, Dialogue::new(vec!["...".to_string()]));
+            let _ = self.world.insert_one(entity, Dialogue::new(vec![DialogueNode { text: "...".to_string(), choices: Vec::new() }]));
         }
 
         ui.separator();
@@ -3258,8 +3885,113 @@ impl Sandbox {
             self.hud.show_toast(&line, 3.0);
         }
         if delete {
+            self.push_undo_snapshot();
             let _ = self.world.despawn(entity);
             self.selected_character = None;
+        }
+    }
+
+    /// Sibling to `draw_selected_character_ui` for a placed spawner —
+    /// timing/limits, plus a compact editor for the `CharacterInstance`
+    /// template it spawns (a smaller field set than the full character
+    /// inspector; scale/attack-range/cooldown/dialogue are left at their
+    /// "Add Spawner" defaults, editable by selecting a spawned instance
+    /// directly once one exists).
+    fn draw_selected_spawner_ui(&mut self, ui: &mut egui::Ui, entity: Entity) {
+        let mut delete = false;
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut SpawnerConfig)>(entity) {
+            if let Some((transform, config)) = query.get() {
+                let mut name = config.name.clone();
+                if ui.text_edit_singleline(&mut name).changed() {
+                    config.name = name;
+                }
+
+                ui.label("Position");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.05).prefix("x: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.05).prefix("y: "));
+                    ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.05).prefix("z: "));
+                });
+
+                ui.add(
+                    egui::DragValue::new(&mut config.spawn_interval_secs)
+                        .speed(0.1)
+                        .range(0.1..=120.0)
+                        .prefix("Interval (s): "),
+                );
+                let mut max_alive_f = config.max_alive as f32;
+                if ui
+                    .add(egui::DragValue::new(&mut max_alive_f).speed(1.0).range(0.0..=50.0).prefix("Max alive: "))
+                    .changed()
+                {
+                    config.max_alive = max_alive_f.max(0.0) as u32;
+                }
+                ui.add(egui::DragValue::new(&mut config.spawn_radius).speed(0.1).range(0.0..=50.0).prefix("Spawn radius: "));
+
+                let mut limited = config.total_to_spawn.is_some();
+                if ui.checkbox(&mut limited, "Limit total spawned").changed() {
+                    config.total_to_spawn = if limited { Some(10) } else { None };
+                }
+                if let Some(total) = &mut config.total_to_spawn {
+                    let mut total_f = *total as f32;
+                    if ui
+                        .add(egui::DragValue::new(&mut total_f).speed(1.0).range(1.0..=999.0).prefix("Total to spawn: "))
+                        .changed()
+                    {
+                        *total = total_f.max(1.0) as u32;
+                    }
+                }
+
+                ui.separator();
+                ui.label("Template character");
+                let mut template_name = config.template.name.clone();
+                if ui.text_edit_singleline(&mut template_name).changed() {
+                    config.template.name = template_name;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    ui.color_edit_button_rgb(&mut config.template.color);
+                });
+                egui::ComboBox::from_id_salt("spawner_template_disposition")
+                    .selected_text(match config.template.disposition {
+                        Disposition::Passive => "Passive",
+                        Disposition::Hostile => "Hostile",
+                        Disposition::Friendly => "Friendly",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut config.template.disposition, Disposition::Passive, "Passive");
+                        ui.selectable_value(&mut config.template.disposition, Disposition::Hostile, "Hostile");
+                        ui.selectable_value(&mut config.template.disposition, Disposition::Friendly, "Friendly");
+                    });
+                ui.add(egui::DragValue::new(&mut config.template.move_speed).speed(0.1).range(0.0..=20.0).prefix("Move speed: "));
+                ui.add(egui::DragValue::new(&mut config.template.sight_range).speed(0.1).range(0.0..=50.0).prefix("Sight range: "));
+
+                let mut has_combat = config.template.damage.is_some();
+                if ui.checkbox(&mut has_combat, "Can attack").changed() {
+                    config.template.damage = if has_combat { Some(5.0) } else { None };
+                }
+                if let Some(damage) = &mut config.template.damage {
+                    ui.add(egui::DragValue::new(damage).speed(0.5).range(0.0..=100.0).prefix("Damage: "));
+                }
+
+                let mut has_health = config.template.max_health.is_some();
+                if ui.checkbox(&mut has_health, "Has health").changed() {
+                    config.template.max_health = if has_health { Some(20.0) } else { None };
+                }
+                if let Some(max_health) = &mut config.template.max_health {
+                    ui.add(egui::DragValue::new(max_health).speed(1.0).range(1.0..=1000.0).prefix("Max health: "));
+                }
+
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    delete = true;
+                }
+            }
+        }
+        if delete {
+            self.push_undo_snapshot();
+            let _ = self.world.despawn(entity);
+            self.selected_spawner = None;
         }
     }
 
@@ -3298,6 +4030,7 @@ impl Sandbox {
             }
         }
         if delete {
+            self.push_undo_snapshot();
             let _ = self.world.despawn(entity);
             self.selected_entity = None;
         }
@@ -3367,6 +4100,7 @@ impl Sandbox {
             }
         }
         if delete {
+            self.push_undo_snapshot();
             let _ = self.world.despawn(entity);
             self.selected_entity = None;
         }
@@ -3402,6 +4136,84 @@ impl Sandbox {
             log::error!("failed to save new rig '{name}': {err}");
             return;
         }
+        self.rigs.push(asset);
+        let index = self.rigs.len() - 1;
+        self.add_rig_instance(gl, index);
+    }
+
+    /// F2 "Import glTF as Rig..." — maps a multi-node glTF/GLB file's node
+    /// hierarchy onto a `RigAsset` (one `RigPartDef` per mesh-carrying
+    /// node, `MeshSource::GltfNode` addressing that specific node so
+    /// parts don't collide the way `MeshSource::GltfFile`'s "first node
+    /// only" convention would). No clips are generated — see
+    /// `engine::mesh::load_gltf`'s doc comment for why animation import is
+    /// out of scope. The new rig is saved to `rigs/` and immediately
+    /// placeable via the existing "Add instance of" list, same as any
+    /// hand-authored rig.
+    fn import_gltf_as_rig(&mut self, gl: &glow::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("glTF", &["gltf", "glb"])
+            .set_directory(&self.asset_root)
+            .pick_file()
+        else {
+            return;
+        };
+        let scene = match load_gltf(&path) {
+            Ok(scene) => scene,
+            Err(err) => {
+                log::error!("failed to load glTF {path:?}: {err}");
+                return;
+            }
+        };
+        if scene.meshes.is_empty() {
+            log::warn!("glTF {path:?} has no mesh-carrying nodes; nothing to import");
+            return;
+        }
+
+        let rig_name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "imported_rig".to_string());
+        if self.rigs.iter().any(|rig| rig.name == rig_name) {
+            log::warn!("a rig named '{rig_name}' already exists; pick a differently-named glTF file or delete the existing rig first");
+            return;
+        }
+        let relative_gltf_path = engine::level::relativize(&path, &self.asset_root);
+        let textures_dir = self.asset_root.join("textures");
+        if let Err(err) = std::fs::create_dir_all(&textures_dir) {
+            log::error!("failed to create textures dir: {err}");
+        }
+
+        let parts: Vec<RigPartDef> = scene
+            .meshes
+            .iter()
+            .map(|entry| {
+                let texture_path = entry.image.as_ref().and_then(|image| {
+                    let out_path = textures_dir.join(format!("{rig_name}_{}.png", entry.name));
+                    match engine::texture::save_rgba8_png(&out_path, &image.rgba, image.width, image.height) {
+                        Ok(()) => Some(engine::level::relativize(&out_path, &self.asset_root)),
+                        Err(err) => {
+                            log::error!("failed to write extracted glTF texture for part '{}': {err}", entry.name);
+                            None
+                        }
+                    }
+                });
+                RigPartDef {
+                    name: entry.name.clone(),
+                    parent: entry.parent_name.clone(),
+                    mesh: MeshSource::GltfNode { path: relative_gltf_path.clone(), node: entry.name.clone() },
+                    texture_path,
+                    local_position: entry.local_position,
+                    local_rotation_euler_deg: entry.local_rotation_euler_deg,
+                    scale: entry.scale,
+                }
+            })
+            .collect();
+
+        let asset = RigAsset { name: rig_name.clone(), parts, clips: Vec::new() };
+        let rig_path = self.rigs_dir.join(format!("{rig_name}.ron"));
+        if let Err(err) = engine::rig::save_to_file(&asset, &rig_path) {
+            log::error!("failed to save imported rig '{rig_name}': {err}");
+            return;
+        }
+        log::info!("imported glTF {path:?} as rig '{rig_name}' ({} parts)", asset.parts.len());
         self.rigs.push(asset);
         let index = self.rigs.len() - 1;
         self.add_rig_instance(gl, index);
@@ -3931,6 +4743,10 @@ impl Sandbox {
             if ui.button("Assign Texture...").clicked() {
                 assign_texture = true;
             }
+            if ui.button("Browse Texture...").clicked() {
+                self.pending_texture_pick = Some(PendingTexturePick::ForClass(index));
+                self.texture_asset_browser.open(&self.asset_root);
+            }
 
             ui.label("Scale");
             ui.horizontal(|ui| {
@@ -4097,6 +4913,7 @@ impl Sandbox {
             let _ = self.world.remove_one::<ClassMember>(entity);
         }
         if delete {
+            self.push_undo_snapshot();
             let _ = self.world.despawn(entity);
             self.selected_entity = None;
         }
@@ -4138,6 +4955,14 @@ impl Sandbox {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_resolution_scale(self.render_params.resolution_scale);
         }
+
+        ui.separator();
+        ui.heading("HUD");
+        hud_style_editor(ui, &mut self.render_params.hud);
+        ui.small("Saved/loaded with the shader profile, like Render Params above.");
+
+        ui.separator();
+        ui.checkbox(&mut self.profiler_visible, "Show Profiler");
 
         ui.separator();
         ui.heading("Physics");
@@ -4310,6 +5135,16 @@ impl Game for Sandbox {
         // to Play so the very first frame a player sees is the game.
         if !editor_available() {
             self.enter_play_mode(ctx);
+        } else {
+            // Hot reload is a dev-only convenience — no watcher (and no
+            // per-frame poll overhead) in a shipped build.
+            self.hot_reload = match HotReloadWatcher::new(&self.asset_root) {
+                Ok(watcher) => Some(watcher),
+                Err(err) => {
+                    log::warn!("hot reload disabled: failed to start file watcher: {err}");
+                    None
+                }
+            };
         }
 
         Ok(())
@@ -4408,11 +5243,55 @@ impl Game for Sandbox {
                 self.save_current_profile();
             }
             Event::KeyDown {
+                keycode: Some(Keycode::Z),
+                repeat: false,
+                keymod,
+                ..
+            } if editing
+                && !ui_wants_keyboard
+                && (keymod.contains(sdl2::keyboard::Mod::LCTRLMOD) || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD)) =>
+            {
+                let gl = ctx.gl();
+                if keymod.contains(sdl2::keyboard::Mod::LSHIFTMOD) || keymod.contains(sdl2::keyboard::Mod::RSHIFTMOD) {
+                    self.redo(gl);
+                } else {
+                    self.undo(gl);
+                }
+            }
+            Event::KeyDown {
+                keycode: Some(Keycode::D),
+                repeat: false,
+                keymod,
+                ..
+            } if editing
+                && !ui_wants_keyboard
+                && (keymod.contains(sdl2::keyboard::Mod::LCTRLMOD) || keymod.contains(sdl2::keyboard::Mod::RCTRLMOD)) =>
+            {
+                let gl = ctx.gl();
+                self.duplicate_selected(gl);
+            }
+            Event::KeyDown {
+                keycode: Some(Keycode::Delete),
+                repeat: false,
+                ..
+            } if editing && !ui_wants_keyboard => {
+                self.delete_selected();
+            }
+            Event::KeyDown {
                 keycode: Some(Keycode::E),
                 repeat: false,
                 ..
             } if self.mode == EditorMode::Play && !self.paused => {
                 self.interact();
+            }
+            Event::KeyDown {
+                keycode: Some(keycode),
+                repeat: false,
+                ..
+            } if self.mode == EditorMode::Play && !self.paused && self.active_dialogue.is_some() => {
+                if let Some(choice_index) = number_key_index(keycode) {
+                    self.choose_dialogue_option(choice_index);
+                }
             }
             Event::ControllerButtonDown { button: ControllerButton::X, .. }
                 if self.mode == EditorMode::Play && !self.paused =>
@@ -4425,6 +5304,15 @@ impl Game for Sandbox {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         self.elapsed_time = ctx.time.elapsed;
+
+        // Drained before touching anything else in `self` — borrowing
+        // `self.hot_reload` only for the duration of `poll_events` (which
+        // returns an owned `Vec`) means `handle_hot_reload` below is free
+        // to take `&mut self` without fighting a still-live borrow.
+        let hot_reload_changes = self.hot_reload.as_mut().map(|watcher| watcher.poll_events()).unwrap_or_default();
+        if !hot_reload_changes.is_empty() {
+            self.handle_hot_reload(ctx, &hot_reload_changes);
+        }
 
         // Runs in both Edit and Play mode — a live preview while editing
         // costs nothing extra and is a nice default. The one exception is a
@@ -4510,6 +5398,9 @@ impl Game for Sandbox {
                             }
                         }
                         AiEvent::CharacterDied { entity, position } => {
+                            if let Ok(meta) = self.world.get::<&CharacterMeta>(entity) {
+                                self.despawned_since_load.push(meta.name.clone());
+                            }
                             let _ = self.world.despawn(entity);
                             self.spawn_burst_at(position, ParticleEmitterDef::default(), 16);
                             self.play_tone(220.0, 0.15);
@@ -4520,6 +5411,27 @@ impl Game for Sandbox {
                 if let Some(player) = self.player_entity {
                     let fraction = self.world.get::<&Health>(player).map(|health| health.fraction()).unwrap_or(1.0);
                     self.hud.set_bar("Health", fraction);
+                }
+            }
+
+            // Spawners don't need `nav_grid`, so they tick independently of
+            // the block above — a request only carries a `CharacterInstance`
+            // (no `gl` access inside `engine::ai`, mirroring why `ai::step`
+            // itself returns events instead of spawning/despawning directly).
+            let spawn_requests = engine::ai::step_spawners(&mut self.world, dt);
+            if !spawn_requests.is_empty() {
+                let gl = ctx.gl();
+                for request in spawn_requests {
+                    match self.spawn_character(gl, &request.instance) {
+                        Ok(entity) => {
+                            if let Ok(mut query) = self.world.query_one::<&mut SpawnerState>(request.spawner) {
+                                if let Some(state) = query.get() {
+                                    state.track_spawned(entity);
+                                }
+                            }
+                        }
+                        Err(err) => log::error!("spawner failed to spawn character: {err}"),
+                    }
                 }
             }
 
@@ -4622,6 +5534,7 @@ impl Game for Sandbox {
         let inv_view_proj = (proj * view).inverse();
         renderer.draw_skybox(gl, inv_view_proj.to_cols_array(), params.sky_horizon_color, params.sky_zenith_color);
 
+        let mut draw_calls: u32 = 0;
         unsafe {
             // Scoped to just this opaque mesh loop — left untouched for the
             // skybox (a single fullscreen triangle already drawn above) and
@@ -4702,6 +5615,7 @@ impl Game for Sandbox {
                 }
 
                 mesh_renderer.mesh.draw(gl);
+                draw_calls += 1;
             }
 
             gl.disable(glow::CULL_FACE);
@@ -4739,6 +5653,31 @@ impl Game for Sandbox {
             },
         );
 
+        // Debug profiler: average frame time over a short rolling window
+        // (less jittery than a single-frame instantaneous FPS reading).
+        self.frame_times.push_back(ctx.time.delta);
+        while self.frame_times.len() > 30 {
+            self.frame_times.pop_front();
+        }
+        let avg_frame_time = self.frame_times.iter().sum::<f32>() / self.frame_times.len().max(1) as f32;
+        let profiler_stats = engine::ui::ProfilerStats {
+            fps: if avg_frame_time > 0.0 { 1.0 / avg_frame_time } else { 0.0 },
+            frame_time_ms: avg_frame_time * 1000.0,
+            entity_count: self.world.len() as usize,
+            draw_calls,
+        };
+        let profiler_visible = self.profiler_visible;
+
+        // Must happen before `self.ui.take()` below — texture registration
+        // needs `&mut EguiState`, which `ui_state.run`'s closure can't
+        // provide (it's already exclusively borrowed for the closure's
+        // duration). See `AssetBrowserState`'s doc comment.
+        if self.texture_asset_browser.is_open() {
+            if let Some(ui_state) = self.ui.as_mut() {
+                self.texture_asset_browser.ensure_thumbnails_loaded(gl, ui_state);
+            }
+        }
+
         // Editor overlay, drawn on top of the final (already-pixelated) image
         // at full window resolution so the UI itself stays crisp.
         let mut ui_state = self.ui.take().expect("ui set up in init");
@@ -4747,7 +5686,16 @@ impl Game for Sandbox {
         let level_ui_visible = self.level_ui_visible && editing;
         let playing = self.mode == EditorMode::Play;
         let mut pause_menu_action: Option<PauseMenuAction> = None;
+        let mut picked_texture: Option<PathBuf> = None;
         let full_output = ui_state.run(drawable_size, |egui_ctx| {
+            if profiler_visible {
+                engine::ui::draw_profiler_overlay(egui_ctx, &profiler_stats);
+            }
+            if editing {
+                if let Some(path) = self.texture_asset_browser.show(egui_ctx, &self.asset_root) {
+                    picked_texture = Some(path);
+                }
+            }
             if level_ui_visible {
                 egui::SidePanel::left("level_editor")
                     .default_width(280.0)
@@ -4782,7 +5730,8 @@ impl Game for Sandbox {
                 // for — mirrors the play_mode_indicator's own gating. Left
                 // visible (though frozen, see `Game::update`) while paused,
                 // same as the rest of the frozen world behind the menu.
-                draw_hud(egui_ctx, &self.hud);
+                draw_hud(egui_ctx, &self.hud, &self.render_params.hud);
+                self.draw_dialogue_choices(egui_ctx);
                 if self.paused {
                     pause_menu_action = draw_pause_menu(egui_ctx, editor_available());
                 }
@@ -4790,6 +5739,34 @@ impl Game for Sandbox {
         });
         ui_state.paint(drawable_size, full_output);
         self.ui = Some(ui_state);
+
+        if let Some(path) = picked_texture {
+            match self.pending_texture_pick.take() {
+                Some(PendingTexturePick::ForEntity(entity)) => {
+                    match GpuTexture::load_from_file(gl, &self.asset_root.join(&path), TextureFilter::Nearest) {
+                        Ok(texture) => {
+                            let texture = Arc::new(texture);
+                            if let Ok(mut query) =
+                                self.world.query_one::<(&mut MeshRenderer, &mut LevelObjectMeta)>(entity)
+                            {
+                                if let Some((renderer, meta)) = query.get() {
+                                    renderer.texture = Some(texture);
+                                    meta.texture_path = Some(path.clone());
+                                }
+                            }
+                            log::info!("assigned texture {path:?} via asset browser");
+                        }
+                        Err(err) => log::error!("failed to load texture {path:?}: {err}"),
+                    }
+                }
+                Some(PendingTexturePick::ForClass(index)) => {
+                    if let Some(class) = self.classes.get_mut(index) {
+                        class.texture_path = Some(path);
+                    }
+                }
+                None => {}
+            }
+        }
 
         match pause_menu_action {
             Some(PauseMenuAction::Resume) => self.resume(ctx),
@@ -4849,6 +5826,21 @@ fn show_fatal_error_dialog(message: &str) {
     }
 }
 
+/// `--smoke-test <path>` runs a compiled `.pss` script driving the game
+/// instead of a human (see `engine::app::App::run_scripted`), exiting with
+/// the script's pass/fail code — CI-friendly (recommend
+/// `SDL_VIDEODRIVER=dummy`, since there's no headless mode). Any other
+/// argument shape falls through to the normal interactive `App::run`.
+fn smoke_test_path_from_args() -> Option<PathBuf> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--smoke-test" {
+            return args.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
 fn main() -> anyhow::Result<()> {
     init_logging();
 
@@ -4856,6 +5848,21 @@ fn main() -> anyhow::Result<()> {
         log::error!("panic: {info}");
         show_fatal_error_dialog(&info.to_string());
     }));
+
+    if let Some(script_path) = smoke_test_path_from_args() {
+        let source = std::fs::read_to_string(&script_path)?;
+        let script = match engine::script::Interpreter::compile(&source) {
+            Ok(script) => script,
+            Err(errors) => {
+                for err in &errors {
+                    log::error!("smoke test script parse error: {err}");
+                }
+                std::process::exit(1);
+            }
+        };
+        let code = App::run_scripted("Jame Engine Sandbox", 1280, 720, Sandbox::new(), script)?;
+        std::process::exit(code);
+    }
 
     let result = App::run("Jame Engine Sandbox", 1280, 720, Sandbox::new());
     if let Err(err) = &result {

@@ -1,3 +1,4 @@
+use crate::hud::HudStyle;
 use crate::profile::{LightingMode, RenderParams, TextureFilterMode};
 
 /// Draws sliders/checkboxes/dropdowns for every `RenderParams` field. Returns
@@ -103,6 +104,35 @@ pub fn render_params_editor(ui: &mut egui::Ui, params: &mut RenderParams) -> boo
                 )
                 .changed();
         });
+
+    changed
+}
+
+/// Draws sliders/color pickers for every `HudStyle` field, the `HudStyle`
+/// sibling of `render_params_editor`. Returns `true` if anything changed —
+/// mirrors that function's contract, though (unlike a shader-variant swap)
+/// nothing here needs special handling on change; `draw_hud` just reads the
+/// live value every frame.
+pub fn hud_style_editor(ui: &mut egui::Ui, style: &mut HudStyle) -> bool {
+    let mut changed = false;
+
+    ui.label("Anchor offset (from top-left, pixels)");
+    ui.horizontal(|ui| {
+        changed |= ui
+            .add(egui::DragValue::new(&mut style.anchor_offset[0]).speed(1.0).prefix("x: "))
+            .changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut style.anchor_offset[1]).speed(1.0).prefix("y: "))
+            .changed();
+    });
+    changed |= ui
+        .add(egui::Slider::new(&mut style.bar_width, 60.0..=400.0).text("Bar width"))
+        .changed();
+    changed |= color_edit(ui, "Bar fill color", &mut style.bar_fill_color);
+    changed |= ui
+        .add(egui::Slider::new(&mut style.title_font_size, 10.0..=48.0).text("Title font size"))
+        .changed();
+    changed |= color_edit(ui, "Toast text color", &mut style.toast_color);
 
     changed
 }

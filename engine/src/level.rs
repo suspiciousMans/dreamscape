@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::Disposition;
+use crate::ai::{Disposition, DialogueNode};
 use crate::camera::CameraShakeSpec;
 use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;
@@ -15,11 +15,17 @@ pub enum PrimitiveKind {
 }
 
 /// Where an object's geometry comes from: a built-in primitive (shared,
-/// generated GPU mesh) or an imported OBJ file.
+/// generated GPU mesh), an imported OBJ file, or an imported glTF/GLB
+/// file — either its first mesh-carrying node (`GltfFile`, for a plain
+/// level object) or one specific named node (`GltfNode`, for a rig part —
+/// see `engine::mesh::load_gltf` and the F2 panel's "Import glTF as
+/// Rig..."). Only the node's first triangle primitive is used either way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeshSource {
     Primitive(PrimitiveKind),
     ObjFile(PathBuf),
+    GltfFile(PathBuf),
+    GltfNode { path: PathBuf, node: String },
 }
 
 /// Mirrors `engine::animation::AnimationKind`, serializable so it can be
@@ -173,7 +179,24 @@ pub struct CharacterInstance {
     #[serde(default)]
     pub attack_cooldown_secs: f32,
     #[serde(default)]
-    pub dialogue: Vec<String>,
+    pub dialogue_nodes: Vec<DialogueNode>,
+}
+
+/// A placed periodic character spawner — a sibling list on `Level` like
+/// `LevelLight`/`RigInstance`, since a spawner has no mesh/texture of its
+/// own, just a position and a spawn config. See `engine::ai::SpawnerConfig`
+/// for what each field does; `Sandbox::spawn_spawner` builds that (plus
+/// runtime `SpawnerState`) from this on level load.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpawnerInstance {
+    pub name: String,
+    pub position: [f32; 3],
+    pub template: CharacterInstance,
+    pub spawn_interval_secs: f32,
+    pub max_alive: u32,
+    #[serde(default)]
+    pub total_to_spawn: Option<u32>,
+    pub spawn_radius: f32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -188,6 +211,8 @@ pub struct Level {
     pub rig_instances: Vec<RigInstance>,
     #[serde(default)]
     pub characters: Vec<CharacterInstance>,
+    #[serde(default)]
+    pub spawners: Vec<SpawnerInstance>,
     #[serde(default)]
     pub physics: PhysicsParams,
     /// Background music for this level, relative to the asset root — looped

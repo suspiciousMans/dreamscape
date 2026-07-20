@@ -1,3 +1,35 @@
+use serde::{Deserialize, Serialize};
+
+/// Visual styling for `engine::ui::hud::draw_hud`'s overlay — bundled into
+/// `engine::profile::RenderParams` (and thus a `ShaderProfile`) so a game's
+/// HUD look is saved/loaded/cycled the same way as its render settings,
+/// editable live via the F1 panel's "HUD" section
+/// (`engine::ui::panels::hud_style_editor`). Kept separate from `HudState`
+/// itself: this is authored "look" data, `HudState` is live per-frame
+/// content (title/bars/toasts), the same split `RenderParams` (look) vs.
+/// the ECS scene (content) already draws elsewhere.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct HudStyle {
+    /// Offset from the top-left corner, pixels.
+    pub anchor_offset: [f32; 2],
+    pub bar_width: f32,
+    pub bar_fill_color: [f32; 3],
+    pub title_font_size: f32,
+    pub toast_color: [f32; 3],
+}
+
+impl Default for HudStyle {
+    fn default() -> Self {
+        Self {
+            anchor_offset: [12.0, 12.0],
+            bar_width: 160.0,
+            bar_fill_color: [0.3, 0.7, 0.3],
+            title_font_size: 20.0,
+            toast_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
 /// The in-game HUD's entire state: an optional title, named progress bars
 /// (health, stamina, ...), and transient fading toast messages. A single
 /// `HudState` is global to the game (there's one HUD, not one per entity),

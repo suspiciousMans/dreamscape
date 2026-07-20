@@ -19,3 +19,5 @@ log.workspace = true
 egui.workspace = true
 egui_glow.workspace = true
 rodio.workspace = true
+notify.workspace = true
+gltf.workspace = true

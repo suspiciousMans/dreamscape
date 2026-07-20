@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::hud::HudStyle;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightingMode {
     Unlit,
@@ -57,6 +59,14 @@ pub struct RenderParams {
     /// field existed keep their exact old look; re-save to opt in.
     #[serde(default)]
     pub backface_culling: bool,
+    /// In-game HUD look (position, bar width/color, title size, toast
+    /// color) — edited live via the F1 panel's "HUD" section
+    /// (`engine::ui::panels::hud_style_editor`) and drawn by
+    /// `engine::ui::hud::draw_hud`. `#[serde(default)]` so profiles saved
+    /// before this field existed still load with the exact same HUD look
+    /// they always had (the defaults match the old hardcoded values).
+    #[serde(default)]
+    pub hud: HudStyle,
 }
 
 fn default_light_dir() -> [f32; 3] {
@@ -82,6 +92,7 @@ impl Default for RenderParams {
             sky_horizon_color: [0.55, 0.65, 0.75],
             sky_zenith_color: [0.1, 0.2, 0.45],
             backface_culling: true,
+            hud: HudStyle::default(),
         }
     }
 }

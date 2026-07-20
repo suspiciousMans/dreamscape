@@ -236,7 +236,7 @@
             damage: None,
             attack_range: 1.0,
             attack_cooldown_secs: 1.0,
-            dialogue: [],
+            dialogue_nodes: [],
         ),
     ],
     physics: (

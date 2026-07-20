@@ -8,6 +8,18 @@ pub enum TextureFilter {
     Bilinear,
 }
 
+/// Writes raw RGBA8 pixels out as a PNG file — used by glTF import to
+/// extract an embedded/referenced base-color texture onto disk (glTF
+/// stores images as decoded pixel buffers via `gltf::import`, but
+/// `LevelObject::texture_path` — like every other texture reference in
+/// this engine — expects a real file, not in-memory bytes).
+pub fn save_rgba8_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> anyhow::Result<()> {
+    let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| anyhow::anyhow!("RGBA8 buffer size doesn't match {width}x{height}"))?;
+    buffer.save(path)?;
+    Ok(())
+}
+
 pub struct GpuTexture {
     pub handle: glow::Texture,
     pub width: u32,

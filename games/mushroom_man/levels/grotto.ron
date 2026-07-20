@@ -162,7 +162,7 @@
             damage: Some(8.0),
             attack_range: 1.4,
             attack_cooldown_secs: 1.2,
-            dialogue: [],
+            dialogue_nodes: [],
         ),
     ],
     physics: (

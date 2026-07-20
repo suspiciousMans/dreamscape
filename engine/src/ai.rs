@@ -69,29 +69,70 @@ impl Health {
     }
 }
 
-/// Lines of dialogue a `Friendly` character cycles through on `interact()`.
-/// `lines` is the authored part (round-tripped like `Health.max`); `index`
-/// is live state that resets whenever the level is (re)loaded.
+/// One line of dialogue plus optional branches: `choices` is a list of
+/// `(button label, target node index)` pairs. An empty `choices` list
+/// means "linear" — the line just auto-advances to the next node on the
+/// next `Dialogue::advance()` call, so a flat conversation (the common
+/// case) is simply every node having no choices, with no special-casing
+/// needed anywhere that reads a `Dialogue`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DialogueNode {
+    pub text: String,
+    #[serde(default)]
+    pub choices: Vec<(String, usize)>,
+}
+
+/// A branching conversation a `Friendly` character cycles/navigates
+/// through on `interact()`. `nodes` is the authored part (round-tripped
+/// like `Health.max`); `current` is live state that resets whenever the
+/// level is (re)loaded.
 pub struct Dialogue {
-    pub lines: Vec<String>,
-    index: usize,
+    pub nodes: Vec<DialogueNode>,
+    current: usize,
 }
 
 impl Dialogue {
-    pub fn new(lines: Vec<String>) -> Self {
-        Self { lines, index: 0 }
+    pub fn new(nodes: Vec<DialogueNode>) -> Self {
+        Self { nodes, current: 0 }
     }
 
-    /// Returns the next line and advances, wrapping around. Empty string if
-    /// there are no lines — shouldn't happen in practice, a `Dialogue` is
-    /// only ever attached to a character authored with at least one.
-    pub fn next(&mut self) -> &str {
-        if self.lines.is_empty() {
-            return "";
+    /// The line to show for wherever the conversation currently is.
+    /// Empty string if there are no nodes — shouldn't happen in practice,
+    /// a `Dialogue` is only ever attached to a character authored with at
+    /// least one.
+    pub fn current_text(&self) -> &str {
+        self.nodes.get(self.current).map(|node| node.text.as_str()).unwrap_or("")
+    }
+
+    /// The current node's choices, if any — an empty slice means the
+    /// conversation is linear at this point (`advance()` is what moves it
+    /// forward, not `choose()`).
+    pub fn current_choices(&self) -> &[(String, usize)] {
+        self.nodes.get(self.current).map(|node| node.choices.as_slice()).unwrap_or(&[])
+    }
+
+    /// Moves to the next node, wrapping around. A no-op if the current
+    /// node has choices — the caller is expected to call `choose` instead
+    /// once the player has picked one (checked via `current_choices`).
+    pub fn advance(&mut self) {
+        if self.nodes.is_empty() {
+            return;
         }
-        let line = self.lines[self.index].as_str();
-        self.index = (self.index + 1) % self.lines.len();
-        line
+        if self.nodes[self.current].choices.is_empty() {
+            self.current = (self.current + 1) % self.nodes.len();
+        }
+    }
+
+    /// Jumps to the target node of the current node's `index`-th choice.
+    /// Returns `false` (no-op) if `index` or the target is out of range.
+    pub fn choose(&mut self, index: usize) -> bool {
+        let Some(node) = self.nodes.get(self.current) else { return false };
+        let Some(&(_, target)) = node.choices.get(index) else { return false };
+        if target >= self.nodes.len() {
+            return false;
+        }
+        self.current = target;
+        true
     }
 }
 
@@ -327,4 +368,103 @@ pub fn step(world: &mut hecs::World, dt: f32, player_position: Vec3, nav_grid: &
     }
 
     events
+}
+
+/// Authored config for a periodic character spawner — a `Transform`-only
+/// entity (like `LevelLight`/`LevelParticleEmitter`) that emits
+/// `SpawnRequest`s for the game to fulfill via `Sandbox::spawn_character`.
+/// This module has no `gl` access, so — like `step`'s own `AiEvent` —
+/// spawning is something the caller does, not this system itself.
+#[derive(Clone, Debug)]
+pub struct SpawnerConfig {
+    pub name: String,
+    /// Only `disposition`/tuning/combat/dialogue fields are used; the
+    /// template's own `position` is ignored — each spawn's position is the
+    /// spawner's own `Transform.position` plus a random offset within
+    /// `spawn_radius`.
+    pub template: crate::level::CharacterInstance,
+    pub spawn_interval_secs: f32,
+    pub max_alive: u32,
+    /// `None` means unlimited (bounded only by `max_alive` at any one time).
+    pub total_to_spawn: Option<u32>,
+    pub spawn_radius: f32,
+}
+
+/// Runtime state — never serialized (see `engine::level::SpawnerInstance`
+/// for the authored/round-trippable half `Sandbox::spawn_spawner` builds
+/// this alongside).
+pub struct SpawnerState {
+    elapsed_since_last: f32,
+    spawned_count: u32,
+    alive: Vec<Entity>,
+}
+
+impl SpawnerState {
+    pub fn new() -> Self {
+        Self { elapsed_since_last: 0.0, spawned_count: 0, alive: Vec::new() }
+    }
+
+    /// Called by the game right after `spawn_character` fulfills a
+    /// `SpawnRequest` from this spawner, so `step_spawners` can track it
+    /// against `max_alive`.
+    pub fn track_spawned(&mut self, entity: Entity) {
+        self.alive.push(entity);
+    }
+}
+
+impl Default for SpawnerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A spawner's ask, for the frame's caller to fulfill (mirrors `AiEvent` —
+/// see `step`'s doc comment for why this system can't spawn directly).
+pub struct SpawnRequest {
+    pub spawner: Entity,
+    pub instance: crate::level::CharacterInstance,
+}
+
+/// Ticks every `SpawnerConfig`, emitting a `SpawnRequest` once its interval
+/// elapses and it's still under both `max_alive` (checked against
+/// `SpawnerState::alive`, pruned of anything since despawned) and
+/// `total_to_spawn`. The timer doesn't accumulate while capped, so a
+/// spawner that's been at its cap for a while doesn't burst out a pile of
+/// spawns the instant a slot frees up.
+pub fn step_spawners(world: &mut hecs::World, dt: f32) -> Vec<SpawnRequest> {
+    let mut requests = Vec::new();
+    let mut rng = Rng::seeded();
+
+    for (spawner_entity, (transform, config, state)) in
+        world.query::<(&Transform, &SpawnerConfig, &mut SpawnerState)>().iter()
+    {
+        state.alive.retain(|&entity| world.contains(entity));
+
+        if state.alive.len() as u32 >= config.max_alive {
+            continue;
+        }
+        if let Some(total) = config.total_to_spawn {
+            if state.spawned_count >= total {
+                continue;
+            }
+        }
+
+        state.elapsed_since_last += dt;
+        if state.elapsed_since_last < config.spawn_interval_secs {
+            continue;
+        }
+        state.elapsed_since_last = 0.0;
+        state.spawned_count += 1;
+
+        let angle = rng.range(0.0, std::f32::consts::TAU);
+        let radius = rng.range(0.0, config.spawn_radius.max(0.0));
+        let offset = Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
+        let position = transform.position + offset;
+
+        let mut instance = config.template.clone();
+        instance.position = position.to_array();
+        requests.push(SpawnRequest { spawner: spawner_entity, instance });
+    }
+
+    requests
 }

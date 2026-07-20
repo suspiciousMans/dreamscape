@@ -245,6 +245,102 @@ in Play mode; unchecking it removes the component, making the object static
 again. New primitives default sensibly (`Cube` → dynamic, `Plane`/imported →
 static) but every object is overridable.
 
+## Undo/redo
+
+The F2 editor keeps `undo_stack`/`redo_stack: Vec<Level>` on `Sandbox` (capped
+at 50 entries), reusing `build_level_from_ecs`/`apply_level`'s existing exact
+round-trip as the snapshot/restore mechanism — no separate diff/patch format.
+`push_undo_snapshot` is called before every discrete edit (an "Add X" button,
+Delete, Duplicate) and whenever the selected entity changes to a *different*
+one than last frame, so a slider-drag session on one object collapses into a
+single undo step instead of one per frame. **Ctrl+Z** pops `undo_stack`,
+pushes the current state to `redo_stack`, and re-applies the popped level;
+**Ctrl+Shift+Z** mirrors this for redo. Selection isn't part of `Level`, so
+undo/redo deselects afterward — a known, accepted simplification. `apply_level`
+only restarts/stops music if `level.music_path` actually changed, specifically
+so undo/redo doesn't glitch music that was already playing correctly.
+
+## Multi-select and duplicate
+
+Scoped to **Scene Objects and Characters** (not rigs/classes — a rig instance
+is a multi-entity hierarchy, out of scope for this pass). `Sandbox` gains
+`selected_entities`/`selected_characters: HashSet<Entity>` alongside the
+existing singular `selected_entity`/`selected_character` (which stay "which
+one's detail panel is shown," always the most recently clicked). A plain
+click on an outliner row clears the set and selects just that entity — the
+same behavior as before this feature existed; **Ctrl+click** toggles
+membership instead. **Ctrl+D** duplicates every entity in the active
+selection set (nudging position, appending "Copy" to the name, and selecting
+the new copies); **Delete** removes every entity in whichever set is
+non-empty. Both push an undo snapshot first.
+
+## In-game profiler overlay
+
+`engine::ui::draw_profiler_overlay` draws a small always-on `egui::Area`
+anchored top-right (the HUD lives top-left, so they never overlap): FPS and
+frame time (averaged over the last ~30 frames via `Sandbox.frame_times: VecDeque<f32>`),
+live entity count (`hecs::World::len()`), and a draw-call counter incremented
+once per mesh draw in `Sandbox::render`'s opaque-mesh loop. Available in both
+Edit and Play mode — it's a dev tool, not gameplay — and toggled off via a
+"Show Profiler" checkbox in the F1 panel (`profiler_visible: bool`, defaults
+`true`).
+
+## Hot reload on file change
+
+`engine::hotreload::HotReloadWatcher` wraps a `notify::RecommendedWatcher`
+watching a game's asset root recursively over a non-blocking channel;
+`poll_events()` drains and de-duplicates same-path events from the same save
+(editors often write a file 2-3 times per save). `Sandbox.hot_reload:
+Option<HotReloadWatcher>` is built in `init` and degrades silently to `None`
+if the watcher fails to start, the same convention as `audio: Option<AudioContext>`.
+**Scoped to shaders, scripts, and textures** — not level/profile RON, since
+those are edited live in the F2 panel and watching them risks fighting an
+in-progress edit or the undo stack. Each frame, a changed path is matched
+against: the active shader profile's three shader files (re-applies the
+profile), any live entity's attached `.pss` script path (re-attaches it), or
+any live `MeshRenderer`'s texture path (reloads and swaps the GPU texture in
+place). Edit a shader or script in your text editor while the game is
+running and the change appears within a frame or two, no manual F2 "Reload"
+click needed.
+
+## Asset browser
+
+A drop-in replacement for the native file picker at every **texture** picker
+call site (`Assign Texture...`, the model importer's texture step, class
+texture assignment) — the only asset kind where a thumbnail is cheap and
+worth showing; model/audio/script pickers keep the plain `rfd::FileDialog`.
+`engine::ui::AssetBrowserState` recursively scans a root folder for
+`png`/`jpg`/`jpeg` files and lazily uploads each thumbnail the first time
+it's visible. Texture registration with `egui_glow`'s painter has to happen
+*outside* the painter's own closure (it's exclusively borrowed during
+`EguiState::run`), so thumbnail loading is split in two:
+`ensure_thumbnails_loaded` (needs `&mut EguiState`, called before the egui
+frame) and `show` (read-only, called inside it). Since egui is immediate-mode
+and a pick doesn't resolve until a later frame, each call site carries a
+small `pending_texture_pick: Option<PendingTexturePick>` across frames to
+remember "who asked" until the browser returns a clicked path.
+
+## glTF import
+
+`engine::mesh::load_gltf` (mirrors the existing OBJ loader) reads a `.gltf`/
+`.glb` file's node tree, requiring the `TRIANGLES` primitive mode per mesh
+(other modes are skipped with a warning, same as OBJ's discarded materials)
+and mapping POSITION/NORMAL/TEXCOORD_0 onto `engine::mesh::Vertex` (missing
+attributes default the same way OBJ's loader does). Embedded and
+external images are decoded to RGBA8 and normalized from whatever glTF pixel
+format they were authored in. **No vertex skinning and no animation-channel
+import** — the rig system is rigid-part hierarchy only, so glTF import is
+static-pose geometry, explicitly logged as a heads-up rather than silently
+dropped.
+
+Two importer entry points in the F2 panel: **"Import Model as Object..."**
+now also accepts `.gltf`/`.glb` (taking the first mesh-carrying node, same
+flow as OBJ import — `MeshSource::GltfFile`), and a new **"Import glTF as
+Rig..."** button under "Rigs" for multi-node files, which builds a
+`RigAsset` with one `RigPartDef` per mesh node (parented by the node's own
+glTF parent) and saves it into `rigs/` — immediately usable through the
+existing "Add instance of" flow, no new placement UI needed.
+
 ## Point lights
 
 Beyond the single hardcoded directional light (sun + ambient), the engine
@@ -532,8 +628,16 @@ and death particles through `spawn_burst_at`:
   player gets one via `Health::new(100.0)` at spawn, in both
   `enter_play_mode` and `transition_to_level`). `damage()`/`is_dead()`/
   `fraction()` (for HUD bars).
-- **`Dialogue`** — a cycling list of lines for `Friendly` characters,
-  advanced by `interact()`.
+- **`Dialogue`** — a small branching node graph for `Friendly` characters:
+  `Dialogue { nodes: Vec<DialogueNode>, current: usize }` where
+  `DialogueNode { text: String, choices: Vec<(String, usize)> }` (choice
+  label, target node index). A node with no choices behaves exactly like the
+  old flat cycling dialogue — auto-advances to the next node, wrapping — so
+  non-branching NPCs are just every node having zero choices. When
+  `interact()` advances into a node that *has* choices, `Sandbox.active_dialogue`
+  is set and a small bottom-center `draw_dialogue_choices` overlay lists them
+  with number-key hints; pressing **1**-**9** jumps to the chosen node's
+  target and shows its text as a toast, same as a normal advance.
 - **`engine::ai::step(world, dt, player_position, nav_grid) ->
   Vec<AiEvent>`** — advances every `CharacterBrain`'s perception/state/
   steering (writes horizontal `RigidBody.velocity`; physics' existing
@@ -585,6 +689,30 @@ Mushroom Man's dungeon demonstrates all three dispositions: a `Friendly`
 "Cave Sprite" near the entrance spawn point (dialogue hints at the Bounce
 gate), a `Passive` "Tunnel Crawler" wandering the tunnels corridor, and a
 `Hostile` "Spore Guardian" guarding the approach to the Heart of the Grove.
+
+## Spawners
+
+A placed periodic spawner (`engine::level::SpawnerInstance`, a sibling list
+on `Level` like `LevelLight`/`CharacterInstance`) periodically spawns copies
+of a `CharacterInstance` template around its own position. `engine::ai::SpawnerConfig`/
+`SpawnerState` hold the authored config (interval, max alive, an optional
+total-spawned cap, spawn radius) and runtime bookkeeping (elapsed time,
+which spawned entities are still alive); `engine::ai::step_spawners(world,
+dt) -> Vec<SpawnRequest>` ticks every spawner and — mirroring `ai::step`'s
+"return events, let the caller act" contract, since `engine::ai` has no `gl`
+access to actually spawn a GPU-backed entity — emits a `SpawnRequest` when
+it's time. `Game::update` calls `step_spawners` right after the main
+`ai::step` block and fulfills each request via `Sandbox::spawn_character`,
+tracking the new entity back onto the spawner's `SpawnerState`.
+
+**F2 panel**: a **"Spawners"** section (mirrors "Characters") — **Add
+Spawner**, a clickable outliner, and for the selected spawner: name,
+position, interval/max-alive/spawn-radius drag values, an optional "Limit
+total spawned" cap, and a compact editor for the template character it
+spawns (name, color, disposition, move speed, sight range, optional combat/
+health). Mushroom Man's `tunnels` level demonstrates one: a "Crawler Nest"
+that tops back up to 2 alive Tunnel Crawlers every 12 seconds if the
+original wanders off or is defeated.
 
 ## Animation
 
@@ -1214,6 +1342,36 @@ Script Demo Cube's `update` (sets a "Wobble" bar from its bob phase) and
 `interact()`'s push demo (`show_toast("Pushed!", 1.5)`) for one example
 from each call site.
 
+### Editing the HUD's look
+
+The above is *content* (what the HUD shows); its *look* — position, bar
+width/color, title size, toast color — is a separate, editable
+`engine::hud::HudStyle`:
+
+```rust
+pub struct HudStyle {
+    pub anchor_offset: [f32; 2],   // pixels from the top-left corner
+    pub bar_width: f32,
+    pub bar_fill_color: [f32; 3],
+    pub title_font_size: f32,
+    pub toast_color: [f32; 3],
+}
+```
+
+It's bundled directly into `engine::profile::RenderParams` (a `hud:
+HudStyle` field, `#[serde(default)]` so profiles saved before this field
+existed keep their old look) rather than living in its own file — this
+means it's saved/loaded/cycled with the rest of a `ShaderProfile`
+automatically, no separate plumbing needed. `draw_hud`'s signature is
+`draw_hud(ctx, hud, style)`; call it with `&self.render_params.hud`.
+
+**F1 panel**: a **"HUD"** section right under "Render Params" —
+`engine::ui::hud_style_editor(ui, &mut style)` draws drag values for the
+anchor offset, a slider for bar width, color pickers for the bar fill and
+toast text, and a slider for title font size. Like Render Params, changes
+apply live (you'll see it update in Play mode immediately) and are
+captured by "Save"/"Save As New" on the shader profile.
+
 ## Save/load (checkpoints)
 
 `engine::save` is intentionally small — a single gameplay checkpoint, not a
@@ -1226,6 +1384,9 @@ pub struct SaveData {
     pub player_yaw: f32,
     pub player_pitch: f32,
     pub saved_at_elapsed: f32,
+    pub player_health: Option<(f32, f32)>,      // (current, max)
+    pub despawned_names: Vec<String>,
+    pub extra: HashMap<String, f32>,
 }
 ```
 
@@ -1233,11 +1394,20 @@ Same `load_from_file`/`save_to_file` RON pattern as every other asset type
 in the engine, written to a game's `saves/` folder — but unlike
 profiles/rigs/classes/levels, there's exactly one file
 (`saves/checkpoint.ron`), overwritten each time, since this is "get back
-to roughly where I was," not a multi-slot save system. **Per-object or
-per-script custom state (inventory, world flags, quest progress, ...) is
-explicitly out of scope** — add it once a concrete game actually needs
-that, rather than guessing at a shape now that would likely be wrong for
-whatever that game turns out to be.
+to roughly where I was," not a multi-slot save system. The three fields
+above (all `#[serde(default)]`, so an old checkpoint file still loads) carry
+just enough world-state delta to make a reload feel right without a full
+per-object snapshot: `player_health` restores current/max HP;
+`despawned_names` (tracked live on `Sandbox.despawned_since_load`, pushed
+whenever a named object/character is despawned — an eaten mushroom pickup,
+`AiEvent::CharacterDied`) is replayed on load by re-despawning whatever
+`apply_level` just freshly respawned; `extra` is a small game-defined scalar
+bag the engine never reads itself (Mushroom Man stashes which mushroom
+ability is currently active there, keyed `"active_mushroom"`). **Full
+per-object/script custom state (inventory, arbitrary world flags, quest
+progress, ...) is still explicitly out of scope** — add it once a concrete
+game actually needs that, rather than guessing at a shape now that would
+likely be wrong for whatever that game turns out to be.
 
 **F9** saves — Play mode only, since there's no player entity to snapshot
 in Edit mode. **F10** loads, entering Play mode first if you're currently
@@ -1250,6 +1420,50 @@ checkpoint's `level_name` doesn't match whatever level is currently
 loaded, F10 logs a warning and repositions the player anyway rather than
 switching levels for you — a checkpoint this simple isn't trying to
 reconstruct "which level should be active," just where you were standing.
+
+## Scripted smoke tests
+
+`engine::app::App::run_scripted` is a separate loop from `App::run` (not a
+flag on it, so the production path stays completely untouched) that drives
+a game with a compiled `.pss` script instead of a human — a real SDL2
+window still opens (there's no headless mode in this engine); run under
+`SDL_VIDEODRIVER=dummy` for CI. Each frame, after polling real SDL events
+(so window-close still works), it calls the script's own `tick()` function
+once via `engine::testkit::SmokeTestHost` — a `Host` implementation that's
+the entire "standard library" a smoke-test script sees:
+
+- **`press(key_name)`** / **`release(key_name)`** — queues a synthetic SDL
+  key event (by SDL key name, e.g. `"W"`, `"F3"`), fed through the exact
+  same `ctx.input.handle_event` + `game.handle_event` path a real keypress
+  takes, right after `tick()` returns.
+- **`time()`** — seconds since the game started (`ctx.time.elapsed`).
+- **`assert_true(cond, message)`** / **`assert_eq(a, b, message)`** — a
+  failure logs the message and marks the run failed, but doesn't stop it
+  (so a script can keep asserting through the rest of its flow).
+- **`finish(passed)`** — ends the run. `run_scripted` returns `Ok(0)` if the
+  run passed (and no assertion failed), `Ok(1)` otherwise — including the
+  window closing early or `tick()` erroring, both treated as failures.
+- **`log(...)`** — same as the in-game scripting `log`, prefixed
+  `[smoke test]`.
+
+Since the `.pss` language has no coroutines, a script can't literally
+"block" on `wait(seconds)` — instead a script drives itself as an explicit
+phase state machine using its own persistent globals and `time()`,
+transitioning phases across many `tick()` calls. See
+`games/sandbox/scripts/smoke/basic_playthrough.pss` (enters Play mode,
+walks forward for a couple of seconds, asserts in-game time advanced, and
+finishes) and `games/mushroom_man/scripts/smoke/talk_to_sprite.pss` (adds a
+short turn-and-interact phase) for the pattern.
+
+Each game's `main()` checks for a `--smoke-test <path>` argument before
+falling through to the normal interactive `App::run`; when present, it
+compiles the script and calls `App::run_scripted`, then
+`std::process::exit`s with the returned code — CI-friendly pass/fail:
+
+```
+cargo run -p sandbox -- --smoke-test scripts/smoke/basic_playthrough.pss
+cargo run -p mushroom_man -- --smoke-test scripts/smoke/talk_to_sprite.pss
+```
 
 ## Adding a new, separate game
 
