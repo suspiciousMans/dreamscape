@@ -304,6 +304,7 @@ pub fn update_world_transforms(world: &mut hecs::World) {
     fn resolve(
         entity: Entity,
         snapshot: &[(Entity, Option<Entity>, Vec3, Quat)],
+        world: &hecs::World,
         resolved: &mut HashMap<Entity, (Vec3, Quat)>,
         in_progress: &mut HashSet<Entity>,
     ) -> (Vec3, Quat) {
@@ -323,13 +324,22 @@ pub fn update_world_transforms(world: &mut hecs::World) {
         let Some(&(_, parent, local_position, local_rotation)) =
             snapshot.iter().find(|(e, ..)| *e == entity)
         else {
+            // Not a `RigPart` itself — an entity outside this rig, e.g. a
+            // networked player's physics-driven root. Inherit its plain
+            // `Transform` if it has one, so a rig can attach to any
+            // externally simulated entity, not only another `RigPart`.
+            // Falls back to identity only if it has no `Transform` at all.
             in_progress.remove(&entity);
-            return (Vec3::ZERO, Quat::IDENTITY);
+            return world
+                .get::<&Transform>(entity)
+                .map(|t| (t.position, t.rotation))
+                .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
         };
         let value = match parent {
             None => (local_position, local_rotation),
             Some(parent_entity) => {
-                let (parent_position, parent_rotation) = resolve(parent_entity, snapshot, resolved, in_progress);
+                let (parent_position, parent_rotation) =
+                    resolve(parent_entity, snapshot, world, resolved, in_progress);
                 (
                     parent_position + parent_rotation * local_position,
                     parent_rotation * local_rotation,
@@ -342,7 +352,7 @@ pub fn update_world_transforms(world: &mut hecs::World) {
     }
 
     for &(entity, ..) in &snapshot {
-        let (world_position, world_rotation) = resolve(entity, &snapshot, &mut resolved, &mut in_progress);
+        let (world_position, world_rotation) = resolve(entity, &snapshot, world, &mut resolved, &mut in_progress);
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
             transform.position = world_position;
             transform.rotation = world_rotation;
@@ -443,6 +453,54 @@ mod tests {
         // With the cycle broken, `a` resolves to its own local transform.
         let t = world.get::<&Transform>(a).unwrap();
         assert!(t.position.abs_diff_eq(Vec3::new(1.0, 0.0, 0.0), 1e-3));
+    }
+
+    #[test]
+    fn update_world_transforms_inherits_from_a_plain_transform_parent() {
+        // A rig's root part can be parented to an entity that isn't itself a
+        // `RigPart` at all — e.g. a networked player's physics/root entity,
+        // whose `Transform` is driven every frame by something else
+        // (physics integration, snapshot smoothing). The resolver must
+        // inherit that entity's current `Transform` each frame rather than
+        // treating an unrecognized parent as the world origin.
+        let mut world = hecs::World::new();
+        let external_parent = world.spawn((Transform {
+            position: Vec3::new(5.0, 0.0, 0.0),
+            rotation: crate::ecs::euler_deg_to_quat(Vec3::new(0.0, 90.0, 0.0)),
+            scale: Vec3::ONE,
+        },));
+        let part = world.spawn((
+            Transform::default(),
+            RigPart {
+                parent: Some(external_parent),
+                local_position: Vec3::new(1.0, 0.0, 0.0),
+                local_rotation_euler_deg: Vec3::ZERO,
+                local_rotation: Quat::IDENTITY,
+            },
+        ));
+
+        update_world_transforms(&mut world);
+
+        // Inherits the external parent's position, plus its own local
+        // offset rotated by the parent's rotation (a 90-degree yaw spins
+        // local +X onto roughly -Z).
+        let resolved_position = world.get::<&Transform>(part).unwrap().position;
+        assert!(
+            resolved_position.abs_diff_eq(Vec3::new(5.0, 0.0, -1.0), 1e-3),
+            "expected inherited parent position + rotated local offset, got {resolved_position:?}"
+        );
+
+        // Moving the external parent (as physics/networking would every
+        // frame) and re-running must follow it, proving this isn't a
+        // one-time snapshot.
+        world.get::<&mut Transform>(external_parent).unwrap().position = Vec3::new(10.0, 2.0, 0.0);
+        update_world_transforms(&mut world);
+        let part_transform = world.get::<&Transform>(part).unwrap();
+        assert!(
+            part_transform.position.abs_diff_eq(Vec3::new(10.0, 2.0, -1.0), 1e-3),
+            "expected to follow the moved parent, got {:?}",
+            part_transform.position
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod protocol;
 use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use protocol::{
@@ -41,6 +42,7 @@ pub struct InputState {
 struct PeerConnection {
     conn: NetConnection,
     name: String,
+    appearance: Option<PathBuf>,
 }
 
 /// The authoritative side of a listen-server session — accepts
@@ -62,6 +64,7 @@ pub struct NetHost {
     snapshot_accumulator: f32,
     pending_interacts: Vec<(NetId, NetId)>,
     pending_dialogue_choices: Vec<(NetId, NetId, usize)>,
+    pending_appearance_changes: Vec<(NetId, Option<PathBuf>)>,
     pending_disconnected: Vec<NetId>,
 }
 
@@ -77,6 +80,7 @@ impl NetHost {
             snapshot_accumulator: 0.0,
             pending_interacts: Vec::new(),
             pending_dialogue_choices: Vec::new(),
+            pending_appearance_changes: Vec::new(),
             pending_disconnected: Vec::new(),
         })
     }
@@ -93,10 +97,10 @@ impl NetHost {
 
     /// Accepts every ready incoming TCP connection, gives every
     /// not-yet-`Hello`'d one a chance to speak, and returns `(net_id,
-    /// player_name)` for each one that just completed the handshake this
-    /// call. Rejects (and drops) a connection whose `protocol_version`
-    /// doesn't match or that would exceed `MAX_PLAYERS`.
-    pub fn poll_new_connections(&mut self) -> Vec<(NetId, String)> {
+    /// player_name, appearance)` for each one that just completed the
+    /// handshake this call. Rejects (and drops) a connection whose
+    /// `protocol_version` doesn't match or that would exceed `MAX_PLAYERS`.
+    pub fn poll_new_connections(&mut self) -> Vec<(NetId, String, Option<PathBuf>)> {
         loop {
             match self.listener.accept() {
                 Ok((stream, _addr)) => match NetConnection::wrap(stream) {
@@ -116,13 +120,13 @@ impl NetHost {
         for (accepted_at, mut conn) in pending {
             let messages: Vec<ClientMessage> = conn.pump();
             let hello = messages.into_iter().find_map(|msg| match msg {
-                ClientMessage::Hello { player_name, protocol_version } => {
-                    Some((player_name, protocol_version))
+                ClientMessage::Hello { player_name, protocol_version, appearance } => {
+                    Some((player_name, protocol_version, appearance))
                 }
                 _ => None,
             });
 
-            let Some((player_name, protocol_version)) = hello else {
+            let Some((player_name, protocol_version, appearance)) = hello else {
                 // Keep waiting on a still-connecting socket, but only until
                 // the handshake deadline — a peer that connects and stays
                 // silent is dropped instead of held forever.
@@ -149,8 +153,8 @@ impl NetHost {
 
             let net_id = self.allocate_net_id();
             log::info!("player '{player_name}' joined as {net_id:?}");
-            self.connections.insert(net_id, PeerConnection { conn, name: player_name.clone() });
-            newly_joined.push((net_id, player_name));
+            self.connections.insert(net_id, PeerConnection { conn, name: player_name.clone(), appearance: appearance.clone() });
+            newly_joined.push((net_id, player_name, appearance));
         }
 
         newly_joined
@@ -172,6 +176,14 @@ impl NetHost {
                     ClientMessage::Interact { target } => self.pending_interacts.push((net_id, target)),
                     ClientMessage::DialogueChoice { speaker, index } => {
                         self.pending_dialogue_choices.push((net_id, speaker, index));
+                    }
+                    ClientMessage::SetAppearance { rig_path } => {
+                        // Recorded here (not just buffered) so a later
+                        // catch-up send (e.g. this peer's `PlayerJoined`
+                        // being replayed to a *third* joiner) reflects the
+                        // latest choice, not the one from `Hello`.
+                        peer.appearance = rig_path.clone();
+                        self.pending_appearance_changes.push((net_id, rig_path));
                     }
                     ClientMessage::Disconnect => newly_disconnected.push(net_id),
                     ClientMessage::Hello { .. } => {}
@@ -198,6 +210,13 @@ impl NetHost {
     /// buffered by the last `poll_inputs` call.
     pub fn poll_dialogue_choices(&mut self) -> Vec<(NetId, NetId, usize)> {
         std::mem::take(&mut self.pending_dialogue_choices)
+    }
+
+    /// Drains `(net_id, new_appearance)` mid-session appearance changes
+    /// buffered by the last `poll_inputs` call — the caller should rebuild
+    /// that `NetId`'s proxy and broadcast `ServerMessage::PlayerAppearanceChanged`.
+    pub fn poll_appearance_changes(&mut self) -> Vec<(NetId, Option<PathBuf>)> {
+        std::mem::take(&mut self.pending_appearance_changes)
     }
 
     /// Drains the `NetId`s of connections that dropped since the last
@@ -251,6 +270,13 @@ impl NetHost {
         self.connections.get(&net_id).map(|peer| peer.name.as_str())
     }
 
+    /// The given connected player's currently-chosen player-model rig
+    /// path, if any — used to catch a newly-joined client up on every
+    /// already-connected peer's appearance via `PlayerJoined`.
+    pub fn player_appearance(&self, net_id: NetId) -> Option<&Path> {
+        self.connections.get(&net_id).and_then(|peer| peer.appearance.as_deref())
+    }
+
     /// Every currently-connected remote player's `NetId` — used to catch a
     /// newly-joined client up on peers who were already connected (the
     /// host's own player is announced separately, since it isn't in this
@@ -274,11 +300,13 @@ impl NetClient {
     /// Blocks for up to `timeout` while the TCP handshake completes (a
     /// one-shot hitch triggered by a "Join" button click, not a per-frame
     /// cost — see the plan's stated simplifications), then sends `Hello`
-    /// and switches to non-blocking for the rest of the session.
-    pub fn connect(addr: SocketAddr, name: String, timeout: Duration) -> io::Result<Self> {
+    /// (including the locally-chosen `appearance`, if any — see
+    /// `ClientMessage::Hello`) and switches to non-blocking for the rest
+    /// of the session.
+    pub fn connect(addr: SocketAddr, name: String, appearance: Option<PathBuf>, timeout: Duration) -> io::Result<Self> {
         let stream = TcpStream::connect_timeout(&addr, timeout)?;
         let mut conn = NetConnection::wrap(stream)?;
-        conn.send(&ClientMessage::Hello { player_name: name, protocol_version: PROTOCOL_VERSION });
+        conn.send(&ClientMessage::Hello { player_name: name, protocol_version: PROTOCOL_VERSION, appearance });
         Ok(Self { conn, my_net_id: None, next_seq: 0, connected: true })
     }
 
@@ -300,6 +328,13 @@ impl NetClient {
 
     pub fn send_dialogue_choice(&mut self, speaker: NetId, index: usize) {
         self.conn.send(&ClientMessage::DialogueChoice { speaker, index });
+    }
+
+    /// Sent when the local player changes their player-model appearance
+    /// mid-session — the host relays it to every peer as
+    /// `ServerMessage::PlayerAppearanceChanged`.
+    pub fn send_set_appearance(&mut self, rig_path: Option<PathBuf>) {
+        self.conn.send(&ClientMessage::SetAppearance { rig_path });
     }
 
     /// Pumps the connection once and returns every `ServerMessage`
@@ -370,6 +405,7 @@ mod tests {
         let mut client = NetClient::connect(
             format!("127.0.0.1:{port}").parse().unwrap(),
             "Tester".to_string(),
+            None,
             Duration::from_secs(2),
         )
         .expect("connect");
@@ -381,7 +417,7 @@ mod tests {
         let mut joined = Vec::new();
         let mut welcomed = false;
         for _ in 0..100 {
-            for (net_id, name) in host.poll_new_connections() {
+            for (net_id, name, _appearance) in host.poll_new_connections() {
                 host.send_to(
                     net_id,
                     &ServerMessage::Welcome {
@@ -448,7 +484,7 @@ mod tests {
         host: &mut NetHost,
         addr: std::net::SocketAddr,
         hello: ClientMessage,
-    ) -> (Vec<(NetId, String)>, Vec<ServerMessage>) {
+    ) -> (Vec<(NetId, String, Option<PathBuf>)>, Vec<ServerMessage>) {
         let stream = TcpStream::connect(addr).expect("connect");
         let mut raw = NetConnection::wrap(stream).expect("wrap");
         raw.send(&hello);
@@ -476,7 +512,11 @@ mod tests {
         let (joined, replies) = hello_and_wait_for_reply(
             &mut host,
             addr,
-            ClientMessage::Hello { player_name: "Mismatched".to_string(), protocol_version: PROTOCOL_VERSION + 1 },
+            ClientMessage::Hello {
+                player_name: "Mismatched".to_string(),
+                protocol_version: PROTOCOL_VERSION + 1,
+                appearance: None,
+            },
         );
 
         assert!(joined.is_empty(), "a version-mismatched peer must never be treated as joined");
@@ -496,7 +536,7 @@ mod tests {
         let mut clients = Vec::new();
         for i in 0..MAX_PLAYERS - 1 {
             let mut client =
-                NetClient::connect(addr, format!("Player{i}"), Duration::from_secs(2)).expect("connect");
+                NetClient::connect(addr, format!("Player{i}"), None, Duration::from_secs(2)).expect("connect");
             for _ in 0..100 {
                 let _ = host.poll_new_connections();
                 client.poll_messages();
@@ -512,7 +552,11 @@ mod tests {
         let (joined, replies) = hello_and_wait_for_reply(
             &mut host,
             addr,
-            ClientMessage::Hello { player_name: "Overflow".to_string(), protocol_version: PROTOCOL_VERSION },
+            ClientMessage::Hello {
+                player_name: "Overflow".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                appearance: None,
+            },
         );
 
         assert!(joined.is_empty(), "a peer arriving after the lobby is full must never be treated as joined");

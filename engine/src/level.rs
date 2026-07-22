@@ -129,6 +129,13 @@ pub struct LevelLight {
     pub color: [f32; 3],
     pub intensity: f32,
     pub range: f32,
+    /// Whether this light is baked into static geometry's vertex colors
+    /// (see `Sandbox::bake_static_lighting`) instead of contributing to
+    /// the per-frame dynamic point-light uniforms. `#[serde(default)]`
+    /// so existing level files load unchanged as `false` (dynamic,
+    /// today's only behavior).
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 /// A placed instance of a `engine::rig::RigAsset` — a separate list from

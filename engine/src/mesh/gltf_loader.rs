@@ -112,6 +112,7 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
                 position: positions[i],
                 normal: *normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]),
                 uv: *uvs.get(i).unwrap_or(&[0.0, 0.0]),
+                color: [0.0, 0.0, 0.0],
             })
             .collect();
 

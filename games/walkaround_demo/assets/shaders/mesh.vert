@@ -1,6 +1,7 @@
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aUV;
+layout (location = 3) in vec3 aColor;
 
 uniform mat4 uModel;
 uniform mat4 uView;
@@ -55,6 +56,13 @@ void main() {
             float pointNdotl = max(dot(worldNormal, normalize(toLight)), 0.0);
             vLight += uPointLightColor[i] * uPointLightIntensity[i] * pointNdotl * atten;
         }
+
+        // Baked static-light contribution — precomputed once per vertex by
+        // `Sandbox::bake_static_lighting` (Rust-side, same N-dot-L +
+        // attenuation formula as the dynamic loop above, just summed over
+        // every `is_static` light with no 4-light array limit). A never-baked
+        // mesh has `aColor == 0`, a pure no-op.
+        vLight += aColor;
     } else {
         vLight = vec3(1.0);
     }

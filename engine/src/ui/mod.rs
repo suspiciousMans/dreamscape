@@ -1,3 +1,4 @@
+mod appearance_panel;
 mod asset_browser;
 mod backend;
 mod hud;
@@ -6,6 +7,7 @@ mod panels;
 mod pause_menu;
 mod profiler;
 
+pub use appearance_panel::{draw_appearance_panel, AppearanceAction};
 pub use asset_browser::AssetBrowserState;
 pub use backend::EguiState;
 pub use hud::draw_hud;

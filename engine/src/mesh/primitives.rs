@@ -12,6 +12,7 @@ fn face(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, corners: [Vec3; 4], 
             position: corner.to_array(),
             normal: normal.to_array(),
             uv,
+            color: [0.0, 0.0, 0.0],
         });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

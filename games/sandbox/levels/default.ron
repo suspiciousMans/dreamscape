@@ -191,6 +191,7 @@
             color: (0.89581305, 0.013029995, 0.82198036),
             intensity: 2.7,
             range: 6.0,
+            is_static: true,
         ),
     ],
     particle_emitters: [
