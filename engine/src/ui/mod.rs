@@ -1,5 +1,6 @@
 mod asset_browser;
 mod backend;
+pub mod dock_skeleton;
 mod hud;
 mod panels;
 mod pause_menu;
@@ -8,6 +9,7 @@ pub mod theme;
 
 pub use asset_browser::AssetBrowserState;
 pub use backend::EguiState;
+pub use dock_skeleton::EditorDocks;
 pub use hud::draw_hud;
 pub use panels::{hud_style_editor, render_params_editor};
 pub use pause_menu::{draw_pause_menu, PauseMenuAction};
