@@ -1,0 +1,471 @@
+//! Turns a layout + theme into concrete blocks (every block is a coloured cube).
+
+use super::grid::{Cell, Grid, P};
+use super::layout;
+use super::theme::{DreamTheme, PropKind, ThemeSpec};
+use crate::gameplay::{CELL, SLAB};
+use engine::glam::{EulerRot, Quat, Vec3};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use std::collections::HashSet;
+use std::f32::consts::TAU;
+
+pub const PORTAL_COLOR: [u8; 4] = [40, 220, 220, 255];
+pub const PORTAL_SIZE: Vec3 = Vec3::new(1.5, 2.0, 1.5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Floor,
+    Wall,
+    Prop,
+    Portal,
+    /// Floating, non-solid set dressing.
+    Decor,
+}
+
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub kind: BlockKind,
+    pub pos: Vec3,
+    pub size: Vec3,
+    pub rotation: Quat,
+    pub color: [u8; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Waypoint {
+    pub pos: Vec3,
+    /// This waypoint is reached by jumping over a void cell.
+    pub jump: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Atmosphere {
+    pub fog_color: [f32; 3],
+    pub ambient: [f32; 3],
+    pub fog_start: f32,
+    pub fog_end: f32,
+}
+
+pub struct Dream {
+    pub theme: DreamTheme,
+    pub seed: u64,
+    pub depth: u32,
+    pub blocks: Vec<Block>,
+    pub spawn: Vec3,
+    pub portal: Vec3,
+    /// Shortest walkable route spawn → portal (cell centres, y = 0).
+    pub route: Vec<Waypoint>,
+    /// Enemy patrol endpoints (y = 0.5).
+    pub patrols: Vec<(Vec3, Vec3)>,
+    pub atmosphere: Atmosphere,
+    /// Where the previous dream's motif prop was placed, if any.
+    pub motif_at: Option<Vec3>,
+}
+
+pub fn generate(theme: DreamTheme, seed: u64, depth: u32, motif: Option<PropKind>) -> Dream {
+    let spec = theme.spec();
+    let mut rng = StdRng::seed_from_u64(seed);
+    let layout = layout::generate(spec.layout, spec.grid_size, &mut rng);
+    if layout.fallback {
+        log::warn!("{theme:?} seed {seed}: layout generator gave up, using fallback hall");
+    }
+    let grid = &layout.grid;
+    let path = grid
+        .path(layout.spawn, layout.portal)
+        .expect("layout::generate only returns connected layouts");
+    let on_path: HashSet<P> = path.iter().map(|&(p, _)| p).collect();
+
+    let mut blocks = Vec::new();
+    floor_slabs(grid, &spec, &mut rng, &mut blocks);
+    walls(grid, &spec, &mut rng, &mut blocks);
+    let motif_at = props(
+        grid,
+        &spec,
+        &on_path,
+        layout.spawn,
+        motif,
+        &mut rng,
+        &mut blocks,
+    );
+    decor(grid, &spec, &mut rng, &mut blocks);
+    let portal = grid.world(layout.portal);
+    blocks.push(Block {
+        kind: BlockKind::Portal,
+        pos: portal + Vec3::Y * PORTAL_SIZE.y * 0.5,
+        size: PORTAL_SIZE,
+        rotation: Quat::IDENTITY,
+        color: PORTAL_COLOR,
+    });
+
+    Dream {
+        theme,
+        seed,
+        depth,
+        blocks,
+        spawn: grid.world(layout.spawn),
+        portal,
+        route: path
+            .iter()
+            .map(|&(p, jump)| Waypoint {
+                pos: grid.world(p),
+                jump,
+            })
+            .collect(),
+        patrols: patrols(grid, &path, &spec, depth, &mut rng),
+        atmosphere: atmosphere(&spec, &mut rng),
+        motif_at,
+    }
+}
+
+fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
+    *palette
+        .choose(rng)
+        .expect("theme palettes are non-empty (theme tests)")
+}
+
+/// Palette colour ± up to 40 per channel, more spread the stranger the dream.
+fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
+    let spread = 12.0 + 28.0 * strangeness;
+    let mut out = [0, 0, 0, 255];
+    for i in 0..3 {
+        out[i] = (c[i] as f32 + rng.gen_range(-spread..spread))
+            .round()
+            .clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+/// One slab per horizontal run of floor cells (fewer entities than one per cell).
+fn floor_slabs(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
+    for y in 0..grid.h {
+        let mut x = 0;
+        while x < grid.w {
+            if grid.get((x, y)) != Cell::Floor {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < grid.w && grid.get((x, y)) == Cell::Floor {
+                x += 1;
+            }
+            let centre = (grid.world((start, y)) + grid.world((x - 1, y))) * 0.5;
+            out.push(Block {
+                kind: BlockKind::Floor,
+                pos: centre - Vec3::Y * SLAB * 0.5,
+                size: Vec3::new((x - start) as f32 * CELL, SLAB, CELL),
+                rotation: Quat::IDENTITY,
+                color: tint(pick(spec.floor_colors, rng), spec.strangeness, rng),
+            });
+        }
+    }
+}
+
+fn walls(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
+    if spec.wall_height <= 0.0 {
+        return;
+    }
+    for cell in grid.cells_of(Cell::Wall) {
+        out.push(Block {
+            kind: BlockKind::Wall,
+            pos: grid.world(cell) + Vec3::Y * spec.wall_height * 0.5,
+            size: Vec3::new(CELL, spec.wall_height, CELL),
+            rotation: Quat::IDENTITY,
+            color: tint(pick(spec.wall_colors, rng), spec.strangeness, rng),
+        });
+    }
+}
+
+fn place(kind: PropKind, base: Vec3, scale: f32, color: [u8; 4], out: &mut Vec<Block>) {
+    for &(offset, size) in kind.parts() {
+        out.push(Block {
+            kind: BlockKind::Prop,
+            pos: base + Vec3::from(offset) * scale,
+            size: Vec3::from(size) * scale,
+            rotation: Quat::IDENTITY, // solid => axis-aligned, so the AABB collider matches
+            color,
+        });
+    }
+}
+
+/// Props only go on floor cells that are NOT on the route, so they can never
+/// block the way to the portal. Returns where the motif was placed.
+#[allow(clippy::too_many_arguments)]
+fn props(
+    grid: &Grid,
+    spec: &ThemeSpec,
+    on_path: &HashSet<P>,
+    spawn: P,
+    motif: Option<PropKind>,
+    rng: &mut StdRng,
+    out: &mut Vec<Block>,
+) -> Option<Vec3> {
+    let free: Vec<P> = grid
+        .cells_of(Cell::Floor)
+        .into_iter()
+        .filter(|p| !on_path.contains(p))
+        .collect();
+    let motif_cell = motif.and_then(|kind| {
+        let cell = *free
+            .iter()
+            .min_by_key(|p| (p.0 - spawn.0).abs() + (p.1 - spawn.1).abs())?;
+        let color = tint(pick(spec.prop_colors, rng), spec.strangeness, rng);
+        place(kind, grid.world(cell), 1.0, color, out);
+        Some(cell)
+    });
+    for &cell in &free {
+        if Some(cell) == motif_cell || !rng.gen_bool(spec.prop_density as f64) {
+            continue;
+        }
+        let kind = *spec
+            .props
+            .choose(rng)
+            .expect("theme props are non-empty (theme tests)");
+        let scale = 1.0 + rng.gen::<f32>() * spec.strangeness * 0.3;
+        let color = tint(pick(spec.prop_colors, rng), spec.strangeness, rng);
+        place(kind, grid.world(cell), scale, color, out);
+    }
+    motif_cell.map(|c| grid.world(c))
+}
+
+/// The dream coming apart underneath: tumbling cubes below the floor plane,
+/// visible past the edges and through void gaps. Count scales with strangeness.
+fn decor(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
+    let half_w = grid.w as f32 * CELL * 0.75;
+    let half_h = grid.h as f32 * CELL * 0.75;
+    for _ in 0..(spec.strangeness * 16.0) as usize {
+        out.push(Block {
+            kind: BlockKind::Decor,
+            pos: Vec3::new(
+                rng.gen_range(-half_w..half_w),
+                rng.gen_range(-10.0..-2.0),
+                rng.gen_range(-half_h..half_h),
+            ),
+            size: Vec3::splat(rng.gen_range(0.3..1.5)),
+            rotation: Quat::from_euler(
+                EulerRot::XYZ,
+                rng.gen_range(0.0..TAU),
+                rng.gen_range(0.0..TAU),
+                rng.gen_range(0.0..TAU),
+            ),
+            color: tint(pick(spec.prop_colors, rng), spec.strangeness, rng),
+        });
+    }
+}
+
+/// Enemies patrol ON the route (so you have to dodge them), never within the
+/// first 3 route cells. Count grows by one every 3 dreams deep.
+fn patrols(
+    grid: &Grid,
+    path: &[(P, bool)],
+    spec: &ThemeSpec,
+    depth: u32,
+    rng: &mut StdRng,
+) -> Vec<(Vec3, Vec3)> {
+    if spec.enemies.1 == 0 || path.len() < layout::MIN_PATH_CELLS {
+        return Vec::new();
+    }
+    let count = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 3).min(spec.enemies.1 + 2)
+        as usize;
+    let mut candidates: Vec<P> = path[3..path.len() - 1]
+        .iter()
+        .filter(|(_, jump)| !jump)
+        .map(|&(p, _)| p)
+        .collect();
+    candidates.shuffle(rng);
+    candidates
+        .into_iter()
+        .take(count)
+        .filter_map(|a| {
+            let (b, _) = grid.moves(a).into_iter().find(|&(_, jump)| !jump)?;
+            Some((grid.world(a) + Vec3::Y * 0.5, grid.world(b) + Vec3::Y * 0.5))
+        })
+        .collect()
+}
+
+fn jitter3(c: [f32; 3], rng: &mut StdRng) -> [f32; 3] {
+    let mut out = c;
+    for v in &mut out {
+        *v = (*v + rng.gen_range(-0.04..0.04)).clamp(0.0, 1.0);
+    }
+    out
+}
+
+fn atmosphere(spec: &ThemeSpec, rng: &mut StdRng) -> Atmosphere {
+    Atmosphere {
+        fog_color: jitter3(spec.fog_color, rng),
+        ambient: jitter3(spec.ambient, rng),
+        fog_start: spec.fog_start,
+        fog_end: spec.fog_end,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dream::theme::ALL_THEMES;
+
+    fn near_palette(c: [u8; 4], palette: &[[u8; 3]]) -> bool {
+        palette
+            .iter()
+            .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
+    }
+
+    #[test]
+    fn same_seed_same_dream() {
+        for theme in ALL_THEMES {
+            let (a, b) = (generate(theme, 7, 2, None), generate(theme, 7, 2, None));
+            assert_eq!(a.blocks.len(), b.blocks.len());
+            for (x, y) in a.blocks.iter().zip(&b.blocks) {
+                assert_eq!((x.pos, x.color), (y.pos, y.color));
+            }
+        }
+    }
+
+    #[test]
+    fn different_seeds_give_different_dreams() {
+        for theme in ALL_THEMES {
+            let distinct: HashSet<String> = (0..20)
+                .map(|s| {
+                    let d = generate(theme, s, 0, None);
+                    format!(
+                        "{}:{:?}",
+                        d.blocks.len(),
+                        d.route
+                            .iter()
+                            .map(|w| (w.pos.x as i32, w.pos.z as i32))
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .collect();
+            assert!(
+                distinct.len() >= 5,
+                "{theme:?}: only {} distinct dreams in 20 seeds",
+                distinct.len()
+            );
+        }
+    }
+
+    #[test]
+    fn route_runs_spawn_to_portal_in_legal_hops() {
+        for theme in ALL_THEMES {
+            for seed in 0..100 {
+                let d = generate(theme, seed, 0, None);
+                assert_eq!(d.route.first().unwrap().pos, d.spawn);
+                assert_eq!(d.route.last().unwrap().pos, d.portal);
+                for hop in d.route.windows(2) {
+                    let dist = hop[0].pos.distance(hop[1].pos);
+                    let want = if hop[1].jump { 2.0 * CELL } else { CELL };
+                    assert!(
+                        (dist - want).abs() < 1e-3,
+                        "{theme:?}/{seed}: hop of {dist}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn props_never_block_the_route() {
+        for theme in ALL_THEMES {
+            for seed in 0..100 {
+                let d = generate(theme, seed, 0, Some(PropKind::Machine));
+                for prop in d.blocks.iter().filter(|b| b.kind == BlockKind::Prop) {
+                    for wp in &d.route {
+                        let gap = (prop.pos - wp.pos).abs();
+                        let reach = prop.size * 0.5 + Vec3::splat(CELL * 0.5);
+                        assert!(
+                            gap.x >= reach.x - 1e-3 || gap.z >= reach.z - 1e-3,
+                            "{theme:?}/{seed}: prop at {:?} intrudes on route cell {:?}",
+                            prop.pos,
+                            wp.pos
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solid_blocks_are_axis_aligned() {
+        for theme in ALL_THEMES {
+            let d = generate(theme, 3, 0, None);
+            for b in d.blocks.iter().filter(|b| b.kind != BlockKind::Decor) {
+                assert_eq!(
+                    b.rotation,
+                    Quat::IDENTITY,
+                    "{theme:?}: rotated {:?}",
+                    b.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_comes_from_the_theme_palette() {
+        for theme in ALL_THEMES {
+            let s = theme.spec();
+            for seed in 0..20 {
+                for b in &generate(theme, seed, 0, None).blocks {
+                    let ok = match b.kind {
+                        BlockKind::Floor => near_palette(b.color, s.floor_colors),
+                        BlockKind::Wall => near_palette(b.color, s.wall_colors),
+                        BlockKind::Prop | BlockKind::Decor => near_palette(b.color, s.prop_colors),
+                        BlockKind::Portal => b.color == PORTAL_COLOR,
+                    };
+                    assert!(
+                        ok,
+                        "{theme:?}/{seed}: off-palette {:?} {:?}",
+                        b.kind, b.color
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enemies_only_where_allowed_and_never_near_spawn() {
+        for seed in 0..100 {
+            assert!(generate(DreamTheme::Lobby, seed, 5, None)
+                .patrols
+                .is_empty());
+            let d = generate(DreamTheme::NightmareFactory, seed, 0, None);
+            assert!(!d.patrols.is_empty(), "factory seed {seed} has no enemies");
+            for (a, _) in &d.patrols {
+                let i = d
+                    .route
+                    .iter()
+                    .position(|w| (w.pos + Vec3::Y * 0.5).distance(*a) < 1e-3)
+                    .expect("patrols start on the route");
+                assert!(i >= 3, "enemy only {i} steps from spawn");
+            }
+        }
+    }
+
+    #[test]
+    fn atmosphere_stays_near_the_theme() {
+        for theme in ALL_THEMES {
+            let s = theme.spec();
+            let a = generate(theme, 11, 0, None).atmosphere;
+            for i in 0..3 {
+                assert!((a.fog_color[i] - s.fog_color[i]).abs() <= 0.041);
+                assert!((a.ambient[i] - s.ambient[i]).abs() <= 0.041);
+            }
+        }
+    }
+
+    #[test]
+    fn previous_dreams_motif_appears_next_to_spawn() {
+        for seed in 0..50 {
+            let d = generate(DreamTheme::Lobby, seed, 1, Some(PropKind::Tree));
+            let at = d.motif_at.expect("the lobby always has free floor");
+            assert!(
+                at.distance(d.spawn) <= 2.0 * CELL + 1e-3,
+                "motif {at:?} far from spawn {:?}",
+                d.spawn
+            );
+            assert!(d.blocks.iter().any(|b| b.kind == BlockKind::Prop
+                && (b.pos.x - at.x).abs() < 1e-3
+                && (b.pos.z - at.z).abs() < 1e-3));
+        }
+    }
+}
