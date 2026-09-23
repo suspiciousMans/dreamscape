@@ -1,28 +1,37 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::Context as _;
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
-use engine::ecs::{MeshRenderer, Transform, World};
+use engine::ecs::{Entity, MeshRenderer, Transform, World};
 use engine::glam::{Mat4, Quat, Vec3};
 use engine::glow::HasContext;
 use engine::mesh::GpuMesh;
-use engine::profile::ProfileCycler;
-use engine::renderer::Renderer;
+use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
+use engine::profile::{ProfileCycler, RenderParams};
+use engine::renderer::{PostParams, Renderer};
 use engine::sdl2::event::Event;
+use engine::sdl2::keyboard::Keycode;
 use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
-use std::path::PathBuf;
-use std::sync::Arc;
 
 mod dream;
 mod enemy_ai;
 mod gameplay;
-mod world_generator;
-mod world_transitions;
 
+use dream::{Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, DREAMS_PER_RUN};
 use enemy_ai::EnemyAI;
-use world_generator::{WorldGenerator, WorldVariant};
-use world_transitions::TransitionManager;
+use gameplay::{PlayerInputState, PortalMarker};
+
+const PROFILES_DIR: &str = "games/dreamscape/profiles";
+const PLAYER_COLOR: [u8; 4] = [255, 255, 255, 255];
+const ENEMY_COLOR: [u8; 4] = [200, 40, 40, 255];
+const ENEMY_SPEED: f32 = 3.0;
 
 fn init_logging() {
     let _ = env_logger::builder()
@@ -31,567 +40,556 @@ fn init_logging() {
         .try_init();
 }
 
-/// Player input state
-#[derive(Debug, Clone, Default)]
-pub struct PlayerInputState {
-    pub forward: bool,
-    pub backward: bool,
-    pub left: bool,
-    pub right: bool,
-    pub jump: bool,
+/// DREAMSCAPE_SEED=<u64> replays a run exactly; otherwise seed from the clock.
+fn run_seed() -> u64 {
+    std::env::var("DREAMSCAPE_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        })
 }
 
-/// The Dreamscape game
 pub struct DreamscapeGame {
-    // Rendering
     renderer: Option<Renderer>,
     shader_cache: Option<ShaderVariantCache>,
     profiles: Option<ProfileCycler>,
-    profiles_dir: PathBuf,
+    render_params: Option<RenderParams>,
+    cube: Option<Arc<GpuMesh>>,
+    textures: HashMap<[u8; 4], Arc<GpuTexture>>,
+    audio: Option<AudioContext>,
 
-    // ECS world
     world: World,
+    director: DreamDirector,
+    dream: Option<Dream>,
+    /// Prop kind carried from the previous dream into the next one.
+    motif: Option<PropKind>,
+    enemies: Vec<(Entity, EnemyAI)>,
 
-    // Game state
-    world_index: usize,
-    transition_manager: TransitionManager,
-    world_generator: WorldGenerator,
-    current_variant: WorldVariant,
-    enemies: Vec<(engine::ecs::Entity, EnemyAI)>,
-
-    // Audio
-    audio_context: Option<AudioContext>,
-
-    // Input
-    player_input: PlayerInputState,
-
-    // Player
-    player_entity: Option<engine::ecs::Entity>,
+    input: PlayerInputState,
+    player: Option<Entity>,
     player_position: Vec3,
-    player_velocity: Vec3,
-
-    // Fallback white texture so meshes aren't rendered pure black
-    white_texture: Option<Arc<GpuTexture>>,
-    // Solid cyan texture for trigger/portal objects — visually distinct from
-    // white/grey walls so the exit portal reads as a distinct thing.
-    portal_texture: Option<Arc<GpuTexture>>,
-    // Per-world wall/floor tint textures, keyed by WorldType Debug string
-    world_tint_textures: std::collections::HashMap<String, Arc<GpuTexture>>,
+    camera_pos: Vec3,
+    /// F1: fixed overview camera.
+    debug_camera: bool,
+    /// DREAMSCAPE_AUTOPILOT=1: follow the generated route (end-to-end test).
+    autopilot: bool,
+    route_index: usize,
 }
 
 impl DreamscapeGame {
-    pub fn new() -> Self {
+    pub fn new(run_seed: u64) -> Self {
         Self {
             renderer: None,
             shader_cache: None,
             profiles: None,
-            profiles_dir: PathBuf::from("games/dreamscape/profiles"),
-
+            render_params: None,
+            cube: None,
+            textures: HashMap::new(),
+            audio: None,
             world: World::new(),
-
-            world_index: 0,
-            transition_manager: TransitionManager::new(),
-            world_generator: WorldGenerator::new(42),
-            current_variant: WorldVariant {
-                seed: 42,
-                difficulty: 0.0,
-            },
+            director: DreamDirector::new(run_seed),
+            dream: None,
+            motif: None,
             enemies: Vec::new(),
-            audio_context: None,
-            player_input: PlayerInputState::default(),
-            player_entity: None,
-            player_position: Vec3::new(0.0, 2.0, 0.0),
-            player_velocity: Vec3::ZERO,
-            white_texture: None,
-            portal_texture: None,
-            world_tint_textures: std::collections::HashMap::new(),
+            input: PlayerInputState::default(),
+            player: None,
+            player_position: Vec3::ZERO,
+            camera_pos: gameplay::CAMERA_OFFSET,
+            debug_camera: false,
+            autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
+            route_index: 0,
         }
     }
 
-    fn load_world(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        log::info!("Loading world {}", self.world_index);
+    /// One cached 1x1 texture per colour.
+    fn texture(&mut self, gl: &engine::glow::Context, color: [u8; 4]) -> Arc<GpuTexture> {
+        self.textures
+            .entry(color)
+            .or_insert_with(|| {
+                Arc::new(
+                    GpuTexture::from_rgba8(gl, &color, 1, 1, TextureFilter::Nearest)
+                        .expect("1x1 texture upload"),
+                )
+            })
+            .clone()
+    }
+
+    fn apply_atmosphere(
+        &mut self,
+        theme: DreamTheme,
+        atmosphere: &Atmosphere,
+    ) -> anyhow::Result<()> {
+        let profiles = self.profiles.as_mut().context("profiles not loaded")?;
+        let name = theme.spec().base_profile;
+        let index = gameplay::profile_index(profiles.all(), name)
+            .with_context(|| format!("no shader profile named '{name}' in {PROFILES_DIR}"))?;
+        let mut params = profiles.select(index).render;
+        params.fog_color = atmosphere.fog_color;
+        params.ambient_color = atmosphere.ambient;
+        params.fog_start = atmosphere.fog_start;
+        params.fog_end = atmosphere.fog_end;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_resolution_scale(params.resolution_scale);
+        }
+        self.render_params = Some(params);
+        log::info!(
+            "Atmosphere: profile '{name}', fog {:?}",
+            atmosphere.fog_color
+        );
+        Ok(())
+    }
+
+    fn play_music(&mut self, path: &str) {
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        match audio.play_music_file(Path::new(path), true) {
+            Ok(()) => log::info!("Music: {path}"),
+            Err(e) => log::error!("Could not play music {path}: {e}"),
+        }
+    }
+
+    fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        let theme = self.director.theme;
+        let spec = theme.spec();
+        let dream = dream::generate(
+            theme,
+            self.director.dream_seed(),
+            self.director.depth,
+            self.motif,
+        );
+        log::info!(
+            "Dream {}/{}: {:?} seed={} blocks={} enemies={} route={} portal={:?} motif={:?}",
+            dream.depth + 1,
+            DREAMS_PER_RUN,
+            dream.theme,
+            dream.seed,
+            dream.blocks.len(),
+            dream.patrols.len(),
+            dream.route.len(),
+            dream.portal,
+            dream.motif_at,
+        );
 
         self.world.clear();
         self.enemies.clear();
-        self.player_entity = None;
+        self.player = None;
+        self.route_index = 0;
+        self.apply_atmosphere(theme, &dream.atmosphere)?;
+        self.play_music(spec.music);
 
-        let world_type = self.transition_manager.current_world();
-        let difficulty = world_type.difficulty();
-
-        self.current_variant = WorldVariant {
-            seed: (self.world_index as u64) ^ 0xdeadbeef,
-            difficulty,
-        };
-        self.world_generator = WorldGenerator::new(self.current_variant.seed);
-
-        // Load level from RON
-        let level_path = world_type.level_path();
-        let level =
-            engine::level::load_from_file(&PathBuf::from(level_path)).unwrap_or_else(|err| {
-                log::warn!(
-                    "Could not load level {}, creating empty: {}",
-                    level_path,
-                    err
-                );
-                engine::level::Level {
-                    name: format!("{:?}", world_type),
-                    objects: Vec::new(),
-                    lights: Vec::new(),
-                    particle_emitters: Vec::new(),
-                    rig_instances: Vec::new(),
-                    characters: Vec::new(),
-                    spawners: Vec::new(),
-                    physics: engine::physics::PhysicsParams::default(),
-                    music_path: None,
-                }
-            });
-
-        // Spawn level objects
         let gl = ctx.gl();
-
-        // Lazy-create per-world tint texture for non-trigger meshes
-        let tint_key = format!("{:?}", world_type);
-        let tint_texture = self
-            .world_tint_textures
-            .entry(tint_key)
-            .or_insert_with(|| {
-                let rgba = world_type.tint_color();
-                Arc::new(
-                    GpuTexture::from_rgba8(gl, &rgba, 1, 1, TextureFilter::Nearest)
-                        .expect("1x1 tint texture upload cannot fail"),
-                )
-            })
-            .clone();
-
-        for obj in &level.objects {
-            let mesh_data = match &obj.mesh {
-                engine::level::MeshSource::Primitive(kind) => match kind {
-                    engine::level::PrimitiveKind::Cube => engine::mesh::primitives::cube(),
-                    engine::level::PrimitiveKind::Plane => engine::mesh::primitives::plane(),
-                },
-                engine::level::MeshSource::ObjFile(path) => engine::mesh::load_obj(path)
-                    .ok()
-                    .and_then(|mut meshes| meshes.pop())
-                    .unwrap_or_else(|| engine::mesh::primitives::cube()),
-                _ => engine::mesh::primitives::cube(),
-            };
-
-            let gpu_mesh = Arc::new(GpuMesh::upload(gl, &mesh_data)?);
-
-            let pos: Vec3 = obj.position.into();
-            let rot = Quat::from_euler(
-                glam::EulerRot::XYZ,
-                obj.rotation_euler_deg[0].to_radians(),
-                obj.rotation_euler_deg[1].to_radians(),
-                obj.rotation_euler_deg[2].to_radians(),
-            );
-
-            let (mutated_pos, mutated_rot) =
-                self.world_generator
-                    .mutate_object(pos, rot, &self.current_variant);
-
-            self.world.spawn((
+        let cube = self.cube.clone().context("cube mesh not uploaded")?;
+        for block in &dream.blocks {
+            let texture = self.texture(gl, block.color);
+            let entity = self.world.spawn((
                 Transform {
-                    position: mutated_pos,
-                    rotation: mutated_rot,
-                    scale: obj.scale.into(),
+                    position: block.pos,
+                    rotation: block.rotation,
+                    scale: block.size,
                 },
                 MeshRenderer {
-                    mesh: gpu_mesh,
-                    texture: if obj.is_trigger {
-                        self.portal_texture.clone()
-                    } else {
-                        Some(tint_texture.clone())
-                    },
+                    mesh: cube.clone(),
+                    texture: Some(texture),
                 },
             ));
-        }
-
-        // Spawn the player
-        self.player_position = Vec3::new(0.0, 2.0, -5.0);
-        self.player_velocity = Vec3::ZERO;
-
-        let player = self.world.spawn((
-            Transform::from_position(self.player_position),
-            MeshRenderer {
-                mesh: Arc::new(GpuMesh::upload(gl, &engine::mesh::primitives::cube())?),
-                texture: self.white_texture.clone(),
-            },
-        ));
-        self.player_entity = Some(player);
-
-        // Spawn enemies
-        if difficulty > 0.5 {
-            for i in 0..2 {
-                let offset = (i as f32) * 3.0;
-                let enemy_pos = Vec3::new(-5.0 + offset, 1.0, 0.0);
-                let enemy_mesh = Arc::new(GpuMesh::upload(gl, &engine::mesh::primitives::cube())?);
-
-                let _enemy_entity = self.world.spawn((
-                    Transform::from_position(enemy_pos),
-                    MeshRenderer {
-                        mesh: enemy_mesh,
-                        texture: self.white_texture.clone(),
-                    },
-                ));
-
-                let ai = EnemyAI::new_patrol(
-                    Vec3::new(-5.0 + offset, 1.0, -5.0),
-                    Vec3::new(-5.0 + offset, 1.0, 5.0),
-                    4.0,
-                );
-
-                self.enemies.push((_enemy_entity, ai));
+            let half_extents = block.size * 0.5;
+            match block.kind {
+                BlockKind::Decor => {}
+                BlockKind::Portal => {
+                    self.world
+                        .insert(
+                            entity,
+                            (
+                                Collider {
+                                    shape: ColliderShape::Aabb { half_extents },
+                                    is_trigger: true,
+                                },
+                                PortalMarker,
+                            ),
+                        )
+                        .expect("entity was just spawned");
+                }
+                BlockKind::Floor | BlockKind::Wall | BlockKind::Prop => {
+                    self.world
+                        .insert_one(
+                            entity,
+                            Collider {
+                                shape: ColliderShape::Aabb { half_extents },
+                                is_trigger: false,
+                            },
+                        )
+                        .expect("entity was just spawned");
+                }
             }
         }
 
-        log::info!(
-            "Loaded world {} (difficulty: {:.2})",
-            self.world_index,
-            difficulty
-        );
+        let spawn = dream.spawn + Vec3::Y;
+        self.player_position = spawn;
+        self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
+        let player_texture = self.texture(gl, PLAYER_COLOR);
+        self.player = Some(self.world.spawn((
+            Transform {
+                position: spawn,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::splat(gameplay::PLAYER_RADIUS * 2.0),
+            },
+            MeshRenderer {
+                mesh: cube.clone(),
+                texture: Some(player_texture),
+            },
+            RigidBody::default(),
+            Collider {
+                shape: ColliderShape::Sphere {
+                    radius: gameplay::PLAYER_RADIUS,
+                },
+                is_trigger: false,
+            },
+        )));
+
+        let enemy_texture = self.texture(gl, ENEMY_COLOR);
+        for &(a, b) in &dream.patrols {
+            let entity = self.world.spawn((
+                Transform {
+                    position: a,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::splat(0.9),
+                },
+                MeshRenderer {
+                    mesh: cube.clone(),
+                    texture: Some(enemy_texture.clone()),
+                },
+            ));
+            self.enemies
+                .push((entity, EnemyAI::new_patrol(a, b, ENEMY_SPEED)));
+        }
+
+        // The next dream inherits one of this dream's prop kinds as its motif.
+        self.motif = spec
+            .props
+            .get((dream.seed % spec.props.len() as u64) as usize)
+            .copied();
+        self.dream = Some(dream);
         Ok(())
+    }
+
+    fn respawn_player(&mut self) {
+        let (Some(player), Some(dream)) = (self.player, self.dream.as_ref()) else {
+            return;
+        };
+        let spawn = dream.spawn + Vec3::Y;
+        if let Ok(mut t) = self.world.get::<&mut Transform>(player) {
+            t.position = spawn;
+        }
+        if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
+            body.velocity = Vec3::ZERO;
+        }
+        self.player_position = spawn;
+        self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
+        self.route_index = 0;
+    }
+
+    /// Autopilot: walk to the next route waypoint; jump when it's a jump hop.
+    fn autopilot_step(&mut self) -> (Vec3, bool) {
+        let Some(dream) = &self.dream else {
+            return (Vec3::ZERO, false);
+        };
+        while let Some(wp) = dream.route.get(self.route_index) {
+            let flat = Vec3::new(
+                wp.pos.x - self.player_position.x,
+                0.0,
+                wp.pos.z - self.player_position.z,
+            );
+            if flat.length() < 0.3 {
+                self.route_index += 1;
+            } else {
+                break;
+            }
+        }
+        match dream.route.get(self.route_index) {
+            Some(wp) => (
+                gameplay::autopilot_velocity(self.player_position, wp.pos),
+                wp.jump,
+            ),
+            None => (Vec3::ZERO, false),
+        }
     }
 }
 
 impl Game for DreamscapeGame {
     fn init(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        log::info!("Initializing Dreamscape game");
-
-        unsafe {
-            ctx.gl().enable(engine::glow::DEPTH_TEST);
-        }
-
+        log::info!("Initializing Dreamscape");
         let gl = ctx.gl();
-        let drawable_size = ctx.drawable_size();
-
-        // Load shader profiles
-        std::fs::create_dir_all(&self.profiles_dir)?;
-        let profiles = engine::profile::load_dir(&self.profiles_dir)?;
-
-        if profiles.is_empty() {
-            log::warn!("No profiles found");
+        unsafe {
+            gl.enable(engine::glow::DEPTH_TEST);
         }
-
-        let cycler = ProfileCycler::new(profiles.clone())?;
-        let first_profile = cycler.current().clone();
-
-        self.profiles = Some(cycler);
-
-        // Load shader sources
-        let vertex_src =
-            std::fs::read_to_string(&first_profile.vertex_shader).unwrap_or_else(|_| {
-                log::warn!("Could not load vertex shader");
-                "void main() { }".to_string()
-            });
-        let fragment_src =
-            std::fs::read_to_string(&first_profile.fragment_shader).unwrap_or_else(|_| {
-                log::warn!("Could not load fragment shader");
-                "void main() { }".to_string()
-            });
-
+        let cycler = ProfileCycler::new(engine::profile::load_dir(Path::new(PROFILES_DIR))?)?;
+        let first = cycler.current().clone();
+        let read =
+            |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading shader {p:?}"));
+        let vertex_src = read(&first.vertex_shader)?;
+        let fragment_src = read(&first.fragment_shader)?;
+        let post_src = read(&first.post_fragment_shader)?;
         self.shader_cache = Some(ShaderVariantCache::new(vertex_src, fragment_src));
-
-        // Initialize renderer
-        let post_frag_src = std::fs::read_to_string(&first_profile.post_fragment_shader)
-            .unwrap_or_else(|_| {
-                log::warn!("Could not load post-process shader");
-                engine::renderer::DEFAULT_FRAGMENT_SRC.to_string()
-            });
-
         self.renderer = Some(Renderer::new(
             gl,
-            drawable_size,
-            first_profile.render.resolution_scale,
-            &post_frag_src,
+            ctx.drawable_size(),
+            first.render.resolution_scale,
+            &post_src,
         )?);
-
-        // Initialize audio
+        self.profiles = Some(cycler);
+        self.cube = Some(Arc::new(GpuMesh::upload(
+            gl,
+            &engine::mesh::primitives::cube(),
+        )?));
         match AudioContext::new() {
-            Ok(audio) => self.audio_context = Some(audio),
-            Err(e) => log::warn!("Failed to initialize audio: {}", e),
+            Ok(audio) => self.audio = Some(audio),
+            Err(e) => log::warn!("Failed to initialize audio: {e}"),
         }
-
-        // Fallback white texture (1x1) so meshes aren't rendered pure black
-        self.white_texture = Some(Arc::new(
-            GpuTexture::from_rgba8(gl, &[255, 255, 255, 255], 1, 1, TextureFilter::Nearest)
-                .expect("1x1 white texture upload cannot fail"),
-        ));
-
-        // Solid cyan texture for trigger/portal objects
-        self.portal_texture = Some(Arc::new(
-            GpuTexture::from_rgba8(gl, &[40, 220, 220, 255], 1, 1, TextureFilter::Nearest)
-                .expect("1x1 cyan texture upload cannot fail"),
-        ));
-
-        // Load the first world
-        self.load_world(ctx)?;
-
+        self.load_dream(ctx)?;
         log::info!("Dreamscape initialized");
         Ok(())
     }
 
     fn handle_event(&mut self, _ctx: &mut Context, event: &Event) {
-        match event {
+        let (key, down, repeat) = match event {
             Event::KeyDown {
-                keycode: Some(k), ..
-            } => {
-                use engine::sdl2::keyboard::Keycode;
-                match *k {
-                    Keycode::W => self.player_input.forward = true,
-                    Keycode::S => self.player_input.backward = true,
-                    Keycode::A => self.player_input.left = true,
-                    Keycode::D => self.player_input.right = true,
-                    Keycode::Space => self.player_input.jump = true,
-                    _ => {}
-                }
-            }
+                keycode: Some(k),
+                repeat,
+                ..
+            } => (*k, true, *repeat),
             Event::KeyUp {
                 keycode: Some(k), ..
-            } => {
-                use engine::sdl2::keyboard::Keycode;
-                match *k {
-                    Keycode::W => self.player_input.forward = false,
-                    Keycode::S => self.player_input.backward = false,
-                    Keycode::A => self.player_input.left = false,
-                    Keycode::D => self.player_input.right = false,
-                    Keycode::Space => self.player_input.jump = false,
-                    _ => {}
-                }
+            } => (*k, false, false),
+            _ => return,
+        };
+        match key {
+            Keycode::W => self.input.forward = down,
+            Keycode::S => self.input.backward = down,
+            Keycode::A => self.input.left = down,
+            Keycode::D => self.input.right = down,
+            Keycode::Space => self.input.jump = down,
+            Keycode::F1 if down && !repeat => {
+                self.debug_camera = !self.debug_camera;
+                log::info!("debug camera: {}", self.debug_camera);
             }
             _ => {}
         }
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
-        // Update player position
-        let move_speed = 8.0;
-        let mut movement = Vec3::ZERO;
+        let dt = dt.min(gameplay::MAX_DT);
+        let Some(player) = self.player else {
+            return Ok(());
+        };
 
-        if self.player_input.forward {
-            movement.z += move_speed;
-        }
-        if self.player_input.backward {
-            movement.z -= move_speed;
-        }
-        if self.player_input.left {
-            movement.x -= move_speed;
-        }
-        if self.player_input.right {
-            movement.x += move_speed;
-        }
-
-        // Apply gravity
-        let gravity = -9.8;
-        self.player_velocity.y += gravity * dt;
-        self.player_velocity.y = self.player_velocity.y.max(-20.0);
-
-        // Jump
-        if self.player_input.jump && self.player_position.y <= 0.5 {
-            self.player_velocity.y = 10.0;
-        }
-
-        // Apply movement
-        self.player_position += movement * dt;
-        self.player_position.y += self.player_velocity.y * dt;
-
-        // Ground collision
-        if self.player_position.y < 0.5 {
-            self.player_position.y = 0.5;
-            self.player_velocity.y = 0.0;
-        }
-
-        // Update player transform in ECS
-        if let Some(player_entity) = self.player_entity {
-            if let Ok(mut transform) = self.world.get::<&mut Transform>(player_entity) {
-                transform.position = self.player_position;
+        // 1. Input (or autopilot) -> player body
+        let (desired, wants_jump) = if self.autopilot {
+            self.autopilot_step()
+        } else {
+            (gameplay::horizontal_velocity(&self.input), self.input.jump)
+        };
+        if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
+            body.velocity.x = desired.x;
+            body.velocity.z = desired.z;
+            if wants_jump && body.grounded {
+                body.velocity.y = gameplay::JUMP_SPEED;
             }
         }
 
-        // Debug: log position periodically so movement can be verified
-        // from console output during manual testing.
-        if self.player_input.forward
-            || self.player_input.backward
-            || self.player_input.left
-            || self.player_input.right
-        {
-            log::info!("player_position = {:?}", self.player_position);
+        // 2. Enemies
+        for (entity, ai) in self.enemies.iter_mut() {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                ai.update(&mut t.position, dt);
+            }
         }
 
-        // Check for portal (proximity > 6.0 on X)
-        if self.player_position.x > 6.0 {
-            log::info!("Portal triggered!");
-            if let Some(_next) = self.transition_manager.advance() {
-                self.world_index = self.transition_manager.current_index();
-                self.load_world(ctx)?;
+        // 3. Physics: gravity, collision, trigger overlaps
+        let overlaps = engine::physics::step(&mut self.world, dt, &PhysicsParams::default());
+        if let Ok(t) = self.world.get::<&Transform>(player) {
+            self.player_position = t.position;
+        }
+        self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+
+        // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
+        let caught = !self.autopilot
+            && self.enemies.iter().any(|(e, _)| {
+                self.world
+                    .get::<&Transform>(*e)
+                    .map(|t| {
+                        gameplay::touches(
+                            t.position,
+                            self.player_position,
+                            gameplay::ENEMY_TOUCH_RADIUS,
+                        )
+                    })
+                    .unwrap_or(false)
+            });
+        if caught || gameplay::fell_out(self.player_position) {
+            log::info!(
+                "Player {} — respawning",
+                if caught {
+                    "caught by the dream"
+                } else {
+                    "fell out of the dream"
+                }
+            );
+            self.respawn_player();
+            return Ok(());
+        }
+
+        // 5. Portal → shift to the next dream
+        let hit_portal = overlaps
+            .iter()
+            .any(|&(a, b)| a == player && self.world.get::<&PortalMarker>(b).is_ok());
+        if hit_portal {
+            log::info!("Portal entered in dream {}", self.director.depth + 1);
+            if self.director.advance().is_some() {
+                self.load_dream(ctx)?;
             } else {
-                log::info!("Game complete!");
+                log::info!("Game complete! You woke up.");
                 ctx.should_quit = true;
             }
         }
-
-        // Update enemies
-        for (entity, ai) in self.enemies.iter_mut() {
-            if let Ok(mut transform) = self.world.get::<&mut Transform>(*entity) {
-                ai.update(&mut transform.position, dt);
-            }
-        }
-
         Ok(())
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let drawable_size = ctx.drawable_size();
+        let (eye, target) = if self.debug_camera {
+            (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
+        } else {
+            (self.camera_pos, self.player_position)
+        };
+        let (Some(renderer), Some(shader_cache), Some(params)) = (
+            self.renderer.as_mut(),
+            self.shader_cache.as_mut(),
+            self.render_params,
+        ) else {
+            return Ok(());
+        };
+        let gl = ctx.gl();
+        renderer.resize_if_needed(gl, drawable_size)?;
+        renderer.begin_scene(gl);
+        unsafe {
+            gl.clear_color(
+                params.fog_color[0],
+                params.fog_color[1],
+                params.fog_color[2],
+                1.0,
+            );
+            gl.clear(engine::glow::COLOR_BUFFER_BIT | engine::glow::DEPTH_BUFFER_BIT);
+        }
 
-        if let Some(ref mut renderer) = &mut self.renderer {
-            let gl = ctx.gl();
-            renderer.resize_if_needed(gl, drawable_size)?;
-            renderer.begin_scene(gl);
+        let aspect = drawable_size.0 as f32 / drawable_size.1.max(1) as f32;
+        let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 1000.0);
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
 
-            if let Some(ref profiles) = &self.profiles {
-                let params = profiles.current().render;
+        let flags = if params.affine_texture_mapping {
+            AFFINE_UV_BIT
+        } else {
+            0
+        };
+        let program = shader_cache.get_or_compile(gl, flags)?;
+        unsafe {
+            gl.use_program(Some(program));
+            let loc = |name: &str| gl.get_uniform_location(program, name);
+            if let Some(l) = loc("uView") {
+                gl.uniform_matrix_4_f32_slice(Some(&l), false, &view.to_cols_array());
+            }
+            if let Some(l) = loc("uProj") {
+                gl.uniform_matrix_4_f32_slice(Some(&l), false, &proj.to_cols_array());
+            }
+            if let Some(l) = loc("uLightDir") {
+                let d = Vec3::from(params.light_dir).normalize_or_zero();
+                gl.uniform_3_f32(Some(&l), d.x, d.y, d.z);
+            }
+            if let Some(l) = loc("uAmbientColor") {
+                gl.uniform_3_f32(
+                    Some(&l),
+                    params.ambient_color[0],
+                    params.ambient_color[1],
+                    params.ambient_color[2],
+                );
+            }
+            if let Some(l) = loc("uLightingMode") {
+                let mode = match params.lighting_mode {
+                    engine::profile::LightingMode::Unlit => 0,
+                    engine::profile::LightingMode::VertexLit => 1,
+                };
+                gl.uniform_1_i32(Some(&l), mode);
+            }
+            if let Some(l) = loc("uVertexSnapAmount") {
+                gl.uniform_1_f32(Some(&l), params.vertex_snap_amount);
+            }
+            if let Some(l) = loc("uFogStart") {
+                gl.uniform_1_f32(Some(&l), params.fog_start);
+            }
+            if let Some(l) = loc("uFogEnd") {
+                gl.uniform_1_f32(Some(&l), params.fog_end);
+            }
+            if let Some(l) = loc("uFogColor") {
+                gl.uniform_3_f32(
+                    Some(&l),
+                    params.fog_color[0],
+                    params.fog_color[1],
+                    params.fog_color[2],
+                );
+            }
+            if let Some(l) = loc("uPointLightCount") {
+                gl.uniform_1_i32(Some(&l), 0);
+            }
+            if params.backface_culling {
+                gl.enable(engine::glow::CULL_FACE);
+                gl.cull_face(engine::glow::BACK);
+            } else {
+                gl.disable(engine::glow::CULL_FACE);
+            }
+            if let Some(l) = loc("uTex") {
+                gl.uniform_1_i32(Some(&l), 0);
+            }
+        }
 
-                // Clear
-                unsafe {
-                    gl.clear_color(
-                        params.fog_color[0],
-                        params.fog_color[1],
-                        params.fog_color[2],
-                        1.0,
+        let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
+        for (_entity, (transform, mesh_renderer)) in
+            self.world.query::<(&Transform, &MeshRenderer)>().iter()
+        {
+            unsafe {
+                if let Some(l) = &model_loc {
+                    gl.uniform_matrix_4_f32_slice(
+                        Some(l),
+                        false,
+                        &transform.matrix().to_cols_array(),
                     );
-                    gl.clear(engine::glow::COLOR_BUFFER_BIT | engine::glow::DEPTH_BUFFER_BIT);
-                }
-
-                // Fixed overview camera (not player-locked) so movement
-                // is visibly detectable against static level geometry —
-                // a camera that tracks the player 1:1 makes them appear
-                // frozen in the viewport even while genuinely moving.
-                let fov = 60.0_f32.to_radians();
-                let aspect = drawable_size.0 as f32 / drawable_size.1.max(1) as f32;
-                let proj = Mat4::perspective_rh(fov, aspect, 0.1, 1000.0);
-
-                let camera_pos = Vec3::new(0.0, 14.0, -14.0);
-                let view = Mat4::look_at_rh(camera_pos, Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
-
-                // Shader
-                if let Some(ref mut shader_cache) = &mut self.shader_cache {
-                    let flags = if params.affine_texture_mapping {
-                        AFFINE_UV_BIT
-                    } else {
-                        0
-                    };
-                    let program = shader_cache.get_or_compile(gl, flags)?;
-
-                    unsafe {
-                        gl.use_program(Some(program));
-
-                        if let Some(loc) = gl.get_uniform_location(program, "uView") {
-                            gl.uniform_matrix_4_f32_slice(Some(&loc), false, &view.to_cols_array());
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uProj") {
-                            gl.uniform_matrix_4_f32_slice(Some(&loc), false, &proj.to_cols_array());
-                        }
-
-                        // Lighting + fog uniforms — without these every
-                        // mesh renders pure black regardless of texture.
-                        if let Some(loc) = gl.get_uniform_location(program, "uLightDir") {
-                            let dir = Vec3::from(params.light_dir).normalize_or_zero();
-                            gl.uniform_3_f32(Some(&loc), dir.x, dir.y, dir.z);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uAmbientColor") {
-                            gl.uniform_3_f32(
-                                Some(&loc),
-                                params.ambient_color[0],
-                                params.ambient_color[1],
-                                params.ambient_color[2],
-                            );
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uLightingMode") {
-                            let mode = match params.lighting_mode {
-                                engine::profile::LightingMode::Unlit => 0,
-                                engine::profile::LightingMode::VertexLit => 1,
-                            };
-                            gl.uniform_1_i32(Some(&loc), mode);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uVertexSnapAmount") {
-                            gl.uniform_1_f32(Some(&loc), params.vertex_snap_amount);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uFogStart") {
-                            gl.uniform_1_f32(Some(&loc), params.fog_start);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uFogEnd") {
-                            gl.uniform_1_f32(Some(&loc), params.fog_end);
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uFogColor") {
-                            gl.uniform_3_f32(
-                                Some(&loc),
-                                params.fog_color[0],
-                                params.fog_color[1],
-                                params.fog_color[2],
-                            );
-                        }
-                        if let Some(loc) = gl.get_uniform_location(program, "uPointLightCount") {
-                            gl.uniform_1_i32(Some(&loc), 0);
-                        }
-
-                        if params.backface_culling {
-                            gl.enable(engine::glow::CULL_FACE);
-                            gl.cull_face(engine::glow::BACK);
-                        } else {
-                            gl.disable(engine::glow::CULL_FACE);
-                        }
-                    }
-
-                    // Draw meshes
-                    for (_id, (transform, mesh_renderer)) in
-                        self.world.query::<(&Transform, &MeshRenderer)>().iter()
-                    {
-                        let model = Mat4::from_translation(transform.position)
-                            * Mat4::from_quat(transform.rotation)
-                            * Mat4::from_scale(transform.scale);
-
-                        unsafe {
-                            if let Some(loc) = gl.get_uniform_location(program, "uModel") {
-                                gl.uniform_matrix_4_f32_slice(
-                                    Some(&loc),
-                                    false,
-                                    &model.to_cols_array(),
-                                );
-                            }
-
-                            if let Some(texture) = &mesh_renderer.texture {
-                                texture.bind(gl, 0);
-                                if let Some(loc) = gl.get_uniform_location(program, "uTex") {
-                                    gl.uniform_1_i32(Some(&loc), 0);
-                                }
-                            }
-                        }
-
-                        mesh_renderer.mesh.draw(gl);
-                    }
                 }
             }
+            if let Some(texture) = &mesh_renderer.texture {
+                texture.bind(gl, 0);
+            }
+            mesh_renderer.mesh.draw(gl);
+        }
 
-            // Present
-            let post_params = engine::renderer::PostParams {
+        renderer.present(
+            gl,
+            drawable_size,
+            &PostParams {
                 color_levels: 256.0,
                 dither_strength: 0.0,
                 tint_color: [1.0, 1.0, 1.0],
                 tint_strength: 0.0,
-            };
-            renderer.present(gl, drawable_size, &post_params);
-        }
-
+            },
+        );
         Ok(())
     }
 }
 
 fn main() -> anyhow::Result<()> {
     init_logging();
-
-    std::panic::set_hook(Box::new(|info| {
-        log::error!("panic: {info}");
-    }));
-
-    App::run("Dreamscape", 1280, 720, DreamscapeGame::new())
+    std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+    let seed = run_seed();
+    log::info!("Dream run seed = {seed} (replay with DREAMSCAPE_SEED={seed})");
+    App::run("Dreamscape", 1280, 720, DreamscapeGame::new(seed))
 }
