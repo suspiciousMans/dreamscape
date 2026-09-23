@@ -1,0 +1,14 @@
+(
+    name: "desert_mirage",
+    objects: [],
+    lights: [],
+    characters: [],
+    spawners: [],
+    rig_instances: [],
+    particle_emitters: [],
+    music_path: None,
+    physics: (
+        gravity: 9.81,
+        linear_damping: 0.1,
+    ),
+)

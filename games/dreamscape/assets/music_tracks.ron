@@ -1,0 +1,12 @@
+// Music track configuration for Dreamscape worlds
+(
+    tracks: {
+        DreamLobby: "games/dreamscape/assets/music/dream_lobby.wav",
+        LiminalOffice: "games/dreamscape/assets/music/liminal_office.wav",
+        EndlessStaircase: "games/dreamscape/assets/music/liminal_office.wav",
+        VoidPlatform: "games/dreamscape/assets/music/void_platform.wav",
+        DreamGarden: "games/dreamscape/assets/music/dream_lobby.wav",
+        NightmareFactory: "games/dreamscape/assets/music/nightmare_factory.wav",
+        Awakening: "games/dreamscape/assets/music/awakening.wav",
+    }
+)

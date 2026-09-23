@@ -1,0 +1,22 @@
+(
+    name: "dreamscape_liminal",
+    vertex_shader: "games/dreamscape/assets/shaders/mesh.vert",
+    fragment_shader: "games/dreamscape/assets/shaders/mesh.frag",
+    post_fragment_shader: "games/dreamscape/assets/shaders/post_composite.frag",
+    render: (
+        resolution_scale: 0.35,
+        fixed_resolution: None,
+        fog_color: (0.2, 0.15, 0.3),
+        fog_start: 4.0,
+        fog_end: 16.0,
+        color_levels: 16,
+        dither_strength: 0.15,
+        lighting_mode: VertexLit,
+        ambient_color: (0.15, 0.1, 0.2),
+        vertex_snap_amount: 0.06,
+        affine_texture_mapping: true,
+        texture_filter: Nearest,
+        sky_horizon_color: (0.3, 0.2, 0.4),
+        sky_zenith_color: (0.05, 0.02, 0.1),
+    ),
+)

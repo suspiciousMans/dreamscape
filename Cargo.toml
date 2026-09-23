@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["engine", "games/sandbox", "tools/script_editor", "games/mushroom_man", "games/walkaround_demo"]
+members = ["engine", "games/sandbox", "tools/script_editor", "games/mushroom_man", "games/walkaround_demo", "games/dreamscape"]
 
 [workspace.dependencies]
 sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
