@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use engine::app::{App, Context, Game};
 use engine::audio::AudioContext;
 use engine::ecs::{MeshRenderer, Transform, World};
@@ -10,18 +8,21 @@ use engine::glow::HasContext;
 use engine::mesh::GpuMesh;
 use engine::profile::ProfileCycler;
 use engine::renderer::Renderer;
-use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::sdl2::event::Event;
+use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-mod world_generator;
-mod world_transitions;
+mod dream;
 mod enemy_ai;
 mod gameplay;
+mod world_generator;
+mod world_transitions;
 
+use enemy_ai::EnemyAI;
 use world_generator::{WorldGenerator, WorldVariant};
 use world_transitions::TransitionManager;
-use enemy_ai::EnemyAI;
 
 fn init_logging() {
     let _ = env_logger::builder()
@@ -60,10 +61,10 @@ pub struct DreamscapeGame {
 
     // Audio
     audio_context: Option<AudioContext>,
-    
+
     // Input
     player_input: PlayerInputState,
-    
+
     // Player
     player_entity: Option<engine::ecs::Entity>,
     player_position: Vec3,
@@ -209,7 +210,7 @@ impl DreamscapeGame {
         // Spawn the player
         self.player_position = Vec3::new(0.0, 2.0, -5.0);
         self.player_velocity = Vec3::ZERO;
-        
+
         let player = self.world.spawn((
             Transform::from_position(self.player_position),
             MeshRenderer {
@@ -332,7 +333,9 @@ impl Game for DreamscapeGame {
 
     fn handle_event(&mut self, _ctx: &mut Context, event: &Event) {
         match event {
-            Event::KeyDown { keycode: Some(k), .. } => {
+            Event::KeyDown {
+                keycode: Some(k), ..
+            } => {
                 use engine::sdl2::keyboard::Keycode;
                 match *k {
                     Keycode::W => self.player_input.forward = true,
@@ -343,7 +346,9 @@ impl Game for DreamscapeGame {
                     _ => {}
                 }
             }
-            Event::KeyUp { keycode: Some(k), .. } => {
+            Event::KeyUp {
+                keycode: Some(k), ..
+            } => {
                 use engine::sdl2::keyboard::Keycode;
                 match *k {
                     Keycode::W => self.player_input.forward = false,
@@ -470,7 +475,11 @@ impl Game for DreamscapeGame {
 
                 // Shader
                 if let Some(ref mut shader_cache) = &mut self.shader_cache {
-                    let flags = if params.affine_texture_mapping { AFFINE_UV_BIT } else { 0 };
+                    let flags = if params.affine_texture_mapping {
+                        AFFINE_UV_BIT
+                    } else {
+                        0
+                    };
                     let program = shader_cache.get_or_compile(gl, flags)?;
 
                     unsafe {
@@ -543,7 +552,11 @@ impl Game for DreamscapeGame {
 
                         unsafe {
                             if let Some(loc) = gl.get_uniform_location(program, "uModel") {
-                                gl.uniform_matrix_4_f32_slice(Some(&loc), false, &model.to_cols_array());
+                                gl.uniform_matrix_4_f32_slice(
+                                    Some(&loc),
+                                    false,
+                                    &model.to_cols_array(),
+                                );
                             }
 
                             if let Some(texture) = &mesh_renderer.texture {

@@ -8,7 +8,7 @@ pub enum WorldType {
     VoidPlatform,
     DreamGarden,
     NightmareFactory,
-    Awakening,  // Final escape level
+    Awakening, // Final escape level
 }
 
 impl WorldType {
@@ -107,7 +107,7 @@ impl TransitionManager {
             self.current_index += 1;
             Some(self.worlds[self.current_index])
         } else {
-            None  // Game complete
+            None // Game complete
         }
     }
 

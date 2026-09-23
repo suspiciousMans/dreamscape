@@ -1,10 +1,10 @@
-use glam::{Vec3, Quat};
+use glam::{Quat, Vec3};
 use rand::{Rng, SeedableRng};
 
 #[derive(Debug, Clone)]
 pub struct WorldVariant {
     pub seed: u64,
-    pub difficulty: f32,  // 0.0 = safe dream, 1.0 = nightmare
+    pub difficulty: f32, // 0.0 = safe dream, 1.0 = nightmare
 }
 
 pub struct WorldGenerator {
@@ -61,7 +61,8 @@ impl WorldGenerator {
 
     /// Should this hazard be active in this variant?
     pub fn should_spawn_hazard(&self, hazard_id: usize, variant: &WorldVariant) -> bool {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed ^ variant.seed ^ hazard_id as u64);
+        let mut rng =
+            rand::rngs::StdRng::seed_from_u64(self.seed ^ variant.seed ^ hazard_id as u64);
         rng.gen_bool(variant.difficulty as f64)
     }
 }

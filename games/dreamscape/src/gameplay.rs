@@ -57,7 +57,10 @@ pub fn autopilot_velocity(pos: Vec3, target: Vec3) -> Vec3 {
 }
 
 pub fn follow_camera(current: Vec3, player: Vec3, dt: f32) -> Vec3 {
-    current.lerp(player + CAMERA_OFFSET, (CAMERA_LERP_PER_SEC * dt).clamp(0.0, 1.0))
+    current.lerp(
+        player + CAMERA_OFFSET,
+        (CAMERA_LERP_PER_SEC * dt).clamp(0.0, 1.0),
+    )
 }
 
 pub fn fell_out(pos: Vec3) -> bool {
@@ -86,19 +89,37 @@ mod tests {
 
     #[test]
     fn right_key_moves_right_on_screen() {
-        let v = horizontal_velocity(&PlayerInputState { right: true, ..Default::default() });
-        assert!(screen_delta(v).x > 0.0, "D moved {:?} in view space", screen_delta(v));
+        let v = horizontal_velocity(&PlayerInputState {
+            right: true,
+            ..Default::default()
+        });
+        assert!(
+            screen_delta(v).x > 0.0,
+            "D moved {:?} in view space",
+            screen_delta(v)
+        );
     }
 
     #[test]
     fn forward_key_moves_away_from_camera() {
-        let v = horizontal_velocity(&PlayerInputState { forward: true, ..Default::default() });
-        assert!(screen_delta(v).z < 0.0, "W moved {:?} in view space", screen_delta(v));
+        let v = horizontal_velocity(&PlayerInputState {
+            forward: true,
+            ..Default::default()
+        });
+        assert!(
+            screen_delta(v).z < 0.0,
+            "W moved {:?} in view space",
+            screen_delta(v)
+        );
     }
 
     #[test]
     fn diagonal_is_not_faster() {
-        let v = horizontal_velocity(&PlayerInputState { forward: true, right: true, ..Default::default() });
+        let v = horizontal_velocity(&PlayerInputState {
+            forward: true,
+            right: true,
+            ..Default::default()
+        });
         assert!((v.length() - MOVE_SPEED).abs() < 1e-4);
     }
 
@@ -136,8 +157,16 @@ mod tests {
     fn fail_states() {
         assert!(fell_out(Vec3::new(0.0, KILL_Y - 0.1, 0.0)));
         assert!(!fell_out(Vec3::new(0.0, 0.5, 0.0)));
-        assert!(touches(Vec3::ZERO, Vec3::new(0.5, 0.0, 0.0), ENEMY_TOUCH_RADIUS));
-        assert!(!touches(Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0), ENEMY_TOUCH_RADIUS));
+        assert!(touches(
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.0, 0.0),
+            ENEMY_TOUCH_RADIUS
+        ));
+        assert!(!touches(
+            Vec3::ZERO,
+            Vec3::new(3.0, 0.0, 0.0),
+            ENEMY_TOUCH_RADIUS
+        ));
     }
 
     /// A one-cell floor slab centred at (x, -SLAB/2, 0), top face at y = 0.
@@ -145,7 +174,9 @@ mod tests {
         world.spawn((
             Transform::from_position(Vec3::new(x, -SLAB * 0.5, 0.0)),
             Collider {
-                shape: ColliderShape::Aabb { half_extents: Vec3::new(CELL * 0.5, SLAB * 0.5, CELL * 0.5) },
+                shape: ColliderShape::Aabb {
+                    half_extents: Vec3::new(CELL * 0.5, SLAB * 0.5, CELL * 0.5),
+                },
                 is_trigger: false,
             },
         ));
@@ -155,7 +186,12 @@ mod tests {
         world.spawn((
             Transform::from_position(at),
             RigidBody::default(),
-            Collider { shape: ColliderShape::Sphere { radius: PLAYER_RADIUS }, is_trigger: false },
+            Collider {
+                shape: ColliderShape::Sphere {
+                    radius: PLAYER_RADIUS,
+                },
+                is_trigger: false,
+            },
         ))
     }
 
@@ -185,7 +221,8 @@ mod tests {
         world.get::<&mut RigidBody>(p).unwrap().velocity.y = JUMP_SPEED;
         for _ in 0..240 {
             let x = world.get::<&Transform>(p).unwrap().position.x;
-            world.get::<&mut RigidBody>(p).unwrap().velocity.x = if x < 2.0 * CELL { MOVE_SPEED } else { 0.0 };
+            world.get::<&mut RigidBody>(p).unwrap().velocity.x =
+                if x < 2.0 * CELL { MOVE_SPEED } else { 0.0 };
             step(&mut world, 1.0 / 60.0, &params);
         }
         let pos = world.get::<&Transform>(p).unwrap().position;
@@ -199,7 +236,12 @@ mod tests {
         slab(&mut world, 0.0);
         let portal = world.spawn((
             Transform::from_position(Vec3::new(0.0, 1.0, 0.0)),
-            Collider { shape: ColliderShape::Aabb { half_extents: Vec3::new(0.75, 1.0, 0.75) }, is_trigger: true },
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: Vec3::new(0.75, 1.0, 0.75),
+                },
+                is_trigger: true,
+            },
             PortalMarker,
         ));
         let p = player(&mut world, Vec3::new(0.0, 0.5, 0.0));
