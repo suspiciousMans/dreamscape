@@ -17,6 +17,7 @@ use engine::texture::{GpuTexture, TextureFilter};
 mod world_generator;
 mod world_transitions;
 mod enemy_ai;
+mod gameplay;
 
 use world_generator::{WorldGenerator, WorldVariant};
 use world_transitions::TransitionManager;
