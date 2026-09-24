@@ -150,7 +150,8 @@ impl DreamscapeGame {
             &spec.rgba(),
             TEX_SIZE,
             TEX_SIZE,
-            TextureFilter::Nearest,
+            // Bilinear: nearest-filtered 64px patterns shimmer into static at range.
+            TextureFilter::Bilinear,
         )?);
         self.dream_textures.push(tex.clone());
         Ok(tex)
@@ -272,7 +273,8 @@ impl DreamscapeGame {
             gl,
             &dream::portal_surface(DreamTheme::Awakening, dream.seed),
         )?;
-        let per_cell = 1.0 / gameplay::CELL;
+        // One texture repeat per two cells: big, readable swirls instead of noise.
+        let per_cell = 0.5 / gameplay::CELL;
         for block in &dream.blocks {
             let (texture, uv) = match block.kind {
                 BlockKind::Floor => (floor_tex.clone(), per_cell),
