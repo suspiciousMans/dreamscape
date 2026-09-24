@@ -24,16 +24,22 @@ pub enum Pattern {
     Checker,
     /// Slow spirals.
     Swirl,
+    /// A grid of almond eyes, each glancing a slightly different way.
+    Eyes,
+    /// Mirror-folded plasma, like looking through a kaleidoscope.
+    Kaleido,
 }
 
 #[cfg(test)]
-pub const ALL_PATTERNS: [Pattern; 6] = [
+pub const ALL_PATTERNS: [Pattern; 8] = [
     Pattern::Plasma,
     Pattern::Stripes,
     Pattern::Rings,
     Pattern::Cells,
     Pattern::Checker,
     Pattern::Swirl,
+    Pattern::Eyes,
+    Pattern::Kaleido,
 ];
 
 /// One periodic wave: sin(2π(a·u + b·v) + phase).
@@ -95,6 +101,12 @@ fn gradient(stops: &[[f32; 3]], t: f32) -> [f32; 3] {
     ]
 }
 
+/// Triangle wave in 0..=1 with period 1: continuous and periodic, so it keeps
+/// textures seamless while mirroring them.
+fn tri_wave(x: f32) -> f32 {
+    1.0 - (2.0 * x.rem_euclid(1.0) - 1.0).abs()
+}
+
 /// Generates a `TEX_SIZE`² RGBA8 texture.
 /// `bands` = how many times the gradient repeats across the value range
 /// (more bands = more psychedelic contour lines).
@@ -137,6 +149,34 @@ pub fn generate(pattern: Pattern, palette: &[[u8; 3]], bands: f32, seed: u64) ->
                     let c = (TAU * checker_n * (u + wu)).sin() * (TAU * checker_n * (v + wv)).sin();
                     let soft = c.signum() * c.abs().sqrt();
                     soft * 0.5 + 0.5
+                }
+                Pattern::Eyes => {
+                    let n = checker_n; // eyes per tile side, an integer, so it tiles
+                    let (cu, cv) = ((u * n).floor(), (v * n).floor());
+                    let lu = (u * n).fract() * 2.0 - 1.0;
+                    let lv = (v * n).fract() * 2.0 - 1.0;
+                    // Gaze is constant per eye and periodic across tiles.
+                    let look_u = 0.3 * warp[0].at((cu + 0.5) / n, (cv + 0.5) / n);
+                    let look_v = 0.2 * warp[1].at((cu + 0.5) / n, (cv + 0.5) / n);
+                    let lid = (1.0 - lu * lu).max(0.0) * 0.45;
+                    if lv * lv >= lid {
+                        0.0 // skin
+                    } else {
+                        let d = ((lu - look_u).powi(2) + ((lv - look_v) * 1.2).powi(2)).sqrt();
+                        if d < 0.16 {
+                            0.75 // pupil
+                        } else if d < 0.38 {
+                            0.5 // iris
+                        } else {
+                            0.25 // white
+                        }
+                    }
+                }
+                Pattern::Kaleido => {
+                    let a = tri_wave(2.0 * u);
+                    let b = tri_wave(2.0 * v);
+                    let (a, b) = if a > b { (a, b) } else { (b, a) }; // mirror on the diagonal
+                    waves.iter().map(|w| w.at(a * 0.5, b * 0.5)).sum::<f32>() / 8.0 + 0.5
                 }
                 Pattern::Swirl => {
                     let a = (TAU * u).sin();

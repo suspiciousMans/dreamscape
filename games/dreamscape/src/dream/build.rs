@@ -2,6 +2,7 @@
 
 use super::grid::{Cell, Grid, P};
 use super::layout;
+use super::meshes::Shape;
 use super::texture::{self as tex, Pattern};
 use super::theme::{DreamTheme, PropKind, ThemeSpec};
 use crate::gameplay::{CELL, SLAB};
@@ -26,6 +27,7 @@ pub enum BlockKind {
 #[derive(Clone, Debug)]
 pub struct Block {
     pub kind: BlockKind,
+    pub shape: Shape,
     pub pos: Vec3,
     pub size: Vec3,
     pub rotation: Quat,
@@ -95,6 +97,7 @@ pub struct Surfaces {
     pub wall: TexSpec,
     pub prop: TexSpec,
     pub shard: TexSpec,
+    pub enemy: TexSpec,
 }
 
 /// Dreams get stranger the deeper you go. Waking is always calm.
@@ -196,6 +199,13 @@ pub fn generate(
             bands: 2.0,
             seed: rng.gen(),
         },
+        // Enemies are always bloodshot eyes: skin, white, iris, pupil.
+        enemy: TexSpec {
+            pattern: Pattern::Eyes,
+            palette: vec![[90, 10, 20], [255, 235, 225], [220, 30, 50], [10, 0, 5]],
+            bands: 1.0,
+            seed: rng.gen(),
+        },
     };
     let portal = grid.world(layout.portal);
     let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
@@ -208,6 +218,7 @@ pub fn generate(
     };
     blocks.push(Block {
         kind: BlockKind::Portal,
+        shape: Shape::Orb,
         pos: portal + Vec3::Y * PORTAL_SIZE.y * 0.5,
         size: PORTAL_SIZE,
         rotation: Quat::IDENTITY,
@@ -283,6 +294,7 @@ fn floor_slabs(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Bl
             let centre = (grid.world((start, y)) + grid.world((x - 1, y))) * 0.5;
             out.push(Block {
                 kind: BlockKind::Floor,
+                shape: Shape::Cube,
                 pos: centre - Vec3::Y * SLAB * 0.5,
                 size: Vec3::new((x - start) as f32 * CELL, SLAB, CELL),
                 rotation: Quat::IDENTITY,
@@ -299,6 +311,7 @@ fn walls(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) 
     for cell in grid.cells_of(Cell::Wall) {
         out.push(Block {
             kind: BlockKind::Wall,
+            shape: Shape::Cube,
             pos: grid.world(cell) + Vec3::Y * spec.wall_height * 0.5,
             size: Vec3::new(CELL, spec.wall_height, CELL),
             rotation: Quat::IDENTITY,
@@ -308,9 +321,10 @@ fn walls(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) 
 }
 
 fn place(kind: PropKind, base: Vec3, scale: f32, color: [u8; 4], out: &mut Vec<Block>) {
-    for &(offset, size) in kind.parts() {
+    for &(offset, size, shape) in kind.parts() {
         out.push(Block {
             kind: BlockKind::Prop,
+            shape,
             pos: base + Vec3::from(offset) * scale,
             size: Vec3::from(size) * scale,
             rotation: Quat::IDENTITY, // solid => axis-aligned, so the AABB collider matches
@@ -367,6 +381,9 @@ fn decor(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) 
     for _ in 0..(spec.strangeness * 16.0) as usize {
         out.push(Block {
             kind: BlockKind::Decor,
+            shape: *[Shape::Cube, Shape::Octahedron, Shape::Orb, Shape::Cone]
+                .choose(rng)
+                .expect("non-empty"),
             pos: Vec3::new(
                 rng.gen_range(-half_w..half_w),
                 rng.gen_range(-10.0..-2.0),
@@ -771,5 +788,25 @@ mod tests {
                 && (b.pos.x - at.x).abs() < 1e-3
                 && (b.pos.z - at.z).abs() < 1e-3));
         }
+    }
+
+    #[test]
+    fn shapes_are_assigned_sensibly() {
+        use crate::dream::meshes::Shape;
+        let mut decor = HashSet::new();
+        for seed in 0..10 {
+            let d = generate(DreamTheme::VoidPlatforms, seed, 8, None, true);
+            for b in &d.blocks {
+                match b.kind {
+                    BlockKind::Floor | BlockKind::Wall => assert_eq!(b.shape, Shape::Cube),
+                    BlockKind::Portal => assert_eq!(b.shape, Shape::Orb),
+                    BlockKind::Decor => {
+                        decor.insert(b.shape);
+                    }
+                    BlockKind::Prop => {}
+                }
+            }
+        }
+        assert!(decor.len() >= 3, "decor shapes: {decor:?}");
     }
 }

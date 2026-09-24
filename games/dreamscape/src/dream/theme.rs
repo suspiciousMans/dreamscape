@@ -1,6 +1,7 @@
 //! Theme = the grammar of a dream. Every random choice the generator makes is
 //! drawn from inside these bounds; that's what makes a dream feel like one place.
 
+use super::meshes::Shape;
 use super::texture::Pattern;
 #[cfg(test)]
 use crate::gameplay::CELL;
@@ -44,10 +45,11 @@ pub enum PropKind {
     Pipe,
     Bench,
     Lamp,
+    Crystal,
 }
 
 #[cfg(test)]
-pub const ALL_PROPS: [PropKind; 9] = [
+pub const ALL_PROPS: [PropKind; 10] = [
     PropKind::Desk,
     PropKind::Partition,
     PropKind::Pillar,
@@ -57,30 +59,39 @@ pub const ALL_PROPS: [PropKind; 9] = [
     PropKind::Pipe,
     PropKind::Bench,
     PropKind::Lamp,
+    PropKind::Crystal,
 ];
 
 impl PropKind {
-    /// Cube parts as (centre offset from the cell centre on the floor, size).
-    pub fn parts(self) -> &'static [([f32; 3], [f32; 3])] {
+    /// Parts as (centre offset from the cell centre on the floor, size, shape).
+    /// Every shape fills its size box (see `meshes`), so the AABB collider matches.
+    pub fn parts(self) -> &'static [([f32; 3], [f32; 3], Shape)] {
+        use Shape::*;
         match self {
-            PropKind::Desk => &[([0.0, 0.4, 0.0], [1.6, 0.8, 0.8])],
-            PropKind::Partition => &[([0.0, 0.75, 0.0], [0.15, 1.5, 2.0])],
-            PropKind::Pillar => &[([0.0, 1.5, 0.0], [0.8, 3.0, 0.8])],
+            PropKind::Desk => &[
+                ([0.0, 0.72, 0.0], [1.6, 0.12, 0.8], Cube),
+                ([-0.65, 0.33, 0.0], [0.12, 0.66, 0.12], Cylinder),
+                ([0.65, 0.33, 0.0], [0.12, 0.66, 0.12], Cylinder),
+            ],
+            PropKind::Partition => &[([0.0, 0.75, 0.0], [0.15, 1.5, 2.0], Cube)],
+            PropKind::Pillar => &[([0.0, 1.5, 0.0], [0.8, 3.0, 0.8], Cylinder)],
             PropKind::Tree => &[
-                ([0.0, 1.0, 0.0], [0.4, 2.0, 0.4]),
-                ([0.0, 2.6, 0.0], [1.8, 1.4, 1.8]),
+                ([0.0, 1.0, 0.0], [0.4, 2.0, 0.4], Cylinder),
+                ([0.0, 2.6, 0.0], [1.8, 1.6, 1.8], Orb),
             ],
-            PropKind::Hedge => &[([0.0, 0.6, 0.0], [2.0, 1.2, 1.0])],
+            PropKind::Hedge => &[([0.0, 0.6, 0.0], [2.0, 1.2, 1.0], Cube)],
             PropKind::Machine => &[
-                ([0.0, 1.0, 0.0], [2.0, 2.0, 1.6]),
-                ([0.6, 2.4, 0.0], [0.4, 0.8, 0.4]),
+                ([0.0, 1.0, 0.0], [2.0, 2.0, 1.6], Cube),
+                ([0.6, 2.4, 0.0], [0.4, 0.8, 0.4], Cylinder),
+                ([-0.5, 2.25, 0.0], [0.6, 0.5, 0.6], Cone),
             ],
-            PropKind::Pipe => &[([0.0, 1.5, 0.0], [0.3, 3.0, 0.3])],
-            PropKind::Bench => &[([0.0, 0.25, 0.0], [1.8, 0.5, 0.6])],
+            PropKind::Pipe => &[([0.0, 1.5, 0.0], [0.3, 3.0, 0.3], Cylinder)],
+            PropKind::Bench => &[([0.0, 0.25, 0.0], [1.8, 0.5, 0.6], Cube)],
             PropKind::Lamp => &[
-                ([0.0, 1.2, 0.0], [0.15, 2.4, 0.15]),
-                ([0.0, 2.5, 0.0], [0.6, 0.3, 0.6]),
+                ([0.0, 1.2, 0.0], [0.15, 2.4, 0.15], Cylinder),
+                ([0.0, 2.45, 0.0], [0.7, 0.4, 0.7], Cone),
             ],
+            PropKind::Crystal => &[([0.0, 0.9, 0.0], [0.9, 1.8, 0.9], Octahedron)],
         }
     }
 }
@@ -138,7 +149,7 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (0, 0),
                 next: &[(LiminalOffice, 3), (Garden, 2), (VoidPlatforms, 1)],
-                patterns: &[Pattern::Plasma, Pattern::Rings],
+                patterns: &[Pattern::Plasma, Pattern::Rings, Pattern::Kaleido],
                 accents: &[[255, 150, 220], [150, 200, 255]],
             },
             LiminalOffice => ThemeSpec {
@@ -169,7 +180,7 @@ impl DreamTheme {
                 floor_colors: &[[140, 160, 200], [110, 120, 170], [170, 150, 210]],
                 wall_colors: &[[90, 90, 120]],
                 prop_colors: &[[200, 200, 255], [60, 60, 90]],
-                props: &[PropKind::Pillar, PropKind::Lamp],
+                props: &[PropKind::Pillar, PropKind::Lamp, PropKind::Crystal],
                 prop_density: 0.08,
                 strangeness: 0.6,
                 fog_color: [0.08, 0.06, 0.15],
@@ -180,7 +191,7 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (0, 0),
                 next: &[(Garden, 2), (NightmareFactory, 2), (LiminalOffice, 1)],
-                patterns: &[Pattern::Swirl, Pattern::Plasma],
+                patterns: &[Pattern::Swirl, Pattern::Plasma, Pattern::Kaleido],
                 accents: &[[255, 40, 220], [40, 240, 255]],
             },
             Garden => ThemeSpec {
@@ -205,7 +216,12 @@ impl DreamTheme {
                     (VoidPlatforms, 1),
                     (NightmareFactory, 2),
                 ],
-                patterns: &[Pattern::Cells, Pattern::Plasma, Pattern::Rings],
+                patterns: &[
+                    Pattern::Cells,
+                    Pattern::Plasma,
+                    Pattern::Rings,
+                    Pattern::Kaleido,
+                ],
                 accents: &[[255, 90, 200], [180, 255, 40]],
             },
             NightmareFactory => ThemeSpec {
@@ -226,7 +242,12 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/nightmare_factory.wav",
                 enemies: (2, 3),
                 next: &[(VoidPlatforms, 1), (LiminalOffice, 2), (Garden, 1)],
-                patterns: &[Pattern::Checker, Pattern::Stripes, Pattern::Cells],
+                patterns: &[
+                    Pattern::Checker,
+                    Pattern::Stripes,
+                    Pattern::Cells,
+                    Pattern::Eyes,
+                ],
                 accents: &[[255, 120, 0], [255, 20, 60]],
             },
             Awakening => ThemeSpec {
@@ -332,7 +353,7 @@ mod tests {
     #[test]
     fn props_fit_inside_one_cell_even_when_scaled_up_30_percent() {
         for kind in ALL_PROPS {
-            for &(off, size) in kind.parts() {
+            for &(off, size, _) in kind.parts() {
                 for axis in [0, 2] {
                     let reach = (off[axis].abs() + size[axis] * 0.5) * 1.3;
                     assert!(
