@@ -273,7 +273,8 @@ impl Booklet {
         (added, dust)
     }
 
-    /// Presses every dream (no fading). Kept for tests and old callers.
+    /// Presses every dream (no fading).
+    #[cfg(test)]
     pub fn add_run(&mut self, run_seed: u64, records: &[DreamRecord]) -> usize {
         let deepest = records.iter().map(|r| r.depth).max().unwrap_or(0);
         let cards = records.iter().map(card_from).collect();

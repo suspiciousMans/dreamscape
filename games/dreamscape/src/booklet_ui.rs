@@ -2,7 +2,7 @@
 
 use crate::cards::{Attribute, Card, Rarity};
 use crate::dream::TEX_SIZE;
-use crate::hud::{glitch_text, hue, rgba, HudView, INK};
+use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use engine::ui::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use std::collections::HashMap;
 
@@ -77,7 +77,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             v.booklet_total
         ),
         FontId::monospace(20.0),
-        rgba(INK, 0.6),
+        rgba(ink(v), 0.6),
     );
     if v.booklet_cards.is_empty() {
         p.text(
@@ -85,7 +85,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             Align2::CENTER_CENTER,
             "your booklet is empty. wake up, then press [s].",
             FontId::monospace(24.0),
-            rgba(INK, 0.8),
+            rgba(ink(v), 0.8),
         );
     }
     let n = v.booklet_cards.len() as f32;
@@ -96,19 +96,32 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             cx - total_w * 0.5 + i as f32 * (CARD_SIZE.x + gap),
             screen.top() + 112.0,
         );
-        card(ctx, p, Rect::from_min_size(min, CARD_SIZE), c, v, art);
+        card(ctx, p, Rect::from_min_size(min, CARD_SIZE), c, v, art, 1.0);
     }
     p.text(
         Pos2::new(cx, screen.bottom() - 40.0),
         Align2::CENTER_TOP,
         "[a/d] turn page      [esc] back",
         FontId::monospace(22.0),
-        rgba(INK, 0.5 + 0.3 * (v.time * 2.0).sin()),
+        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );
 }
 
-fn card(ctx: &egui::Context, p: &egui::Painter, r: Rect, c: &Card, v: &HudView, art: &mut CardArt) {
-    let frame = rarity_color(c.rarity, v.time);
+pub fn card(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    r: Rect,
+    c: &Card,
+    v: &HudView,
+    art: &mut CardArt,
+    scale: f32,
+) {
+    let frame = match v.card_style {
+        crate::store::CardStyle::Plain => rarity_color(c.rarity, v.time),
+        crate::store::CardStyle::Gilt => [255, 205, 90],
+        crate::store::CardStyle::Holo => hue(v.time * 0.3 + c.number as f32 * 0.13),
+    };
+    let s = scale;
     p.rect_filled(r, 0.0, rgba([16, 9, 30], 1.0));
     p.rect_stroke(r.shrink(2.0), 0.0, Stroke::new(4.0_f32, rgba(frame, 1.0)));
     p.rect_stroke(r.shrink(8.0), 0.0, Stroke::new(1.0_f32, rgba(frame, 0.45)));
@@ -125,43 +138,43 @@ fn card(ctx: &egui::Context, p: &egui::Painter, r: Rect, c: &Card, v: &HudView, 
             rgba([8, 4, 20], 1.0),
         );
     }
-    let inner = r.shrink(14.0);
+    let inner = r.shrink(14.0 * s);
     let attr = attribute_color(c.attribute);
-    let pill = Rect::from_min_size(inner.left_top(), Vec2::new(78.0, 22.0));
+    let pill = Rect::from_min_size(inner.left_top(), Vec2::new(78.0, 22.0) * s);
     p.rect_filled(pill, 0.0, rgba(attr, 0.9));
     p.text(
         pill.center(),
         Align2::CENTER_CENTER,
         c.attribute.label(),
-        FontId::monospace(18.0),
+        FontId::monospace(18.0 * s),
         rgba([10, 5, 20], 1.0),
     );
     p.text(
         inner.right_top(),
         Align2::RIGHT_TOP,
         format!("No.{:03}", c.number),
-        FontId::monospace(18.0),
-        rgba(INK, 0.6),
+        FontId::monospace(18.0 * s),
+        rgba(ink(v), 0.6),
     );
 
     let name = p.layout(
         c.name.clone(),
-        FontId::monospace(22.0),
-        rgba(INK, 1.0),
+        FontId::monospace(22.0 * s),
+        rgba(ink(v), 1.0),
         inner.width(),
     );
     let name_h = name.size().y;
     p.galley(
-        inner.left_top() + Vec2::new(0.0, 28.0),
+        inner.left_top() + Vec2::new(0.0, 28.0 * s),
         name,
         Color32::WHITE,
     );
 
     let art_rect = Rect::from_min_size(
-        inner.left_top() + Vec2::new(0.0, 32.0 + name_h),
-        Vec2::new(inner.width(), ART_H),
+        inner.left_top() + Vec2::new(0.0, 32.0 * s + name_h),
+        Vec2::new(inner.width(), ART_H * s),
     );
-    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, ART_H / inner.width()));
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, ART_H * s / inner.width()));
     p.image(art.texture(ctx, c), art_rect, uv, Color32::WHITE);
     p.rect_stroke(art_rect, 0.0, Stroke::new(2.0_f32, rgba(frame, 0.8)));
     if c.rarity >= Rarity::Lucid {
@@ -169,62 +182,62 @@ fn card(ctx: &egui::Context, p: &egui::Painter, r: Rect, c: &Card, v: &HudView, 
     }
     if c.recurring {
         let tag = Rect::from_min_size(
-            art_rect.left_bottom() - Vec2::new(0.0, 20.0),
-            Vec2::new(96.0, 20.0),
+            art_rect.left_bottom() - Vec2::new(0.0, 20.0 * s),
+            Vec2::new(96.0, 20.0) * s,
         );
         p.rect_filled(tag, 0.0, rgba([255, 210, 80], 0.95));
         p.text(
             tag.center(),
             Align2::CENTER_CENTER,
             "RECURRING",
-            FontId::monospace(16.0),
+            FontId::monospace(16.0 * s),
             rgba([20, 10, 0], 1.0),
         );
     }
 
-    let mut y = art_rect.bottom() + 8.0;
+    let mut y = art_rect.bottom() + 8.0 * s;
     for (label, val) in [("DREAD", c.dread), ("DRIFT", c.drift)] {
         p.text(
             Pos2::new(inner.left(), y),
             Align2::LEFT_TOP,
             label,
-            FontId::monospace(18.0),
-            rgba(INK, 0.8),
+            FontId::monospace(18.0 * s),
+            rgba(ink(v), 0.8),
         );
         for k in 0..9u8 {
             let cell = Rect::from_min_size(
-                Pos2::new(inner.left() + 64.0 + k as f32 * 14.0, y + 4.0),
-                Vec2::splat(10.0),
+                Pos2::new(inner.left() + (64.0 + k as f32 * 14.0) * s, y + 4.0 * s),
+                Vec2::splat(10.0 * s),
             );
             if k < val {
                 p.rect_filled(cell, 0.0, rgba(attr, 0.95));
             } else {
-                p.rect_stroke(cell, 0.0, Stroke::new(1.0_f32, rgba(INK, 0.3)));
+                p.rect_stroke(cell, 0.0, Stroke::new(1.0_f32, rgba(ink(v), 0.3)));
             }
         }
-        y += 22.0;
+        y += 22.0 * s;
     }
     let desc = p.layout(
         c.description.clone(),
-        FontId::proportional(19.0),
+        FontId::proportional(19.0 * s),
         rgba([200, 190, 230], 0.95),
         inner.width(),
     );
-    p.galley(Pos2::new(inner.left(), y + 4.0), desc, Color32::WHITE);
+    p.galley(Pos2::new(inner.left(), y + 4.0 * s), desc, Color32::WHITE);
 
     p.text(
         inner.left_bottom(),
         Align2::LEFT_BOTTOM,
         c.rarity.label(),
-        FontId::monospace(20.0),
+        FontId::monospace(20.0 * s),
         rgba(frame, 1.0),
     );
     p.text(
         inner.right_bottom(),
         Align2::RIGHT_BOTTOM,
         format!("depth {}", c.depth),
-        FontId::monospace(18.0),
-        rgba(INK, 0.55),
+        FontId::monospace(18.0 * s),
+        rgba(ink(v), 0.55),
     );
 }
 

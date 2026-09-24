@@ -14,6 +14,8 @@ pub enum Mode {
     Playing,
     Paused,
     Journal,
+    Reveal,
+    Store,
     Booklet,
 }
 
@@ -70,6 +72,15 @@ pub struct HudView {
     pub booklet_pages: usize,
     pub booklet_total: usize,
     pub seed: u64,
+    pub dust: u32,
+    pub eye: crate::store::EyeStyle,
+    pub hud: crate::store::HudPalette,
+    pub card_style: crate::store::CardStyle,
+    pub store_cursor: usize,
+    pub store_states: Vec<crate::store::State>,
+    pub store_status: Option<String>,
+    /// Perks active this run (shown small under the depth counter).
+    pub perks: Vec<&'static str>,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -134,6 +145,42 @@ pub(crate) const INK: [u8; 3] = [245, 240, 255];
 const GHOST_RED: [u8; 3] = [255, 40, 110];
 const GHOST_CYAN: [u8; 3] = [40, 230, 255];
 
+/// The text colour for the equipped HUD palette.
+pub(crate) fn ink(v: &HudView) -> [u8; 3] {
+    use crate::store::HudPalette::*;
+    match v.hud {
+        Dream => INK,
+        Amber => [255, 190, 90],
+        Phosphor => [140, 255, 150],
+        Vapor => [255, 170, 235],
+    }
+}
+
+/// (left ghost, right ghost) for the equipped HUD palette.
+fn ghosts(v: &HudView) -> ([u8; 3], [u8; 3]) {
+    use crate::store::HudPalette::*;
+    match v.hud {
+        Dream => (GHOST_RED, GHOST_CYAN),
+        Amber => ([255, 80, 20], [255, 230, 120]),
+        Phosphor => ([20, 120, 60], [200, 255, 120]),
+        Vapor => ([90, 220, 255], [190, 90, 255]),
+    }
+}
+
+/// Iris colour for the equipped eye.
+fn iris_color(v: &HudView, lucid: bool) -> [u8; 3] {
+    use crate::store::EyeStyle::*;
+    match v.eye {
+        Dream if lucid => hue(v.time * 0.15),
+        Dream => hue(0.75 + 0.1 * v.strangeness),
+        Ember => [255, (90.0 + 60.0 * (v.time * 3.0).sin()) as u8, 20],
+        Toxic => [120, 255, 40],
+        Frost => [150, 230, 255],
+        Gold => [255, 205, 60],
+        Void => [8, 0, 16],
+    }
+}
+
 pub(crate) fn rgba(rgb: [u8; 3], alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
         rgb[0],
@@ -196,20 +243,25 @@ pub(crate) fn glitch_text(
             Align2::LEFT_TOP,
             &s,
             font.clone(),
-            rgba(GHOST_RED, alpha * 0.6),
+            rgba(ghosts(v).0, alpha * 0.6),
         );
         p.text(
             pos + Vec2::new(split, 0.0),
             Align2::LEFT_TOP,
             &s,
             font.clone(),
-            rgba(GHOST_CYAN, alpha * 0.6),
+            rgba(ghosts(v).1, alpha * 0.6),
         );
         p.text(pos, Align2::LEFT_TOP, &s, font.clone(), rgba(core, alpha));
     }
 }
 
-pub fn draw(ctx: &egui::Context, v: &HudView, art: &mut crate::booklet_ui::CardArt) {
+pub fn draw(
+    ctx: &egui::Context,
+    v: &HudView,
+    art: &mut crate::booklet_ui::CardArt,
+    pack: &crate::reveal_ui::PackView,
+) {
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("dream_hud"),
@@ -217,6 +269,8 @@ pub fn draw(ctx: &egui::Context, v: &HudView, art: &mut crate::booklet_ui::CardA
     let screen = ctx.screen_rect();
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
+        Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
+        Mode::Store => return crate::reveal_ui::draw_store(&p, screen, v),
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
         Mode::Playing | Mode::Paused => {}
     }
@@ -239,7 +293,7 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         false,
         &format!("DEPTH {:02}", v.depth),
         44.0,
-        INK,
+        ink(v),
         1.0,
         v,
     );
@@ -248,8 +302,17 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::LEFT_TOP,
         format!("deepest {}", v.best),
         FontId::monospace(20.0),
-        rgba(INK, 0.55),
+        rgba(ink(v), 0.55),
     );
+    for (k, perk) in v.perks.iter().enumerate() {
+        p.text(
+            screen.left_top() + Vec2::new(30.0, 96.0 + 20.0 * k as f32),
+            Align2::LEFT_TOP,
+            format!("+ {perk}"),
+            FontId::monospace(18.0),
+            rgba([80, 230, 200], 0.8),
+        );
+    }
 }
 
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -260,11 +323,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
         .min(1.0)
         * pixels::blink(v.time);
     let cells = pixels::eye_pixels(open, v.shard_dir, lucid);
-    let iris = if lucid {
-        hue(v.time * 0.15)
-    } else {
-        hue(0.75 + 0.1 * v.strangeness)
-    };
+    let iris = iris_color(v, lucid);
     let rim = [iris[0] / 2, iris[1] / 2, iris[2] / 2];
     // Pixel drop shadow, one cell down.
     px_cells(
@@ -279,8 +338,8 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
     for &(x, y, kind) in &cells {
         let color = match kind {
-            EyePx::Lid => rgba(INK, 0.95),
-            EyePx::Lash => rgba(INK, 0.75),
+            EyePx::Lid => rgba(ink(v), 0.95),
+            EyePx::Lash => rgba(ink(v), 0.75),
             EyePx::Sclera => rgba([30, 18, 52], 0.92),
             EyePx::Iris => rgba(iris, 1.0),
             EyePx::IrisRim => rgba(rim, 1.0),
@@ -336,7 +395,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
         let rgb = if filled {
             hue(v.time * 0.1 + i as f32 * 0.33)
         } else {
-            INK
+            ink(v)
         };
         px_cells(
             p,
@@ -399,7 +458,7 @@ fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
             Align2::CENTER_TOP,
             format!("{dist:.0}m"),
             FontId::monospace(20.0),
-            rgba(INK, 0.8),
+            rgba(ink(v), 0.8),
         );
     }
 }
@@ -412,7 +471,7 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
     let core = if v.strangeness > 0.6 {
         hue(v.time * 0.25)
     } else {
-        INK
+        ink(v)
     };
     let y = screen.top() + screen.height() * 0.2;
     glitch_text(
@@ -443,7 +502,7 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
         true,
         "THE DREAM HOLDS ITS BREATH",
         38.0,
-        INK,
+        ink(v),
         1.0,
         v,
     );
@@ -452,21 +511,21 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::CENTER_TOP,
         "[esc] keep dreaming",
         FontId::monospace(22.0),
-        rgba(INK, 0.8),
+        rgba(ink(v), 0.8),
     );
     p.text(
         c + Vec2::new(0.0, 52.0),
         Align2::CENTER_TOP,
         "[q] wake up for real",
         FontId::monospace(22.0),
-        rgba(INK, 0.5),
+        rgba(ink(v), 0.5),
     );
     p.text(
         c + Vec2::new(0.0, 80.0),
         Align2::CENTER_TOP,
         "[b] dream booklet",
         FontId::monospace(22.0),
-        rgba(INK, 0.5),
+        rgba(ink(v), 0.5),
     );
 }
 
@@ -488,7 +547,7 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::CENTER_TOP,
         format!("seed {}  ·  deepest {}", v.seed, v.best),
         FontId::monospace(20.0),
-        rgba(INK, 0.55),
+        rgba(ink(v), 0.55),
     );
     let first = v.journal.len().saturating_sub(14);
     for (i, (line, rarity)) in v.journal[first..].iter().enumerate() {
@@ -500,7 +559,7 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
             Align2::LEFT_TOP,
             line,
             FontId::monospace(24.0),
-            rgba(INK, a),
+            rgba(ink(v), a),
         );
         p.text(
             Pos2::new(cx + 330.0, y),
@@ -529,7 +588,7 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::CENTER_TOP,
         keys,
         FontId::monospace(22.0),
-        rgba(INK, 0.5 + 0.3 * (v.time * 2.0).sin()),
+        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );
 }
 

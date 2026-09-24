@@ -29,6 +29,7 @@ mod gameplay;
 mod hud;
 mod pixels;
 mod records;
+mod reveal_ui;
 mod store;
 
 use dream::{
@@ -126,6 +127,12 @@ pub struct DreamscapeGame {
     booklet_return: hud::Mode,
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
+    pack: reveal_ui::PackView,
+    store_cursor: usize,
+    store_status: Option<String>,
+    /// Perks consumed for the current run.
+    perks: Vec<store::Perk>,
+    shards_this_run: u32,
     run_seed: u64,
     restart_requested: bool,
     fonts_installed: bool,
@@ -173,6 +180,11 @@ impl DreamscapeGame {
             booklet_return: hud::Mode::Journal,
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
+            pack: reveal_ui::PackView::default(),
+            store_cursor: 0,
+            store_status: None,
+            perks: Vec::new(),
+            shards_this_run: 0,
             run_seed,
             restart_requested: false,
             fonts_installed: false,
@@ -323,32 +335,118 @@ impl DreamscapeGame {
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
             seed: self.run_seed,
+            dust: self.booklet.stash.dust,
+            eye: self.booklet.stash.eye,
+            hud: self.booklet.stash.hud,
+            card_style: self.booklet.stash.card,
+            store_cursor: self.store_cursor,
+            store_states: store::CATALOG
+                .iter()
+                .map(|&i| self.booklet.stash.state(i))
+                .collect(),
+            store_status: self.store_status.clone(),
+            perks: self
+                .perks
+                .iter()
+                .map(|&p| store::Item::Perk(p).info().name)
+                .collect(),
         }
     }
 
-    fn save_journal(&mut self) {
-        if self.booklet.has_run(self.run_seed) {
-            log::info!("Booklet: run {} already saved", self.run_seed);
-            self.journal_status = Some("already pressed into your booklet".into());
-            return;
-        }
-        let added = self.booklet.add_run(self.run_seed, &self.run_log);
+    fn has_perk(&self, p: store::Perk) -> bool {
+        self.perks.contains(&p)
+    }
+
+    fn persist_booklet(&mut self) -> bool {
         match cards::save(&self.booklet_path, &self.booklet) {
-            Ok(()) => {
-                log::info!(
-                    "Booklet: pressed {added} cards (total {}) -> {:?}",
-                    self.booklet.card_count(),
-                    self.booklet_path
-                );
-                self.journal_status = Some(format!(
-                    "pressed {added} cards · booklet holds {}",
-                    self.booklet.card_count()
-                ));
-            }
+            Ok(()) => true,
             Err(e) => {
                 log::error!("could not save booklet {:?}: {e}", self.booklet_path);
-                self.booklet.runs.pop();
-                self.journal_status = Some("the ink wouldn't take (save failed, see log)".into());
+                false
+            }
+        }
+    }
+
+    /// Wake up: roll which dreams stayed with you and start the pack opening.
+    fn open_pack(&mut self) {
+        let boost = cards::MemoryBoost {
+            lucid_wake: true,
+            deep_memory: self.has_perk(store::Perk::DeepMemory),
+        };
+        self.pack = reveal_ui::PackView {
+            pack: cards::recall(&self.run_log, boost),
+            ..Default::default()
+        };
+        let kept = self.pack.pack.iter().filter(|r| r.remembered).count();
+        log::info!(
+            "Pack: {kept}/{} dreams remembered: {}",
+            self.pack.pack.len(),
+            self.pack
+                .pack
+                .iter()
+                .map(|r| format!(
+                    "{} [{}{}]",
+                    r.card.name,
+                    r.card.rarity.label(),
+                    if r.remembered { "" } else { ", faded" }
+                ))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        self.mode = hud::Mode::Reveal;
+    }
+
+    fn save_journal(&mut self) {
+        if self.pack.pressed || self.booklet.has_run(self.run_seed) {
+            log::info!("Booklet: run {} already saved", self.run_seed);
+            return;
+        }
+        let before = self.booklet.clone();
+        let (added, dust) =
+            self.booklet
+                .press(self.run_seed, &self.pack.pack, self.shards_this_run);
+        if self.persist_booklet() {
+            log::info!(
+                "Booklet: pressed {added} cards (total {}), +{dust} dust (now {}) -> {:?}",
+                self.booklet.card_count(),
+                self.booklet.stash.dust,
+                self.booklet_path
+            );
+            self.pack.pressed = true;
+            self.pack.cards_added = added;
+            self.pack.dust_earned = dust;
+        } else {
+            self.booklet = before;
+        }
+    }
+
+    fn open_store(&mut self) {
+        self.booklet_return = self.mode;
+        self.store_status = None;
+        self.mode = hud::Mode::Store;
+    }
+
+    fn store_select(&mut self) {
+        let item = store::CATALOG[self.store_cursor];
+        let before = self.booklet.stash.clone();
+        let outcome = self.booklet.stash.select(item);
+        let name = item.info().name;
+        self.store_status = Some(match outcome {
+            store::Outcome::Bought => format!("{name} is yours"),
+            store::Outcome::Armed => format!("{name} will be with you next dream"),
+            store::Outcome::Equipped => format!("{name} equipped"),
+            store::Outcome::AlreadyArmed => format!("{name} is already waiting for you"),
+            store::Outcome::AlreadyEquipped => format!("already wearing {name}"),
+            store::Outcome::TooPoor { need } => format!("you need {need} more dust"),
+        });
+        if self.booklet.stash != before {
+            log::info!(
+                "Store: {outcome:?} {item:?}, dust now {}",
+                self.booklet.stash.dust
+            );
+            if !self.persist_booklet() {
+                self.booklet.stash = before;
+                self.store_status = Some("the store couldn't write it down (see log)".into());
             }
         }
     }
@@ -371,7 +469,28 @@ impl DreamscapeGame {
         self.run_log.clear();
         self.journal_status = None;
         self.mode = hud::Mode::Playing;
+        self.begin_run();
         self.load_dream(ctx)
+    }
+
+    /// Consume armed perks for the run that is starting.
+    fn begin_run(&mut self) {
+        self.shards_this_run = 0;
+        self.pack = reveal_ui::PackView::default();
+        self.perks = if self.autopilot {
+            Vec::new()
+        } else {
+            self.booklet.stash.take_armed()
+        };
+        if !self.perks.is_empty() {
+            log::info!("Perks this run: {:?}", self.perks);
+            self.persist_booklet();
+        }
+        if self.has_perk(store::Perk::FirstLight) {
+            self.director.collect_shard();
+            self.director.shard_this_dream = false;
+            self.shards_this_run += 1;
+        }
     }
 
     fn tone(&self, hz: f32, secs: f32) {
@@ -615,6 +734,8 @@ impl DreamscapeGame {
             },
         )));
 
+        let slow_heart = self.has_perk(store::Perk::SlowHeart);
+        let eyelids = self.has_perk(store::Perk::HeavyEyelids);
         let enemy_texture = self.upload_surface(gl, &dream.surfaces.enemy)?;
         for &(a, b) in &dream.patrols {
             let entity = self.world.spawn((
@@ -634,8 +755,12 @@ impl DreamscapeGame {
                 EnemyAI::new(
                     a,
                     b,
-                    gameplay::enemy_speed(dream.depth),
-                    gameplay::chase_radius(dream.depth),
+                    gameplay::enemy_speed(dream.depth) * if slow_heart { 0.8 } else { 1.0 },
+                    if eyelids {
+                        0.0
+                    } else {
+                        gameplay::chase_radius(dream.depth)
+                    },
                     gameplay::CHASE_LEASH,
                 ),
             ));
@@ -671,7 +796,12 @@ impl DreamscapeGame {
         self.player_position = spawn;
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
         self.route_index = 0;
-        self.grace = gameplay::RESPAWN_GRACE;
+        self.grace = gameplay::RESPAWN_GRACE
+            * if self.has_perk(store::Perk::SlowHeart) {
+                2.0
+            } else {
+                1.0
+            };
     }
 
     /// Autopilot: walk to the next route waypoint; jump when it's a jump hop.
@@ -733,6 +863,7 @@ impl Game for DreamscapeGame {
             Ok(audio) => self.audio = Some(audio),
             Err(e) => log::warn!("Failed to initialize audio: {e}"),
         }
+        self.begin_run();
         self.load_dream(ctx)?;
         log::info!("Dreamscape initialized");
         Ok(())
@@ -751,6 +882,7 @@ impl Game for DreamscapeGame {
             _ => return,
         };
         if down && !repeat {
+            let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
             match (self.mode, key) {
                 (hud::Mode::Playing, Keycode::Escape) => {
                     self.mode = hud::Mode::Paused;
@@ -761,23 +893,41 @@ impl Game for DreamscapeGame {
                     self.mode = hud::Mode::Playing;
                     return;
                 }
-                (hud::Mode::Paused, Keycode::Q) | (hud::Mode::Journal, Keycode::Escape) => {
+                (hud::Mode::Paused, Keycode::Q) | (hud::Mode::Reveal, Keycode::Escape)
+                    if self.mode != hud::Mode::Reveal || revealed =>
+                {
                     ctx.should_quit = true;
                     return;
                 }
-                (hud::Mode::Journal, Keycode::R) => {
+                (hud::Mode::Reveal, Keycode::Space | Keycode::Return) if !revealed => {
+                    self.pack.age = f32::MAX;
+                    return;
+                }
+                (hud::Mode::Reveal, Keycode::R) if revealed => {
                     self.restart_requested = true;
                     return;
                 }
-                (hud::Mode::Journal, Keycode::S) => {
+                (hud::Mode::Reveal, Keycode::S) if revealed => {
                     self.save_journal();
                     return;
                 }
-                (hud::Mode::Journal | hud::Mode::Paused, Keycode::B) => {
+                (hud::Mode::Reveal, Keycode::B) if revealed => {
                     self.open_booklet();
                     return;
                 }
-                (hud::Mode::Booklet, Keycode::Escape) => {
+                (hud::Mode::Paused, Keycode::B) => {
+                    self.open_booklet();
+                    return;
+                }
+                (hud::Mode::Reveal, Keycode::L) if revealed => {
+                    self.open_store();
+                    return;
+                }
+                (hud::Mode::Paused, Keycode::L) => {
+                    self.open_store();
+                    return;
+                }
+                (hud::Mode::Booklet | hud::Mode::Store, Keycode::Escape) => {
                     self.mode = self.booklet_return;
                     return;
                 }
@@ -788,6 +938,19 @@ impl Game for DreamscapeGame {
                 (hud::Mode::Booklet, Keycode::D | Keycode::Right) => {
                     let last = cards::page_count(self.booklet.card_count()) - 1;
                     self.booklet_page = (self.booklet_page + 1).min(last);
+                    return;
+                }
+                (hud::Mode::Store, Keycode::W | Keycode::Up) => {
+                    let n = store::CATALOG.len();
+                    self.store_cursor = (self.store_cursor + n - 1) % n;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::S | Keycode::Down) => {
+                    self.store_cursor = (self.store_cursor + 1) % store::CATALOG.len();
+                    return;
+                }
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) => {
+                    self.store_select();
                     return;
                 }
                 _ => {}
@@ -819,12 +982,18 @@ impl Game for DreamscapeGame {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
         }
         self.title_age += dt;
+        if self.mode == hud::Mode::Reveal && self.pack.age < f32::MAX {
+            self.pack.age += dt;
+        }
         if std::mem::take(&mut self.restart_requested) {
             return self.restart(ctx);
         }
         // E2E runs: show the journal briefly (for screenshots), then exit.
         if self.autopilot
-            && matches!(self.mode, hud::Mode::Journal | hud::Mode::Booklet)
+            && matches!(
+                self.mode,
+                hud::Mode::Journal | hud::Mode::Booklet | hud::Mode::Reveal
+            )
             && self.title_age
                 > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
                     .ok()
@@ -894,6 +1063,7 @@ impl Game for DreamscapeGame {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.tone(110.0, 0.35);
             if self.director.caught() {
+                self.shards_this_run = self.shards_this_run.saturating_sub(1);
                 if let Some(r) = self.run_log.last_mut() {
                     r.shard_taken = false;
                 }
@@ -933,6 +1103,7 @@ impl Game for DreamscapeGame {
                 self.flash.trigger([0.3, 1.0, 1.0], 0.6);
                 self.tone(880.0, 0.2);
                 self.director.collect_shard();
+                self.shards_this_run += 1;
                 if let Some(r) = self.run_log.last_mut() {
                     r.shard_taken = true;
                 }
@@ -965,11 +1136,14 @@ impl Game for DreamscapeGame {
                 self.load_dream(ctx)?;
             } else {
                 log::info!("Game complete! You woke up.");
-                self.mode = hud::Mode::Journal;
                 self.title_age = 0.0;
+                self.open_pack();
                 if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+                    self.pack.age = f32::MAX;
                     self.save_journal();
-                    self.open_booklet();
+                    if std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() == Ok("booklet") {
+                        self.open_booklet();
+                    }
                 }
             }
         }
@@ -1125,12 +1299,13 @@ impl Game for DreamscapeGame {
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let card_art = &mut self.card_art;
+        let pack = &self.pack;
         if let Some(ui) = self.ui.as_mut() {
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
                 }
-                hud::draw(egui_ctx, &hud_view, card_art);
+                hud::draw(egui_ctx, &hud_view, card_art, pack);
             });
             ui.paint(drawable_size, output);
         }
