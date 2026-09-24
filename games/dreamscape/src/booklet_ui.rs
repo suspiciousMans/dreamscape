@@ -152,7 +152,11 @@ pub fn card(
     p.text(
         inner.right_top(),
         Align2::RIGHT_TOP,
-        format!("No.{:03}", c.number),
+        if c.number == 0 {
+            "NEW".to_string()
+        } else {
+            format!("No.{:03}", c.number)
+        },
         FontId::monospace(18.0 * s),
         rgba(ink(v), 0.6),
     );

@@ -992,7 +992,7 @@ impl Game for DreamscapeGame {
         if self.autopilot
             && matches!(
                 self.mode,
-                hud::Mode::Journal | hud::Mode::Booklet | hud::Mode::Reveal
+                hud::Mode::Journal | hud::Mode::Booklet | hud::Mode::Reveal | hud::Mode::Store
             )
             && self.title_age
                 > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
@@ -1141,8 +1141,13 @@ impl Game for DreamscapeGame {
                 if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
                     self.pack.age = f32::MAX;
                     self.save_journal();
-                    if std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() == Ok("booklet") {
-                        self.open_booklet();
+                    match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
+                        Ok("booklet") => self.open_booklet(),
+                        Ok("store") => {
+                            self.open_store();
+                            self.store_cursor = 5;
+                        }
+                        _ => {}
                     }
                 }
             }
