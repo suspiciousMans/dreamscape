@@ -6,7 +6,7 @@
 //! Layout/animation maths are pure and unit-tested; `draw` paints them with
 //! egui's low-level painter and is verified by screenshot.
 
-use engine::ui::egui::{self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Stroke, Vec2};
+use engine::ui::egui::{self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Vec2};
 use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +59,8 @@ pub struct HudView {
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
     pub shard_dir: Option<[f32; 2]>,
+    /// World distance to the shard / wake door (shown under the compass).
+    pub shard_dist: Option<f32>,
     pub journal: Vec<String>,
     pub seed: u64,
 }
@@ -67,33 +69,6 @@ pub struct HudView {
 pub fn eye_openness(lucidity: u32, target: u32) -> f32 {
     let t = (lucidity as f32 / target.max(1) as f32).clamp(0.0, 1.0);
     0.08 + 0.92 * t
-}
-
-/// Upper and lower eyelid curves, `n` points each, left to right, for an eye
-/// centred at (cx, cy) with half-width `w`. Screen y grows downward.
-pub fn eyelids(
-    cx: f32,
-    cy: f32,
-    w: f32,
-    openness: f32,
-    n: usize,
-) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
-    let h = w * 0.55 * openness;
-    let mut top = Vec::with_capacity(n);
-    let mut bottom = Vec::with_capacity(n);
-    for i in 0..n {
-        let t = i as f32 / (n - 1) as f32;
-        let x = cx - w + 2.0 * w * t;
-        // Exact zero at the corners (sin(PI) isn't 0.0 in f32) so the lids meet.
-        let bulge = if i == 0 || i == n - 1 {
-            0.0
-        } else {
-            (PI * t).sin()
-        };
-        top.push([x, cy - h * bulge]);
-        bottom.push([x, cy + h * 0.8 * bulge]);
-    }
-    (top, bottom)
 }
 
 pub fn wobble_amp(strangeness: f32) -> f32 {
@@ -161,6 +136,24 @@ fn rgba(rgb: [u8; 3], alpha: f32) -> Color32 {
     )
 }
 
+/// Paints cells as crisp squares of `px` pixels centred on `origin`.
+fn px_cells(
+    p: &egui::Painter,
+    origin: Pos2,
+    px: f32,
+    cells: impl IntoIterator<Item = (i32, i32)>,
+    color: Color32,
+) {
+    let o = Pos2::new(origin.x.round(), origin.y.round());
+    for (x, y) in cells {
+        let min = o + Vec2::new(x as f32 * px - px * 0.5, y as f32 * px - px * 0.5);
+        p.rect_filled(Rect::from_min_size(min, Vec2::splat(px)), 0.0, color);
+    }
+}
+
+const EYE_PX: f32 = 6.0;
+const ARROW_PX: f32 = 4.0;
+
 /// The HUD's signature: text laid out letter by letter so each letter can
 /// wobble, drawn as a red ghost, a cyan ghost, then the core. The split
 /// widens as the dream gets stranger.
@@ -209,20 +202,6 @@ fn glitch_text(
     }
 }
 
-fn diamond(p: &egui::Painter, c: Pos2, r: f32, spin: f32, filled: bool, color: Color32) {
-    let pts: Vec<Pos2> = (0..4)
-        .map(|k| {
-            let a = spin + k as f32 * PI * 0.5;
-            c + Vec2::new(a.cos() * r * 0.7, a.sin() * r)
-        })
-        .collect();
-    if filled {
-        p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-    } else {
-        p.add(egui::Shape::closed_line(pts, Stroke::new(1.5_f32, color)));
-    }
-}
-
 pub fn draw(ctx: &egui::Context, v: &HudView) {
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -266,88 +245,154 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
 }
 
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
-    let c = Pos2::new(screen.center().x, screen.bottom() - 78.0);
-    let w = 64.0;
+    use crate::pixels::{self, EyePx};
+    let c = Pos2::new(screen.center().x, screen.bottom() - 96.0);
     let lucid = v.lucidity >= v.lucid_target;
-    // The eye breathes; it is never perfectly still.
-    let open =
-        (eye_openness(v.lucidity, v.lucid_target) * (1.0 + 0.06 * (v.time * 1.7).sin())).min(1.0);
-    let n = 24;
-    let (top, bottom) = eyelids(c.x, c.y, w, open, n);
-    let mut outline: Vec<Pos2> = top.iter().map(|q| Pos2::new(q[0], q[1])).collect();
-    // Skip the shared corner points so the polygon has no duplicate vertices.
-    outline.extend(
-        bottom
+    let open = (eye_openness(v.lucidity, v.lucid_target) * (1.0 + 0.05 * (v.time * 1.7).sin()))
+        .min(1.0)
+        * pixels::blink(v.time);
+    let cells = pixels::eye_pixels(open, v.shard_dir, lucid);
+    let iris = if lucid {
+        hue(v.time * 0.15)
+    } else {
+        hue(0.75 + 0.1 * v.strangeness)
+    };
+    let rim = [iris[0] / 2, iris[1] / 2, iris[2] / 2];
+    // Pixel drop shadow, one cell down.
+    px_cells(
+        p,
+        c + Vec2::new(0.0, EYE_PX),
+        EYE_PX,
+        cells
             .iter()
-            .rev()
-            .skip(1)
-            .take(n - 2)
-            .map(|q| Pos2::new(q[0], q[1])),
+            .filter(|q| q.2 != EyePx::Lash)
+            .map(|q| (q.0, q.1)),
+        rgba([0, 0, 0], 0.45),
     );
-    p.add(egui::Shape::convex_polygon(
-        outline.clone(),
-        rgba([12, 6, 24], 0.75),
-        Stroke::NONE,
-    ));
-    let h = w * 0.55 * open;
-    if h > 6.0 {
-        // Iris glances toward the shard when there is one.
-        let gaze = v
-            .shard_dir
-            .map_or(Vec2::ZERO, |d| Vec2::new(d[0], d[1]) * (w * 0.25));
-        let r = (h * 0.85).min(w * 0.4);
-        let iris = if lucid {
-            hue(v.time * 0.15)
-        } else {
-            hue(0.75 + 0.1 * v.strangeness)
+    for &(x, y, kind) in &cells {
+        let color = match kind {
+            EyePx::Lid => rgba(INK, 0.95),
+            EyePx::Lash => rgba(INK, 0.75),
+            EyePx::Sclera => rgba([30, 18, 52], 0.92),
+            EyePx::Iris => rgba(iris, 1.0),
+            EyePx::IrisRim => rgba(rim, 1.0),
+            EyePx::Pupil => rgba([6, 0, 12], 1.0),
+            EyePx::Glint => rgba([255, 255, 255], 0.95),
         };
-        p.circle_filled(c + gaze, r, rgba(iris, 0.95));
-        p.circle_filled(
-            c + gaze,
-            r * (0.4 + 0.08 * (v.time * 2.0).sin()),
-            rgba([5, 0, 10], 1.0),
-        );
-        p.circle_filled(
-            c + gaze + Vec2::new(-r * 0.3, -r * 0.35),
-            r * 0.15,
-            rgba([255, 255, 255], 0.8),
-        );
+        px_cells(p, c, EYE_PX, [(x, y)], color);
     }
-    p.add(egui::Shape::closed_line(
-        outline,
-        Stroke::new(3.0_f32, rgba(INK, 0.9)),
-    ));
     if lucid {
-        for i in 0..12 {
-            let a = TAU * i as f32 / 12.0 + v.time * 0.3;
-            let len = 14.0 + 8.0 * (v.time * 3.0 + i as f32).sin().abs();
-            let dir = Vec2::new(a.cos(), a.sin());
-            let from = c + dir * (w + 8.0);
-            p.line_segment(
-                [from, from + dir * len],
-                Stroke::new(2.0_f32, rgba(hue(v.time * 0.2 + i as f32 / 12.0), 0.8)),
-            );
+        // Pixel sunburst: 8 flickering rays.
+        for i in 0..8 {
+            let a = TAU * i as f32 / 8.0 + PI / 8.0;
+            for k in 0..3 {
+                if ((v.time * 6.0) as i32 + i + k) % 3 == 0 {
+                    continue;
+                }
+                let rad = 15.0 + k as f32 * 1.5;
+                let cell = (
+                    (a.cos() * rad).round() as i32,
+                    (a.sin() * rad * 0.62).round() as i32,
+                );
+                px_cells(
+                    p,
+                    c,
+                    EYE_PX,
+                    [cell],
+                    rgba(hue(v.time * 0.2 + i as f32 / 8.0), 0.85),
+                );
+            }
         }
     }
-    // One diamond pip per shard needed; a shard that could still be dropped blinks.
+    // Shard pips: pixel diamonds; a shard that could still be dropped blinks.
+    let full = pixels::sprite(&pixels::PIP);
+    let empty = pixels::sprite(&pixels::PIP_EMPTY);
     for i in 0..v.lucid_target {
-        let x = c.x + (i as f32 - (v.lucid_target - 1) as f32 * 0.5) * 26.0;
-        let at = Pos2::new(x, c.y + w * 0.55 + 22.0);
+        let at = c + Vec2::new(
+            (i as f32 - (v.lucid_target - 1) as f32 * 0.5) * 30.0,
+            9.0 * EYE_PX,
+        );
         let filled = i < v.lucidity;
         let blinking = filled && v.unbanked && i + 1 == v.lucidity;
         let alpha = if blinking {
-            0.35 + 0.65 * (v.time * 6.0).sin().abs()
+            if (v.time * 5.0) as i32 % 2 == 0 {
+                1.0
+            } else {
+                0.25
+            }
         } else if filled {
             1.0
         } else {
-            0.5
+            0.55
         };
         let rgb = if filled {
             hue(v.time * 0.1 + i as f32 * 0.33)
         } else {
             INK
         };
-        diamond(p, at, 7.0, v.time * 0.8, filled, rgba(rgb, alpha));
+        px_cells(
+            p,
+            at,
+            3.0,
+            if filled { full.clone() } else { empty.clone() },
+            rgba(rgb, alpha),
+        );
+    }
+}
+
+fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
+    use crate::pixels;
+    let f = pixels::snap8(dir);
+    let fv = Vec2::new(f[0], f[1]);
+    let bob = ((v.time * 5.0).sin() * 1.5).round() * ARROW_PX;
+    let raw = screen.center() + Vec2::new(dir[0], dir[1]) * (screen.height() * 0.30) + fv * bob;
+    // Snap to the pixel grid so the sprite never shimmers between pixels.
+    let at = Pos2::new(
+        (raw.x / ARROW_PX).round() * ARROW_PX,
+        (raw.y / ARROW_PX).round() * ARROW_PX,
+    );
+    let lucid = v.lucidity >= v.lucid_target;
+    let cells = pixels::arrow_cells(dir);
+    px_cells(
+        p,
+        at + Vec2::splat(ARROW_PX),
+        ARROW_PX,
+        cells.iter().copied(),
+        rgba([0, 0, 0], 0.55),
+    );
+    for k in 1..=3 {
+        if ((v.time * 8.0) as i32 + k) % 2 == 0 {
+            let back = at - fv * (ARROW_PX * (6.0 + 3.0 * k as f32));
+            px_cells(
+                p,
+                back,
+                ARROW_PX,
+                [(0, 0)],
+                rgba(hue(v.time * 0.5 + 0.1 * k as f32), 0.8 - 0.2 * k as f32),
+            );
+        }
+    }
+    for &(x, y) in &cells {
+        // Lucid: it points at the wake door, so it burns white-gold instead of rainbow.
+        let rgb = if lucid {
+            if (x + y + (v.time * 6.0) as i32) % 3 == 0 {
+                [255, 255, 255]
+            } else {
+                [255, 210, 80]
+            }
+        } else {
+            hue(v.time * 0.6 - (x as f32 * f[0] + y as f32 * f[1]) * 0.06)
+        };
+        px_cells(p, at, ARROW_PX, [(x, y)], rgba(rgb, 0.95));
+    }
+    if let Some(dist) = v.shard_dist {
+        p.text(
+            at + Vec2::new(0.0, 9.0 * ARROW_PX),
+            Align2::CENTER_TOP,
+            format!("{dist:.0}m"),
+            FontId::monospace(20.0),
+            rgba(INK, 0.8),
+        );
     }
 }
 
@@ -378,17 +423,6 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
         &v.whisper,
         FontId::proportional(24.0),
         rgba([200, 190, 230], a * 0.85),
-    );
-}
-
-fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
-    let d = Vec2::new(dir[0], dir[1]);
-    let at = screen.center() + d * (screen.height() * 0.28 + 6.0 * (v.time * 2.5).sin());
-    let rgb = hue(v.time * 0.5);
-    diamond(p, at, 10.0, v.time * 2.0, true, rgba(rgb, 0.9));
-    p.line_segment(
-        [at - d * 14.0, at - d * 40.0],
-        Stroke::new(2.0_f32, rgba(rgb, 0.35)),
     );
 }
 
@@ -472,17 +506,6 @@ mod tests {
         assert!(eye_openness(1, 3) < eye_openness(2, 3));
         assert_eq!(eye_openness(3, 3), 1.0);
         assert_eq!(eye_openness(9, 3), 1.0, "clamps past lucid");
-    }
-
-    #[test]
-    fn eyelids_meet_at_the_corners_and_gap_scales_with_openness() {
-        let (t1, b1) = eyelids(100.0, 50.0, 60.0, 1.0, 21);
-        let (t0, b0) = eyelids(100.0, 50.0, 60.0, 0.1, 21);
-        assert_eq!(t1[0], b1[0]);
-        assert_eq!(t1[20], b1[20]);
-        let gap = |t: &[[f32; 2]], b: &[[f32; 2]]| b[10][1] - t[10][1];
-        assert!(gap(&t1, &b1) > 0.0);
-        assert!((gap(&t1, &b1) / gap(&t0, &b0) - 10.0).abs() < 1e-3);
     }
 
     #[test]

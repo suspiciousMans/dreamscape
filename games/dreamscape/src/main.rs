@@ -273,6 +273,14 @@ impl DreamscapeGame {
             title_age: self.title_age,
             shard_dir: target
                 .and_then(|t| hud::compass(self.player_position.to_array(), t.to_array(), 7.0)),
+            shard_dist: target.map(|t| {
+                Vec3::new(
+                    t.x - self.player_position.x,
+                    0.0,
+                    t.z - self.player_position.z,
+                )
+                .length()
+            }),
             journal: self.journal.clone(),
             seed: self.run_seed,
         }
