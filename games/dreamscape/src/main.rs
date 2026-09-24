@@ -21,6 +21,7 @@ use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::EguiState;
 
+mod cards;
 mod dream;
 mod enemy_ai;
 mod gameplay;
