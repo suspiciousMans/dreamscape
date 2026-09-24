@@ -481,6 +481,7 @@ impl DreamscapeGame {
         self.run_log.clear();
         self.journal_status = None;
         self.mode = hud::Mode::Playing;
+        self.transition.cancel();
         self.begin_run();
         self.load_dream(ctx)
     }
@@ -1079,7 +1080,13 @@ impl Game for DreamscapeGame {
         // 0. Dream transition: the world is frozen while it melts and reforms.
         if let Some(ev) = self.transition.tick(dt) {
             match ev {
-                transition::Event::Swap(p) => self.finish_melt(ctx, p)?,
+                transition::Event::Swap(p) => {
+                    self.finish_melt(ctx, p)?;
+                    // The world just changed under us (or the run ended):
+                    // don't run this frame's gameplay against it, or a
+                    // player still standing in the old portal re-triggers.
+                    return Ok(());
+                }
                 transition::Event::Done => {
                     log::info!("Melt: reformed at depth {}", self.director.depth)
                 }

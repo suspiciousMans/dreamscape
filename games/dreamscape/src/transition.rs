@@ -83,6 +83,12 @@ impl Transition {
         true
     }
 
+    /// Drop any running melt (a new run is starting).
+    pub fn cancel(&mut self) {
+        self.phase = Phase::Idle;
+        self.t = 0.0;
+    }
+
     pub fn tick(&mut self, dt: f32) -> Option<Event> {
         match self.phase {
             Phase::Idle => None,
@@ -252,5 +258,18 @@ mod tests {
             frag.contains("uniform float uMelt;"),
             "mesh.frag has no uMelt"
         );
+    }
+
+    #[test]
+    fn cancel_drops_a_running_melt_and_keeps_the_scale() {
+        let mut tr = Transition::new(2.0);
+        tr.start(Pending::Finish, [0.0; 3]);
+        tr.tick(0.3);
+        tr.cancel();
+        assert!(!tr.active());
+        assert_eq!(tr.melt(), 0.0);
+        assert_eq!(tr.tick(10.0), None, "a cancelled melt never swaps");
+        tr.start(Pending::Descend, [0.0; 3]);
+        assert_eq!(tr.tick(MELT_OUT * 1.5), None, "scale survived the cancel");
     }
 }
