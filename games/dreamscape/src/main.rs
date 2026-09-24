@@ -59,6 +59,10 @@ struct Spin(f32);
 #[derive(Clone, Copy)]
 struct SurfaceUv(f32);
 
+/// Drawn with uMelt = 0: the dreamer stays solid while the dream melts.
+#[derive(Clone, Copy)]
+struct NoMelt;
+
 fn init_logging() {
     let _ = env_logger::builder()
         .is_test(false)
@@ -134,6 +138,7 @@ pub struct DreamscapeGame {
     /// Perks consumed for the current run.
     perks: Vec<store::Perk>,
     shards_this_run: u32,
+    transition: transition::Transition,
     run_seed: u64,
     restart_requested: bool,
     fonts_installed: bool,
@@ -186,6 +191,12 @@ impl DreamscapeGame {
             store_status: None,
             perks: Vec::new(),
             shards_this_run: 0,
+            transition: transition::Transition::new(
+                std::env::var("DREAMSCAPE_MELT_SCALE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0),
+            ),
             run_seed,
             restart_requested: false,
             fonts_installed: false,
@@ -494,6 +505,64 @@ impl DreamscapeGame {
         }
     }
 
+    /// Awake: roll the pack (and, for autopilot E2E runs, autosave).
+    fn complete_run(&mut self) {
+        log::info!("Game complete! You woke up.");
+        self.title_age = 0.0;
+        self.open_pack();
+        if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+            self.pack.age = f32::MAX;
+            self.save_journal();
+            match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
+                Ok("booklet") => self.open_booklet(),
+                Ok("store") => {
+                    self.open_store();
+                    self.store_cursor = 5;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Begin melting toward `pending`. Ignored if a melt is already running
+    /// (so touching the portal for several frames can't queue two descents).
+    fn begin_melt(&mut self, pending: transition::Pending) {
+        let fog = match pending {
+            transition::Pending::Descend => self.director.next.spec().fog_color,
+            transition::Pending::Wake => DreamTheme::Awakening.spec().fog_color,
+            // The pack reveal's backdrop, rgb(6, 3, 16).
+            transition::Pending::Finish => [0.024, 0.012, 0.063],
+        };
+        if self.transition.start(pending, fog) {
+            log::info!("Melt: {pending:?} begins at depth {}", self.director.depth);
+            self.tone(196.0, 0.9);
+            self.input = PlayerInputState::default();
+        }
+    }
+
+    /// The bottom of the melt: the screen is fog, so change the dream now.
+    fn finish_melt(
+        &mut self,
+        ctx: &mut Context,
+        pending: transition::Pending,
+    ) -> anyhow::Result<()> {
+        log::info!("Melt: swap ({pending:?})");
+        match pending {
+            transition::Pending::Descend => {
+                self.director.descend();
+                self.load_dream(ctx)
+            }
+            transition::Pending::Wake => {
+                self.director.wake();
+                self.load_dream(ctx)
+            }
+            transition::Pending::Finish => {
+                self.complete_run();
+                Ok(())
+            }
+        }
+    }
+
     fn tone(&self, hz: f32, secs: f32) {
         if let Some(audio) = &self.audio {
             audio.play_tone(hz, secs);
@@ -726,6 +795,7 @@ impl DreamscapeGame {
                 texture: Some(player_texture),
             },
             Spin(1.2),
+            NoMelt,
             RigidBody::default(),
             Collider {
                 shape: ColliderShape::Sphere {
@@ -1006,6 +1076,19 @@ impl Game for DreamscapeGame {
         if self.mode != hud::Mode::Playing {
             return Ok(());
         }
+        // 0. Dream transition: the world is frozen while it melts and reforms.
+        if let Some(ev) = self.transition.tick(dt) {
+            match ev {
+                transition::Event::Swap(p) => self.finish_melt(ctx, p)?,
+                transition::Event::Done => {
+                    log::info!("Melt: reformed at depth {}", self.director.depth)
+                }
+            }
+        }
+        if self.transition.active() {
+            self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+            return Ok(());
+        }
         let Some(player) = self.player else {
             return Ok(());
         };
@@ -1125,33 +1208,19 @@ impl Game for DreamscapeGame {
             log::info!("Wake door taken at depth {}", self.director.depth);
             self.flash.trigger([1.0, 1.0, 1.0], 1.0);
             self.tone(660.0, 0.6);
-            self.director.wake();
-            return self.load_dream(ctx);
+            self.begin_melt(transition::Pending::Wake);
+            return Ok(());
         }
         if touched
             .iter()
             .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
         {
             log::info!("Portal entered at depth {}", self.director.depth);
-            if self.director.descend().is_some() {
-                self.load_dream(ctx)?;
+            self.begin_melt(if self.director.theme == DreamTheme::Awakening {
+                transition::Pending::Finish
             } else {
-                log::info!("Game complete! You woke up.");
-                self.title_age = 0.0;
-                self.open_pack();
-                if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
-                    self.pack.age = f32::MAX;
-                    self.save_journal();
-                    match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
-                        Ok("booklet") => self.open_booklet(),
-                        Ok("store") => {
-                            self.open_store();
-                            self.store_cursor = 5;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+                transition::Pending::Descend
+            });
         }
         Ok(())
     }
@@ -1161,6 +1230,8 @@ impl Game for DreamscapeGame {
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
+        let melt = self.transition.melt();
+        let transition = self.transition;
         let strangeness = self.dream.as_ref().map_or(0.0, |d| d.strangeness);
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
@@ -1175,6 +1246,7 @@ impl Game for DreamscapeGame {
             return Ok(());
         };
         let gl = ctx.gl();
+        let fog = transition.fog(params.fog_color);
         renderer.resize_if_needed(gl, drawable_size)?;
         renderer.begin_scene(gl);
         unsafe {
@@ -1184,12 +1256,7 @@ impl Game for DreamscapeGame {
             gl.disable(engine::glow::SCISSOR_TEST);
         }
         unsafe {
-            gl.clear_color(
-                params.fog_color[0],
-                params.fog_color[1],
-                params.fog_color[2],
-                1.0,
-            );
+            gl.clear_color(fog[0], fog[1], fog[2], 1.0);
             gl.clear(engine::glow::COLOR_BUFFER_BIT | engine::glow::DEPTH_BUFFER_BIT);
         }
 
@@ -1241,12 +1308,7 @@ impl Game for DreamscapeGame {
                 gl.uniform_1_f32(Some(&l), params.fog_end);
             }
             if let Some(l) = loc("uFogColor") {
-                gl.uniform_3_f32(
-                    Some(&l),
-                    params.fog_color[0],
-                    params.fog_color[1],
-                    params.fog_color[2],
-                );
+                gl.uniform_3_f32(Some(&l), fog[0], fog[1], fog[2]);
             }
             if let Some(l) = loc("uPointLightCount") {
                 gl.uniform_1_i32(Some(&l), 0);
@@ -1270,12 +1332,21 @@ impl Game for DreamscapeGame {
 
         let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
         let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
-        for (_entity, (transform, mesh_renderer, uv)) in self
+        let melt_loc = unsafe { gl.get_uniform_location(program, "uMelt") };
+        for (_entity, (transform, mesh_renderer, uv, solid)) in self
             .world
-            .query::<(&Transform, &MeshRenderer, Option<&SurfaceUv>)>()
+            .query::<(
+                &Transform,
+                &MeshRenderer,
+                Option<&SurfaceUv>,
+                Option<&NoMelt>,
+            )>()
             .iter()
         {
             unsafe {
+                if let Some(l) = &melt_loc {
+                    gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
+                }
                 if let Some(l) = &uv_loc {
                     gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
                 }
