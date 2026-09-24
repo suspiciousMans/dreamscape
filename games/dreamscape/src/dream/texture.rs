@@ -10,7 +10,7 @@ use std::f32::consts::TAU;
 
 pub const TEX_SIZE: u32 = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Pattern {
     /// Soft interfering waves.
     Plasma,

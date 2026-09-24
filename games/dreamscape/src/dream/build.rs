@@ -77,7 +77,7 @@ pub struct Dream {
 }
 
 /// Everything needed to (re)build one procedural texture.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TexSpec {
     pub pattern: Pattern,
     pub palette: Vec<[u8; 3]>,

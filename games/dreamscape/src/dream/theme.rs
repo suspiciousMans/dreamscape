@@ -6,7 +6,7 @@ use super::texture::Pattern;
 #[cfg(test)]
 use crate::gameplay::CELL;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DreamTheme {
     Lobby,
     LiminalOffice,
