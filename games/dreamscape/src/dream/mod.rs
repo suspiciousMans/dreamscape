@@ -7,6 +7,7 @@ mod meshes;
 mod names;
 mod texture;
 mod theme;
+mod vocab;
 
 pub use build::{generate, portal_surface, Atmosphere, BlockKind, Dream, TexSpec};
 pub use director::{DreamDirector, LUCIDITY_TO_WAKE};
