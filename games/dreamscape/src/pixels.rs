@@ -154,11 +154,13 @@ pub fn sprite(rows: &[&str]) -> Vec<(i32, i32)> {
     out
 }
 
-/// Snaps a direction to the nearest of 8 (pixel art only looks right at 45° steps).
+/// Snaps a direction to the nearest of 8 (pixel art only looks right at 45°
+/// steps). Float dust is zeroed so axis-aligned arrows are exactly symmetric.
 pub fn snap8(d: [f32; 2]) -> [f32; 2] {
     let step = PI / 4.0;
     let a = (d[1].atan2(d[0]) / step).round() * step;
-    [a.cos(), a.sin()]
+    let clean = |v: f32| if v.abs() < 1e-6 { 0.0 } else { v };
+    [clean(a.cos()), clean(a.sin())]
 }
 
 fn in_tri(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
