@@ -239,4 +239,12 @@ mod tests {
         assert_eq!(slow.tick(REFORM * 1.5), None);
         assert_eq!(slow.tick(REFORM), Some(Event::Done));
     }
+
+    #[test]
+    fn both_shaders_listen_for_the_melt() {
+        let vert = include_str!("../assets/shaders/mesh.vert");
+        let frag = include_str!("../assets/shaders/mesh.frag");
+        assert!(vert.contains("uniform float uMelt;"), "mesh.vert has no uMelt");
+        assert!(frag.contains("uniform float uMelt;"), "mesh.frag has no uMelt");
+    }
 }

@@ -13,6 +13,7 @@ uniform sampler2D uTex;
 uniform vec3 uFogColor;
 uniform float uTime;
 uniform float uStrangeness;
+uniform float uMelt;
 
 // Rotate a colour around the grey axis (hue shift that keeps brightness).
 vec3 hueShift(vec3 c, float a) {
@@ -41,5 +42,9 @@ void main() {
     // Fog cycles hue too, so the horizon itself shimmers.
     vec3 fog = hueShift(uFogColor, s * 0.8 * sin(uTime * 0.25));
     vec3 withFog = mix(lit, fog, vFogFactor);
+    // Melting: colours smear round the hue wheel, then everything dissolves
+    // into the fog so the dream swap underneath is never seen.
+    withFog = mix(withFog, hueShift(withFog, 4.0 * uMelt), uMelt);
+    withFog = mix(withFog, fog, smoothstep(0.45, 0.95, uMelt));
     FragColor = vec4(withFog, texColor.a);
 }

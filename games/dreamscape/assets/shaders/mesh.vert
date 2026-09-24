@@ -20,6 +20,8 @@ uniform float uStrangeness;
 // > 0: texture coordinates come from world position (textures tile at this
 // many repeats per world unit instead of stretching over big slabs).
 uniform float uUVScale;
+// Dream transition: 0 = solid, 1 = fully melted into the floor.
+uniform float uMelt;
 
 // Fixed-size point light arrays (simple uniform arrays, not a UBO/SSBO —
 // plenty for a handful of level lights and keeps the shader trivial).
@@ -59,6 +61,21 @@ void main() {
         sin(uTime * 1.1 + worldPos.z * 0.45 + worldPos.y * 0.3),
         sin(uTime * 0.8 + worldPos.x * 0.35) * 0.6,
         sin(uTime * 1.3 + worldPos.x * 0.4 + worldPos.y * 0.25));
+
+    // The dream melts: everything slumps, drips and sinks into the floor,
+    // then (uMelt running back to 0) rises out of it as the next dream.
+    if (uMelt > 0.0) {
+        // Each ~1.5-unit column drips at its own speed. Hash the un-breathed
+        // position so columns don't flicker as the world breathes.
+        float h = fract(sin(dot(floor(vWorld.xz * 0.7), vec2(12.9898, 78.233))) * 43758.5453);
+        float sag = uMelt * uMelt * (3.0 + 7.0 * h);
+        // Tops fall further than bottoms: things slump before they sink.
+        worldPos.y -= sag * (0.35 + 0.3 * max(worldPos.y + 1.0, 0.0));
+        // The puddle spreads and ripples.
+        worldPos.xz += uMelt * 0.8 * vec2(
+            sin(worldPos.z * 0.9 + uTime * 2.3),
+            cos(worldPos.x * 0.9 + uTime * 1.9));
+    }
 
     vec4 viewPos = uView * worldPos;
     vec4 clipPos = uProj * viewPos;
