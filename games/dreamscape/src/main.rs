@@ -39,7 +39,6 @@ use gameplay::{PlayerInputState, PortalMarker};
 
 const PROFILES_DIR: &str = "games/dreamscape/profiles";
 const PLAYER_COLOR: [u8; 4] = [255, 255, 255, 255];
-const ENEMY_SPEED: f32 = 3.0;
 const SHARD_SIZE: f32 = 0.8;
 const SHARD_SPIN: f32 = 2.0;
 const BEACON_HEIGHT: f32 = 8.0;
@@ -629,8 +628,16 @@ impl DreamscapeGame {
                 },
                 Spin(0.9),
             ));
-            self.enemies
-                .push((entity, EnemyAI::new_patrol(a, b, ENEMY_SPEED)));
+            self.enemies.push((
+                entity,
+                EnemyAI::new(
+                    a,
+                    b,
+                    gameplay::enemy_speed(dream.depth),
+                    gameplay::chase_radius(dream.depth),
+                    gameplay::CHASE_LEASH,
+                ),
+            ));
         }
 
         // The next dream inherits one of this dream's prop kinds as its motif.
@@ -847,9 +854,16 @@ impl Game for DreamscapeGame {
         }
 
         // 2. Enemies
+        let target = self.player_position;
         for (entity, ai) in self.enemies.iter_mut() {
             if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
-                ai.update(&mut t.position, dt);
+                let was = ai.chasing;
+                ai.update(&mut t.position, target, dt);
+                // Swell when they notice you: the tell that you've been seen.
+                t.scale = Vec3::splat(if ai.chasing { 1.25 } else { 0.9 });
+                if ai.chasing && !was && !self.autopilot {
+                    log::info!("An enemy noticed you");
+                }
             }
         }
 

@@ -125,6 +125,24 @@ pub fn next_run_seed(seed: u64) -> u64 {
         .wrapping_add(1_442_695_040_888_963_407)
 }
 
+/// Enemies speed up the deeper you go (capped well below MOVE_SPEED).
+pub fn enemy_speed(depth: u32) -> f32 {
+    (3.0 + 0.15 * depth.min(1000) as f32).min(4.4)
+}
+
+/// How close you can get before an enemy notices you. Shallow dreams
+/// (depth < 2) never chase.
+pub fn chase_radius(depth: u32) -> f32 {
+    if depth < 2 {
+        0.0
+    } else {
+        (3.0 + 0.25 * depth.min(1000) as f32).min(6.0)
+    }
+}
+
+/// How far from its patrol an enemy will follow you.
+pub const CHASE_LEASH: f32 = 2.0 * CELL;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +356,16 @@ mod tests {
             s = next_run_seed(s);
             assert!(seen.insert(s), "repeated after {} runs", seen.len());
         }
+    }
+
+    #[test]
+    fn difficulty_ramps_and_caps() {
+        assert!(enemy_speed(0) < enemy_speed(5));
+        assert_eq!(enemy_speed(50), enemy_speed(u32::MAX));
+        assert!(enemy_speed(u32::MAX) < MOVE_SPEED);
+        assert_eq!(chase_radius(0), 0.0);
+        assert_eq!(chase_radius(1), 0.0);
+        assert!(chase_radius(2) > 0.0 && chase_radius(2) < chase_radius(8));
+        assert!(chase_radius(u32::MAX) <= 6.0);
     }
 }

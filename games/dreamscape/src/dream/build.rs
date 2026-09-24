@@ -101,6 +101,17 @@ pub struct Surfaces {
 }
 
 /// Dreams get stranger the deeper you go. Waking is always calm.
+/// Dreams get bigger the deeper you go: +1 cell per side every 2 dreams, up
+/// to +6. The Lobby and the Awakening never grow.
+pub fn grid_size(theme: DreamTheme, depth: u32) -> (i32, i32) {
+    let (lo, hi) = theme.spec().grid_size;
+    let grow = match theme {
+        DreamTheme::Lobby | DreamTheme::Awakening => 0,
+        _ => (depth.min(12) / 2) as i32,
+    };
+    (lo + grow, hi + grow)
+}
+
 pub fn strangeness(theme: DreamTheme, depth: u32) -> f32 {
     if theme == DreamTheme::Awakening {
         return 0.0;
@@ -150,7 +161,7 @@ pub fn generate(
     let mut spec = theme.spec();
     spec.strangeness = strangeness(theme, depth);
     let mut rng = StdRng::seed_from_u64(seed);
-    let layout = layout::generate(spec.layout, spec.grid_size, &mut rng);
+    let layout = layout::generate(spec.layout, grid_size(theme, depth), &mut rng);
     if layout.fallback {
         log::warn!("{theme:?} seed {seed}: layout generator gave up, using fallback hall");
     }
@@ -402,7 +413,7 @@ fn decor(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) 
 }
 
 /// Enemies patrol ON the route (so you have to dodge them), never within the
-/// first 3 route cells. Count grows by one every 3 dreams deep.
+/// first 3 route cells. Count grows by one every 2 dreams deep.
 fn patrols(
     grid: &Grid,
     path: &[(P, bool)],
@@ -413,7 +424,7 @@ fn patrols(
     if spec.enemies.1 == 0 || path.len() < layout::MIN_PATH_CELLS {
         return Vec::new();
     }
-    let count = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 3).min(spec.enemies.1 + 2)
+    let count = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 2).min(spec.enemies.1 + 4)
         as usize;
     let mut candidates: Vec<P> = path[3..path.len() - 1]
         .iter()
@@ -695,6 +706,41 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+    }
+
+    #[test]
+    fn dreams_grow_with_depth_but_the_lobby_and_waking_do_not() {
+        assert_eq!(
+            grid_size(DreamTheme::Lobby, 20),
+            DreamTheme::Lobby.spec().grid_size
+        );
+        assert_eq!(
+            grid_size(DreamTheme::Awakening, 20),
+            DreamTheme::Awakening.spec().grid_size
+        );
+        let (a, b) = (
+            grid_size(DreamTheme::Garden, 0),
+            grid_size(DreamTheme::Garden, 12),
+        );
+        assert_eq!((b.0 - a.0, b.1 - a.1), (6, 6));
+        assert_eq!(grid_size(DreamTheme::Garden, 99), b, "growth caps");
+        let shallow = generate(DreamTheme::LiminalOffice, 7, 0, None, true);
+        let deep = generate(DreamTheme::LiminalOffice, 7, 12, None, true);
+        assert!(deep.blocks.len() > shallow.blocks.len());
+    }
+
+    #[test]
+    fn deeper_dreams_have_more_enemies() {
+        let count = |depth| -> usize {
+            (0..40)
+                .map(|s| {
+                    generate(DreamTheme::NightmareFactory, s, depth, None, true)
+                        .patrols
+                        .len()
+                })
+                .sum()
+        };
+        assert!(count(8) > count(0), "{} vs {}", count(8), count(0));
     }
 
     #[test]

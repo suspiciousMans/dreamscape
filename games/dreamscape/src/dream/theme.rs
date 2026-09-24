@@ -133,7 +133,7 @@ impl DreamTheme {
         match self {
             Lobby => ThemeSpec {
                 layout: LayoutKind::OpenHall,
-                grid_size: (9, 11),
+                grid_size: (11, 13),
                 wall_height: 3.0,
                 floor_colors: &[[225, 215, 235], [210, 205, 230]],
                 wall_colors: &[[240, 235, 245]],
@@ -154,7 +154,7 @@ impl DreamTheme {
             },
             LiminalOffice => ThemeSpec {
                 layout: LayoutKind::Maze,
-                grid_size: (11, 15),
+                grid_size: (15, 19),
                 wall_height: 3.0,
                 floor_colors: &[[196, 184, 120], [184, 172, 112]],
                 wall_colors: &[[222, 214, 168], [210, 204, 160]],
@@ -168,14 +168,14 @@ impl DreamTheme {
                 fog_end: 30.0,
                 base_profile: "dreamscape_liminal",
                 music: "games/dreamscape/assets/music/liminal_office.wav",
-                enemies: (0, 1),
+                enemies: (1, 2),
                 next: &[(VoidPlatforms, 2), (NightmareFactory, 2), (Garden, 1)],
                 patterns: &[Pattern::Stripes, Pattern::Checker],
                 accents: &[[210, 255, 60], [255, 220, 40]],
             },
             VoidPlatforms => ThemeSpec {
                 layout: LayoutKind::PlatformChain,
-                grid_size: (11, 15),
+                grid_size: (15, 19),
                 wall_height: 0.0,
                 floor_colors: &[[140, 160, 200], [110, 120, 170], [170, 150, 210]],
                 wall_colors: &[[90, 90, 120]],
@@ -189,14 +189,14 @@ impl DreamTheme {
                 fog_end: 30.0,
                 base_profile: "shattered_realm",
                 music: "games/dreamscape/assets/music/void_platform.wav",
-                enemies: (0, 0),
+                enemies: (0, 1),
                 next: &[(Garden, 2), (NightmareFactory, 2), (LiminalOffice, 1)],
                 patterns: &[Pattern::Swirl, Pattern::Plasma, Pattern::Kaleido],
                 accents: &[[255, 40, 220], [40, 240, 255]],
             },
             Garden => ThemeSpec {
                 layout: LayoutKind::ScatterField,
-                grid_size: (9, 12),
+                grid_size: (13, 17),
                 wall_height: 1.2,
                 floor_colors: &[[110, 170, 90], [120, 180, 100]],
                 wall_colors: &[[60, 120, 60], [70, 130, 70]],
@@ -210,7 +210,7 @@ impl DreamTheme {
                 fog_end: 42.0,
                 base_profile: "ethereal_sanctuary",
                 music: "games/dreamscape/assets/music/dream_lobby.wav",
-                enemies: (0, 1),
+                enemies: (1, 2),
                 next: &[
                     (LiminalOffice, 2),
                     (VoidPlatforms, 1),
@@ -226,7 +226,7 @@ impl DreamTheme {
             },
             NightmareFactory => ThemeSpec {
                 layout: LayoutKind::Maze,
-                grid_size: (11, 15),
+                grid_size: (15, 19),
                 wall_height: 3.0,
                 floor_colors: &[[70, 60, 55], [80, 70, 60]],
                 wall_colors: &[[120, 60, 40], [100, 50, 40]],
@@ -240,7 +240,7 @@ impl DreamTheme {
                 fog_end: 30.0,
                 base_profile: "nightmare_factory",
                 music: "games/dreamscape/assets/music/nightmare_factory.wav",
-                enemies: (2, 3),
+                enemies: (3, 4),
                 next: &[(VoidPlatforms, 1), (LiminalOffice, 2), (Garden, 1)],
                 patterns: &[
                     Pattern::Checker,
