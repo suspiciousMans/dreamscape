@@ -702,7 +702,14 @@ impl Game for DreamscapeGame {
             return self.restart(ctx);
         }
         // E2E runs: show the journal briefly (for screenshots), then exit.
-        if self.autopilot && self.mode == hud::Mode::Journal && self.title_age > 3.0 {
+        if self.autopilot
+            && self.mode == hud::Mode::Journal
+            && self.title_age
+                > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3.0)
+        {
             ctx.should_quit = true;
         }
         if self.mode != hud::Mode::Playing {
