@@ -38,6 +38,7 @@ const ENEMY_COLOR: [u8; 4] = [200, 40, 40, 255];
 const ENEMY_SPEED: f32 = 3.0;
 const SHARD_SIZE: f32 = 0.8;
 const SHARD_SPIN: f32 = 2.0;
+const BEACON_HEIGHT: f32 = 8.0;
 
 /// Collect to become lucid.
 #[derive(Clone, Copy)]
@@ -99,6 +100,14 @@ pub struct DreamscapeGame {
     /// DREAMSCAPE_AUTOPILOT=1: follow the generated route (end-to-end test).
     autopilot: bool,
     route_index: usize,
+    flash: gameplay::Flash,
+    /// Seconds of enemy immunity left after a respawn.
+    grace: f32,
+    /// The shard (or wake door) entity and its beacon.
+    shard_entities: Vec<Entity>,
+    shard_tex: Option<Arc<GpuTexture>>,
+    wake_tex: Option<Arc<GpuTexture>>,
+    best_depth: u32,
 }
 
 impl DreamscapeGame {
@@ -125,6 +134,12 @@ impl DreamscapeGame {
             debug_camera: false,
             autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
             route_index: 0,
+            flash: gameplay::Flash::default(),
+            grace: 0.0,
+            shard_entities: Vec::new(),
+            shard_tex: None,
+            wake_tex: None,
+            best_depth: records::load(Path::new(records::RECORD_PATH)),
         }
     }
 
@@ -169,8 +184,8 @@ impl DreamscapeGame {
             )
         } else {
             format!(
-                "Dreamscape — depth {} — lucidity {}/{}",
-                self.director.depth, self.director.lucidity, LUCIDITY_TO_WAKE
+                "Dreamscape — depth {} — lucidity {}/{} — best {}",
+                self.director.depth, self.director.lucidity, LUCIDITY_TO_WAKE, self.best_depth
             )
         };
         let _ = ctx.platform.window.set_title(&title);
@@ -208,6 +223,79 @@ impl DreamscapeGame {
         match audio.play_music_file(Path::new(path), true) {
             Ok(()) => log::info!("Music: {path}"),
             Err(e) => log::error!("Could not play music {path}: {e}"),
+        }
+    }
+
+    fn tone(&self, hz: f32, secs: f32) {
+        if let Some(audio) = &self.audio {
+            audio.play_tone(hz, secs);
+        }
+    }
+
+    /// The shard (or, once lucid, the wake door) plus a tall beacon above it
+    /// that can be seen over maze walls.
+    fn spawn_shard_slot(&mut self, at: Vec3, wake_door: bool) -> anyhow::Result<()> {
+        let cube = self.cube.clone().context("cube mesh not uploaded")?;
+        let tex = if wake_door {
+            self.wake_tex.clone()
+        } else {
+            self.shard_tex.clone()
+        }
+        .context("shard textures not uploaded")?;
+        let (size, spin) = if wake_door {
+            (Vec3::new(1.2, 2.4, 1.2), 0.6)
+        } else {
+            (Vec3::splat(SHARD_SIZE), SHARD_SPIN)
+        };
+        let entity = self.world.spawn((
+            Transform {
+                position: at + Vec3::Y * (size.y * 0.5 + 0.2),
+                rotation: Quat::IDENTITY,
+                scale: size,
+            },
+            MeshRenderer {
+                mesh: cube.clone(),
+                texture: Some(tex.clone()),
+            },
+            SurfaceUv(0.8),
+            Spin(spin),
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: size * 0.5,
+                },
+                is_trigger: true,
+            },
+        ));
+        if wake_door {
+            self.world
+                .insert_one(entity, WakeMarker)
+                .expect("just spawned");
+        } else {
+            self.world
+                .insert_one(entity, ShardMarker)
+                .expect("just spawned");
+        }
+        // No Collider: purely visual, physics never sees it.
+        let beacon = self.world.spawn((
+            Transform {
+                position: at + Vec3::Y * (size.y + 0.4 + BEACON_HEIGHT * 0.5),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.15, BEACON_HEIGHT, 0.15),
+            },
+            MeshRenderer {
+                mesh: cube,
+                texture: Some(tex),
+            },
+            SurfaceUv(0.8),
+            Spin(-spin),
+        ));
+        self.shard_entities = vec![entity, beacon];
+        Ok(())
+    }
+
+    fn despawn_shard_slot(&mut self) {
+        for e in self.shard_entities.drain(..) {
+            let _ = self.world.despawn(e);
         }
     }
 
@@ -262,7 +350,7 @@ impl DreamscapeGame {
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
-        let shard_tex = self.upload_surface(gl, &dream.surfaces.shard)?;
+        self.shard_tex = Some(self.upload_surface(gl, &dream.surfaces.shard)?);
         let preview = if theme == DreamTheme::Awakening {
             DreamTheme::Awakening
         } else {
@@ -270,10 +358,10 @@ impl DreamscapeGame {
         };
         let portal_tex =
             self.upload_surface(gl, &dream::portal_surface(preview, dream.seed ^ 0x5EED))?;
-        let wake_tex = self.upload_surface(
+        self.wake_tex = Some(self.upload_surface(
             gl,
             &dream::portal_surface(DreamTheme::Awakening, dream.seed),
-        )?;
+        )?);
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         for block in &dream.blocks {
@@ -326,40 +414,10 @@ impl DreamscapeGame {
             }
         }
 
+        // world.clear() above already removed the old ones.
+        self.shard_entities.clear();
         if let Some(at) = dream.shard {
-            let (size, tex, spin) = if wake_door {
-                (Vec3::new(1.2, 2.4, 1.2), wake_tex.clone(), 0.6)
-            } else {
-                (Vec3::splat(SHARD_SIZE), shard_tex.clone(), SHARD_SPIN)
-            };
-            let entity = self.world.spawn((
-                Transform {
-                    position: at + Vec3::Y * (size.y * 0.5 + 0.2),
-                    rotation: Quat::IDENTITY,
-                    scale: size,
-                },
-                MeshRenderer {
-                    mesh: cube.clone(),
-                    texture: Some(tex),
-                },
-                SurfaceUv(0.8),
-                Spin(spin),
-                Collider {
-                    shape: ColliderShape::Aabb {
-                        half_extents: size * 0.5,
-                    },
-                    is_trigger: true,
-                },
-            ));
-            if wake_door {
-                self.world
-                    .insert_one(entity, WakeMarker)
-                    .expect("just spawned");
-            } else {
-                self.world
-                    .insert_one(entity, ShardMarker)
-                    .expect("just spawned");
-            }
+            self.spawn_shard_slot(at, wake_door)?;
         }
 
         let spawn = dream.spawn + Vec3::Y;
@@ -408,6 +466,12 @@ impl DreamscapeGame {
             .get((dream.seed % spec.props.len() as u64) as usize)
             .copied();
         self.dream = Some(dream);
+        if !self.autopilot && self.director.depth > self.best_depth {
+            self.best_depth = self.director.depth;
+            if let Err(e) = records::save(Path::new(records::RECORD_PATH), self.best_depth) {
+                log::warn!("could not save best depth: {e}");
+            }
+        }
         self.update_title(ctx);
         Ok(())
     }
@@ -426,6 +490,7 @@ impl DreamscapeGame {
         self.player_position = spawn;
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
         self.route_index = 0;
+        self.grace = gameplay::RESPAWN_GRACE;
     }
 
     /// Autopilot: walk to the next route waypoint; jump when it's a jump hop.
@@ -489,7 +554,7 @@ impl Game for DreamscapeGame {
         Ok(())
     }
 
-    fn handle_event(&mut self, _ctx: &mut Context, event: &Event) {
+    fn handle_event(&mut self, ctx: &mut Context, event: &Event) {
         let (key, down, repeat) = match event {
             Event::KeyDown {
                 keycode: Some(k),
@@ -511,6 +576,7 @@ impl Game for DreamscapeGame {
                 self.debug_camera = !self.debug_camera;
                 log::info!("debug camera: {}", self.debug_camera);
             }
+            Keycode::Escape if down => ctx.should_quit = true,
             _ => {}
         }
     }
@@ -518,6 +584,8 @@ impl Game for DreamscapeGame {
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         let dt = dt.min(gameplay::MAX_DT);
         self.time += dt;
+        self.flash.tick(dt);
+        self.grace = (self.grace - dt).max(0.0);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
         }
@@ -555,6 +623,7 @@ impl Game for DreamscapeGame {
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
         let caught = !self.autopilot
+            && self.grace <= 0.0
             && self.enemies.iter().any(|(e, _)| {
                 self.world
                     .get::<&Transform>(*e)
@@ -568,7 +637,18 @@ impl Game for DreamscapeGame {
                     .unwrap_or(false)
             });
         if caught {
-            self.director.caught();
+            self.flash.trigger([1.0, 0.1, 0.15], 0.7);
+            self.tone(110.0, 0.35);
+            if self.director.caught() {
+                log::info!(
+                    "Shard dropped ({}/{}) — it's back where you found it",
+                    self.director.lucidity,
+                    LUCIDITY_TO_WAKE
+                );
+                if let Some(at) = self.dream.as_ref().and_then(|d| d.shard) {
+                    self.spawn_shard_slot(at, false)?;
+                }
+            }
             self.update_title(ctx);
         }
         if caught || gameplay::fell_out(self.player_position) {
@@ -592,7 +672,9 @@ impl Game for DreamscapeGame {
             .collect();
         for &e in &touched {
             if self.world.get::<&ShardMarker>(e).is_ok() {
-                self.world.despawn(e).expect("shard exists");
+                self.despawn_shard_slot();
+                self.flash.trigger([0.3, 1.0, 1.0], 0.6);
+                self.tone(880.0, 0.2);
                 self.director.collect_shard();
                 log::info!(
                     "Lucidity shard collected at depth {} ({}/{})",
@@ -601,6 +683,7 @@ impl Game for DreamscapeGame {
                     LUCIDITY_TO_WAKE
                 );
                 self.update_title(ctx);
+                break;
             }
         }
         if touched
@@ -608,6 +691,8 @@ impl Game for DreamscapeGame {
             .any(|&e| self.world.get::<&WakeMarker>(e).is_ok())
         {
             log::info!("Wake door taken at depth {}", self.director.depth);
+            self.flash.trigger([1.0, 1.0, 1.0], 1.0);
+            self.tone(660.0, 0.6);
             self.director.wake();
             return self.load_dream(ctx);
         }
@@ -629,6 +714,7 @@ impl Game for DreamscapeGame {
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let drawable_size = ctx.drawable_size();
         let time = self.time;
+        let flash = self.flash;
         let strangeness = self.dream.as_ref().map_or(0.0, |d| d.strangeness);
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
@@ -761,8 +847,8 @@ impl Game for DreamscapeGame {
             &PostParams {
                 color_levels: 256.0,
                 dither_strength: 0.0,
-                tint_color: [1.0, 1.0, 1.0],
-                tint_strength: 0.0,
+                tint_color: flash.color,
+                tint_strength: flash.strength,
             },
         );
         Ok(())
