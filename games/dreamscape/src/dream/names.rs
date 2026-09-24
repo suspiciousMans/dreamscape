@@ -116,13 +116,20 @@ fn fitted(
     fallback(&vocab(theme)).to_string()
 }
 
+/// Mix the theme in, or every theme walks the same RNG path for a seed
+/// (same template, same abstract noun) and the lists feel tiny.
+fn theme_seed(theme: DreamTheme, seed: u64) -> u64 {
+    seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (theme as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+}
+
 pub fn dream_name(theme: DreamTheme, seed: u64) -> String {
-    let mut rng = StdRng::seed_from_u64(seed ^ 0x0D2E_A11E);
+    let mut rng = StdRng::seed_from_u64(theme_seed(theme, seed) ^ 0x0D2E_A11E);
     fitted(theme, &mut rng, MAX_NAME, name_once, |v| v.nouns[0])
 }
 
 pub fn whisper(theme: DreamTheme, seed: u64) -> String {
-    let mut rng = StdRng::seed_from_u64(seed ^ 0x005E_C2E7);
+    let mut rng = StdRng::seed_from_u64(theme_seed(theme, seed) ^ 0x005E_C2E7);
     fitted(theme, &mut rng, MAX_WHISPER, whisper_once, |v| {
         v.whispers[0]
     })
@@ -208,6 +215,28 @@ mod tests {
     }
 
     #[test]
+    fn themes_do_not_move_in_lockstep() {
+        // Same seed, different themes: templates should differ at least sometimes.
+        let shape = |n: &str| {
+            n.contains(" THAT ") as u8
+                | (n.contains(" OF ") as u8) << 1
+                | (n.contains("BEFORE") as u8) << 2
+                | (n.starts_with("SOMEONE") as u8) << 3
+        };
+        let mut differ = 0;
+        for s in 0..200 {
+            let a = shape(&dream_name(DreamTheme::Garden, s));
+            let b = shape(&dream_name(DreamTheme::NightmareFactory, s));
+            differ += (a != b) as u32;
+        }
+        assert!(
+            differ > 40,
+            "garden and factory share a template {}/200 times",
+            200 - differ
+        );
+    }
+
+    #[test]
     fn awakening_never_mashes() {
         let own: HashSet<&str> = vocab(DreamTheme::Awakening).nouns.iter().copied().collect();
         for s in 0..300 {
@@ -221,7 +250,11 @@ mod tests {
     fn print_samples() {
         for t in ALL_THEMES {
             for s in 0..6 {
-                println!("{t:?} | {} | {}", dream_name(t, s * 7919), whisper(t, s * 7919));
+                println!(
+                    "{t:?} | {} | {}",
+                    dream_name(t, s * 7919),
+                    whisper(t, s * 7919)
+                );
             }
         }
     }

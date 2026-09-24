@@ -91,7 +91,7 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
                 "the carpet", "the chandelier", "the doorman", "the clock above the desk",
                 "a porter", "the potted palm", "the lift music", "your coat", "the front desk",
                 "a guest who looks like you", "the revolving door", "the wallpaper",
-                "your reservation", "the ice machine", "the drapes", "the lobby piano",
+                "your reservation", "the ice machine", "the velvet curtain", "the lobby piano",
                 "the phone behind the counter", "a velvet rope", "the mirror",
             ],
             predicates: &[
@@ -149,7 +149,7 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
             ],
             subjects: &[
                 "the printer", "the water cooler", "your desk", "the fluorescent light",
-                "the photocopier", "your manager", "the break timer", "the carpet tiles",
+                "the photocopier", "your manager", "the break timer", "the carpet",
                 "the fax machine", "the elevator to floor zero", "your keycard",
                 "an unread email", "the stapler", "the swivel chair", "the vending machine",
                 "the hum", "the wall clock", "the conference phone", "your nametag",
@@ -209,7 +209,7 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
             subjects: &[
                 "the floor", "the next platform", "something below", "the gap",
                 "the dark", "your shadow", "the ledge", "the edge", "a falling star",
-                "the far side", "the bridge", "gravity", "the stairs", "the horizon",
+                "the far side", "the bridge", "gravity", "the staircase", "the horizon",
                 "the silence", "the last step", "your footprint", "a light in the distance",
                 "the void", "the tether", "the wind that isn't there", "your echo",
             ],
@@ -265,14 +265,14 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
                 "PETALS", "BEESWAX", "RIPE FRUIT", "THE COMPOST", "WILD MINT", "RAIN ON LEAVES", "TALL GRASS", "NECTAR",
             ],
             subjects: &[
-                "the flowers", "the hedge", "a bee", "the roses", "the pond", "the sundial",
-                "the scarecrow", "the orchard", "the vines", "the moss", "the gazebo",
+                "the tallest flower", "the hedge", "a bee", "the rosebush", "the pond", "the sundial",
+                "the scarecrow", "the orchard", "the ivy", "the moss", "the gazebo",
                 "the birdbath", "the fountain", "a poppy", "the willow", "the soil",
                 "the topiary swan", "a snail", "the greenhouse glass", "the honey",
                 "the path", "the bramble", "the weeping tree",
             ],
             predicates: &[
-                "turn to watch you", "smells like a birthday", "moved again",
+                "turns to watch you", "smells like a birthday", "moved again",
                 "is breathing, slowly", "wants to be picked", "hums when you pass",
                 "is growing in your footprints", "is sweeter than it should be",
                 "has too many petals", "knows the way out", "doesn't know the way out",
@@ -320,14 +320,14 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
                 "SCRAP METAL", "BURNT OIL", "THE ASSEMBLY", "SPARKS", "THE FURNACE", "EXHAUST", "COGS", "HEAVY INDUSTRY",
             ],
             subjects: &[
-                "the machines", "the conveyor", "the furnace", "the shift whistle",
-                "the foreman", "the press", "the smokestack", "the gears", "the quota board",
+                "the machine", "the conveyor", "the furnace", "the shift whistle",
+                "the foreman", "the press", "the smokestack", "the gearbox", "the quota board",
                 "the punch clock", "the boiler", "the crane", "the steam", "the vat",
                 "the product", "the siren", "the assembly line", "a spare part",
                 "the anvil", "the grinding", "the heat", "the line manager",
             ],
             predicates: &[
-                "are making you", "counts heartbeats", "is ahead of schedule",
+                "is making you", "counts heartbeats", "is ahead of schedule",
                 "wants another shift", "never cools down", "is measuring you",
                 "is running on fumes", "has your number stamped in it",
                 "screams on the hour", "is short one part", "is shaped like you",
@@ -370,15 +370,22 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
             ],
             subjects: &[
                 "the alarm", "the light", "the kettle", "the window", "your pillow",
-                "the curtains", "the birds", "the radio", "the morning", "your name",
-                "the room", "the day", "the sheets", "the sun",
+                "the curtain", "a blackbird", "the radio", "the morning", "your name",
+                "the room", "the day", "the duvet", "the sun",
+                "the mug on the nightstand", "the ceiling", "the cat", "the toaster",
+                "the phone on the pillow", "the floorboard", "a sunbeam", "the bathroom mirror",
+                "your breath", "the street outside",
             ],
             predicates: &[
                 "is ringing, softly", "is warm on your face", "is almost boiling",
-                "is open a crack", "still has the shape of you", "are singing",
+                "is open a crack", "still has the shape of you", "is singing",
                 "is playing something you know", "is yours again", "comes back to you",
                 "is exactly where you left it", "is only just starting",
                 "is real this time", "is waiting, patiently",
+                "smells like toast", "is glowing at the edges", "is purring",
+                "creaks, the way it always does", "has one missed call", "is fogged up",
+                "is ordinary again", "is humming a morning song", "is gold for a moment",
+                "is still a little warm", "feels like sunday",
             ],
             whispers: &[
                 "you remember your name", "the alarm is ringing, softly",
@@ -472,6 +479,34 @@ mod tests {
             ] {
                 let set: HashSet<_> = list.iter().collect();
                 assert_eq!(set.len(), list.len(), "{t:?} {what} has duplicates");
+            }
+        }
+    }
+
+    /// Whispers are built as "{subject} {predicate}" with subjects from any
+    /// dream, so every subject must be singular and every predicate must
+    /// conjugate for a singular subject.
+    #[test]
+    fn whisper_grammar_agrees() {
+        const ENDS_IN_S_BUT_SINGULAR: &[&str] = &[
+            "glass", "moss", "press", "hum", "grass", "gas", "this", "is", "bus", "canvas", "less",
+            "boss", "dress",
+        ];
+        for t in ALL_THEMES {
+            let v = vocab(t);
+            for s in v.subjects {
+                let last = s.rsplit(' ').next().unwrap();
+                assert!(
+                    !last.ends_with('s') || ENDS_IN_S_BUT_SINGULAR.contains(&last),
+                    "{t:?}: plural subject {s:?}"
+                );
+            }
+            for p in v.predicates {
+                let first = p.split(' ').next().unwrap();
+                assert!(
+                    !["are", "were", "have", "turn", "know", "want", "keep"].contains(&first),
+                    "{t:?}: plural predicate {p:?}"
+                );
             }
         }
     }
