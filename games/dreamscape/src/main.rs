@@ -431,18 +431,16 @@ impl DreamscapeGame {
             return (Vec3::ZERO, false);
         };
         let route = &dream.lucid_route;
-        while let Some(wp) = route.get(self.route_index) {
-            let flat = Vec3::new(
-                wp.pos.x - self.player_position.x,
-                0.0,
-                wp.pos.z - self.player_position.z,
-            );
-            if flat.length() < 0.3 {
-                self.route_index += 1;
-            } else {
-                break;
-            }
-        }
+        let grounded = self
+            .player
+            .and_then(|p| self.world.get::<&RigidBody>(p).ok().map(|b| b.grounded))
+            .unwrap_or(false);
+        self.route_index = gameplay::advance_waypoint(
+            route.iter().map(|w| w.pos),
+            self.route_index,
+            self.player_position,
+            grounded,
+        );
         match route.get(self.route_index) {
             Some(wp) => (
                 gameplay::autopilot_velocity(self.player_position, wp.pos),

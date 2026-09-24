@@ -588,6 +588,98 @@ mod tests {
         }
     }
 
+    /// Drive the autopilot through the REAL physics engine on a generated
+    /// dream. Returns Err(description) if the player falls or times out.
+    fn traverse(d: &Dream) -> Result<(), String> {
+        use crate::gameplay::{autopilot_velocity, JUMP_SPEED, KILL_Y, PLAYER_RADIUS};
+        use engine::ecs::Transform;
+        use engine::physics::{step, Collider, ColliderShape, PhysicsParams, RigidBody};
+        let mut world = hecs::World::new();
+        for b in d
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::Floor | BlockKind::Wall | BlockKind::Prop))
+        {
+            world.spawn((
+                Transform {
+                    position: b.pos,
+                    rotation: Quat::IDENTITY,
+                    scale: b.size,
+                },
+                Collider {
+                    shape: ColliderShape::Aabb {
+                        half_extents: b.size * 0.5,
+                    },
+                    is_trigger: false,
+                },
+            ));
+        }
+        let p = world.spawn((
+            Transform::from_position(d.spawn + Vec3::Y),
+            RigidBody::default(),
+            Collider {
+                shape: ColliderShape::Sphere {
+                    radius: PLAYER_RADIUS,
+                },
+                is_trigger: false,
+            },
+        ));
+        let params = PhysicsParams::default();
+        let route = &d.lucid_route;
+        let mut i = 0;
+        for frame in 0..60 * 120 {
+            let pos = world.get::<&Transform>(p).unwrap().position;
+            let grounded = world.get::<&RigidBody>(p).unwrap().grounded;
+            i = crate::gameplay::advance_waypoint(route.iter().map(|w| w.pos), i, pos, grounded);
+            let Some(wp) = route.get(i) else {
+                return Ok(());
+            };
+            {
+                let mut body = world.get::<&mut RigidBody>(p).unwrap();
+                let v = autopilot_velocity(pos, wp.pos);
+                body.velocity.x = v.x;
+                body.velocity.z = v.z;
+                if wp.jump && body.grounded {
+                    body.velocity.y = JUMP_SPEED;
+                }
+            }
+            step(&mut world, 1.0 / 60.0, &params);
+            let pos = world.get::<&Transform>(p).unwrap().position;
+            if pos.y < KILL_Y {
+                let prev = route[i.saturating_sub(1)];
+                return Err(format!(
+                    "fell at frame {frame} heading to waypoint {i}/{} {:?} (jump={}) from {:?}",
+                    route.len(),
+                    wp.pos,
+                    wp.jump,
+                    prev.pos
+                ));
+            }
+        }
+        Err(format!("timed out at waypoint {i}/{}", route.len()))
+    }
+
+    #[test]
+    fn every_route_is_physically_traversable() {
+        let mut failures = Vec::new();
+        for theme in ALL_THEMES {
+            for seed in 0..25 {
+                for depth in [0, 3, 10] {
+                    let d = generate(theme, seed, depth, Some(PropKind::Pillar), true);
+                    if let Err(e) = traverse(&d) {
+                        failures.push(format!("{theme:?} seed={seed} depth={depth}: {e}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn strangeness_grows_with_depth_and_caps() {
         let a = strangeness(DreamTheme::LiminalOffice, 0);

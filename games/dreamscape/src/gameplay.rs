@@ -56,6 +56,28 @@ pub fn autopilot_velocity(pos: Vec3, target: Vec3) -> Vec3 {
     Vec3::new(target.x - pos.x, 0.0, target.z - pos.z).normalize_or_zero() * MOVE_SPEED
 }
 
+/// Autopilot waypoint progress. A waypoint only counts as reached once the
+/// player is standing on it — reaching it mid-jump and turning toward the next
+/// one while still airborne drifts you off the edge of small platforms.
+pub fn advance_waypoint(
+    route: impl Iterator<Item = Vec3>,
+    mut index: usize,
+    pos: Vec3,
+    grounded: bool,
+) -> usize {
+    if !grounded {
+        return index;
+    }
+    for wp in route.skip(index) {
+        if Vec3::new(wp.x - pos.x, 0.0, wp.z - pos.z).length() < 0.3 {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    index
+}
+
 pub fn follow_camera(current: Vec3, player: Vec3, dt: f32) -> Vec3 {
     current.lerp(
         player + CAMERA_OFFSET,
