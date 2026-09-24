@@ -23,6 +23,7 @@ use engine::texture::{GpuTexture, TextureFilter};
 mod dream;
 mod enemy_ai;
 mod gameplay;
+mod records;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, TexSpec, LUCIDITY_TO_WAKE,
@@ -567,7 +568,7 @@ impl Game for DreamscapeGame {
                     .unwrap_or(false)
             });
         if caught {
-            self.director.lose_lucidity();
+            self.director.caught();
             self.update_title(ctx);
         }
         if caught || gameplay::fell_out(self.player_position) {

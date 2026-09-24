@@ -20,6 +20,8 @@ pub struct DreamDirector {
     pub lucidity: u32,
     /// Whether the current dream has a shard slot (a shard, or the wake door once lucid).
     pub has_shard: bool,
+    /// A shard was collected in the CURRENT dream (droppable if caught).
+    pub shard_this_dream: bool,
 }
 
 impl DreamDirector {
@@ -34,6 +36,7 @@ impl DreamDirector {
             next,
             lucidity: 0,
             has_shard: false,
+            shard_this_dream: false,
         }
     }
 
@@ -50,10 +53,18 @@ impl DreamDirector {
 
     pub fn collect_shard(&mut self) {
         self.lucidity += 1;
+        self.shard_this_dream = true;
     }
 
-    pub fn lose_lucidity(&mut self) {
+    /// Caught by the dream: drop the shard picked up in THIS dream, if any.
+    /// Returns true if a shard was lost (the game respawns it).
+    pub fn caught(&mut self) -> bool {
+        if !self.shard_this_dream {
+            return false;
+        }
+        self.shard_this_dream = false;
         self.lucidity = self.lucidity.saturating_sub(1);
+        true
     }
 
     /// Take the cyan portal: one dream deeper. `None` once you are awake.
@@ -62,6 +73,7 @@ impl DreamDirector {
             return None;
         }
         self.depth += 1;
+        self.shard_this_dream = false;
         self.theme = self.next;
         self.next = roll(self.theme, &mut self.rng);
         // Always roll, so the shard sequence doesn't depend on lucidity.
@@ -73,6 +85,7 @@ impl DreamDirector {
     /// Take the wake door.
     pub fn wake(&mut self) {
         self.depth += 1;
+        self.shard_this_dream = false;
         self.theme = DreamTheme::Awakening;
         self.has_shard = false;
     }
@@ -160,8 +173,8 @@ mod tests {
     #[test]
     fn lucidity_and_waking() {
         let mut d = DreamDirector::new(1);
-        d.lose_lucidity();
-        assert_eq!(d.lucidity, 0, "lucidity never goes negative");
+        assert!(!d.caught(), "nothing to lose at the start");
+        assert_eq!(d.lucidity, 0);
         for _ in 0..LUCIDITY_TO_WAKE {
             assert!(!d.lucid());
             d.collect_shard();
@@ -174,5 +187,23 @@ mod tests {
         assert_eq!(d.theme, DreamTheme::Awakening);
         assert_eq!(d.depth, depth + 1);
         assert_eq!(d.descend(), None, "waking ends the run");
+    }
+
+    #[test]
+    fn getting_caught_only_costs_this_dreams_shard() {
+        let mut d = DreamDirector::new(1);
+        d.descend();
+        d.collect_shard();
+        d.descend(); // that shard is now banked
+        assert!(!d.caught(), "banked shards are safe");
+        assert_eq!(d.lucidity, 1);
+        d.collect_shard();
+        assert_eq!(d.lucidity, 2);
+        assert!(d.caught(), "the shard from this dream is dropped");
+        assert_eq!(d.lucidity, 1);
+        assert!(!d.caught(), "the same shard can't be lost twice");
+        d.collect_shard(); // picked it back up
+        d.wake();
+        assert!(!d.caught(), "waking banks everything");
     }
 }

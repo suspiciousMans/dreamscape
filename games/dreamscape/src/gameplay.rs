@@ -97,6 +97,28 @@ pub fn profile_index(profiles: &[ShaderProfile], name: &str) -> Option<usize> {
     profiles.iter().position(|p| p.name == name)
 }
 
+/// Seconds of immunity to enemies after any respawn.
+pub const RESPAWN_GRACE: f32 = 1.5;
+pub const FLASH_FADE_PER_SEC: f32 = 2.5;
+
+/// A full-screen colour flash that fades out (fed to the post-process tint).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Flash {
+    pub color: [f32; 3],
+    pub strength: f32,
+}
+
+impl Flash {
+    pub fn trigger(&mut self, color: [f32; 3], strength: f32) {
+        self.color = color;
+        self.strength = strength.clamp(0.0, 1.0);
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        self.strength = (self.strength - FLASH_FADE_PER_SEC * dt).max(0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +291,35 @@ mod tests {
         let p = player(&mut world, Vec3::new(0.0, 0.5, 0.0));
         let overlaps = step(&mut world, 1.0 / 60.0, &PhysicsParams::default());
         assert!(overlaps.contains(&(p, portal)), "overlaps = {overlaps:?}");
+    }
+
+    #[test]
+    fn flash_clamps_and_fades_to_zero() {
+        let mut f = Flash::default();
+        f.trigger([1.0, 0.0, 0.0], 3.0);
+        assert_eq!(f.strength, 1.0, "strength clamps to 1");
+        assert_eq!(f.color, [1.0, 0.0, 0.0]);
+        f.tick(0.1);
+        assert!(f.strength < 1.0 && f.strength > 0.0);
+        for _ in 0..100 {
+            f.tick(0.1);
+        }
+        assert_eq!(f.strength, 0.0, "never goes negative");
+    }
+
+    #[test]
+    fn flash_is_gone_within_half_a_second() {
+        let mut f = Flash::default();
+        f.trigger([0.0, 1.0, 1.0], 1.0);
+        for _ in 0..30 {
+            f.tick(1.0 / 60.0);
+        }
+        assert!(f.strength < 0.01, "strength after 0.5s = {}", f.strength);
+    }
+
+    #[test]
+    fn grace_outlasts_an_enemy_crossing_the_spawn_cell() {
+        // Enemies move at 3 u/s; crossing one cell takes CELL/3 = 1s.
+        assert!(RESPAWN_GRACE > CELL / 3.0);
     }
 }
