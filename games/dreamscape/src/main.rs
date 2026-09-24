@@ -21,6 +21,7 @@ use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::EguiState;
 
+mod booklet_ui;
 mod cards;
 mod dream;
 mod enemy_ai;
@@ -117,7 +118,14 @@ pub struct DreamscapeGame {
     title_age: f32,
     dream_name: String,
     dream_whisper: String,
-    journal: Vec<String>,
+    run_log: Vec<cards::DreamRecord>,
+    booklet: cards::Booklet,
+    booklet_path: std::path::PathBuf,
+    booklet_page: usize,
+    /// Mode to return to when the booklet closes.
+    booklet_return: hud::Mode,
+    journal_status: Option<String>,
+    card_art: booklet_ui::CardArt,
     run_seed: u64,
     restart_requested: bool,
     fonts_installed: bool,
@@ -158,7 +166,13 @@ impl DreamscapeGame {
             title_age: 0.0,
             dream_name: String::new(),
             dream_whisper: String::new(),
-            journal: Vec::new(),
+            run_log: Vec::new(),
+            booklet: cards::load(&cards::booklet_path()),
+            booklet_path: cards::booklet_path(),
+            booklet_page: 0,
+            booklet_return: hud::Mode::Journal,
+            journal_status: None,
+            card_art: booklet_ui::CardArt::default(),
             run_seed,
             restart_requested: false,
             fonts_installed: false,
@@ -282,9 +296,67 @@ impl DreamscapeGame {
                 )
                 .length()
             }),
-            journal: self.journal.clone(),
+            journal: if self.mode == hud::Mode::Journal {
+                self.run_log
+                    .iter()
+                    .map(|r| {
+                        (
+                            format!("{:>3}  {}", r.depth, r.name),
+                            cards::card_from(r).rarity,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            journal_status: self.journal_status.clone(),
+            booklet_cards: if self.mode == hud::Mode::Booklet {
+                let all: Vec<&cards::Card> = self.booklet.cards().collect();
+                all[cards::page_range(all.len(), self.booklet_page)]
+                    .iter()
+                    .map(|c| (*c).clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            booklet_page: self.booklet_page,
+            booklet_pages: cards::page_count(self.booklet.card_count()),
+            booklet_total: self.booklet.card_count(),
             seed: self.run_seed,
         }
+    }
+
+    fn save_journal(&mut self) {
+        if self.booklet.has_run(self.run_seed) {
+            log::info!("Booklet: run {} already saved", self.run_seed);
+            self.journal_status = Some("already pressed into your booklet".into());
+            return;
+        }
+        let added = self.booklet.add_run(self.run_seed, &self.run_log);
+        match cards::save(&self.booklet_path, &self.booklet) {
+            Ok(()) => {
+                log::info!(
+                    "Booklet: pressed {added} cards (total {}) -> {:?}",
+                    self.booklet.card_count(),
+                    self.booklet_path
+                );
+                self.journal_status = Some(format!(
+                    "pressed {added} cards · booklet holds {}",
+                    self.booklet.card_count()
+                ));
+            }
+            Err(e) => {
+                log::error!("could not save booklet {:?}: {e}", self.booklet_path);
+                self.booklet.runs.pop();
+                self.journal_status = Some("the ink wouldn't take (save failed, see log)".into());
+            }
+        }
+    }
+
+    fn open_booklet(&mut self) {
+        self.booklet_return = self.mode;
+        self.booklet_page = cards::page_count(self.booklet.card_count()) - 1;
+        self.mode = hud::Mode::Booklet;
     }
 
     fn restart(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
@@ -296,7 +368,8 @@ impl DreamscapeGame {
         );
         self.director = DreamDirector::new(self.run_seed);
         self.motif = None;
-        self.journal.clear();
+        self.run_log.clear();
+        self.journal_status = None;
         self.mode = hud::Mode::Playing;
         self.load_dream(ctx)
     }
@@ -393,8 +466,17 @@ impl DreamscapeGame {
         self.dream_name = dream::dream_name(theme, dream.seed);
         self.dream_whisper = dream::whisper(theme, dream.seed);
         self.title_age = 0.0;
-        self.journal
-            .push(format!("{:>3}  {}", dream.depth, self.dream_name));
+        self.run_log.push(cards::DreamRecord {
+            theme,
+            seed: dream.seed,
+            depth: dream.depth,
+            name: self.dream_name.clone(),
+            whisper: self.dream_whisper.clone(),
+            strangeness: dream.strangeness,
+            enemies: dream.patrols.len() as u32,
+            shard_taken: false,
+            art: dream.surfaces.floor.clone(),
+        });
         log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(
             "Dream depth={} {:?} seed={} strangeness={:.2} lucidity={}/{} blocks={} enemies={} route={} shard={:?} portal={:?} motif={:?} wake_door={} next={:?} patterns=({:?},{:?},{:?})",
@@ -679,6 +761,27 @@ impl Game for DreamscapeGame {
                     self.restart_requested = true;
                     return;
                 }
+                (hud::Mode::Journal, Keycode::S) => {
+                    self.save_journal();
+                    return;
+                }
+                (hud::Mode::Journal | hud::Mode::Paused, Keycode::B) => {
+                    self.open_booklet();
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::Escape) => {
+                    self.mode = self.booklet_return;
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::A | Keycode::Left) => {
+                    self.booklet_page = self.booklet_page.saturating_sub(1);
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::D | Keycode::Right) => {
+                    let last = cards::page_count(self.booklet.card_count()) - 1;
+                    self.booklet_page = (self.booklet_page + 1).min(last);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -713,7 +816,7 @@ impl Game for DreamscapeGame {
         }
         // E2E runs: show the journal briefly (for screenshots), then exit.
         if self.autopilot
-            && self.mode == hud::Mode::Journal
+            && matches!(self.mode, hud::Mode::Journal | hud::Mode::Booklet)
             && self.title_age
                 > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
                     .ok()
@@ -776,6 +879,9 @@ impl Game for DreamscapeGame {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.tone(110.0, 0.35);
             if self.director.caught() {
+                if let Some(r) = self.run_log.last_mut() {
+                    r.shard_taken = false;
+                }
                 log::info!(
                     "Shard dropped ({}/{}) — it's back where you found it",
                     self.director.lucidity,
@@ -812,6 +918,9 @@ impl Game for DreamscapeGame {
                 self.flash.trigger([0.3, 1.0, 1.0], 0.6);
                 self.tone(880.0, 0.2);
                 self.director.collect_shard();
+                if let Some(r) = self.run_log.last_mut() {
+                    r.shard_taken = true;
+                }
                 log::info!(
                     "Lucidity shard collected at depth {} ({}/{})",
                     self.director.depth,
@@ -843,6 +952,10 @@ impl Game for DreamscapeGame {
                 log::info!("Game complete! You woke up.");
                 self.mode = hud::Mode::Journal;
                 self.title_age = 0.0;
+                if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+                    self.save_journal();
+                    self.open_booklet();
+                }
             }
         }
         Ok(())
@@ -996,12 +1109,13 @@ impl Game for DreamscapeGame {
             },
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
+        let card_art = &mut self.card_art;
         if let Some(ui) = self.ui.as_mut() {
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
                 }
-                hud::draw(egui_ctx, &hud_view);
+                hud::draw(egui_ctx, &hud_view, card_art);
             });
             ui.paint(drawable_size, output);
         }

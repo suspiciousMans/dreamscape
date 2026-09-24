@@ -14,6 +14,7 @@ pub enum Mode {
     Playing,
     Paused,
     Journal,
+    Booklet,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -61,7 +62,13 @@ pub struct HudView {
     pub shard_dir: Option<[f32; 2]>,
     /// World distance to the shard / wake door (shown under the compass).
     pub shard_dist: Option<f32>,
-    pub journal: Vec<String>,
+    pub journal: Vec<(String, crate::cards::Rarity)>,
+    /// Shown on the journal after pressing [s].
+    pub journal_status: Option<String>,
+    pub booklet_cards: Vec<crate::cards::Card>,
+    pub booklet_page: usize,
+    pub booklet_pages: usize,
+    pub booklet_total: usize,
     pub seed: u64,
 }
 
@@ -123,11 +130,11 @@ pub fn hue(t: f32) -> [u8; 3] {
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
 }
 
-const INK: [u8; 3] = [245, 240, 255];
+pub(crate) const INK: [u8; 3] = [245, 240, 255];
 const GHOST_RED: [u8; 3] = [255, 40, 110];
 const GHOST_CYAN: [u8; 3] = [40, 230, 255];
 
-fn rgba(rgb: [u8; 3], alpha: f32) -> Color32 {
+pub(crate) fn rgba(rgb: [u8; 3], alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(
         rgb[0],
         rgb[1],
@@ -158,7 +165,7 @@ const ARROW_PX: f32 = 4.0;
 /// wobble, drawn as a red ghost, a cyan ghost, then the core. The split
 /// widens as the dream gets stranger.
 #[allow(clippy::too_many_arguments)]
-fn glitch_text(
+pub(crate) fn glitch_text(
     p: &egui::Painter,
     at: Pos2,
     centered: bool,
@@ -202,15 +209,16 @@ fn glitch_text(
     }
 }
 
-pub fn draw(ctx: &egui::Context, v: &HudView) {
+pub fn draw(ctx: &egui::Context, v: &HudView, art: &mut crate::booklet_ui::CardArt) {
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("dream_hud"),
     ));
     let screen = ctx.screen_rect();
-    if v.mode == Mode::Journal {
-        journal(&p, screen, v);
-        return;
+    match v.mode {
+        Mode::Journal => return journal(&p, screen, v),
+        Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
+        Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);
     lucidity_eye(&p, screen, v);
@@ -453,6 +461,13 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::monospace(22.0),
         rgba(INK, 0.5),
     );
+    p.text(
+        c + Vec2::new(0.0, 80.0),
+        Align2::CENTER_TOP,
+        "[b] dream booklet",
+        FontId::monospace(22.0),
+        rgba(INK, 0.5),
+    );
 }
 
 fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -475,22 +490,44 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::monospace(20.0),
         rgba(INK, 0.55),
     );
-    let first = v.journal.len().saturating_sub(16);
-    for (i, line) in v.journal[first..].iter().enumerate() {
+    let first = v.journal.len().saturating_sub(14);
+    for (i, (line, rarity)) in v.journal[first..].iter().enumerate() {
         // Entries surface one by one, like remembering.
         let a = ((v.title_age - 0.12 * i as f32) / 0.4).clamp(0.0, 1.0);
+        let y = screen.top() + 148.0 + 26.0 * i as f32;
         p.text(
-            Pos2::new(cx - 190.0, screen.top() + 148.0 + 26.0 * i as f32),
+            Pos2::new(cx - 300.0, y),
             Align2::LEFT_TOP,
             line,
             FontId::monospace(24.0),
             rgba(INK, a),
         );
+        p.text(
+            Pos2::new(cx + 330.0, y),
+            Align2::RIGHT_TOP,
+            rarity.label(),
+            FontId::monospace(20.0),
+            rgba(crate::booklet_ui::rarity_color(*rarity, v.time), a),
+        );
     }
+    if let Some(status) = &v.journal_status {
+        p.text(
+            Pos2::new(cx, screen.bottom() - 90.0),
+            Align2::CENTER_TOP,
+            status,
+            FontId::monospace(22.0),
+            rgba([255, 210, 80], 0.9),
+        );
+    }
+    let keys = if v.journal_status.is_some() {
+        "[b] booklet   [r] dream again   [esc] wake for real"
+    } else {
+        "[s] press into booklet   [b] booklet   [r] dream again   [esc] wake"
+    };
     p.text(
         Pos2::new(cx, screen.bottom() - 54.0),
         Align2::CENTER_TOP,
-        "[r] dream again        [esc] wake for real",
+        keys,
         FontId::monospace(22.0),
         rgba(INK, 0.5 + 0.3 * (v.time * 2.0).sin()),
     );
