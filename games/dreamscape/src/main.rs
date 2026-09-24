@@ -31,6 +31,7 @@ mod pixels;
 mod records;
 mod reveal_ui;
 mod store;
+mod transition;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, Shape, TexSpec,
