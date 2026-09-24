@@ -1,6 +1,10 @@
 //! Dream trading cards and the booklet they're pressed into. Pure data + RON
 //! persistence; drawing lives in `booklet_ui.rs`.
 //!
+//! Waking doesn't keep every dream: each one is *remembered* with a chance
+//! that grows with its rarity, depth, whether you were lucid, and the
+//! DEEP MEMORY perk. Dreams that fade leave Dream Dust behind instead.
+//!
 //! Save-format note: any field added to `Card`/`SavedRun`/`Booklet` later MUST
 //! carry `#[serde(default)]`, or existing booklets stop parsing (they'd be
 //! quarantined to `.ron.corrupt`, not lost — but still).
@@ -154,6 +158,73 @@ pub fn card_from(r: &DreamRecord) -> Card {
 
 pub const CARDS_PER_PAGE: usize = 3;
 
+/// Base chance to remember a dream of each rarity.
+pub fn base_memory(r: Rarity) -> f32 {
+    match r {
+        Rarity::Faint => 0.25,
+        Rarity::Hazy => 0.40,
+        Rarity::Vivid => 0.60,
+        Rarity::Lucid => 0.80,
+        Rarity::Prophetic => 0.95,
+    }
+}
+
+/// Everything that nudges the odds besides rarity.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryBoost {
+    pub lucid_wake: bool,
+    pub deep_memory: bool,
+}
+
+pub fn memory_chance(r: Rarity, depth: u32, boost: MemoryBoost) -> f32 {
+    let mut p = base_memory(r) + 0.02 * depth.min(10) as f32;
+    if boost.lucid_wake {
+        p += 0.10;
+    }
+    if boost.deep_memory {
+        p += 0.25;
+    }
+    p.min(1.0)
+}
+
+/// Dust a faded dream leaves behind.
+pub fn fade_dust(r: Rarity) -> u32 {
+    match r {
+        Rarity::Faint => 3,
+        Rarity::Hazy => 5,
+        Rarity::Vivid => 8,
+        Rarity::Lucid => 12,
+        Rarity::Prophetic => 20,
+    }
+}
+
+/// Dust for the run itself: depth reached and shards gathered.
+pub fn run_dust(deepest: u32, shards: u32) -> u32 {
+    2 * deepest.min(50) + 5 * shards.min(50)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recalled {
+    pub card: Card,
+    pub remembered: bool,
+}
+
+/// One slot in the run's pack: the card as it would be pressed, and whether
+/// the memory held. The waking dream is always remembered: you're awake.
+/// Deterministic per dream seed so the reveal can be replayed exactly.
+pub fn recall(records: &[DreamRecord], boost: MemoryBoost) -> Vec<Recalled> {
+    records
+        .iter()
+        .map(|r| {
+            let card = card_from(r);
+            let roll = StdRng::seed_from_u64(r.seed ^ 0x3E30_12AA).gen::<f32>();
+            let remembered = r.theme == DreamTheme::Awakening
+                || roll < memory_chance(card.rarity, r.depth, boost);
+            Recalled { card, remembered }
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedRun {
     pub run_seed: u64,
@@ -164,6 +235,9 @@ pub struct SavedRun {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Booklet {
     pub runs: Vec<SavedRun>,
+    /// Dream Dust and Lucid Store purchases.
+    #[serde(default)]
+    pub stash: crate::store::Stash,
 }
 
 impl Booklet {
@@ -179,14 +253,39 @@ impl Booklet {
         self.runs.iter().any(|r| r.run_seed == run_seed)
     }
 
-    /// Presses a finished run into the booklet. Returns how many cards were added.
+    /// Presses the remembered dreams of a finished run into the booklet and
+    /// banks the dust. Returns (cards added, dust earned).
+    pub fn press(&mut self, run_seed: u64, pack: &[Recalled], shards: u32) -> (usize, u32) {
+        let deepest = pack.iter().map(|r| r.card.depth).max().unwrap_or(0);
+        let dust = run_dust(deepest, shards)
+            + pack
+                .iter()
+                .filter(|r| !r.remembered)
+                .map(|r| fade_dust(r.card.rarity))
+                .sum::<u32>();
+        let cards: Vec<Card> = pack
+            .iter()
+            .filter(|r| r.remembered)
+            .map(|r| r.card.clone())
+            .collect();
+        let added = self.push_cards(run_seed, deepest, cards);
+        self.stash.dust += dust;
+        (added, dust)
+    }
+
+    /// Presses every dream (no fading). Kept for tests and old callers.
     pub fn add_run(&mut self, run_seed: u64, records: &[DreamRecord]) -> usize {
+        let deepest = records.iter().map(|r| r.depth).max().unwrap_or(0);
+        let cards = records.iter().map(card_from).collect();
+        self.push_cards(run_seed, deepest, cards)
+    }
+
+    fn push_cards(&mut self, run_seed: u64, deepest: u32, cards: Vec<Card>) -> usize {
         let mut next = self.card_count() as u32 + 1;
         let mut seen: HashSet<String> = self.cards().map(|c| c.name.clone()).collect();
-        let cards: Vec<Card> = records
-            .iter()
-            .map(|r| {
-                let mut c = card_from(r);
+        let cards: Vec<Card> = cards
+            .into_iter()
+            .map(|mut c| {
                 c.number = next;
                 next += 1;
                 if !seen.insert(c.name.clone()) {
@@ -197,7 +296,6 @@ impl Booklet {
             })
             .collect();
         let added = cards.len();
-        let deepest = records.iter().map(|r| r.depth).max().unwrap_or(0);
         self.runs.push(SavedRun {
             run_seed,
             deepest,
@@ -439,5 +537,91 @@ mod tests {
             "this is not ron (("
         );
         let _ = std::fs::remove_file(&aside);
+    }
+
+    #[test]
+    fn memory_odds_rise_with_rarity_depth_lucidity_and_the_perk() {
+        let none = MemoryBoost::default();
+        let all = MemoryBoost {
+            lucid_wake: true,
+            deep_memory: true,
+        };
+        let mut prev = 0.0;
+        for r in [
+            Rarity::Faint,
+            Rarity::Hazy,
+            Rarity::Vivid,
+            Rarity::Lucid,
+            Rarity::Prophetic,
+        ] {
+            let p = memory_chance(r, 0, none);
+            assert!(p > prev, "{r:?}");
+            prev = p;
+            assert!(memory_chance(r, 8, none) >= p);
+            assert!(memory_chance(r, 0, all) >= p);
+            assert!(memory_chance(r, 99, all) <= 1.0);
+        }
+    }
+
+    #[test]
+    fn some_dreams_fade_and_waking_never_does() {
+        let records: Vec<DreamRecord> = (0..60)
+            .map(|s| {
+                record(
+                    if s % 6 == 5 { Awakening } else { Garden },
+                    s,
+                    (s % 6) as u32,
+                    0.3,
+                    false,
+                )
+            })
+            .collect();
+        let pack = recall(&records, MemoryBoost::default());
+        let kept = pack.iter().filter(|r| r.remembered).count();
+        assert!(kept > 10 && kept < 55, "kept {kept}/60");
+        for r in &pack {
+            if r.card.theme == Awakening {
+                assert!(r.remembered);
+            }
+        }
+        assert_eq!(
+            pack,
+            recall(&records, MemoryBoost::default()),
+            "reveal replays exactly"
+        );
+        let boosted = recall(
+            &records,
+            MemoryBoost {
+                lucid_wake: true,
+                deep_memory: true,
+            },
+        );
+        assert!(boosted.iter().filter(|r| r.remembered).count() >= kept);
+    }
+
+    #[test]
+    fn pressing_keeps_the_remembered_and_turns_the_rest_into_dust() {
+        let records = [
+            record(Lobby, 1, 0, 0.0, false),
+            record(Garden, 2, 1, 0.3, true),
+            record(Awakening, 3, 2, 0.0, false),
+        ];
+        let mut pack = recall(&records, MemoryBoost::default());
+        pack[0].remembered = false;
+        pack[1].remembered = true;
+        let mut b = Booklet::default();
+        let (added, dust) = b.press(7, &pack, 1);
+        assert_eq!(added, 2);
+        assert_eq!(dust, run_dust(2, 1) + fade_dust(pack[0].card.rarity));
+        assert_eq!(b.stash.dust, dust);
+        assert_eq!(b.cards().map(|c| c.number).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(b.has_run(7));
+    }
+
+    #[test]
+    fn old_booklets_without_a_stash_still_load() {
+        let old = "(runs: [(run_seed: 1, deepest: 0, cards: [])])";
+        let b: Booklet = ron::from_str(old).unwrap();
+        assert_eq!(b.stash, crate::store::Stash::default());
     }
 }

@@ -29,6 +29,7 @@ mod gameplay;
 mod hud;
 mod pixels;
 mod records;
+mod store;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, Shape, TexSpec,
