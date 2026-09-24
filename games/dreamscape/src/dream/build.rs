@@ -2,6 +2,7 @@
 
 use super::grid::{Cell, Grid, P};
 use super::layout;
+use super::texture::{self as tex, Pattern};
 use super::theme::{DreamTheme, PropKind, ThemeSpec};
 use crate::gameplay::{CELL, SLAB};
 use engine::glam::{EulerRot, Quat, Vec3};
@@ -28,6 +29,9 @@ pub struct Block {
     pub pos: Vec3,
     pub size: Vec3,
     pub rotation: Quat,
+    /// Flat palette colour. Rendering now uses the dream's procedural
+    /// textures; kept as the per-block palette record the cohesion tests check.
+    #[allow(dead_code)]
     pub color: [u8; 4],
 }
 
@@ -60,10 +64,88 @@ pub struct Dream {
     pub atmosphere: Atmosphere,
     /// Where the previous dream's motif prop was placed, if any.
     pub motif_at: Option<Vec3>,
+    /// Depth-scaled weirdness, 0..=1. Drives colour spread, debris, texture
+    /// accents, and the shader's warp/hue-cycling intensity.
+    pub strangeness: f32,
+    pub surfaces: Surfaces,
+    /// Lucidity shard location (floor level), if this dream has one.
+    pub shard: Option<Vec3>,
+    /// Route spawn → shard → portal (equals `route` when there is no shard).
+    pub lucid_route: Vec<Waypoint>,
 }
 
-pub fn generate(theme: DreamTheme, seed: u64, depth: u32, motif: Option<PropKind>) -> Dream {
-    let spec = theme.spec();
+/// Everything needed to (re)build one procedural texture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TexSpec {
+    pub pattern: Pattern,
+    pub palette: Vec<[u8; 3]>,
+    pub bands: f32,
+    pub seed: u64,
+}
+
+impl TexSpec {
+    pub fn rgba(&self) -> Vec<u8> {
+        tex::generate(self.pattern, &self.palette, self.bands, self.seed)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Surfaces {
+    pub floor: TexSpec,
+    pub wall: TexSpec,
+    pub prop: TexSpec,
+    pub shard: TexSpec,
+}
+
+/// Dreams get stranger the deeper you go. Waking is always calm.
+pub fn strangeness(theme: DreamTheme, depth: u32) -> f32 {
+    if theme == DreamTheme::Awakening {
+        return 0.0;
+    }
+    (theme.spec().strangeness + depth as f32 * 0.07).min(1.0)
+}
+
+fn surface(base: &[[u8; 3]], spec: &ThemeSpec, rng: &mut StdRng) -> TexSpec {
+    let s = spec.strangeness;
+    let mut palette = base.to_vec();
+    if s > 0.3 {
+        let n = ((s * spec.accents.len() as f32).ceil() as usize).min(spec.accents.len());
+        palette.extend_from_slice(&spec.accents[..n]);
+    }
+    TexSpec {
+        pattern: *spec
+            .patterns
+            .choose(rng)
+            .expect("theme patterns are non-empty (theme tests)"),
+        palette,
+        bands: 1.0 + s * 3.0,
+        seed: rng.gen(),
+    }
+}
+
+/// The portal is a window into the NEXT dream: its floor pattern at full
+/// psychedelic intensity, so you see where you're going before you step in.
+pub fn portal_surface(next: DreamTheme, seed: u64) -> TexSpec {
+    let spec = next.spec();
+    let mut palette = spec.floor_colors.to_vec();
+    palette.extend_from_slice(spec.accents);
+    TexSpec {
+        pattern: spec.patterns[0],
+        palette,
+        bands: 3.0,
+        seed,
+    }
+}
+
+pub fn generate(
+    theme: DreamTheme,
+    seed: u64,
+    depth: u32,
+    motif: Option<PropKind>,
+    with_shard: bool,
+) -> Dream {
+    let mut spec = theme.spec();
+    spec.strangeness = strangeness(theme, depth);
     let mut rng = StdRng::seed_from_u64(seed);
     let layout = layout::generate(spec.layout, spec.grid_size, &mut rng);
     if layout.fallback {
@@ -73,7 +155,23 @@ pub fn generate(theme: DreamTheme, seed: u64, depth: u32, motif: Option<PropKind
     let path = grid
         .path(layout.spawn, layout.portal)
         .expect("layout::generate only returns connected layouts");
-    let on_path: HashSet<P> = path.iter().map(|&(p, _)| p).collect();
+    let mut on_path: HashSet<P> = path.iter().map(|&(p, _)| p).collect();
+
+    // Lucidity shard: an off-route detour, reachable, never blocked by props.
+    let shard_cell = if with_shard {
+        pick_shard(grid, &on_path, layout.spawn, &mut rng)
+    } else {
+        None
+    };
+    let lucid_path: Vec<(P, bool)> = match shard_cell {
+        Some(c) => {
+            let there = grid.path(layout.spawn, c).expect("shard chosen reachable");
+            let back = grid.path(c, layout.portal).expect("moves are symmetric");
+            there.into_iter().chain(back.into_iter().skip(1)).collect()
+        }
+        None => path.clone(),
+    };
+    on_path.extend(lucid_path.iter().map(|&(p, _)| p));
 
     let mut blocks = Vec::new();
     floor_slabs(grid, &spec, &mut rng, &mut blocks);
@@ -88,7 +186,26 @@ pub fn generate(theme: DreamTheme, seed: u64, depth: u32, motif: Option<PropKind
         &mut blocks,
     );
     decor(grid, &spec, &mut rng, &mut blocks);
+    let surfaces = Surfaces {
+        floor: surface(spec.floor_colors, &spec, &mut rng),
+        wall: surface(spec.wall_colors, &spec, &mut rng),
+        prop: surface(spec.prop_colors, &spec, &mut rng),
+        shard: TexSpec {
+            pattern: Pattern::Swirl,
+            palette: spec.accents.to_vec(),
+            bands: 2.0,
+            seed: rng.gen(),
+        },
+    };
     let portal = grid.world(layout.portal);
+    let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
+        p.iter()
+            .map(|&(c, jump)| Waypoint {
+                pos: grid.world(c),
+                jump,
+            })
+            .collect()
+    };
     blocks.push(Block {
         kind: BlockKind::Portal,
         pos: portal + Vec3::Y * PORTAL_SIZE.y * 0.5,
@@ -104,17 +221,32 @@ pub fn generate(theme: DreamTheme, seed: u64, depth: u32, motif: Option<PropKind
         blocks,
         spawn: grid.world(layout.spawn),
         portal,
-        route: path
-            .iter()
-            .map(|&(p, jump)| Waypoint {
-                pos: grid.world(p),
-                jump,
-            })
-            .collect(),
+        route: waypoints(&path),
+        lucid_route: waypoints(&lucid_path),
+        shard: shard_cell.map(|c| grid.world(c)),
         patrols: patrols(grid, &path, &spec, depth, &mut rng),
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
+        strangeness: spec.strangeness,
+        surfaces,
     }
+}
+
+/// A reachable floor cell off the direct route, biased toward far-away ones
+/// so fetching it is a real detour.
+fn pick_shard(grid: &Grid, on_path: &HashSet<P>, spawn: P, rng: &mut StdRng) -> Option<P> {
+    let mut candidates: Vec<(usize, P)> = grid
+        .cells_of(Cell::Floor)
+        .into_iter()
+        .filter(|c| !on_path.contains(c))
+        .filter_map(|c| grid.path(spawn, c).map(|p| (p.len(), c)))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort();
+    let far_half = &candidates[candidates.len() / 2..];
+    far_half.choose(rng).map(|&(_, c)| c)
 }
 
 fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
@@ -313,7 +445,10 @@ mod tests {
     #[test]
     fn same_seed_same_dream() {
         for theme in ALL_THEMES {
-            let (a, b) = (generate(theme, 7, 2, None), generate(theme, 7, 2, None));
+            let (a, b) = (
+                generate(theme, 7, 2, None, true),
+                generate(theme, 7, 2, None, true),
+            );
             assert_eq!(a.blocks.len(), b.blocks.len());
             for (x, y) in a.blocks.iter().zip(&b.blocks) {
                 assert_eq!((x.pos, x.color), (y.pos, y.color));
@@ -326,7 +461,7 @@ mod tests {
         for theme in ALL_THEMES {
             let distinct: HashSet<String> = (0..20)
                 .map(|s| {
-                    let d = generate(theme, s, 0, None);
+                    let d = generate(theme, s, 0, None, true);
                     format!(
                         "{}:{:?}",
                         d.blocks.len(),
@@ -349,7 +484,7 @@ mod tests {
     fn route_runs_spawn_to_portal_in_legal_hops() {
         for theme in ALL_THEMES {
             for seed in 0..100 {
-                let d = generate(theme, seed, 0, None);
+                let d = generate(theme, seed, 0, None, true);
                 assert_eq!(d.route.first().unwrap().pos, d.spawn);
                 assert_eq!(d.route.last().unwrap().pos, d.portal);
                 for hop in d.route.windows(2) {
@@ -368,7 +503,7 @@ mod tests {
     fn props_never_block_the_route() {
         for theme in ALL_THEMES {
             for seed in 0..100 {
-                let d = generate(theme, seed, 0, Some(PropKind::Machine));
+                let d = generate(theme, seed, 0, Some(PropKind::Machine), true);
                 for prop in d.blocks.iter().filter(|b| b.kind == BlockKind::Prop) {
                     for wp in &d.route {
                         let gap = (prop.pos - wp.pos).abs();
@@ -388,7 +523,7 @@ mod tests {
     #[test]
     fn solid_blocks_are_axis_aligned() {
         for theme in ALL_THEMES {
-            let d = generate(theme, 3, 0, None);
+            let d = generate(theme, 3, 0, None, true);
             for b in d.blocks.iter().filter(|b| b.kind != BlockKind::Decor) {
                 assert_eq!(
                     b.rotation,
@@ -405,7 +540,7 @@ mod tests {
         for theme in ALL_THEMES {
             let s = theme.spec();
             for seed in 0..20 {
-                for b in &generate(theme, seed, 0, None).blocks {
+                for b in &generate(theme, seed, 0, None, true).blocks {
                     let ok = match b.kind {
                         BlockKind::Floor => near_palette(b.color, s.floor_colors),
                         BlockKind::Wall => near_palette(b.color, s.wall_colors),
@@ -425,10 +560,10 @@ mod tests {
     #[test]
     fn enemies_only_where_allowed_and_never_near_spawn() {
         for seed in 0..100 {
-            assert!(generate(DreamTheme::Lobby, seed, 5, None)
+            assert!(generate(DreamTheme::Lobby, seed, 5, None, true)
                 .patrols
                 .is_empty());
-            let d = generate(DreamTheme::NightmareFactory, seed, 0, None);
+            let d = generate(DreamTheme::NightmareFactory, seed, 0, None, true);
             assert!(!d.patrols.is_empty(), "factory seed {seed} has no enemies");
             for (a, _) in &d.patrols {
                 let i = d
@@ -445,7 +580,7 @@ mod tests {
     fn atmosphere_stays_near_the_theme() {
         for theme in ALL_THEMES {
             let s = theme.spec();
-            let a = generate(theme, 11, 0, None).atmosphere;
+            let a = generate(theme, 11, 0, None, true).atmosphere;
             for i in 0..3 {
                 assert!((a.fog_color[i] - s.fog_color[i]).abs() <= 0.041);
                 assert!((a.ambient[i] - s.ambient[i]).abs() <= 0.041);
@@ -454,9 +589,86 @@ mod tests {
     }
 
     #[test]
+    fn strangeness_grows_with_depth_and_caps() {
+        let a = strangeness(DreamTheme::LiminalOffice, 0);
+        let b = strangeness(DreamTheme::LiminalOffice, 5);
+        assert!(b > a);
+        assert_eq!(strangeness(DreamTheme::LiminalOffice, 1000), 1.0);
+        assert_eq!(strangeness(DreamTheme::Awakening, 50), 0.0);
+    }
+
+    #[test]
+    fn deep_dreams_bleed_accent_colours_into_textures() {
+        let shallow = generate(DreamTheme::LiminalOffice, 4, 0, None, true);
+        let deep = generate(DreamTheme::LiminalOffice, 4, 12, None, true);
+        let acc = DreamTheme::LiminalOffice.spec().accents;
+        assert!(!shallow
+            .surfaces
+            .floor
+            .palette
+            .iter()
+            .any(|c| acc.contains(c)));
+        assert!(deep.surfaces.floor.palette.iter().any(|c| acc.contains(c)));
+        assert!(deep.surfaces.floor.bands > shallow.surfaces.floor.bands);
+    }
+
+    #[test]
+    fn surfaces_use_the_theme_patterns() {
+        for theme in ALL_THEMES {
+            let d = generate(theme, 21, 3, None, true);
+            let pats = theme.spec().patterns;
+            for s in [&d.surfaces.floor, &d.surfaces.wall, &d.surfaces.prop] {
+                assert!(pats.contains(&s.pattern), "{theme:?}: {:?}", s.pattern);
+            }
+        }
+    }
+
+    #[test]
+    fn shard_is_off_route_reachable_and_unblocked() {
+        let mut with_shard = 0;
+        for theme in ALL_THEMES {
+            for seed in 0..60 {
+                let d = generate(theme, seed, 2, Some(PropKind::Pillar), true);
+                let Some(shard) = d.shard else { continue };
+                with_shard += 1;
+                assert!(
+                    !d.route.iter().any(|w| w.pos == shard),
+                    "{theme:?}/{seed}: shard on route"
+                );
+                assert!(d.lucid_route.iter().any(|w| w.pos == shard));
+                assert_eq!(d.lucid_route.first().unwrap().pos, d.spawn);
+                assert_eq!(d.lucid_route.last().unwrap().pos, d.portal);
+                for hop in d.lucid_route.windows(2) {
+                    let dist = hop[0].pos.distance(hop[1].pos);
+                    let want = if hop[1].jump { 2.0 * CELL } else { CELL };
+                    assert!((dist - want).abs() < 1e-3, "{theme:?}/{seed}: hop {dist}");
+                }
+                for prop in d.blocks.iter().filter(|b| b.kind == BlockKind::Prop) {
+                    for wp in &d.lucid_route {
+                        let gap = (prop.pos - wp.pos).abs();
+                        let reach = prop.size * 0.5 + Vec3::splat(CELL * 0.5);
+                        assert!(
+                            gap.x >= reach.x - 1e-3 || gap.z >= reach.z - 1e-3,
+                            "{theme:?}/{seed}: prop blocks lucid route"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(with_shard > 250, "only {with_shard}/360 dreams got a shard");
+    }
+
+    #[test]
+    fn no_shard_when_not_asked() {
+        let d = generate(DreamTheme::Garden, 1, 1, None, false);
+        assert!(d.shard.is_none());
+        assert_eq!(d.lucid_route.len(), d.route.len());
+    }
+
+    #[test]
     fn previous_dreams_motif_appears_next_to_spawn() {
         for seed in 0..50 {
-            let d = generate(DreamTheme::Lobby, seed, 1, Some(PropKind::Tree));
+            let d = generate(DreamTheme::Lobby, seed, 1, Some(PropKind::Tree), true);
             let at = d.motif_at.expect("the lobby always has free floor");
             assert!(
                 at.distance(d.spawn) <= 2.0 * CELL + 1e-3,

@@ -13,6 +13,14 @@ uniform float uVertexSnapAmount;
 uniform float uFogStart;
 uniform float uFogEnd;
 
+// Dreamscape: acid-trip controls.
+uniform float uTime;
+// 0 = sober, 1 = fully melted. Scales every distortion below.
+uniform float uStrangeness;
+// > 0: texture coordinates come from world position (textures tile at this
+// many repeats per world unit instead of stretching over big slabs).
+uniform float uUVScale;
+
 // Fixed-size point light arrays (simple uniform arrays, not a UBO/SSBO —
 // plenty for a handful of level lights and keeps the shader trivial).
 uniform vec3 uPointLightPos[4];
@@ -28,9 +36,30 @@ out vec2 vUV;
 #endif
 out vec3 vLight;
 out float vFogFactor;
+out vec3 vWorld;
 
 void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vec3 worldNormal = normalize(mat3(uModel) * aNormal);
+
+    // World-space (tri-planar style) UVs, from the un-warped position so the
+    // pattern stays glued to the surface while the geometry breathes.
+    if (uUVScale > 0.0) {
+        vec3 n = abs(worldNormal);
+        vec2 uv = n.y > 0.5 ? worldPos.xz : (n.x > 0.5 ? worldPos.zy : worldPos.xy);
+        vUV = uv * uUVScale;
+    } else {
+        vUV = aUV;
+    }
+    vWorld = worldPos.xyz;
+
+    // The world breathes: slow travelling waves through every vertex.
+    float breathe = 0.12 * uStrangeness;
+    worldPos.xyz += breathe * vec3(
+        sin(uTime * 1.1 + worldPos.z * 0.45 + worldPos.y * 0.3),
+        sin(uTime * 0.8 + worldPos.x * 0.35) * 0.6,
+        sin(uTime * 1.3 + worldPos.x * 0.4 + worldPos.y * 0.25));
+
     vec4 viewPos = uView * worldPos;
     vec4 clipPos = uProj * viewPos;
 
@@ -42,10 +71,8 @@ void main() {
     }
 
     gl_Position = clipPos;
-    vUV = aUV;
 
     if (uLightingMode == 1) {
-        vec3 worldNormal = normalize(mat3(uModel) * aNormal);
         float ndotl = max(dot(worldNormal, normalize(uLightDir)), 0.0);
         vLight = uAmbientColor + vec3(ndotl);
 
@@ -57,11 +84,6 @@ void main() {
             vLight += uPointLightColor[i] * uPointLightIntensity[i] * pointNdotl * atten;
         }
 
-        // Baked static-light contribution — precomputed once per vertex by
-        // `Sandbox::bake_static_lighting` (Rust-side, same N-dot-L +
-        // attenuation formula as the dynamic loop above, just summed over
-        // every `is_static` light with no 4-light array limit). A never-baked
-        // mesh has `aColor == 0`, a pure no-op.
         vLight += aColor;
     } else {
         vLight = vec3(1.0);

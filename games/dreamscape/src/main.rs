@@ -24,7 +24,10 @@ mod dream;
 mod enemy_ai;
 mod gameplay;
 
-use dream::{Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, DREAMS_PER_RUN};
+use dream::{
+    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, TexSpec, LUCIDITY_TO_WAKE,
+    TEX_SIZE,
+};
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
 
@@ -32,6 +35,21 @@ const PROFILES_DIR: &str = "games/dreamscape/profiles";
 const PLAYER_COLOR: [u8; 4] = [255, 255, 255, 255];
 const ENEMY_COLOR: [u8; 4] = [200, 40, 40, 255];
 const ENEMY_SPEED: f32 = 3.0;
+const SHARD_SIZE: f32 = 0.8;
+const SHARD_SPIN: f32 = 2.0;
+
+/// Collect to become lucid.
+#[derive(Clone, Copy)]
+struct ShardMarker;
+/// Only appears once lucid: step through to wake up.
+#[derive(Clone, Copy)]
+struct WakeMarker;
+/// Spins in place (shards, wake door).
+#[derive(Clone, Copy)]
+struct Spin(f32);
+/// Texture repeats per world unit (0 = use mesh UVs).
+#[derive(Clone, Copy)]
+struct SurfaceUv(f32);
 
 fn init_logging() {
     let _ = env_logger::builder()
@@ -59,6 +77,9 @@ pub struct DreamscapeGame {
     render_params: Option<RenderParams>,
     cube: Option<Arc<GpuMesh>>,
     textures: HashMap<[u8; 4], Arc<GpuTexture>>,
+    /// Per-dream procedural textures; destroyed when the dream changes.
+    dream_textures: Vec<Arc<GpuTexture>>,
+    time: f32,
     audio: Option<AudioContext>,
 
     world: World,
@@ -88,6 +109,8 @@ impl DreamscapeGame {
             render_params: None,
             cube: None,
             textures: HashMap::new(),
+            dream_textures: Vec::new(),
+            time: 0.0,
             audio: None,
             world: World::new(),
             director: DreamDirector::new(run_seed),
@@ -115,6 +138,40 @@ impl DreamscapeGame {
                 )
             })
             .clone()
+    }
+
+    fn upload_surface(
+        &mut self,
+        gl: &engine::glow::Context,
+        spec: &TexSpec,
+    ) -> anyhow::Result<Arc<GpuTexture>> {
+        let tex = Arc::new(GpuTexture::from_rgba8(
+            gl,
+            &spec.rgba(),
+            TEX_SIZE,
+            TEX_SIZE,
+            TextureFilter::Nearest,
+        )?);
+        self.dream_textures.push(tex.clone());
+        Ok(tex)
+    }
+
+    fn update_title(&self, ctx: &mut Context) {
+        let theme = self.director.theme;
+        let title = if theme == DreamTheme::Awakening {
+            "Dreamscape — waking up...".to_string()
+        } else if self.director.lucid() {
+            format!(
+                "Dreamscape — depth {} — LUCID: find the white door to wake",
+                self.director.depth
+            )
+        } else {
+            format!(
+                "Dreamscape — depth {} — lucidity {}/{}",
+                self.director.depth, self.director.lucidity, LUCIDITY_TO_WAKE
+            )
+        };
+        let _ = ctx.platform.window.set_title(&title);
     }
 
     fn apply_atmosphere(
@@ -160,21 +217,38 @@ impl DreamscapeGame {
             self.director.dream_seed(),
             self.director.depth,
             self.motif,
+            self.director.has_shard,
         );
+        let wake_door = self.director.lucid() && dream.shard.is_some();
         log::info!(
-            "Dream {}/{}: {:?} seed={} blocks={} enemies={} route={} portal={:?} motif={:?}",
-            dream.depth + 1,
-            DREAMS_PER_RUN,
+            "Dream depth={} {:?} seed={} strangeness={:.2} lucidity={}/{} blocks={} enemies={} route={} shard={:?} portal={:?} motif={:?} wake_door={} next={:?} patterns=({:?},{:?},{:?})",
+            dream.depth,
             dream.theme,
             dream.seed,
+            dream.strangeness,
+            self.director.lucidity,
+            LUCIDITY_TO_WAKE,
             dream.blocks.len(),
             dream.patrols.len(),
             dream.route.len(),
+            dream.shard,
             dream.portal,
             dream.motif_at,
+            wake_door,
+            self.director.next,
+            dream.surfaces.floor.pattern,
+            dream.surfaces.wall.pattern,
+            dream.surfaces.prop.pattern,
         );
 
         self.world.clear();
+        {
+            let gl = ctx.gl();
+            for tex in self.dream_textures.drain(..) {
+                // Safe: world.clear() dropped every entity holding these.
+                unsafe { tex.destroy(gl) };
+            }
+        }
         self.enemies.clear();
         self.player = None;
         self.route_index = 0;
@@ -183,8 +257,29 @@ impl DreamscapeGame {
 
         let gl = ctx.gl();
         let cube = self.cube.clone().context("cube mesh not uploaded")?;
+        let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
+        let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
+        let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
+        let shard_tex = self.upload_surface(gl, &dream.surfaces.shard)?;
+        let preview = if theme == DreamTheme::Awakening {
+            DreamTheme::Awakening
+        } else {
+            self.director.next
+        };
+        let portal_tex =
+            self.upload_surface(gl, &dream::portal_surface(preview, dream.seed ^ 0x5EED))?;
+        let wake_tex = self.upload_surface(
+            gl,
+            &dream::portal_surface(DreamTheme::Awakening, dream.seed),
+        )?;
+        let per_cell = 1.0 / gameplay::CELL;
         for block in &dream.blocks {
-            let texture = self.texture(gl, block.color);
+            let (texture, uv) = match block.kind {
+                BlockKind::Floor => (floor_tex.clone(), per_cell),
+                BlockKind::Wall => (wall_tex.clone(), per_cell),
+                BlockKind::Prop | BlockKind::Decor => (prop_tex.clone(), 0.5),
+                BlockKind::Portal => (portal_tex.clone(), 0.5),
+            };
             let entity = self.world.spawn((
                 Transform {
                     position: block.pos,
@@ -195,6 +290,7 @@ impl DreamscapeGame {
                     mesh: cube.clone(),
                     texture: Some(texture),
                 },
+                SurfaceUv(uv),
             ));
             let half_extents = block.size * 0.5;
             match block.kind {
@@ -224,6 +320,42 @@ impl DreamscapeGame {
                         )
                         .expect("entity was just spawned");
                 }
+            }
+        }
+
+        if let Some(at) = dream.shard {
+            let (size, tex, spin) = if wake_door {
+                (Vec3::new(1.2, 2.4, 1.2), wake_tex.clone(), 0.6)
+            } else {
+                (Vec3::splat(SHARD_SIZE), shard_tex.clone(), SHARD_SPIN)
+            };
+            let entity = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * (size.y * 0.5 + 0.2),
+                    rotation: Quat::IDENTITY,
+                    scale: size,
+                },
+                MeshRenderer {
+                    mesh: cube.clone(),
+                    texture: Some(tex),
+                },
+                SurfaceUv(0.8),
+                Spin(spin),
+                Collider {
+                    shape: ColliderShape::Aabb {
+                        half_extents: size * 0.5,
+                    },
+                    is_trigger: true,
+                },
+            ));
+            if wake_door {
+                self.world
+                    .insert_one(entity, WakeMarker)
+                    .expect("just spawned");
+            } else {
+                self.world
+                    .insert_one(entity, ShardMarker)
+                    .expect("just spawned");
             }
         }
 
@@ -273,6 +405,7 @@ impl DreamscapeGame {
             .get((dream.seed % spec.props.len() as u64) as usize)
             .copied();
         self.dream = Some(dream);
+        self.update_title(ctx);
         Ok(())
     }
 
@@ -297,7 +430,8 @@ impl DreamscapeGame {
         let Some(dream) = &self.dream else {
             return (Vec3::ZERO, false);
         };
-        while let Some(wp) = dream.route.get(self.route_index) {
+        let route = &dream.lucid_route;
+        while let Some(wp) = route.get(self.route_index) {
             let flat = Vec3::new(
                 wp.pos.x - self.player_position.x,
                 0.0,
@@ -309,7 +443,7 @@ impl DreamscapeGame {
                 break;
             }
         }
-        match dream.route.get(self.route_index) {
+        match route.get(self.route_index) {
             Some(wp) => (
                 gameplay::autopilot_velocity(self.player_position, wp.pos),
                 wp.jump,
@@ -382,6 +516,10 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         let dt = dt.min(gameplay::MAX_DT);
+        self.time += dt;
+        for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
+            t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
+        }
         let Some(player) = self.player else {
             return Ok(());
         };
@@ -428,6 +566,10 @@ impl Game for DreamscapeGame {
                     })
                     .unwrap_or(false)
             });
+        if caught {
+            self.director.lose_lucidity();
+            self.update_title(ctx);
+        }
         if caught || gameplay::fell_out(self.player_position) {
             log::info!(
                 "Player {} — respawning",
@@ -441,13 +583,39 @@ impl Game for DreamscapeGame {
             return Ok(());
         }
 
-        // 5. Portal → shift to the next dream
-        let hit_portal = overlaps
+        // 5. Triggers: shards, the wake door, and the portal deeper
+        let touched: Vec<Entity> = overlaps
             .iter()
-            .any(|&(a, b)| a == player && self.world.get::<&PortalMarker>(b).is_ok());
-        if hit_portal {
-            log::info!("Portal entered in dream {}", self.director.depth + 1);
-            if self.director.advance().is_some() {
+            .filter(|&&(a, _)| a == player)
+            .map(|&(_, b)| b)
+            .collect();
+        for &e in &touched {
+            if self.world.get::<&ShardMarker>(e).is_ok() {
+                self.world.despawn(e).expect("shard exists");
+                self.director.collect_shard();
+                log::info!(
+                    "Lucidity shard collected at depth {} ({}/{})",
+                    self.director.depth,
+                    self.director.lucidity,
+                    LUCIDITY_TO_WAKE
+                );
+                self.update_title(ctx);
+            }
+        }
+        if touched
+            .iter()
+            .any(|&e| self.world.get::<&WakeMarker>(e).is_ok())
+        {
+            log::info!("Wake door taken at depth {}", self.director.depth);
+            self.director.wake();
+            return self.load_dream(ctx);
+        }
+        if touched
+            .iter()
+            .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
+        {
+            log::info!("Portal entered at depth {}", self.director.depth);
+            if self.director.descend().is_some() {
                 self.load_dream(ctx)?;
             } else {
                 log::info!("Game complete! You woke up.");
@@ -459,6 +627,8 @@ impl Game for DreamscapeGame {
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let drawable_size = ctx.drawable_size();
+        let time = self.time;
+        let strangeness = self.dream.as_ref().map_or(0.0, |d| d.strangeness);
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
         } else {
@@ -551,13 +721,25 @@ impl Game for DreamscapeGame {
             if let Some(l) = loc("uTex") {
                 gl.uniform_1_i32(Some(&l), 0);
             }
+            if let Some(l) = loc("uTime") {
+                gl.uniform_1_f32(Some(&l), time);
+            }
+            if let Some(l) = loc("uStrangeness") {
+                gl.uniform_1_f32(Some(&l), strangeness);
+            }
         }
 
         let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
-        for (_entity, (transform, mesh_renderer)) in
-            self.world.query::<(&Transform, &MeshRenderer)>().iter()
+        let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
+        for (_entity, (transform, mesh_renderer, uv)) in self
+            .world
+            .query::<(&Transform, &MeshRenderer, Option<&SurfaceUv>)>()
+            .iter()
         {
             unsafe {
+                if let Some(l) = &uv_loc {
+                    gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
+                }
                 if let Some(l) = &model_loc {
                     gl.uniform_matrix_4_f32_slice(
                         Some(l),

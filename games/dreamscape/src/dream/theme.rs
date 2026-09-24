@@ -1,6 +1,7 @@
 //! Theme = the grammar of a dream. Every random choice the generator makes is
 //! drawn from inside these bounds; that's what makes a dream feel like one place.
 
+use super::texture::Pattern;
 #[cfg(test)]
 use crate::gameplay::CELL;
 
@@ -109,6 +110,10 @@ pub struct ThemeSpec {
     pub enemies: (u32, u32),
     /// Weighted exits. Lobby and Awakening are never listed — the director owns them.
     pub next: &'static [(DreamTheme, u32)],
+    /// Texture patterns this dream draws from (floor/wall/prop each pick one).
+    pub patterns: &'static [Pattern],
+    /// Vivid colours that bleed into the textures once the dream gets strange.
+    pub accents: &'static [[u8; 3]],
 }
 
 impl DreamTheme {
@@ -133,6 +138,8 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (0, 0),
                 next: &[(LiminalOffice, 3), (Garden, 2), (VoidPlatforms, 1)],
+                patterns: &[Pattern::Plasma, Pattern::Rings],
+                accents: &[[255, 150, 220], [150, 200, 255]],
             },
             LiminalOffice => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -152,6 +159,8 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (0, 1),
                 next: &[(VoidPlatforms, 2), (NightmareFactory, 2), (Garden, 1)],
+                patterns: &[Pattern::Stripes, Pattern::Checker],
+                accents: &[[210, 255, 60], [255, 220, 40]],
             },
             VoidPlatforms => ThemeSpec {
                 layout: LayoutKind::PlatformChain,
@@ -171,6 +180,8 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (0, 0),
                 next: &[(Garden, 2), (NightmareFactory, 2), (LiminalOffice, 1)],
+                patterns: &[Pattern::Swirl, Pattern::Plasma],
+                accents: &[[255, 40, 220], [40, 240, 255]],
             },
             Garden => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -194,6 +205,8 @@ impl DreamTheme {
                     (VoidPlatforms, 1),
                     (NightmareFactory, 2),
                 ],
+                patterns: &[Pattern::Cells, Pattern::Plasma, Pattern::Rings],
+                accents: &[[255, 90, 200], [180, 255, 40]],
             },
             NightmareFactory => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -213,6 +226,8 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/nightmare_factory.wav",
                 enemies: (2, 3),
                 next: &[(VoidPlatforms, 1), (LiminalOffice, 2), (Garden, 1)],
+                patterns: &[Pattern::Checker, Pattern::Stripes, Pattern::Cells],
+                accents: &[[255, 120, 0], [255, 20, 60]],
             },
             Awakening => ThemeSpec {
                 layout: LayoutKind::OpenHall,
@@ -232,6 +247,8 @@ impl DreamTheme {
                 music: "games/dreamscape/assets/music/awakening.wav",
                 enemies: (0, 0),
                 next: &[],
+                patterns: &[Pattern::Plasma],
+                accents: &[[255, 240, 200]],
             },
         }
     }
@@ -279,6 +296,10 @@ mod tests {
                 "{t:?}"
             );
             assert!(!s.props.is_empty(), "{t:?} has no props");
+            assert!(
+                !s.patterns.is_empty() && !s.accents.is_empty(),
+                "{t:?} has no patterns/accents"
+            );
             assert!(
                 (0.0..=1.0).contains(&s.strangeness) && (0.0..=1.0).contains(&s.prop_density),
                 "{t:?}"
