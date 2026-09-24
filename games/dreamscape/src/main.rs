@@ -25,6 +25,7 @@ mod dream;
 mod enemy_ai;
 mod gameplay;
 mod hud;
+mod pixels;
 mod records;
 
 use dream::{
