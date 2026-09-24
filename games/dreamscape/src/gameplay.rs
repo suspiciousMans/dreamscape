@@ -119,6 +119,12 @@ impl Flash {
     }
 }
 
+/// Seed for "dream again": a fresh, reproducible run derived from the last one.
+pub fn next_run_seed(seed: u64) -> u64 {
+    seed.wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +327,16 @@ mod tests {
     fn grace_outlasts_an_enemy_crossing_the_spawn_cell() {
         // Enemies move at 3 u/s; crossing one cell takes CELL/3 = 1s.
         assert!(RESPAWN_GRACE > CELL / 3.0);
+    }
+
+    #[test]
+    fn next_run_seed_is_deterministic_and_never_repeats_quickly() {
+        assert_eq!(next_run_seed(42), next_run_seed(42));
+        let mut seen = std::collections::HashSet::new();
+        let mut s = 1;
+        for _ in 0..1000 {
+            s = next_run_seed(s);
+            assert!(seen.insert(s), "repeated after {} runs", seen.len());
+        }
     }
 }

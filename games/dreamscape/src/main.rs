@@ -19,22 +19,23 @@ use engine::sdl2::event::Event;
 use engine::sdl2::keyboard::Keycode;
 use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
+use engine::ui::EguiState;
 
 mod dream;
 mod enemy_ai;
 mod gameplay;
+mod hud;
 mod records;
 
 use dream::{
-    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, TexSpec, LUCIDITY_TO_WAKE,
-    TEX_SIZE,
+    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, Shape, TexSpec,
+    LUCIDITY_TO_WAKE, TEX_SIZE,
 };
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
 
 const PROFILES_DIR: &str = "games/dreamscape/profiles";
 const PLAYER_COLOR: [u8; 4] = [255, 255, 255, 255];
-const ENEMY_COLOR: [u8; 4] = [200, 40, 40, 255];
 const ENEMY_SPEED: f32 = 3.0;
 const SHARD_SIZE: f32 = 0.8;
 const SHARD_SPIN: f32 = 2.0;
@@ -77,7 +78,7 @@ pub struct DreamscapeGame {
     shader_cache: Option<ShaderVariantCache>,
     profiles: Option<ProfileCycler>,
     render_params: Option<RenderParams>,
-    cube: Option<Arc<GpuMesh>>,
+    meshes: HashMap<Shape, Arc<GpuMesh>>,
     textures: HashMap<[u8; 4], Arc<GpuTexture>>,
     /// Per-dream procedural textures; destroyed when the dream changes.
     dream_textures: Vec<Arc<GpuTexture>>,
@@ -108,6 +109,16 @@ pub struct DreamscapeGame {
     shard_tex: Option<Arc<GpuTexture>>,
     wake_tex: Option<Arc<GpuTexture>>,
     best_depth: u32,
+    ui: Option<EguiState>,
+    mode: hud::Mode,
+    /// Seconds since the current dream (or the journal) began.
+    title_age: f32,
+    dream_name: String,
+    dream_whisper: String,
+    journal: Vec<String>,
+    run_seed: u64,
+    restart_requested: bool,
+    fonts_installed: bool,
 }
 
 impl DreamscapeGame {
@@ -117,7 +128,7 @@ impl DreamscapeGame {
             shader_cache: None,
             profiles: None,
             render_params: None,
-            cube: None,
+            meshes: HashMap::new(),
             textures: HashMap::new(),
             dream_textures: Vec::new(),
             time: 0.0,
@@ -140,6 +151,15 @@ impl DreamscapeGame {
             shard_tex: None,
             wake_tex: None,
             best_depth: records::load(Path::new(records::RECORD_PATH)),
+            ui: None,
+            mode: hud::Mode::Playing,
+            title_age: 0.0,
+            dream_name: String::new(),
+            dream_whisper: String::new(),
+            journal: Vec::new(),
+            run_seed,
+            restart_requested: false,
+            fonts_installed: false,
         }
     }
 
@@ -226,6 +246,51 @@ impl DreamscapeGame {
         }
     }
 
+    fn mesh(&self, shape: Shape) -> anyhow::Result<Arc<GpuMesh>> {
+        self.meshes
+            .get(&shape)
+            .cloned()
+            .context("mesh not uploaded")
+    }
+
+    fn hud_view(&self) -> hud::HudView {
+        let target = self
+            .shard_entities
+            .first()
+            .and_then(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position));
+        hud::HudView {
+            mode: self.mode,
+            time: self.time,
+            depth: self.director.depth,
+            best: self.best_depth,
+            lucidity: self.director.lucidity,
+            lucid_target: LUCIDITY_TO_WAKE,
+            unbanked: self.director.shard_this_dream,
+            strangeness: self.dream.as_ref().map_or(0.0, |d| d.strangeness),
+            title: self.dream_name.clone(),
+            whisper: self.dream_whisper.clone(),
+            title_age: self.title_age,
+            shard_dir: target
+                .and_then(|t| hud::compass(self.player_position.to_array(), t.to_array(), 7.0)),
+            journal: self.journal.clone(),
+            seed: self.run_seed,
+        }
+    }
+
+    fn restart(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        self.run_seed = gameplay::next_run_seed(self.run_seed);
+        log::info!(
+            "Dream run seed = {} (replay with DREAMSCAPE_SEED={})",
+            self.run_seed,
+            self.run_seed
+        );
+        self.director = DreamDirector::new(self.run_seed);
+        self.motif = None;
+        self.journal.clear();
+        self.mode = hud::Mode::Playing;
+        self.load_dream(ctx)
+    }
+
     fn tone(&self, hz: f32, secs: f32) {
         if let Some(audio) = &self.audio {
             audio.play_tone(hz, secs);
@@ -235,7 +300,12 @@ impl DreamscapeGame {
     /// The shard (or, once lucid, the wake door) plus a tall beacon above it
     /// that can be seen over maze walls.
     fn spawn_shard_slot(&mut self, at: Vec3, wake_door: bool) -> anyhow::Result<()> {
-        let cube = self.cube.clone().context("cube mesh not uploaded")?;
+        let body_mesh = self.mesh(if wake_door {
+            Shape::Cylinder
+        } else {
+            Shape::Octahedron
+        })?;
+        let beacon_mesh = self.mesh(Shape::Cylinder)?;
         let tex = if wake_door {
             self.wake_tex.clone()
         } else {
@@ -254,7 +324,7 @@ impl DreamscapeGame {
                 scale: size,
             },
             MeshRenderer {
-                mesh: cube.clone(),
+                mesh: body_mesh,
                 texture: Some(tex.clone()),
             },
             SurfaceUv(0.8),
@@ -283,7 +353,7 @@ impl DreamscapeGame {
                 scale: Vec3::new(0.15, BEACON_HEIGHT, 0.15),
             },
             MeshRenderer {
-                mesh: cube,
+                mesh: beacon_mesh,
                 texture: Some(tex),
             },
             SurfaceUv(0.8),
@@ -310,6 +380,12 @@ impl DreamscapeGame {
             self.director.has_shard,
         );
         let wake_door = self.director.lucid() && dream.shard.is_some();
+        self.dream_name = dream::dream_name(theme, dream.seed);
+        self.dream_whisper = dream::whisper(theme, dream.seed);
+        self.title_age = 0.0;
+        self.journal
+            .push(format!("{:>3}  {}", dream.depth, self.dream_name));
+        log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(
             "Dream depth={} {:?} seed={} strangeness={:.2} lucidity={}/{} blocks={} enemies={} route={} shard={:?} portal={:?} motif={:?} wake_door={} next={:?} patterns=({:?},{:?},{:?})",
             dream.depth,
@@ -346,7 +422,8 @@ impl DreamscapeGame {
         self.play_music(spec.music);
 
         let gl = ctx.gl();
-        let cube = self.cube.clone().context("cube mesh not uploaded")?;
+        let player_mesh = self.mesh(Shape::Octahedron)?;
+        let enemy_mesh = self.mesh(Shape::Orb)?;
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
@@ -371,6 +448,7 @@ impl DreamscapeGame {
                 BlockKind::Prop | BlockKind::Decor => (prop_tex.clone(), 0.5),
                 BlockKind::Portal => (portal_tex.clone(), 0.5),
             };
+            let mesh = self.mesh(block.shape)?;
             let entity = self.world.spawn((
                 Transform {
                     position: block.pos,
@@ -378,7 +456,7 @@ impl DreamscapeGame {
                     scale: block.size,
                 },
                 MeshRenderer {
-                    mesh: cube.clone(),
+                    mesh,
                     texture: Some(texture),
                 },
                 SurfaceUv(uv),
@@ -396,6 +474,7 @@ impl DreamscapeGame {
                                     is_trigger: true,
                                 },
                                 PortalMarker,
+                                Spin(0.5),
                             ),
                         )
                         .expect("entity was just spawned");
@@ -428,12 +507,13 @@ impl DreamscapeGame {
             Transform {
                 position: spawn,
                 rotation: Quat::IDENTITY,
-                scale: Vec3::splat(gameplay::PLAYER_RADIUS * 2.0),
+                scale: Vec3::new(0.8, 1.1, 0.8),
             },
             MeshRenderer {
-                mesh: cube.clone(),
+                mesh: player_mesh,
                 texture: Some(player_texture),
             },
+            Spin(1.2),
             RigidBody::default(),
             Collider {
                 shape: ColliderShape::Sphere {
@@ -443,7 +523,7 @@ impl DreamscapeGame {
             },
         )));
 
-        let enemy_texture = self.texture(gl, ENEMY_COLOR);
+        let enemy_texture = self.upload_surface(gl, &dream.surfaces.enemy)?;
         for &(a, b) in &dream.patrols {
             let entity = self.world.spawn((
                 Transform {
@@ -452,9 +532,10 @@ impl DreamscapeGame {
                     scale: Vec3::splat(0.9),
                 },
                 MeshRenderer {
-                    mesh: cube.clone(),
+                    mesh: enemy_mesh.clone(),
                     texture: Some(enemy_texture.clone()),
                 },
+                Spin(0.9),
             ));
             self.enemies
                 .push((entity, EnemyAI::new_patrol(a, b, ENEMY_SPEED)));
@@ -541,10 +622,13 @@ impl Game for DreamscapeGame {
             &post_src,
         )?);
         self.profiles = Some(cycler);
-        self.cube = Some(Arc::new(GpuMesh::upload(
-            gl,
-            &engine::mesh::primitives::cube(),
-        )?));
+        for shape in dream::ALL_SHAPES {
+            self.meshes.insert(
+                shape,
+                Arc::new(GpuMesh::upload(gl, &dream::build_mesh(shape))?),
+            );
+        }
+        self.ui = Some(EguiState::new(ctx.gl_arc())?);
         match AudioContext::new() {
             Ok(audio) => self.audio = Some(audio),
             Err(e) => log::warn!("Failed to initialize audio: {e}"),
@@ -566,6 +650,31 @@ impl Game for DreamscapeGame {
             } => (*k, false, false),
             _ => return,
         };
+        if down && !repeat {
+            match (self.mode, key) {
+                (hud::Mode::Playing, Keycode::Escape) => {
+                    self.mode = hud::Mode::Paused;
+                    self.input = PlayerInputState::default();
+                    return;
+                }
+                (hud::Mode::Paused, Keycode::Escape) => {
+                    self.mode = hud::Mode::Playing;
+                    return;
+                }
+                (hud::Mode::Paused, Keycode::Q) | (hud::Mode::Journal, Keycode::Escape) => {
+                    ctx.should_quit = true;
+                    return;
+                }
+                (hud::Mode::Journal, Keycode::R) => {
+                    self.restart_requested = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.mode != hud::Mode::Playing {
+            return;
+        }
         match key {
             Keycode::W => self.input.forward = down,
             Keycode::S => self.input.backward = down,
@@ -576,7 +685,6 @@ impl Game for DreamscapeGame {
                 self.debug_camera = !self.debug_camera;
                 log::info!("debug camera: {}", self.debug_camera);
             }
-            Keycode::Escape if down => ctx.should_quit = true,
             _ => {}
         }
     }
@@ -588,6 +696,17 @@ impl Game for DreamscapeGame {
         self.grace = (self.grace - dt).max(0.0);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
+        }
+        self.title_age += dt;
+        if std::mem::take(&mut self.restart_requested) {
+            return self.restart(ctx);
+        }
+        // E2E runs: show the journal briefly (for screenshots), then exit.
+        if self.autopilot && self.mode == hud::Mode::Journal && self.title_age > 3.0 {
+            ctx.should_quit = true;
+        }
+        if self.mode != hud::Mode::Playing {
+            return Ok(());
         }
         let Some(player) = self.player else {
             return Ok(());
@@ -705,13 +824,15 @@ impl Game for DreamscapeGame {
                 self.load_dream(ctx)?;
             } else {
                 log::info!("Game complete! You woke up.");
-                ctx.should_quit = true;
+                self.mode = hud::Mode::Journal;
+                self.title_age = 0.0;
             }
         }
         Ok(())
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        let hud_view = self.hud_view();
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
@@ -731,6 +852,12 @@ impl Game for DreamscapeGame {
         let gl = ctx.gl();
         renderer.resize_if_needed(gl, drawable_size)?;
         renderer.begin_scene(gl);
+        unsafe {
+            // egui (drawn last frame) leaves depth test off and blending/scissor on.
+            gl.enable(engine::glow::DEPTH_TEST);
+            gl.disable(engine::glow::BLEND);
+            gl.disable(engine::glow::SCISSOR_TEST);
+        }
         unsafe {
             gl.clear_color(
                 params.fog_color[0],
@@ -851,6 +978,16 @@ impl Game for DreamscapeGame {
                 tint_strength: flash.strength,
             },
         );
+        let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
+        if let Some(ui) = self.ui.as_mut() {
+            let output = ui.run(drawable_size, |egui_ctx| {
+                if install_fonts {
+                    hud::install_font(egui_ctx);
+                }
+                hud::draw(egui_ctx, &hud_view);
+            });
+            ui.paint(drawable_size, output);
+        }
         Ok(())
     }
 }
