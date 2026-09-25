@@ -65,9 +65,11 @@ void main() {
     // The dream melts: everything slumps, drips and sinks into the floor,
     // then (uMelt running back to 0) rises out of it as the next dream.
     if (uMelt > 0.0) {
-        // Each ~1.5-unit column drips at its own speed. Hash the un-breathed
-        // position so columns don't flicker as the world breathes.
-        float h = fract(sin(dot(floor(vWorld.xz * 0.7), vec2(12.9898, 78.233))) * 43758.5453);
+        // Drip speed varies smoothly across the floor (overlapping waves, not a
+        // per-cell hash: a hash jumps at cell edges and tears walls apart).
+        // Un-breathed position, so the drips don't flicker as the world breathes.
+        float h = 0.5 + 0.25 * sin(vWorld.x * 0.83 + 1.7) * sin(vWorld.z * 0.61)
+                      + 0.25 * sin((vWorld.x + vWorld.z) * 0.37 + 4.1);
         float sag = uMelt * uMelt * (3.0 + 7.0 * h);
         // Tops fall further than bottoms: things slump before they sink.
         worldPos.y -= sag * (0.35 + 0.3 * max(worldPos.y + 1.0, 0.0));
