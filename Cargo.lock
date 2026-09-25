@@ -672,6 +672,7 @@ dependencies = [
  "env_logger",
  "glam",
  "hecs",
+ "image",
  "log",
  "rand 0.8.8",
  "ron",

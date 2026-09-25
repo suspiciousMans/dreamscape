@@ -75,7 +75,12 @@ pub struct Dream {
     /// Lucidity shard location (floor level), if this dream has one.
     pub shard: Option<Vec3>,
     /// Route spawn → shard → portal (equals `route` when there is no shard).
+    /// In a nightmare: spawn → every sigil → portal.
     pub lucid_route: Vec<Waypoint>,
+    /// Nightmare arenas: sigils to gather before the portal opens.
+    pub sigils: Vec<Vec3>,
+    /// Nightmare arenas: where the hunter starts.
+    pub hunter: Option<Vec3>,
 }
 
 /// Everything needed to (re)build one procedural texture.
@@ -242,24 +247,7 @@ pub fn generate_with(
     );
     decor(grid, &spec, &mut rng, &mut blocks);
     undersides(grid, &spec, &mut rng, &mut blocks);
-    let surfaces = Surfaces {
-        floor: surface(spec.floor_colors, &spec, &mut rng),
-        wall: surface(spec.wall_colors, &spec, &mut rng),
-        prop: surface(spec.prop_colors, &spec, &mut rng),
-        shard: TexSpec {
-            pattern: Pattern::Swirl,
-            palette: spec.accents.to_vec(),
-            bands: 2.0,
-            seed: rng.gen(),
-        },
-        // Enemies are always bloodshot eyes: skin, white, iris, pupil.
-        enemy: TexSpec {
-            pattern: Pattern::Eyes,
-            palette: vec![[90, 10, 20], [255, 235, 225], [220, 30, 50], [10, 0, 5]],
-            bands: 1.0,
-            seed: rng.gen(),
-        },
-    };
+    let surfaces = surfaces(&spec, &mut rng);
     let portal = grid.world(layout.portal);
     let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
         p.iter()
@@ -293,6 +281,127 @@ pub fn generate_with(
         motif_at,
         strangeness: spec.strangeness,
         surfaces,
+        sigils: Vec::new(),
+        hunter: None,
+    }
+}
+
+fn surfaces(spec: &ThemeSpec, rng: &mut StdRng) -> Surfaces {
+    Surfaces {
+        floor: surface(spec.floor_colors, spec, rng),
+        wall: surface(spec.wall_colors, spec, rng),
+        prop: surface(spec.prop_colors, spec, rng),
+        shard: TexSpec {
+            pattern: Pattern::Swirl,
+            palette: spec.accents.to_vec(),
+            bands: 2.0,
+            seed: rng.gen(),
+        },
+        // Enemies are always bloodshot eyes: skin, white, iris, pupil.
+        enemy: TexSpec {
+            pattern: Pattern::Eyes,
+            palette: vec![[90, 10, 20], [255, 235, 225], [220, 30, 50], [10, 0, 5]],
+            bands: 1.0,
+            seed: rng.gen(),
+        },
+    }
+}
+
+/// Sigils to gather in a nightmare arena.
+pub const SIGILS: usize = 3;
+
+/// A nightmare: a walled arena in the current dream's style, with a hunter
+/// in it and `SIGILS` sigils spread around the edge. The portal (far end)
+/// only opens once every sigil is taken. Pillars give you something to
+/// circle round. Arenas grow a little with depth.
+pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
+    let mut spec = theme.spec();
+    spec.strangeness = (strangeness(theme, depth) + 0.2).min(1.0);
+    // Nightmares are always walled, whatever the dream: no falling out.
+    spec.wall_height = 2.0;
+    let mut rng = StdRng::seed_from_u64(seed ^ 0x0B05_5000);
+    let side = (11 + (depth as i32 / 5).min(4)) | 1;
+    let mid = side / 2;
+    let mut g = Grid::new(side, side, Cell::Floor);
+    for i in 0..side {
+        for p in [(i, 0), (i, side - 1), (0, i), (side - 1, i)] {
+            g.set(p, Cell::Wall);
+        }
+    }
+    // Four pillars round the middle, one cell off the centre lines.
+    let q = side / 4;
+    for p in [
+        (q, q),
+        (side - 1 - q, q),
+        (q, side - 1 - q),
+        (side - 1 - q, side - 1 - q),
+    ] {
+        g.set(p, Cell::Wall);
+    }
+    let spawn = (mid, 1);
+    let portal = (mid, side - 2);
+    // Sigils: left, right and back walls, jittered along them.
+    let j = |rng: &mut StdRng| rng.gen_range(-1..=1);
+    let sigil_cells = [
+        (1, mid + j(&mut rng)),
+        (side - 2, mid + j(&mut rng)),
+        (mid + j(&mut rng), side - 3),
+    ];
+    let hunter = (mid, mid + 1);
+    let path = g.path(spawn, portal).expect("an open arena is connected");
+    let mut stops = vec![spawn];
+    stops.extend(sigil_cells);
+    stops.push(portal);
+    let lucid: Vec<(P, bool)> = stops
+        .windows(2)
+        .enumerate()
+        .flat_map(|(k, w)| {
+            let leg = g.path(w[0], w[1]).expect("an open arena is connected");
+            leg.into_iter().skip(if k == 0 { 0 } else { 1 })
+        })
+        .collect();
+    let mut blocks = Vec::new();
+    floor_slabs(&g, &spec, &mut rng, &mut blocks);
+    walls(&g, &spec, &mut rng, &mut blocks);
+    decor(&g, &spec, &mut rng, &mut blocks);
+    let surfaces = surfaces(&spec, &mut rng);
+    blocks.push(Block {
+        kind: BlockKind::Portal,
+        shape: Shape::Orb,
+        pos: g.world(portal) + Vec3::Y * PORTAL_SIZE.y * 0.5,
+        size: PORTAL_SIZE,
+        rotation: Quat::IDENTITY,
+        color: PORTAL_COLOR,
+    });
+    let mut atmos = atmosphere(&spec, &mut rng);
+    // Darker fog, but a well-lit floor: you need to read the arena.
+    atmos.fog_color = atmos.fog_color.map(|c| c * 0.8);
+    atmos.ambient = atmos.ambient.map(|c| c.max(0.5));
+    let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
+        p.iter()
+            .map(|&(c, jump)| Waypoint {
+                pos: g.world(c),
+                jump,
+            })
+            .collect()
+    };
+    Dream {
+        theme,
+        seed,
+        depth,
+        blocks,
+        spawn: g.world(spawn),
+        portal: g.world(portal),
+        route: waypoints(&path),
+        lucid_route: waypoints(&lucid),
+        patrols: Vec::new(),
+        atmosphere: atmos,
+        motif_at: None,
+        strangeness: spec.strangeness,
+        surfaces,
+        shard: None,
+        sigils: sigil_cells.iter().map(|&c| g.world(c)).collect(),
+        hunter: Some(g.world(hunter) + Vec3::Y * 0.9),
     }
 }
 
@@ -1200,6 +1309,43 @@ mod tests {
             assert!(d.blocks.iter().any(|b| b.kind == BlockKind::Prop
                 && (b.pos.x - at.x).abs() < 1e-3
                 && (b.pos.z - at.z).abs() < 1e-3));
+        }
+    }
+
+    #[test]
+    fn nightmares_are_walled_arenas_with_spread_out_sigils() {
+        for theme in ALL_THEMES {
+            for seed in 0..10 {
+                for depth in [5, 10, 40] {
+                    let d = generate_nightmare(theme, seed, depth);
+                    assert_eq!(d.sigils.len(), SIGILS);
+                    assert!(d.shard.is_none() && d.patrols.is_empty());
+                    let hunter = d.hunter.expect("a nightmare has a hunter");
+                    assert!(
+                        hunter.distance(d.spawn) > 3.0 * CELL,
+                        "{theme:?}: the hunter starts on top of you"
+                    );
+                    for (i, a) in d.sigils.iter().enumerate() {
+                        assert!(a.distance(d.spawn) > 2.0 * CELL);
+                        for b in &d.sigils[i + 1..] {
+                            assert!(a.distance(*b) > 3.0 * CELL, "sigils bunched up");
+                        }
+                        // The autopilot's route visits every sigil.
+                        assert!(d.lucid_route.iter().any(|w| w.pos.distance(*a) < 1e-3));
+                    }
+                    assert!(
+                        d.blocks.iter().any(|b| b.kind == BlockKind::Wall),
+                        "{theme:?}: nightmares are always walled"
+                    );
+                    let first = d.lucid_route.first().unwrap().pos;
+                    let last = d.lucid_route.last().unwrap().pos;
+                    assert!(first.distance(d.spawn) < 1e-3 && last.distance(d.portal) < 1e-3);
+                    assert!(d
+                        .lucid_route
+                        .windows(2)
+                        .all(|w| w[0].pos.distance(w[1].pos) <= CELL + 1e-3));
+                }
+            }
         }
     }
 

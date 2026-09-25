@@ -29,11 +29,13 @@ mod dream;
 mod enemy_ai;
 mod gameplay;
 mod hud;
+mod hunter;
 mod pixels;
 mod records;
 mod reveal_ui;
 mod shop_ui;
 mod store;
+mod summary_ui;
 mod title_ui;
 mod transition;
 mod tunnel;
@@ -58,6 +60,9 @@ const OUTLINE_SCALE: f32 = 1.22;
 /// Collect to become lucid.
 #[derive(Clone, Copy)]
 struct ShardMarker;
+/// Nightmare sigil: gather them all to open the portal.
+#[derive(Clone, Copy)]
+struct SigilMarker;
 /// Only appears once lucid: step through to wake up.
 #[derive(Clone, Copy)]
 struct WakeMarker;
@@ -96,6 +101,18 @@ struct Bob {
     amp: f32,
     speed: f32,
     phase: f32,
+}
+
+/// Tallies for the end-of-run summary.
+#[derive(Clone, Debug, Default)]
+struct RunStats {
+    caught: u32,
+    fell: u32,
+    nightmares: u32,
+    twists: Vec<Variant>,
+    /// Seconds spent dreaming (not in menus or melts).
+    time: f32,
+    skipped: u32,
 }
 
 /// What the choice screen is choosing.
@@ -210,6 +227,14 @@ pub struct DreamscapeGame {
     offer_upgrade: bool,
     choice: Option<ChoiceKind>,
     choice_view: upgrade_ui::ChoiceView,
+    /// The pending pick is a beaten nightmare's reward.
+    boss_reward: bool,
+    /// Nightmare arenas: the hunter, its start, sigils left, and the
+    /// portal waiting to open.
+    hunter: Option<(Entity, hunter::Hunter, Vec3)>,
+    sigils_left: usize,
+    sealed_portal: Option<(dream::Block, Arc<GpuTexture>)>,
+    stats: RunStats,
     /// Mid-air jumps used since last touching the ground.
     air_jumps_used: u32,
     jump_was_down: bool,
@@ -300,6 +325,11 @@ impl DreamscapeGame {
             offer_upgrade: false,
             choice: None,
             choice_view: upgrade_ui::ChoiceView::default(),
+            boss_reward: false,
+            hunter: None,
+            sigils_left: 0,
+            sealed_portal: None,
+            stats: RunStats::default(),
             air_jumps_used: 0,
             jump_was_down: false,
             facing: Vec3::Z,
@@ -326,51 +356,98 @@ impl DreamscapeGame {
     }
 
     fn open_upgrade_choice(&mut self) {
-        let seed = self.director.dream_seed() ^ 0xC401_CE00;
-        let options = upgrades::roll_choices(seed, &self.run);
+        let seed = self.director.dream_seed()
+            ^ 0xC401_CE00
+            ^ (self.run.rerolls_used as u64).wrapping_mul(0x9E37_79B9);
+        let roll = upgrades::Roll {
+            depth: self.director.depth,
+            boss: self.boss_reward,
+        };
+        let options = upgrades::roll_choices(seed, &self.run, roll);
         if options.is_empty() {
             return;
         }
+        let card = |u: Upgrade| {
+            let info = u.info();
+            let have = self.run.count(u);
+            // Would taking this complete a combo?
+            let mut after = self.run.clone();
+            after.take(u);
+            let combo = after
+                .synergies()
+                .into_iter()
+                .find(|s| !self.run.has(*s))
+                .map(|s| format!("completes {}", s.name()));
+            let tag = combo.unwrap_or_else(|| {
+                if u.is_ability() {
+                    let slot = self.run.abilities.len().min(upgrades::ABILITY_SLOTS - 1);
+                    if self.run.abilities.len() >= upgrades::ABILITY_SLOTS {
+                        format!(
+                            "ability · replaces {}",
+                            self.run.abilities[0].ability.name()
+                        )
+                    } else {
+                        format!("ability · [{}]", upgrades::SLOT_KEYS[slot])
+                    }
+                } else if have > 0 {
+                    format!("{} · {} / {}", info.tier.label(), have + 1, info.max)
+                } else {
+                    info.tier.label().into()
+                }
+            });
+            upgrade_ui::ChoiceCard {
+                name: info.name.into(),
+                desc: info.desc.into(),
+                icon: info.icon,
+                color: info.color,
+                frame: info.tier.frame(),
+                tag,
+            }
+        };
         self.choice_view = upgrade_ui::ChoiceView {
-            title: "THE DREAM OFFERS YOU SOMETHING".into(),
+            title: if self.boss_reward {
+                "THE NIGHTMARE LEAVES SOMETHING BEHIND".into()
+            } else {
+                "THE DREAM OFFERS YOU SOMETHING".into()
+            },
             subtitle: format!(
                 "depth {} · keep one for the rest of the run",
                 self.director.depth
             ),
-            cards: options
-                .iter()
-                .map(|&u| {
-                    let info = u.info();
-                    let have = self.run.count(u);
-                    upgrade_ui::ChoiceCard {
-                        name: info.name.into(),
-                        desc: info.desc.into(),
-                        icon: info.icon,
-                        color: info.color,
-                        tag: if u.is_ability() {
-                            let slot = self.run.abilities.len().min(upgrades::ABILITY_SLOTS - 1);
-                            if self.run.abilities.len() >= upgrades::ABILITY_SLOTS {
-                                format!(
-                                    "ability · replaces {}",
-                                    self.run.abilities[0].ability.name()
-                                )
-                            } else {
-                                format!("ability · [{}]", upgrades::SLOT_KEYS[slot])
-                            }
-                        } else if have > 0 {
-                            format!("{} / {}", have + 1, info.max)
-                        } else {
-                            "upgrade".into()
-                        },
-                    }
-                })
-                .collect(),
+            cards: options.iter().map(|&u| card(u)).collect(),
             selected: 0,
             age: 0.0,
+            hint: format!(
+                "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
+                self.run.rerolls_left(),
+                upgrades::SKIP_DUST
+            ),
         };
         self.choice = Some(ChoiceKind::Upgrade(options));
         self.input = PlayerInputState::default();
         self.mode = hud::Mode::Choice;
+    }
+
+    fn reroll_choice(&mut self) {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) || self.run.rerolls_left() == 0 {
+            return;
+        }
+        self.run.rerolls_used += 1;
+        log::info!("Rerolled the pick");
+        self.tone(330.0, 0.15);
+        self.open_upgrade_choice();
+    }
+
+    fn skip_choice(&mut self) {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) {
+            return;
+        }
+        self.choice = None;
+        self.boss_reward = false;
+        self.mode = hud::Mode::Playing;
+        self.bonus_dust += upgrades::SKIP_DUST;
+        self.stats.skipped += 1;
+        log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
     }
 
     fn open_wake_choice(&mut self) {
@@ -386,6 +463,7 @@ impl DreamscapeGame {
                     desc: "open your eyes and keep what you remember".into(),
                     icon: upgrades::Icon::Eye,
                     color: [255, 230, 160],
+                    frame: [255, 230, 160],
                     tag: format!("{} dreams deep", self.director.depth),
                 },
                 upgrade_ui::ChoiceCard {
@@ -396,11 +474,13 @@ impl DreamscapeGame {
                     ),
                     icon: upgrades::Icon::Shard,
                     color: [255, 90, 140],
+                    frame: [255, 90, 140],
                     tag: format!("nightmare x{next:.1}"),
                 },
             ],
             selected: 0,
             age: 0.0,
+            hint: "[a/d] choose   [enter] decide".into(),
         };
         self.choice = Some(ChoiceKind::WakeDoor);
         self.input = PlayerInputState::default();
@@ -419,8 +499,20 @@ impl DreamscapeGame {
                     self.mode = hud::Mode::Choice;
                     return;
                 };
+                let before = self.run.synergies();
                 self.run.take(u);
+                self.boss_reward = false;
                 self.director.shard_bonus = self.run.shard_bonus();
+                if u == Upgrade::LucidHeart {
+                    // Banked straight away: it can't be dropped.
+                    self.director.lucidity += 1;
+                    self.shards_this_run += 1;
+                }
+                for s in self.run.synergies() {
+                    if !before.contains(&s) {
+                        log::info!("Synergy: {} ({})", s.name(), s.desc());
+                    }
+                }
                 log::info!("Upgrade taken: {u:?} (run: {:?})", self.run.taken);
                 self.flash
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
@@ -627,7 +719,17 @@ impl DreamscapeGame {
                     .map(|&p| store::Item::Perk(p).info().name)
                     .collect()
             },
-            upgrades: self.run.summary(),
+            upgrades: self
+                .run
+                .summary()
+                .into_iter()
+                .chain(
+                    self.run
+                        .synergies()
+                        .iter()
+                        .map(|s| format!("= {}", s.name())),
+                )
+                .collect(),
             abilities: self
                 .run
                 .abilities
@@ -637,7 +739,7 @@ impl DreamscapeGame {
                     (
                         a.ability.name(),
                         upgrades::SLOT_KEYS[k],
-                        a.charge(self.run.cooldown()),
+                        a.charge(self.run.cooldown_for(a.ability)),
                         a.is_active(),
                     )
                 })
@@ -653,6 +755,22 @@ impl DreamscapeGame {
             timer: self.twists.timer().map(|t| t - self.dream_age),
             difficulty: self.director.hardness().map(|_| self.difficulty()),
             run_length: self.run_length.label(),
+            summary: if self.mode == hud::Mode::Summary {
+                self.summary_view()
+            } else {
+                summary_ui::SummaryView::default()
+            },
+            objective: self.hunter.as_ref().map(|_| {
+                if self.sigils_left > 0 {
+                    format!(
+                        "SIGILS {}/{}",
+                        dream::SIGILS - self.sigils_left,
+                        dream::SIGILS
+                    )
+                } else {
+                    "THE PORTAL IS OPEN".into()
+                }
+            }),
             choice: if self.mode == hud::Mode::Choice {
                 self.choice_view.clone()
             } else {
@@ -661,12 +779,47 @@ impl DreamscapeGame {
         }
     }
 
+    /// Every sigil taken: the nightmare's portal opens.
+    fn open_portal(&mut self) -> anyhow::Result<()> {
+        let Some((block, texture)) = self.sealed_portal.take() else {
+            return Ok(());
+        };
+        let mesh = self.mesh(block.shape)?;
+        self.world.spawn((
+            Transform {
+                position: block.pos,
+                rotation: block.rotation,
+                scale: block.size,
+            },
+            MeshRenderer {
+                mesh,
+                texture: Some(texture),
+            },
+            SurfaceUv(0.5),
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: block.size * 0.5,
+                },
+                is_trigger: true,
+            },
+            PortalMarker,
+            Spin(0.5),
+            Lit,
+            Hero,
+        ));
+        log::info!("The nightmare's portal opens");
+        self.flash.trigger([0.3, 1.0, 1.0], 0.8);
+        self.tone(990.0, 0.5);
+        Ok(())
+    }
+
     /// Fire the ability in `slot`, if held and charged.
     fn use_ability(&mut self, slot: usize) {
-        let mult = self.run.cooldown();
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
         };
+        let mult = self.run.cooldown_for(state.ability);
+        let stretch = self.run.duration_for(state.ability);
         if state.cooldown > 0.0 {
             self.tone(140.0, 0.05);
             return;
@@ -694,8 +847,19 @@ impl DreamscapeGame {
             }
             self.player_position = at;
         }
-        if self.run.abilities[slot].try_use(mult) {
+        if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            match state.ability {
+                Ability::Dash if self.run.has(upgrades::Synergy::GhostStep) => {
+                    self.grace = self
+                        .grace
+                        .max(Ability::Dash.duration() + upgrades::GHOST_STEP_SECONDS);
+                }
+                Ability::Blink if self.run.has(upgrades::Synergy::Skywalk) => {
+                    self.air_jumps_used = 0;
+                }
+                _ => {}
+            }
             let color = match state.ability {
                 Ability::Dash => [0.5, 0.9, 1.0],
                 Ability::Blink => [0.9, 0.5, 1.0],
@@ -809,7 +973,7 @@ impl DreamscapeGame {
             self.has_perk(store::Perk::DustMagnet),
         );
         // Run upgrades and hard runs pay out on top of the pack.
-        let mult = self.run.dust() * gameplay::difficulty_reward(self.peak_difficulty);
+        let mult = self.dust_multiplier();
         let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust;
         self.booklet.stash.earn(extra);
         let dust = dust + extra;
@@ -897,6 +1061,8 @@ impl DreamscapeGame {
     fn begin_run(&mut self) {
         self.shards_this_run = 0;
         self.run = RunUpgrades::default();
+        self.stats = RunStats::default();
+        self.boss_reward = false;
         self.bonus_dust = 0;
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
@@ -927,8 +1093,8 @@ impl DreamscapeGame {
     fn complete_run(&mut self) {
         log::info!("Game complete! You woke up.");
         self.title_age = 0.0;
-        self.open_pack();
         if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+            self.open_pack();
             self.pack.age = f32::MAX;
             self.save_journal();
             match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
@@ -940,6 +1106,76 @@ impl DreamscapeGame {
                 }
                 _ => {}
             }
+        } else {
+            self.mode = hud::Mode::Summary;
+            log::info!("Summary: {:?}", self.summary_view());
+        }
+    }
+
+    /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
+    fn dust_multiplier(&self) -> f32 {
+        self.run.dust() * gameplay::difficulty_reward(self.peak_difficulty)
+    }
+
+    fn summary_view(&self) -> summary_ui::SummaryView {
+        let t = self.stats.time as u32;
+        let mut rows = vec![
+            (
+                "deepest dream".to_string(),
+                format!("{}", self.director.depth),
+            ),
+            (
+                "run".into(),
+                format!(
+                    "{} · {} shards",
+                    self.run_length.label(),
+                    self.shards_this_run
+                ),
+            ),
+            ("time dreaming".into(), format!("{}:{:02}", t / 60, t % 60)),
+            (
+                "nightmares beaten".into(),
+                self.stats.nightmares.to_string(),
+            ),
+            (
+                "caught / fell".into(),
+                format!("{} / {}", self.stats.caught, self.stats.fell),
+            ),
+        ];
+        if self.director.overdrive > 0 {
+            rows.push((
+                "refused to wake".into(),
+                format!("{}x", self.director.overdrive),
+            ));
+        }
+        if self.peak_difficulty > 1.0 {
+            rows.push((
+                "peak nightmare".into(),
+                format!("x{:.1}", self.peak_difficulty),
+            ));
+        }
+        if !self.stats.twists.is_empty() {
+            let mut names: Vec<&str> = self.stats.twists.iter().map(|v| v.label()).collect();
+            names.sort_unstable();
+            names.dedup();
+            rows.push(("twists survived".into(), names.join(", ")));
+        }
+        summary_ui::SummaryView {
+            rows,
+            upgrades: self.run.summary(),
+            synergies: self
+                .run
+                .synergies()
+                .iter()
+                .map(|s| s.name().to_string())
+                .collect(),
+            dust: format!(
+                "dust x{:.2}  (hoarding x{:.2} · nightmare x{:.2})  + {} bonus",
+                self.dust_multiplier(),
+                self.run.dust(),
+                gameplay::difficulty_reward(self.peak_difficulty),
+                self.bonus_dust
+            ),
         }
     }
 
@@ -1029,6 +1265,10 @@ impl DreamscapeGame {
                 is_trigger: true,
             },
         ));
+        // THIRD EYE: the shard shows through walls, like the dreamer does.
+        if self.run.has(upgrades::Synergy::ThirdEye) {
+            self.world.insert_one(entity, Hero).expect("just spawned");
+        }
         if wake_door {
             self.world
                 .insert_one(entity, WakeMarker)
@@ -1072,26 +1312,37 @@ impl DreamscapeGame {
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let theme = self.director.theme;
         let spec = theme.spec();
-        self.twists = dream::roll_twists(
-            theme,
-            self.director.dream_seed(),
-            self.director.depth,
-            self.director.hardness().is_some(),
-        );
+        self.twists = if self.director.nightmare {
+            Twists::default()
+        } else {
+            dream::roll_twists(
+                theme,
+                self.director.dream_seed(),
+                self.director.depth,
+                self.director.hardness().is_some(),
+            )
+        };
         if self.twists.has(Variant::Gilded) {
             self.director.has_shard = true;
         }
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
         self.air_jumps_used = 0;
-        let dream = dream::generate_with(
-            theme,
-            self.director.dream_seed(),
-            self.director.depth,
-            self.motif,
-            self.director.has_shard,
-            self.pressure(),
-        );
+        let dream = if self.director.nightmare {
+            dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
+        } else {
+            dream::generate_with(
+                theme,
+                self.director.dream_seed(),
+                self.director.depth,
+                self.motif,
+                self.director.has_shard,
+                self.pressure(),
+            )
+        };
+        self.hunter = None;
+        self.sealed_portal = None;
+        self.sigils_left = dream.sigils.len();
         if !self.twists.0.is_empty() {
             log::info!("Dream twist: {}", self.twists.label());
         }
@@ -1168,6 +1419,11 @@ impl DreamscapeGame {
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         for block in &dream.blocks {
+            if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
+                // Sealed until every sigil is gathered.
+                self.sealed_portal = Some((block.clone(), portal_tex.clone()));
+                continue;
+            }
             let (texture, uv) = match block.kind {
                 BlockKind::Floor => (floor_tex.clone(), per_cell),
                 BlockKind::Wall => (wall_tex.clone(), per_cell),
@@ -1357,11 +1613,73 @@ impl DreamscapeGame {
                     if eyelids {
                         0.0
                     } else {
-                        gameplay::pressured_chase_radius(dream.depth, difficulty)
+                        gameplay::pressured_chase_radius(dream.depth, difficulty) * self.run.alert()
                     },
                     gameplay::CHASE_LEASH,
                 ),
             ));
+        }
+
+        // Nightmare: sigils round the edge, and the hunter in the middle.
+        let sigil_tex = self
+            .shard_tex
+            .clone()
+            .context("shard textures not uploaded")?;
+        let sigil_mesh = self.mesh(Shape::Octahedron)?;
+        for (k, &at) in dream.sigils.iter().enumerate() {
+            let size = Vec3::new(0.7, 1.3, 0.7);
+            self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * 1.0,
+                    rotation: Quat::IDENTITY,
+                    scale: size,
+                },
+                MeshRenderer {
+                    mesh: sigil_mesh.clone(),
+                    texture: Some(sigil_tex.clone()),
+                },
+                SurfaceUv(0.8),
+                Spin(2.5),
+                Bob {
+                    base: 1.0,
+                    amp: 0.25,
+                    speed: 2.0,
+                    phase: k as f32 * 2.1,
+                },
+                Lit,
+                Hero,
+                SigilMarker,
+                Collider {
+                    shape: ColliderShape::Aabb {
+                        half_extents: size * 0.5,
+                    },
+                    is_trigger: true,
+                },
+            ));
+        }
+        if let Some(at) = dream.hunter {
+            let h = hunter::Hunter::new(dream.depth, self.player_speed());
+            let entity = self.world.spawn((
+                Transform {
+                    position: at,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::splat(h.size()),
+                },
+                MeshRenderer {
+                    mesh: enemy_mesh.clone(),
+                    texture: Some(enemy_texture.clone()),
+                },
+                Spin(0.6),
+                Lit,
+            ));
+            self.hunter = Some((entity, h, at));
+            self.dream_whisper = "gather the sigils. it is hunting you.".into();
+            self.dream_name = format!("NIGHTMARE: {}", self.dream_name);
+            log::info!(
+                "Nightmare at depth {}: {} sigils",
+                dream.depth,
+                dream.sigils.len()
+            );
         }
 
         // The next dream inherits one of this dream's prop kinds as its motif.
@@ -1475,6 +1793,15 @@ impl Game for DreamscapeGame {
                 None => log::warn!("DREAMSCAPE_THEME={name}: no such dream"),
             }
         }
+        // Dev switch: DREAMSCAPE_NIGHTMARE=1 starts in a nightmare arena.
+        if std::env::var("DREAMSCAPE_NIGHTMARE").is_ok() {
+            if self.director.theme == DreamTheme::Lobby {
+                self.director.theme = DreamTheme::NightmareFactory;
+            }
+            self.director.depth = dream::NIGHTMARE_EVERY;
+            self.director.nightmare = true;
+            self.director.has_shard = false;
+        }
         self.load_dream(ctx)?;
         log::info!("Dreamscape initialized");
         Ok(())
@@ -1494,6 +1821,13 @@ impl Game for DreamscapeGame {
         };
         if down && !repeat {
             let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
+            if self.mode == hud::Mode::Summary {
+                if matches!(key, Keycode::Return | Keycode::Space) && self.title_age > 0.5 {
+                    self.title_age = 0.0;
+                    self.open_pack();
+                }
+                return;
+            }
             if self.mode == hud::Mode::Choice {
                 let n = self.choice_view.cards.len().max(1);
                 match key {
@@ -1512,6 +1846,8 @@ impl Game for DreamscapeGame {
                             self.choose(i);
                         }
                     }
+                    Keycode::R => self.reroll_choice(),
+                    Keycode::X => self.skip_choice(),
                     // Cards deal in first, so a held key can't pick blind.
                     Keycode::Return | Keycode::Space if self.choice_view.age > 0.4 => {
                         self.choose(self.choice_view.selected);
@@ -1677,6 +2013,10 @@ impl Game for DreamscapeGame {
             t.position.y = bob.base + bob.amp * (time * bob.speed + bob.phase).sin();
         }
         self.title_age += dt;
+        if self.mode == hud::Mode::Summary && self.autopilot && self.title_age > 1.5 {
+            self.title_age = 0.0;
+            self.open_pack();
+        }
         if self.mode == hud::Mode::Choice {
             self.choice_view.age += dt;
             // E2E runs: take the first card (WAKE at the door) after a beat.
@@ -1735,6 +2075,7 @@ impl Game for DreamscapeGame {
             return Ok(());
         };
         self.dream_age += dt;
+        self.stats.time += dt;
         self.run.tick(dt);
 
         // 0b. Abilities
@@ -1802,6 +2143,14 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        if let Some((entity, h, _)) = self.hunter.as_mut() {
+            if !held {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                    h.update(&mut t.position, target, dt);
+                    t.scale = Vec3::splat(h.size());
+                }
+            }
+        }
 
         // 3. Physics: gravity, collision, trigger overlaps
         let physics = PhysicsParams {
@@ -1823,18 +2172,29 @@ impl Game for DreamscapeGame {
         let caught = !self.autopilot
             && self.grace <= 0.0
             && !untouchable
-            && self.enemies.iter().any(|(e, _)| {
-                self.world
-                    .get::<&Transform>(*e)
-                    .map(|t| {
-                        gameplay::touches(
-                            t.position,
-                            self.player_position,
-                            gameplay::ENEMY_TOUCH_RADIUS,
-                        )
-                    })
-                    .unwrap_or(false)
-            });
+            && self
+                .enemies
+                .iter()
+                .map(|(e, _)| (*e, false))
+                .chain(self.hunter.iter().map(|(e, _, _)| (*e, true)))
+                .any(|(e, is_hunter)| {
+                    self.world
+                        .get::<&Transform>(e)
+                        .map(|t| {
+                            if is_hunter {
+                                // Flat distance: it's too big to jump over.
+                                let d = t.position - self.player_position;
+                                Vec3::new(d.x, 0.0, d.z).length() < hunter::HUNTER_TOUCH
+                            } else {
+                                gameplay::touches(
+                                    t.position,
+                                    self.player_position,
+                                    gameplay::ENEMY_TOUCH_RADIUS,
+                                )
+                            }
+                        })
+                        .unwrap_or(false)
+                });
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.tone(110.0, 0.35);
@@ -1877,6 +2237,18 @@ impl Game for DreamscapeGame {
                     "fell out of the dream"
                 }
             );
+            if caught {
+                self.stats.caught += 1;
+            } else {
+                self.stats.fell += 1;
+            }
+            // The hunter goes back to its corner to catch its breath.
+            if let Some((entity, h, home)) = self.hunter.as_mut() {
+                h.rest();
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                    t.position = *home;
+                }
+            }
             self.respawn_player();
             return Ok(());
         }
@@ -1907,6 +2279,24 @@ impl Game for DreamscapeGame {
                 break;
             }
         }
+        let sigils: Vec<Entity> = touched
+            .iter()
+            .copied()
+            .filter(|&e| self.world.get::<&SigilMarker>(e).is_ok())
+            .collect();
+        for e in sigils {
+            let _ = self.world.despawn(e);
+            self.sigils_left = self.sigils_left.saturating_sub(1);
+            self.flash.trigger([1.0, 0.4, 1.0], 0.5);
+            self.tone(
+                660.0 + 110.0 * (dream::SIGILS - self.sigils_left) as f32,
+                0.2,
+            );
+            log::info!("Sigil taken ({} left)", self.sigils_left);
+            if self.sigils_left == 0 {
+                self.open_portal()?;
+            }
+        }
         if touched
             .iter()
             .any(|&e| self.world.get::<&WakeMarker>(e).is_ok())
@@ -1920,6 +2310,12 @@ impl Game for DreamscapeGame {
         {
             log::info!("Portal entered at depth {}", self.director.depth);
             self.dream_bonus();
+            self.stats.twists.extend(self.twists.0.iter().copied());
+            if self.director.nightmare {
+                self.stats.nightmares += 1;
+                self.boss_reward = true;
+                log::info!("Nightmare beaten at depth {}", self.director.depth);
+            }
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {
                 transition::Pending::Finish
             } else {
@@ -1943,8 +2339,14 @@ impl Game for DreamscapeGame {
         } else {
             Vec3::Y
         };
-        let sight_scale = self.twists.sight();
-        let sight_bonus = self.run.sight_bonus();
+        let sight_scale = self.twists.sight() * self.run.sight();
+        // Nightmares: you get to see the whole fight coming.
+        let sight_bonus = self.run.sight_bonus()
+            + if self.hunter.is_some() {
+                1.5 * gameplay::CELL
+            } else {
+                0.0
+            };
         // Off on the title/menus and in the F1 overview; on while dreaming.
         let tunnel = self.tunnel_on && !self.debug_camera && self.mode != hud::Mode::Title;
         let sight = if tunnel {
@@ -2236,7 +2638,48 @@ impl Game for DreamscapeGame {
             });
             ui.paint(drawable_size, output);
         }
+        self.maybe_screenshot(ctx);
         Ok(())
+    }
+}
+
+impl DreamscapeGame {
+    /// DREAMSCAPE_SHOT=out.png: after DREAMSCAPE_SHOT_AT seconds (default 6)
+    /// of the run, save the frame and quit. Used by tools/screenshots.sh.
+    fn maybe_screenshot(&mut self, ctx: &mut Context) {
+        let Ok(path) = std::env::var("DREAMSCAPE_SHOT") else {
+            return;
+        };
+        let at: f32 = std::env::var("DREAMSCAPE_SHOT_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6.0);
+        if self.time < at || ctx.should_quit {
+            return;
+        }
+        let (w, h) = ctx.drawable_size();
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            let gl = ctx.gl();
+            gl.bind_framebuffer(engine::glow::READ_FRAMEBUFFER, None);
+            gl.read_pixels(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                engine::glow::RGBA,
+                engine::glow::UNSIGNED_BYTE,
+                engine::glow::PixelPackData::Slice(&mut rgba),
+            );
+        }
+        // GL rows run bottom-up.
+        let row = (w * 4) as usize;
+        let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
+        match image::RgbaImage::from_raw(w, h, flipped).map(|img| img.save(&path)) {
+            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
+            other => log::error!("Screenshot {path} failed: {other:?}"),
+        }
+        ctx.should_quit = true;
     }
 }
 

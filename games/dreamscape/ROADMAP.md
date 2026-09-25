@@ -4,7 +4,7 @@ The run is now a roguelike: an upgrade after every dream, short and long runs, g
 
 ---
 
-## Phase 1: Run structure and feedback
+## Phase 1: Run structure and feedback ✅ done
 
 | # | Feature | Notes / code |
 |---|---|---|
@@ -118,7 +118,7 @@ A cracked wall hides a door, and the Blink ability or a DASH through reaches it.
 | 5.6 | **Accessibility** | Sliders for grain and vignette, colour-blind shard and portal markers, key remapping, reduced motion (which caps the breathing, melting and tracer effects). |
 | 5.7 | **Title screen for runs** | Pick the dreamer, run length, ascension level and daily seed on one panel. |
 
-## Phase 6: Infrastructure
+## Phase 6: Infrastructure (6.1 and 6.2 ✅ done)
 
 | # | Feature | Notes |
 |---|---|---|

@@ -42,3 +42,35 @@ jobs:
       - name: Run engine test suite
         shell: pwsh
         run: cargo test -p engine --verbose
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system libraries (SDL2 build deps, ALSA, virtual display)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libudev-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxinerama-dev libxss-dev libgl1-mesa-dev xvfb x11-apps imagemagick
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (dreamscape)
+        run: cargo clippy -p dreamscape --all-targets -- -D clippy::correctness
+
+      - name: Test engine and dreamscape
+        run: cargo test -p engine -p dreamscape
+
+      - name: Dream screenshots (every dream type, autopilot, software GL)
+        run: games/dreamscape/tools/screenshots.sh target/dream-shots
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dream-shots
+          path: target/dream-shots
