@@ -674,6 +674,8 @@ dependencies = [
  "hecs",
  "log",
  "rand 0.8.8",
+ "ron",
+ "serde",
 ]
 
 [[package]]

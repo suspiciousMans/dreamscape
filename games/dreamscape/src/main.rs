@@ -21,6 +21,8 @@ use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::EguiState;
 
+use engine::ui::egui;
+
 mod booklet_ui;
 mod cards;
 mod dream;
@@ -34,6 +36,7 @@ mod shop_ui;
 mod store;
 mod title_ui;
 mod transition;
+mod tunnel;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, Shape, TexSpec,
@@ -63,6 +66,10 @@ struct SurfaceUv(f32);
 /// Drawn with uMelt = 0: the dreamer stays solid while the dream melts.
 #[derive(Clone, Copy)]
 struct NoMelt;
+
+/// Glows through the tunnel-vision darkness (you, shards, beacons, portal).
+#[derive(Clone, Copy)]
+struct Lit;
 
 fn init_logging() {
     let _ = env_logger::builder()
@@ -148,6 +155,10 @@ pub struct DreamscapeGame {
     run_seed: u64,
     restart_requested: bool,
     fonts_installed: bool,
+    /// Film grain, uploaded to egui on the first frame.
+    grain: Option<egui::TextureHandle>,
+    /// F2 toggles tunnel vision + grain (for screenshots / accessibility).
+    tunnel_on: bool,
 }
 
 impl DreamscapeGame {
@@ -217,6 +228,8 @@ impl DreamscapeGame {
             run_seed,
             restart_requested: false,
             fonts_installed: false,
+            grain: None,
+            tunnel_on: std::env::var("DREAMSCAPE_NO_TUNNEL").is_err(),
         }
     }
 
@@ -647,6 +660,7 @@ impl DreamscapeGame {
             },
             SurfaceUv(0.8),
             Spin(spin),
+            Lit,
             Collider {
                 shape: ColliderShape::Aabb {
                     half_extents: size * 0.5,
@@ -676,6 +690,7 @@ impl DreamscapeGame {
             },
             SurfaceUv(0.8),
             Spin(-spin),
+            Lit,
         ));
         self.shard_entities = vec![entity, beacon];
         Ok(())
@@ -803,6 +818,7 @@ impl DreamscapeGame {
                                 },
                                 PortalMarker,
                                 Spin(0.5),
+                                Lit,
                             ),
                         )
                         .expect("entity was just spawned");
@@ -843,6 +859,7 @@ impl DreamscapeGame {
             },
             Spin(1.2),
             NoMelt,
+            Lit,
             RigidBody::default(),
             Collider {
                 shape: ColliderShape::Sphere {
@@ -1132,6 +1149,10 @@ impl Game for DreamscapeGame {
             Keycode::A => self.input.left = down,
             Keycode::D => self.input.right = down,
             Keycode::Space => self.input.jump = down,
+            Keycode::F2 if down && !repeat => {
+                self.tunnel_on = !self.tunnel_on;
+                log::info!("tunnel vision: {}", self.tunnel_on);
+            }
             Keycode::F1 if down && !repeat => {
                 self.debug_camera = !self.debug_camera;
                 log::info!("debug camera: {}", self.debug_camera);
@@ -1350,6 +1371,14 @@ impl Game for DreamscapeGame {
         let melt = self.transition.melt();
         let transition = self.transition;
         let strangeness = self.dream.as_ref().map_or(0.0, |d| d.strangeness);
+        let player = self.player_position;
+        // Off on the title/menus and in the F1 overview; on while dreaming.
+        let tunnel = self.tunnel_on && !self.debug_camera && self.mode != hud::Mode::Title;
+        let sight = if tunnel {
+            tunnel::sight_radius(strangeness)
+        } else {
+            0.0
+        };
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
         } else {
@@ -1364,6 +1393,8 @@ impl Game for DreamscapeGame {
         };
         let gl = ctx.gl();
         let fog = transition.fog(params.fog_color);
+        let dark = tunnel::darkness(fog);
+        let clear = if tunnel { dark } else { fog };
         renderer.resize_if_needed(gl, drawable_size)?;
         renderer.begin_scene(gl);
         unsafe {
@@ -1373,11 +1404,12 @@ impl Game for DreamscapeGame {
             gl.disable(engine::glow::SCISSOR_TEST);
         }
         unsafe {
-            gl.clear_color(fog[0], fog[1], fog[2], 1.0);
+            gl.clear_color(clear[0], clear[1], clear[2], 1.0);
             gl.clear(engine::glow::COLOR_BUFFER_BIT | engine::glow::DEPTH_BUFFER_BIT);
         }
 
         let aspect = drawable_size.0 as f32 / drawable_size.1.max(1) as f32;
+        let aspect_for_overlay = aspect;
         let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 1000.0);
         let view = Mat4::look_at_rh(eye, target, Vec3::Y);
 
@@ -1445,22 +1477,39 @@ impl Game for DreamscapeGame {
             if let Some(l) = loc("uStrangeness") {
                 gl.uniform_1_f32(Some(&l), strangeness);
             }
+            if let Some(l) = loc("uPlayer") {
+                gl.uniform_3_f32(Some(&l), player.x, player.y, player.z);
+            }
+            if let Some(l) = loc("uSight") {
+                gl.uniform_1_f32(Some(&l), sight);
+            }
+            if let Some(l) = loc("uSightFade") {
+                gl.uniform_1_f32(Some(&l), tunnel::SIGHT_FADE);
+            }
+            if let Some(l) = loc("uDark") {
+                gl.uniform_3_f32(Some(&l), dark[0], dark[1], dark[2]);
+            }
         }
 
         let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
         let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
         let melt_loc = unsafe { gl.get_uniform_location(program, "uMelt") };
-        for (_entity, (transform, mesh_renderer, uv, solid)) in self
+        let lit_loc = unsafe { gl.get_uniform_location(program, "uLit") };
+        for (_entity, (transform, mesh_renderer, uv, solid, lit)) in self
             .world
             .query::<(
                 &Transform,
                 &MeshRenderer,
                 Option<&SurfaceUv>,
                 Option<&NoMelt>,
+                Option<&Lit>,
             )>()
             .iter()
         {
             unsafe {
+                if let Some(l) = &lit_loc {
+                    gl.uniform_1_f32(Some(l), if lit.is_some() { 1.0 } else { 0.0 });
+                }
                 if let Some(l) = &melt_loc {
                     gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
                 }
@@ -1494,10 +1543,47 @@ impl Game for DreamscapeGame {
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let card_art = &mut self.card_art;
         let pack = &self.pack;
+        let grain = &mut self.grain;
+        // Where the player is on screen (NDC -> 0..1), for the vignette centre.
+        let clip = Mat4::perspective_rh(60.0_f32.to_radians(), aspect_for_overlay, 0.1, 1000.0)
+            * Mat4::look_at_rh(eye, target, Vec3::Y)
+            * player.extend(1.0);
+        let player_uv = if clip.w > 0.0 {
+            [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w]
+        } else {
+            [0.5, 0.5]
+        };
+        let overlay = tunnel && hud_view.mode == hud::Mode::Playing
+            || tunnel && hud_view.mode == hud::Mode::Paused;
         if let Some(ui) = self.ui.as_mut() {
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
+                }
+                if overlay {
+                    let tex = grain
+                        .get_or_insert_with(|| {
+                            let size = tunnel::GRAIN_SIZE;
+                            egui_ctx.load_texture(
+                                "film-grain",
+                                egui::ColorImage::from_rgba_unmultiplied(
+                                    [size, size],
+                                    &tunnel::grain_pixels(7),
+                                ),
+                                egui::TextureOptions::NEAREST_REPEAT,
+                            )
+                        })
+                        .id();
+                    let screen = egui_ctx.screen_rect();
+                    let p = egui_ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Background,
+                        egui::Id::new("tunnel_vision"),
+                    ));
+                    let at = egui::Pos2::new(
+                        screen.left() + player_uv[0] * screen.width(),
+                        screen.top() + player_uv[1] * screen.height(),
+                    );
+                    tunnel::draw_overlay(&p, screen, at, strangeness, time, Some(tex));
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack);
             });

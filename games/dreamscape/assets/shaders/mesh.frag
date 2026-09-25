@@ -14,6 +14,12 @@ uniform vec3 uFogColor;
 uniform float uTime;
 uniform float uStrangeness;
 uniform float uMelt;
+// Tunnel vision: the dream only exists near the dreamer.
+uniform vec3 uPlayer;   // world position of the player
+uniform float uSight;   // radius where the world is fully dark
+uniform float uSightFade; // fraction of uSight spent fading
+uniform float uLit;     // 1 = this object glows through the dark (you, shards, portal)
+uniform vec3 uDark;     // colour of the dark
 
 // Rotate a colour around the grey axis (hue shift that keeps brightness).
 vec3 hueShift(vec3 c, float a) {
@@ -46,5 +52,13 @@ void main() {
     // into the fog so the dream swap underneath is never seen.
     withFog = mix(withFog, hueShift(withFog, 4.0 * uMelt), uMelt);
     withFog = mix(withFog, fog, smoothstep(0.45, 0.95, uMelt));
+    // Tunnel vision: past the edge of sight the dream sinks into darkness.
+    // Lit things (you, shards, beacons, portal, door) keep glowing through it.
+    if (uSight > 0.0) {
+        float d = length(vWorld.xz - uPlayer.xz);
+        float edge = smoothstep(uSight * (1.0 - uSightFade), uSight, d);
+        float dark = edge * (1.0 - 0.8 * uLit);
+        withFog = mix(withFog, uDark, dark);
+    }
     FragColor = vec4(withFog, texColor.a);
 }
