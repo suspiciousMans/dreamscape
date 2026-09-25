@@ -148,9 +148,7 @@ impl EguiState {
             self.painter.set_texture(*id, delta);
         }
 
-        let clipped_primitives = self
-            .ctx
-            .tessellate(output.shapes, output.pixels_per_point);
+        let clipped_primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         self.painter.paint_primitives(
             [drawable_size.0, drawable_size.1],
             output.pixels_per_point,

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{Disposition, DialogueNode};
+use crate::ai::{DialogueNode, Disposition};
 use crate::camera::CameraShakeSpec;
 use crate::particles::ParticleEmitterDef;
 use crate::physics::PhysicsParams;

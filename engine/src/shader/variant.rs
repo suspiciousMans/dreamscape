@@ -29,7 +29,11 @@ impl ShaderVariantCache {
         }
     }
 
-    pub fn get_or_compile(&mut self, gl: &glow::Context, flags: u32) -> anyhow::Result<glow::Program> {
+    pub fn get_or_compile(
+        &mut self,
+        gl: &glow::Context,
+        flags: u32,
+    ) -> anyhow::Result<glow::Program> {
         if let Some(&program) = self.variants.get(&flags) {
             return Ok(program);
         }

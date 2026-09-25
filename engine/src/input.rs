@@ -99,7 +99,11 @@ impl Input {
                 }
             }
             Event::ControllerDeviceRemoved { which, .. } => {
-                if self.controller.as_ref().is_some_and(|c| c.instance_id() == which as u32) {
+                if self
+                    .controller
+                    .as_ref()
+                    .is_some_and(|c| c.instance_id() == which as u32)
+                {
                     log::info!("controller disconnected");
                     self.controller = None;
                     self.controller_buttons_down.clear();
@@ -129,7 +133,10 @@ impl Input {
             // would otherwise leave them stuck "held" on return and keep the
             // character walking. Clear all held + edge state on focus loss so
             // nothing carries over.
-            Event::Window { win_event: WindowEvent::FocusLost, .. } => {
+            Event::Window {
+                win_event: WindowEvent::FocusLost,
+                ..
+            } => {
                 self.keys_down.clear();
                 self.keys_pressed.clear();
                 self.keys_released.clear();

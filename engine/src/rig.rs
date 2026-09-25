@@ -196,11 +196,15 @@ fn sample_track(track: &JointTrack, time: f32) -> Option<Quat> {
         return None;
     }
     if time <= keyframes[0].time {
-        return Some(crate::ecs::euler_deg_to_quat(Vec3::from(keyframes[0].rotation_euler_deg)));
+        return Some(crate::ecs::euler_deg_to_quat(Vec3::from(
+            keyframes[0].rotation_euler_deg,
+        )));
     }
     let last = keyframes.len() - 1;
     if time >= keyframes[last].time {
-        return Some(crate::ecs::euler_deg_to_quat(Vec3::from(keyframes[last].rotation_euler_deg)));
+        return Some(crate::ecs::euler_deg_to_quat(Vec3::from(
+            keyframes[last].rotation_euler_deg,
+        )));
     }
     for window in keyframes.windows(2) {
         let [a, b] = window else { unreachable!() };
@@ -227,8 +231,12 @@ pub fn step_rig_animation(world: &mut hecs::World, dt: f32) {
         if !animator.playing {
             continue;
         }
-        let Some(clip_index) = animator.current_clip else { continue };
-        let Some(clip) = animator.clips.get(clip_index) else { continue };
+        let Some(clip_index) = animator.current_clip else {
+            continue;
+        };
+        let Some(clip) = animator.clips.get(clip_index) else {
+            continue;
+        };
 
         animator.time += dt * animator.speed;
         if clip.duration > 0.0 {
@@ -242,7 +250,9 @@ pub fn step_rig_animation(world: &mut hecs::World, dt: f32) {
         // Blending out a just-replaced clip so switching clips doesn't pop —
         // `blend_from` is a frozen (clip index, time) snapshot of whatever
         // was playing at the moment `play_clip` was called.
-        let blend_from = animator.previous_clip.map(|index| (index, animator.previous_time));
+        let blend_from = animator
+            .previous_clip
+            .map(|index| (index, animator.previous_time));
         if animator.previous_clip.is_some() {
             animator.blend_elapsed += dt;
             if animator.blend_elapsed >= animator.blend_duration {
@@ -256,14 +266,23 @@ pub fn step_rig_animation(world: &mut hecs::World, dt: f32) {
         };
 
         for track in &clip.tracks {
-            let Some(&part_entity) = rig.parts_by_name.get(&track.joint_name) else { continue };
-            let Some(current_rotation) = sample_track(track, animator.time) else { continue };
+            let Some(&part_entity) = rig.parts_by_name.get(&track.joint_name) else {
+                continue;
+            };
+            let Some(current_rotation) = sample_track(track, animator.time) else {
+                continue;
+            };
             let rotation = match blend_from {
                 Some((previous_index, previous_time)) => {
                     let previous_rotation = animator
                         .clips
                         .get(previous_index)
-                        .and_then(|prev_clip| prev_clip.tracks.iter().find(|t| t.joint_name == track.joint_name))
+                        .and_then(|prev_clip| {
+                            prev_clip
+                                .tracks
+                                .iter()
+                                .find(|t| t.joint_name == track.joint_name)
+                        })
                         .and_then(|prev_track| sample_track(prev_track, previous_time))
                         .unwrap_or(current_rotation);
                     previous_rotation.slerp(current_rotation, blend_t)
@@ -273,7 +292,11 @@ pub fn step_rig_animation(world: &mut hecs::World, dt: f32) {
             let (euler_x, euler_y, euler_z) = rotation.to_euler(glam::EulerRot::XYZ);
             updates.push((
                 part_entity,
-                Vec3::new(euler_x.to_degrees(), euler_y.to_degrees(), euler_z.to_degrees()),
+                Vec3::new(
+                    euler_x.to_degrees(),
+                    euler_y.to_degrees(),
+                    euler_z.to_degrees(),
+                ),
             ));
         }
     }
@@ -295,7 +318,14 @@ pub fn update_world_transforms(world: &mut hecs::World) {
     let snapshot: Vec<(Entity, Option<Entity>, Vec3, Quat)> = world
         .query::<&RigPart>()
         .iter()
-        .map(|(entity, part)| (entity, part.parent, part.local_position, part.local_rotation))
+        .map(|(entity, part)| {
+            (
+                entity,
+                part.parent,
+                part.local_position,
+                part.local_rotation,
+            )
+        })
         .collect();
 
     let mut resolved: HashMap<Entity, (Vec3, Quat)> = HashMap::with_capacity(snapshot.len());
@@ -352,7 +382,8 @@ pub fn update_world_transforms(world: &mut hecs::World) {
     }
 
     for &(entity, ..) in &snapshot {
-        let (world_position, world_rotation) = resolve(entity, &snapshot, world, &mut resolved, &mut in_progress);
+        let (world_position, world_rotation) =
+            resolve(entity, &snapshot, world, &mut resolved, &mut in_progress);
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
             transform.position = world_position;
             transform.rotation = world_rotation;
@@ -369,7 +400,10 @@ mod tests {
             joint_name: "Arm".to_string(),
             keyframes: keyframes
                 .into_iter()
-                .map(|(time, rotation_euler_deg)| Keyframe { time, rotation_euler_deg })
+                .map(|(time, rotation_euler_deg)| Keyframe {
+                    time,
+                    rotation_euler_deg,
+                })
                 .collect(),
         }
     }
@@ -380,7 +414,10 @@ mod tests {
         let before = sample_track(&t, 0.0).unwrap();
         let after = sample_track(&t, 5.0).unwrap();
         assert!(before.abs_diff_eq(Quat::IDENTITY, 1e-4));
-        assert!(after.abs_diff_eq(Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, 90f32.to_radians()), 1e-4));
+        assert!(after.abs_diff_eq(
+            Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, 90f32.to_radians()),
+            1e-4
+        ));
     }
 
     #[test]
@@ -426,7 +463,9 @@ mod tests {
 
         // The root spins the local +X offset onto roughly -Z (a 90-degree yaw).
         let child_transform = world.get::<&Transform>(child).unwrap();
-        assert!(child_transform.position.abs_diff_eq(Vec3::new(0.0, 0.0, -1.0), 1e-3));
+        assert!(child_transform
+            .position
+            .abs_diff_eq(Vec3::new(0.0, 0.0, -1.0), 1e-3));
     }
 
     #[test]
@@ -493,11 +532,16 @@ mod tests {
         // Moving the external parent (as physics/networking would every
         // frame) and re-running must follow it, proving this isn't a
         // one-time snapshot.
-        world.get::<&mut Transform>(external_parent).unwrap().position = Vec3::new(10.0, 2.0, 0.0);
+        world
+            .get::<&mut Transform>(external_parent)
+            .unwrap()
+            .position = Vec3::new(10.0, 2.0, 0.0);
         update_world_transforms(&mut world);
         let part_transform = world.get::<&Transform>(part).unwrap();
         assert!(
-            part_transform.position.abs_diff_eq(Vec3::new(10.0, 2.0, -1.0), 1e-3),
+            part_transform
+                .position
+                .abs_diff_eq(Vec3::new(10.0, 2.0, -1.0), 1e-3),
             "expected to follow the moved parent, got {:?}",
             part_transform.position
         );
@@ -525,7 +569,13 @@ mod tests {
         };
         let root = world.spawn((
             Rig { parts_by_name },
-            RigAnimator { clips: vec![clip], current_clip: Some(0), time: 0.9, playing: true, ..Default::default() },
+            RigAnimator {
+                clips: vec![clip],
+                current_clip: Some(0),
+                time: 0.9,
+                playing: true,
+                ..Default::default()
+            },
         ));
 
         // Advancing past the clip's duration should wrap, not clamp, since looping = true.
@@ -569,7 +619,12 @@ mod tests {
         };
         let root = world.spawn((
             Rig { parts_by_name },
-            RigAnimator { clips: vec![clip_a, clip_b], current_clip: Some(0), playing: true, ..Default::default() },
+            RigAnimator {
+                clips: vec![clip_a, clip_b],
+                current_clip: Some(0),
+                playing: true,
+                ..Default::default()
+            },
         ));
 
         world.get::<&mut RigAnimator>(root).unwrap().play_clip(1);
@@ -578,30 +633,52 @@ mod tests {
         // should still read as the old clip's, not pop to the new one.
         step_rig_animation(&mut world, 0.0);
         let just_after = world.get::<&RigPart>(arm).unwrap().local_rotation;
-        assert!(just_after.abs_diff_eq(Quat::IDENTITY, 1e-3), "expected still-old pose right at the switch, got {just_after:?}");
+        assert!(
+            just_after.abs_diff_eq(Quat::IDENTITY, 1e-3),
+            "expected still-old pose right at the switch, got {just_after:?}"
+        );
 
         // Halfway through the default 0.2s blend window, the pose should sit
         // roughly midway between old and new.
         step_rig_animation(&mut world, 0.1);
         let midpoint = world.get::<&RigPart>(arm).unwrap().local_rotation;
-        let expected_mid =
-            Quat::IDENTITY.slerp(Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, 90f32.to_radians()), 0.5);
-        assert!(midpoint.abs_diff_eq(expected_mid, 1e-3), "expected blend midpoint, got {midpoint:?}");
+        let expected_mid = Quat::IDENTITY.slerp(
+            Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, 90f32.to_radians()),
+            0.5,
+        );
+        assert!(
+            midpoint.abs_diff_eq(expected_mid, 1e-3),
+            "expected blend midpoint, got {midpoint:?}"
+        );
 
         // Once the blend window has fully elapsed, the pose matches the new
         // clip exactly and the animator stops tracking a previous clip.
         step_rig_animation(&mut world, 0.2);
         let after_blend = world.get::<&RigPart>(arm).unwrap().local_rotation;
         let expected_new = Quat::from_euler(glam::EulerRot::XYZ, 0.0, 0.0, 90f32.to_radians());
-        assert!(after_blend.abs_diff_eq(expected_new, 1e-3), "expected fully-new pose after blend, got {after_blend:?}");
-        assert!(world.get::<&RigAnimator>(root).unwrap().previous_clip.is_none());
+        assert!(
+            after_blend.abs_diff_eq(expected_new, 1e-3),
+            "expected fully-new pose after blend, got {after_blend:?}"
+        );
+        assert!(world
+            .get::<&RigAnimator>(root)
+            .unwrap()
+            .previous_clip
+            .is_none());
     }
 
     #[test]
     fn play_clip_is_a_no_op_for_the_already_playing_clip() {
-        let mut animator = RigAnimator { current_clip: Some(0), time: 0.42, ..Default::default() };
+        let mut animator = RigAnimator {
+            current_clip: Some(0),
+            time: 0.42,
+            ..Default::default()
+        };
         animator.play_clip(0);
-        assert_eq!(animator.time, 0.42, "switching to the already-playing clip shouldn't reset time");
+        assert_eq!(
+            animator.time, 0.42,
+            "switching to the already-playing clip shouldn't reset time"
+        );
         assert!(animator.previous_clip.is_none());
     }
 }

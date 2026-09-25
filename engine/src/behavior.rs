@@ -78,7 +78,9 @@ pub struct ScriptBehavior {
 
 impl ScriptBehavior {
     pub fn from_source(source: &str) -> Result<Self, Vec<ScriptError>> {
-        Ok(Self { interpreter: Interpreter::compile(source)? })
+        Ok(Self {
+            interpreter: Interpreter::compile(source)?,
+        })
     }
 
     /// Calls a hook function if the script defines one; a script that
@@ -142,7 +144,11 @@ impl Host for HostAdapter<'_> {
 
         match name {
             "log" => {
-                let message = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+                let message = args
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 self.api.log(&message);
                 Ok(Value::Nil)
             }
@@ -150,11 +156,19 @@ impl Host for HostAdapter<'_> {
             "get_y" => Ok(Value::Number(self.api.position().1 as f64)),
             "get_z" => Ok(Value::Number(self.api.position().2 as f64)),
             "set_position" => {
-                self.api.set_position(num(args, 0, name)?, num(args, 1, name)?, num(args, 2, name)?);
+                self.api.set_position(
+                    num(args, 0, name)?,
+                    num(args, 1, name)?,
+                    num(args, 2, name)?,
+                );
                 Ok(Value::Nil)
             }
             "move_by" => {
-                self.api.move_by(num(args, 0, name)?, num(args, 1, name)?, num(args, 2, name)?);
+                self.api.move_by(
+                    num(args, 0, name)?,
+                    num(args, 1, name)?,
+                    num(args, 2, name)?,
+                );
                 Ok(Value::Nil)
             }
             "play_tone" => {
@@ -163,7 +177,10 @@ impl Host for HostAdapter<'_> {
             }
             "play_sfx" => {
                 let Some(Value::Str(path)) = args.first() else {
-                    return Err(ScriptError { message: "'play_sfx' expects a string path first".to_string(), line: 0 });
+                    return Err(ScriptError {
+                        message: "'play_sfx' expects a string path first".to_string(),
+                        line: 0,
+                    });
                 };
                 self.api.play_sfx(path);
                 Ok(Value::Nil)
@@ -171,14 +188,20 @@ impl Host for HostAdapter<'_> {
             "time" => Ok(Value::Number(self.api.elapsed() as f64)),
             "hud_bar" => {
                 let Some(Value::Str(bar_name)) = args.first() else {
-                    return Err(ScriptError { message: "'hud_bar' expects a string name first".to_string(), line: 0 });
+                    return Err(ScriptError {
+                        message: "'hud_bar' expects a string name first".to_string(),
+                        line: 0,
+                    });
                 };
                 self.api.set_hud_bar(bar_name, num(args, 1, name)?);
                 Ok(Value::Nil)
             }
             "toast" => {
                 let Some(Value::Str(message)) = args.first() else {
-                    return Err(ScriptError { message: "'toast' expects a string message first".to_string(), line: 0 });
+                    return Err(ScriptError {
+                        message: "'toast' expects a string message first".to_string(),
+                        line: 0,
+                    });
                 };
                 self.api.show_toast(message, num(args, 1, name)?);
                 Ok(Value::Nil)
@@ -196,10 +219,14 @@ impl Host for HostAdapter<'_> {
                 Ok(Value::Nil)
             }
             "camera_shake" => {
-                self.api.camera_shake(num(args, 0, name)?, num(args, 1, name)?);
+                self.api
+                    .camera_shake(num(args, 0, name)?, num(args, 1, name)?);
                 Ok(Value::Nil)
             }
-            _ => Err(ScriptError { message: format!("unknown function '{name}'"), line: 0 }),
+            _ => Err(ScriptError {
+                message: format!("unknown function '{name}'"),
+                line: 0,
+            }),
         }
     }
 }
@@ -216,7 +243,11 @@ pub struct NativeBobBehavior {
 
 impl NativeBobBehavior {
     pub fn new(amplitude: f32, period_secs: f32) -> Self {
-        Self { phase: 0.0, amplitude, period_secs }
+        Self {
+            phase: 0.0,
+            amplitude,
+            period_secs,
+        }
     }
 }
 
@@ -229,7 +260,11 @@ impl Behavior for NativeBobBehavior {
         let previous_phase = self.phase;
         self.phase += dt;
         let wave = |p: f32| (p / self.period_secs * std::f32::consts::TAU).sin();
-        api.move_by(0.0, self.amplitude * (wave(self.phase) - wave(previous_phase)), 0.0);
+        api.move_by(
+            0.0,
+            self.amplitude * (wave(self.phase) - wave(previous_phase)),
+            0.0,
+        );
     }
 
     fn on_interact(&mut self, api: &mut dyn ScriptApi) {

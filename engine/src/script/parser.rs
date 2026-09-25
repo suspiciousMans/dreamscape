@@ -63,7 +63,11 @@ pub struct FunctionDecl {
 /// `let` bindings and `fn` declarations — no nested scripts/modules).
 pub fn parse(source: &str) -> Result<Vec<Stmt>, Vec<ScriptError>> {
     let tokens = lex(source).map_err(|e| vec![e])?;
-    let mut parser = Parser { tokens, pos: 0, errors: Vec::new() };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        errors: Vec::new(),
+    };
     let mut statements = Vec::new();
     while !parser.check(&Token::Eof) {
         match parser.statement() {
@@ -137,7 +141,10 @@ impl Parser {
                 self.advance();
                 return;
             }
-            if matches!(self.peek(), Token::Fn | Token::Let | Token::If | Token::While | Token::Return) {
+            if matches!(
+                self.peek(),
+                Token::Fn | Token::Let | Token::If | Token::While | Token::Return
+            ) {
                 return;
             }
             self.advance();
@@ -158,7 +165,11 @@ impl Parser {
             return self.while_statement();
         }
         if self.matches(&Token::Return) {
-            let value = if self.check(&Token::Semicolon) { None } else { Some(self.expr()?) };
+            let value = if self.check(&Token::Semicolon) {
+                None
+            } else {
+                Some(self.expr()?)
+            };
             self.expect(Token::Semicolon, "';' after return")?;
             return Ok(Stmt::Return(value));
         }
@@ -246,7 +257,10 @@ impl Parser {
             if let Expr::Ident(name) = expr {
                 return Ok(Expr::Assign(name, Box::new(value)));
             }
-            return Err(ScriptError { message: "invalid assignment target".to_string(), line: self.line() });
+            return Err(ScriptError {
+                message: "invalid assignment target".to_string(),
+                line: self.line(),
+            });
         }
         Ok(expr)
     }
@@ -385,7 +399,10 @@ impl Parser {
                 self.expect(Token::RParen, "')' after expression")?;
                 Ok(expr)
             }
-            other => Err(ScriptError { message: format!("unexpected token {other:?}"), line }),
+            other => Err(ScriptError {
+                message: format!("unexpected token {other:?}"),
+                line,
+            }),
         }
     }
 }

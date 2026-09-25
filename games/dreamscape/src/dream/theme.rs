@@ -33,6 +33,46 @@ pub const ALL_THEMES: [DreamTheme; 10] = [
     DreamTheme::MirrorHall,
 ];
 
+/// How a dream *feels* beyond its colours: shader and post-effect levels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mood {
+    /// Extra surface breathing, 0..=1 (on top of strangeness).
+    pub breathe: f32,
+    /// Tracers: how long moving things smear, 0..=0.9.
+    pub trails: f32,
+    /// Bright parts of textures glow in the dark, 0..=1.
+    pub glow: f32,
+    /// Beats per minute the dream pulses to (0 = no pulse).
+    pub bpm: f32,
+}
+
+impl Mood {
+    pub const PLAIN: Mood = Mood {
+        breathe: 0.0,
+        trails: 0.0,
+        glow: 0.0,
+        bpm: 0.0,
+    };
+
+    pub const fn new(breathe: f32, trails: f32, glow: f32, bpm: f32) -> Mood {
+        Mood {
+            breathe,
+            trails,
+            glow,
+            bpm,
+        }
+    }
+
+    /// 1 on the beat, falling off sharply until the next one.
+    pub fn pulse(&self, time: f32) -> f32 {
+        if self.bpm <= 0.0 {
+            return 0.0;
+        }
+        let phase = (time * self.bpm / 60.0).fract();
+        (1.0 - phase).powi(4)
+    }
+}
+
 /// Special enemies (on top of the pacers every dream has).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnemyKind {
@@ -212,6 +252,7 @@ pub struct ThemeSpec {
     pub specials: &'static [(EnemyKind, u32)],
     /// Slow fog pockets drift through this dream.
     pub fog_pockets: bool,
+    pub mood: Mood,
 }
 
 impl DreamTheme {
@@ -253,6 +294,7 @@ impl DreamTheme {
                 accents: &[[255, 150, 220], [150, 200, 255]],
                 specials: &[],
                 fog_pockets: false,
+                mood: Mood::PLAIN,
             },
             LiminalOffice => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -287,6 +329,7 @@ impl DreamTheme {
                 accents: &[[210, 255, 60], [255, 220, 40]],
                 specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Sentry, 1)],
                 fog_pockets: false,
+                mood: Mood::new(0.15, 0.0, 0.0, 0.0),
             },
             VoidPlatforms => ThemeSpec {
                 layout: LayoutKind::PlatformChain,
@@ -321,6 +364,7 @@ impl DreamTheme {
                 accents: &[[255, 40, 220], [40, 240, 255]],
                 specials: &[(EnemyKind::Drifter, 1)],
                 fog_pockets: false,
+                mood: Mood::new(0.0, 0.35, 0.2, 0.0),
             },
             Garden => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -361,6 +405,7 @@ impl DreamTheme {
                 accents: &[[255, 90, 200], [180, 255, 40]],
                 specials: &[(EnemyKind::Jester, 1)],
                 fog_pockets: true,
+                mood: Mood::new(0.4, 0.0, 0.0, 0.0),
             },
             NightmareFactory => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -395,6 +440,7 @@ impl DreamTheme {
                 accents: &[[255, 120, 0], [255, 20, 60]],
                 specials: &[(EnemyKind::Sentry, 2), (EnemyKind::Mimic, 1)],
                 fog_pockets: false,
+                mood: Mood::new(0.1, 0.0, 0.1, 96.0),
             },
             Awakening => ThemeSpec {
                 layout: LayoutKind::OpenHall,
@@ -418,6 +464,7 @@ impl DreamTheme {
                 accents: &[[255, 240, 200]],
                 specials: &[],
                 fog_pockets: false,
+                mood: Mood::PLAIN,
             },
             CursedForest => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -451,6 +498,7 @@ impl DreamTheme {
                 accents: &[[120, 255, 90], [255, 60, 200]],
                 specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Jester, 1)],
                 fog_pockets: true,
+                mood: Mood::new(0.5, 0.0, 0.25, 0.0),
             },
             DrownedLibrary => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -479,6 +527,7 @@ impl DreamTheme {
                 accents: &[[80, 220, 255], [180, 120, 255]],
                 specials: &[(EnemyKind::Sentry, 1), (EnemyKind::Mimic, 1)],
                 fog_pockets: true,
+                mood: Mood::new(0.2, 0.25, 0.0, 0.0),
             },
             SkyStairs => ThemeSpec {
                 layout: LayoutKind::Spiral,
@@ -506,6 +555,7 @@ impl DreamTheme {
                 accents: &[[255, 200, 120], [140, 220, 255]],
                 specials: &[(EnemyKind::Drifter, 1)],
                 fog_pockets: false,
+                mood: Mood::new(0.0, 0.3, 0.0, 0.0),
             },
             MirrorHall => ThemeSpec {
                 layout: LayoutKind::Mirrored,
@@ -539,6 +589,7 @@ impl DreamTheme {
                 accents: &[[255, 160, 255], [120, 255, 240]],
                 specials: &[(EnemyKind::Mimic, 2), (EnemyKind::Stalker, 1)],
                 fog_pockets: false,
+                mood: Mood::new(0.0, 0.3, 0.1, 0.0),
             },
         }
     }
@@ -553,6 +604,20 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(rel)
+    }
+
+    #[test]
+    fn moods_are_in_range_and_pulses_beat() {
+        for t in ALL_THEMES {
+            let m = t.spec().mood;
+            assert!((0.0..=1.0).contains(&m.breathe) && (0.0..=0.9).contains(&m.trails));
+            assert!((0.0..=1.0).contains(&m.glow) && m.bpm >= 0.0, "{t:?}");
+        }
+        let m = Mood::new(0.0, 0.0, 0.0, 120.0);
+        assert!((m.pulse(0.0) - 1.0).abs() < 1e-5);
+        assert!(m.pulse(0.25) < 0.1);
+        assert!((m.pulse(0.5) - 1.0).abs() < 1e-4, "on the next beat");
+        assert_eq!(Mood::PLAIN.pulse(3.3), 0.0);
     }
 
     #[test]

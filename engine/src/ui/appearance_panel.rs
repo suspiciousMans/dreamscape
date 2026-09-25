@@ -50,7 +50,10 @@ pub fn draw_appearance_panel(
                 ui.separator();
                 ui.label("Available models:");
                 for (index, name) in available_rigs.iter().enumerate() {
-                    if ui.selectable_label(Some(name.as_str()) == current, name).clicked() {
+                    if ui
+                        .selectable_label(Some(name.as_str()) == current, name)
+                        .clicked()
+                    {
                         action = Some(AppearanceAction::SelectExisting(index));
                     }
                 }

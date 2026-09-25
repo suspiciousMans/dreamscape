@@ -46,7 +46,11 @@ impl AudioContext {
         // otherwise crash the whole single-threaded engine mid-frame
         // instead of just skipping the blip — sanitize to a finite,
         // non-negative value first (and skip a zero-length source).
-        let secs = if duration_secs.is_finite() { duration_secs.max(0.0) } else { 0.0 };
+        let secs = if duration_secs.is_finite() {
+            duration_secs.max(0.0)
+        } else {
+            0.0
+        };
         if secs <= 0.0 {
             return;
         }

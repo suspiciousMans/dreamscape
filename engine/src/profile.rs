@@ -150,7 +150,10 @@ pub struct ProfileCycler {
 
 impl ProfileCycler {
     pub fn new(profiles: Vec<ShaderProfile>) -> anyhow::Result<Self> {
-        anyhow::ensure!(!profiles.is_empty(), "at least one shader profile is required");
+        anyhow::ensure!(
+            !profiles.is_empty(),
+            "at least one shader profile is required"
+        );
         Ok(Self { profiles, index: 0 })
     }
 

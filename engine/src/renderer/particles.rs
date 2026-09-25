@@ -68,10 +68,22 @@ impl ParticlePass {
         }
     }
 
-    pub fn draw_particle(&self, gl: &glow::Context, mesh: &GpuMesh, model: &[f32; 16], color: [f32; 4]) {
+    pub fn draw_particle(
+        &self,
+        gl: &glow::Context,
+        mesh: &GpuMesh,
+        model: &[f32; 16],
+        color: [f32; 4],
+    ) {
         unsafe {
             gl.uniform_matrix_4_f32_slice(self.uniform_model.as_ref(), false, model);
-            gl.uniform_4_f32(self.uniform_color.as_ref(), color[0], color[1], color[2], color[3]);
+            gl.uniform_4_f32(
+                self.uniform_color.as_ref(),
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
         }
         mesh.draw(gl);
     }

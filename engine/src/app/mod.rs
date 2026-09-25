@@ -63,7 +63,8 @@ impl App {
                 if matches!(event, Event::Quit { .. }) {
                     ctx.should_quit = true;
                 }
-                ctx.input.handle_event(&event, &ctx.platform.game_controller);
+                ctx.input
+                    .handle_event(&event, &ctx.platform.game_controller);
                 game.handle_event(&mut ctx, &event);
             }
             if ctx.should_quit {
@@ -131,7 +132,8 @@ impl App {
                 if matches!(event, Event::Quit { .. }) {
                     ctx.should_quit = true;
                 }
-                ctx.input.handle_event(&event, &ctx.platform.game_controller);
+                ctx.input
+                    .handle_event(&event, &ctx.platform.game_controller);
                 game.handle_event(&mut ctx, &event);
             }
             if ctx.should_quit {
@@ -147,7 +149,8 @@ impl App {
                 break 'running;
             }
             for event in host.drain_events() {
-                ctx.input.handle_event(&event, &ctx.platform.game_controller);
+                ctx.input
+                    .handle_event(&event, &ctx.platform.game_controller);
                 game.handle_event(&mut ctx, &event);
             }
 

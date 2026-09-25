@@ -97,13 +97,19 @@ impl Interpreter {
     /// compile time) — keep them to constants/built-in math.
     pub fn compile(source: &str) -> Result<Self, Vec<ScriptError>> {
         let statements = parse(source)?;
-        let mut interpreter =
-            Interpreter { functions: HashMap::new(), globals: HashMap::new(), call_depth: 0, scope_pool: Vec::new() };
+        let mut interpreter = Interpreter {
+            functions: HashMap::new(),
+            globals: HashMap::new(),
+            call_depth: 0,
+            scope_pool: Vec::new(),
+        };
         let mut host = NoHost;
         for stmt in statements {
             match stmt {
                 Stmt::FnDecl(decl) => {
-                    interpreter.functions.insert(decl.name.clone(), Arc::new(decl));
+                    interpreter
+                        .functions
+                        .insert(decl.name.clone(), Arc::new(decl));
                 }
                 Stmt::Let(name, expr) => {
                     let mut scopes = Vec::new();
@@ -114,7 +120,8 @@ impl Interpreter {
                 }
                 _ => {
                     return Err(vec![ScriptError {
-                        message: "only 'let' and 'fn' declarations are allowed at the top level".to_string(),
+                        message: "only 'let' and 'fn' declarations are allowed at the top level"
+                            .to_string(),
                         line: 0,
                     }]);
                 }
@@ -132,7 +139,12 @@ impl Interpreter {
     /// a name that isn't defined is a no-op returning `Nil`, so hooks like
     /// `update`/`interact` are optional: a script just omits the ones it
     /// doesn't need.
-    pub fn call(&mut self, name: &str, args: &[Value], host: &mut dyn Host) -> Result<Value, ScriptError> {
+    pub fn call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        host: &mut dyn Host,
+    ) -> Result<Value, ScriptError> {
         let Some(decl) = self.functions.get(name).cloned() else {
             return Ok(Value::Nil);
         };
@@ -175,7 +187,12 @@ impl Interpreter {
         }
     }
 
-    fn exec_block(&mut self, statements: &[Stmt], scopes: &mut Vec<Scope>, host: &mut dyn Host) -> Result<Flow, ScriptError> {
+    fn exec_block(
+        &mut self,
+        statements: &[Stmt],
+        scopes: &mut Vec<Scope>,
+        host: &mut dyn Host,
+    ) -> Result<Flow, ScriptError> {
         for stmt in statements {
             match self.exec_stmt(stmt, scopes, host)? {
                 Flow::Normal => {}
@@ -185,11 +202,19 @@ impl Interpreter {
         Ok(Flow::Normal)
     }
 
-    fn exec_stmt(&mut self, stmt: &Stmt, scopes: &mut Vec<Scope>, host: &mut dyn Host) -> Result<Flow, ScriptError> {
+    fn exec_stmt(
+        &mut self,
+        stmt: &Stmt,
+        scopes: &mut Vec<Scope>,
+        host: &mut dyn Host,
+    ) -> Result<Flow, ScriptError> {
         match stmt {
             Stmt::Let(name, expr) => {
                 let value = self.eval_expr(expr, scopes, host)?;
-                scopes.last_mut().expect("call frame always has a scope").insert(name.clone(), value);
+                scopes
+                    .last_mut()
+                    .expect("call frame always has a scope")
+                    .insert(name.clone(), value);
                 Ok(Flow::Normal)
             }
             Stmt::Expr(expr) => {
@@ -218,7 +243,8 @@ impl Interpreter {
                     iterations += 1;
                     if iterations > MAX_ITERATIONS {
                         return Err(ScriptError {
-                            message: "while loop exceeded 1,000,000 iterations (likely infinite)".to_string(),
+                            message: "while loop exceeded 1,000,000 iterations (likely infinite)"
+                                .to_string(),
                             line: 0,
                         });
                     }
@@ -248,7 +274,12 @@ impl Interpreter {
         }
     }
 
-    fn exec_scoped(&mut self, statements: &[Stmt], scopes: &mut Vec<Scope>, host: &mut dyn Host) -> Result<Flow, ScriptError> {
+    fn exec_scoped(
+        &mut self,
+        statements: &[Stmt],
+        scopes: &mut Vec<Scope>,
+        host: &mut dyn Host,
+    ) -> Result<Flow, ScriptError> {
         // Recycle a scope from the pool instead of allocating a fresh
         // `HashMap` on every if-branch / while-iteration — pooled scopes are
         // always returned cleared, so this one starts empty.
@@ -271,7 +302,12 @@ impl Interpreter {
         self.globals.get(name).cloned()
     }
 
-    fn assign(&mut self, name: &str, value: Value, scopes: &mut [Scope]) -> Result<(), ScriptError> {
+    fn assign(
+        &mut self,
+        name: &str,
+        value: Value,
+        scopes: &mut [Scope],
+    ) -> Result<(), ScriptError> {
         for scope in scopes.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
@@ -282,18 +318,27 @@ impl Interpreter {
             self.globals.insert(name.to_string(), value);
             return Ok(());
         }
-        Err(ScriptError { message: format!("assignment to undefined variable '{name}'"), line: 0 })
+        Err(ScriptError {
+            message: format!("assignment to undefined variable '{name}'"),
+            line: 0,
+        })
     }
 
-    fn eval_expr(&mut self, expr: &Expr, scopes: &mut Vec<Scope>, host: &mut dyn Host) -> Result<Value, ScriptError> {
+    fn eval_expr(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut Vec<Scope>,
+        host: &mut dyn Host,
+    ) -> Result<Value, ScriptError> {
         match expr {
             Expr::Number(n) => Ok(Value::Number(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
-            Expr::Ident(name) => self
-                .lookup(name, scopes)
-                .ok_or_else(|| ScriptError { message: format!("undefined variable '{name}'"), line: 0 }),
+            Expr::Ident(name) => self.lookup(name, scopes).ok_or_else(|| ScriptError {
+                message: format!("undefined variable '{name}'"),
+                line: 0,
+            }),
             Expr::Assign(name, value_expr) => {
                 let value = self.eval_expr(value_expr, scopes, host)?;
                 self.assign(name, value.clone(), scopes)?;
@@ -303,9 +348,10 @@ impl Interpreter {
                 let value = self.eval_expr(operand, scopes, host)?;
                 match op {
                     UnaryOp::Neg => {
-                        let n = value
-                            .as_number()
-                            .ok_or_else(|| ScriptError { message: "'-' expects a number".to_string(), line: 0 })?;
+                        let n = value.as_number().ok_or_else(|| ScriptError {
+                            message: "'-' expects a number".to_string(),
+                            line: 0,
+                        })?;
                         Ok(Value::Number(-n))
                     }
                     UnaryOp::Not => Ok(Value::Bool(!value.truthy())),
@@ -348,7 +394,12 @@ impl Interpreter {
     /// Resolution order for a call expression: built-in math function, then
     /// a user-defined script function (a fresh call frame — no access to
     /// the caller's locals), then fall through to the embedder's `Host`.
-    fn call_named(&mut self, name: &str, args: &[Value], host: &mut dyn Host) -> Result<Value, ScriptError> {
+    fn call_named(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        host: &mut dyn Host,
+    ) -> Result<Value, ScriptError> {
         if let Some(result) = call_builtin(name, args)? {
             return Ok(result);
         }
@@ -360,17 +411,30 @@ impl Interpreter {
 }
 
 fn numeric_error(op: &str) -> ScriptError {
-    ScriptError { message: format!("'{op}' expects numbers"), line: 0 }
+    ScriptError {
+        message: format!("'{op}' expects numbers"),
+        line: 0,
+    }
 }
 
-fn numeric_op(op: &str, left: Value, right: Value, f: impl Fn(f64, f64) -> f64) -> Result<Value, ScriptError> {
+fn numeric_op(
+    op: &str,
+    left: Value,
+    right: Value,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<Value, ScriptError> {
     let (Value::Number(a), Value::Number(b)) = (&left, &right) else {
         return Err(numeric_error(op));
     };
     Ok(Value::Number(f(*a, *b)))
 }
 
-fn compare(op: &str, left: Value, right: Value, f: impl Fn(f64, f64) -> bool) -> Result<Value, ScriptError> {
+fn compare(
+    op: &str,
+    left: Value,
+    right: Value,
+    f: impl Fn(f64, f64) -> bool,
+) -> Result<Value, ScriptError> {
     let (Value::Number(a), Value::Number(b)) = (&left, &right) else {
         return Err(numeric_error(op));
     };
@@ -406,12 +470,18 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, ScriptError
     fn arg(args: &[Value], index: usize, name: &str) -> Result<f64, ScriptError> {
         args.get(index)
             .and_then(Value::as_number)
-            .ok_or_else(|| ScriptError { message: format!("'{name}' expects numeric argument(s)"), line: 0 })
+            .ok_or_else(|| ScriptError {
+                message: format!("'{name}' expects numeric argument(s)"),
+                line: 0,
+            })
     }
     fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), ScriptError> {
         if args.len() != expected {
             return Err(ScriptError {
-                message: format!("'{name}' expects {expected} argument(s), got {}", args.len()),
+                message: format!(
+                    "'{name}' expects {expected} argument(s), got {}",
+                    args.len()
+                ),
                 line: 0,
             });
         }
@@ -419,13 +489,34 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Option<Value>, ScriptError
     }
 
     let value = match name {
-        "sin" => { check_arity(name, args, 1)?; Value::Number(arg(args, 0, name)?.sin()) }
-        "cos" => { check_arity(name, args, 1)?; Value::Number(arg(args, 0, name)?.cos()) }
-        "abs" => { check_arity(name, args, 1)?; Value::Number(arg(args, 0, name)?.abs()) }
-        "sqrt" => { check_arity(name, args, 1)?; Value::Number(arg(args, 0, name)?.sqrt()) }
-        "floor" => { check_arity(name, args, 1)?; Value::Number(arg(args, 0, name)?.floor()) }
-        "min" => { check_arity(name, args, 2)?; Value::Number(arg(args, 0, name)?.min(arg(args, 1, name)?)) }
-        "max" => { check_arity(name, args, 2)?; Value::Number(arg(args, 0, name)?.max(arg(args, 1, name)?)) }
+        "sin" => {
+            check_arity(name, args, 1)?;
+            Value::Number(arg(args, 0, name)?.sin())
+        }
+        "cos" => {
+            check_arity(name, args, 1)?;
+            Value::Number(arg(args, 0, name)?.cos())
+        }
+        "abs" => {
+            check_arity(name, args, 1)?;
+            Value::Number(arg(args, 0, name)?.abs())
+        }
+        "sqrt" => {
+            check_arity(name, args, 1)?;
+            Value::Number(arg(args, 0, name)?.sqrt())
+        }
+        "floor" => {
+            check_arity(name, args, 1)?;
+            Value::Number(arg(args, 0, name)?.floor())
+        }
+        "min" => {
+            check_arity(name, args, 2)?;
+            Value::Number(arg(args, 0, name)?.min(arg(args, 1, name)?))
+        }
+        "max" => {
+            check_arity(name, args, 2)?;
+            Value::Number(arg(args, 0, name)?.max(arg(args, 1, name)?))
+        }
         _ => return Ok(None),
     };
     Ok(Some(value))
@@ -450,7 +541,10 @@ mod tests {
     fn arithmetic_and_precedence() {
         let mut interp = Interpreter::compile("fn calc() { return 2 + 3 * 4 - 1; }").unwrap();
         let mut host = NoHost;
-        assert_eq!(interp.call("calc", &[], &mut host).unwrap(), Value::Number(13.0));
+        assert_eq!(
+            interp.call("calc", &[], &mut host).unwrap(),
+            Value::Number(13.0)
+        );
     }
 
     #[test]
@@ -459,11 +553,15 @@ mod tests {
         let mut interp = Interpreter::compile(src).unwrap();
         let mut host = NoHost;
         assert_eq!(
-            interp.call("classify", &[Value::Number(5.0)], &mut host).unwrap(),
+            interp
+                .call("classify", &[Value::Number(5.0)], &mut host)
+                .unwrap(),
             Value::Str("pos".to_string())
         );
         assert_eq!(
-            interp.call("classify", &[Value::Number(-1.0)], &mut host).unwrap(),
+            interp
+                .call("classify", &[Value::Number(-1.0)], &mut host)
+                .unwrap(),
             Value::Str("nonpos".to_string())
         );
     }
@@ -473,16 +571,31 @@ mod tests {
         let src = "let total = 0.0;\nfn accumulate(n) { let i = 0.0; while i < n { total = total + 1.0; i = i + 1.0; } return total; }";
         let mut interp = Interpreter::compile(src).unwrap();
         let mut host = NoHost;
-        assert_eq!(interp.call("accumulate", &[Value::Number(3.0)], &mut host).unwrap(), Value::Number(3.0));
+        assert_eq!(
+            interp
+                .call("accumulate", &[Value::Number(3.0)], &mut host)
+                .unwrap(),
+            Value::Number(3.0)
+        );
         // Calling again should keep accumulating in the persistent global.
-        assert_eq!(interp.call("accumulate", &[Value::Number(2.0)], &mut host).unwrap(), Value::Number(5.0));
+        assert_eq!(
+            interp
+                .call("accumulate", &[Value::Number(2.0)], &mut host)
+                .unwrap(),
+            Value::Number(5.0)
+        );
     }
 
     #[test]
     fn built_in_math_functions() {
-        let mut interp = Interpreter::compile("fn calc() { return sqrt(16.0) + abs(-3.0) + max(1.0, 9.0); }").unwrap();
+        let mut interp =
+            Interpreter::compile("fn calc() { return sqrt(16.0) + abs(-3.0) + max(1.0, 9.0); }")
+                .unwrap();
         let mut host = NoHost;
-        assert_eq!(interp.call("calc", &[], &mut host).unwrap(), Value::Number(4.0 + 3.0 + 9.0));
+        assert_eq!(
+            interp.call("calc", &[], &mut host).unwrap(),
+            Value::Number(4.0 + 3.0 + 9.0)
+        );
     }
 
     #[test]
@@ -492,14 +605,20 @@ mod tests {
         interp.call("go", &[], &mut host).unwrap();
         assert_eq!(host.calls.len(), 1);
         assert_eq!(host.calls[0].0, "log");
-        assert_eq!(host.calls[0].1, vec![Value::Str("hi".to_string()), Value::Number(42.0)]);
+        assert_eq!(
+            host.calls[0].1,
+            vec![Value::Str("hi".to_string()), Value::Number(42.0)]
+        );
     }
 
     #[test]
     fn missing_function_call_is_a_noop() {
         let mut interp = Interpreter::compile("fn go() {}").unwrap();
         let mut host = NoHost;
-        assert_eq!(interp.call("nonexistent", &[], &mut host).unwrap(), Value::Nil);
+        assert_eq!(
+            interp.call("nonexistent", &[], &mut host).unwrap(),
+            Value::Nil
+        );
     }
 
     #[test]
@@ -507,7 +626,9 @@ mod tests {
         let mut interp = Interpreter::compile("fn greet(name) { return \"hi \" + name; }").unwrap();
         let mut host = NoHost;
         assert_eq!(
-            interp.call("greet", &[Value::Str("world".to_string())], &mut host).unwrap(),
+            interp
+                .call("greet", &[Value::Str("world".to_string())], &mut host)
+                .unwrap(),
             Value::Str("hi world".to_string())
         );
     }

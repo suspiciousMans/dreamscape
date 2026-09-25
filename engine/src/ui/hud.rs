@@ -23,7 +23,11 @@ pub fn draw_hud(ctx: &egui::Context, hud: &HudState, style: &HudStyle) {
         )
         .show(ctx, |ui| {
             if let Some(title) = &hud.title {
-                ui.label(egui::RichText::new(title).size(style.title_font_size).strong());
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(style.title_font_size)
+                        .strong(),
+                );
             }
             for (name, fraction) in &hud.bars {
                 ui.add(
@@ -37,7 +41,12 @@ pub fn draw_hud(ctx: &egui::Context, hud: &HudState, style: &HudStyle) {
             for (message, remaining) in hud.toasts() {
                 let alpha = remaining.min(1.0);
                 let base = color32(toast_rgb);
-                let color = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (alpha * 255.0) as u8);
+                let color = egui::Color32::from_rgba_unmultiplied(
+                    base.r(),
+                    base.g(),
+                    base.b(),
+                    (alpha * 255.0) as u8,
+                );
                 ui.colored_label(color, message);
             }
         });

@@ -1342,6 +1342,11 @@ impl DreamscapeGame {
         }
     }
 
+    /// 1 = full motion effects; lower with the reduced-motion setting.
+    fn motion_scale(&self) -> f32 {
+        1.0
+    }
+
     /// The dreamer's walking speed right now.
     fn player_speed(&self) -> f32 {
         gameplay::MOVE_SPEED
@@ -2855,6 +2860,12 @@ impl Game for DreamscapeGame {
         let melt = self.transition.melt();
         let transition = self.transition;
         let strangeness = self.visual_strangeness();
+        let mood = self
+            .dream
+            .as_ref()
+            .map_or(dream::Mood::PLAIN, |d| d.theme.spec().mood);
+        let motion = self.motion_scale();
+        let pulse = mood.pulse(self.time) * motion;
         let player = self.player_position;
         let up = if self.inverted() && !self.debug_camera {
             -Vec3::Y
@@ -2893,6 +2904,11 @@ impl Game for DreamscapeGame {
         let dark = tunnel::darkness(fog);
         let clear = if tunnel { dark } else { fog };
         renderer.resize_if_needed(gl, drawable_size)?;
+        renderer.set_trails(if self.mode == hud::Mode::Title {
+            0.0
+        } else {
+            mood.trails * motion
+        });
         renderer.begin_scene(gl);
         unsafe {
             // egui (drawn last frame) leaves depth test off and blending/scissor on.
@@ -2973,6 +2989,15 @@ impl Game for DreamscapeGame {
             }
             if let Some(l) = loc("uStrangeness") {
                 gl.uniform_1_f32(Some(&l), strangeness);
+            }
+            if let Some(l) = loc("uBreathe") {
+                gl.uniform_1_f32(Some(&l), mood.breathe * motion);
+            }
+            if let Some(l) = loc("uPulse") {
+                gl.uniform_1_f32(Some(&l), pulse);
+            }
+            if let Some(l) = loc("uGlow") {
+                gl.uniform_1_f32(Some(&l), mood.glow);
             }
             if let Some(l) = loc("uPlayer") {
                 gl.uniform_3_f32(Some(&l), player.x, player.y, player.z);

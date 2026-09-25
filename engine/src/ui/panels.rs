@@ -32,13 +32,25 @@ pub fn render_params_editor(ui: &mut egui::Ui, params: &mut RenderParams) -> boo
     ui.label("Sun direction (toward the light)");
     ui.horizontal(|ui| {
         changed |= ui
-            .add(egui::DragValue::new(&mut params.light_dir[0]).speed(0.05).prefix("x: "))
+            .add(
+                egui::DragValue::new(&mut params.light_dir[0])
+                    .speed(0.05)
+                    .prefix("x: "),
+            )
             .changed();
         changed |= ui
-            .add(egui::DragValue::new(&mut params.light_dir[1]).speed(0.05).prefix("y: "))
+            .add(
+                egui::DragValue::new(&mut params.light_dir[1])
+                    .speed(0.05)
+                    .prefix("y: "),
+            )
             .changed();
         changed |= ui
-            .add(egui::DragValue::new(&mut params.light_dir[2]).speed(0.05).prefix("z: "))
+            .add(
+                egui::DragValue::new(&mut params.light_dir[2])
+                    .speed(0.05)
+                    .prefix("z: "),
+            )
             .changed();
     });
 
@@ -75,8 +87,7 @@ pub fn render_params_editor(ui: &mut egui::Ui, params: &mut RenderParams) -> boo
     ui.heading("Geometry / Texturing");
     changed |= ui
         .add(
-            egui::Slider::new(&mut params.vertex_snap_amount, 0.0..=0.2)
-                .text("Vertex snap amount"),
+            egui::Slider::new(&mut params.vertex_snap_amount, 0.0..=0.2).text("Vertex snap amount"),
         )
         .changed();
     changed |= ui
@@ -119,10 +130,18 @@ pub fn hud_style_editor(ui: &mut egui::Ui, style: &mut HudStyle) -> bool {
     ui.label("Anchor offset (from top-left, pixels)");
     ui.horizontal(|ui| {
         changed |= ui
-            .add(egui::DragValue::new(&mut style.anchor_offset[0]).speed(1.0).prefix("x: "))
+            .add(
+                egui::DragValue::new(&mut style.anchor_offset[0])
+                    .speed(1.0)
+                    .prefix("x: "),
+            )
             .changed();
         changed |= ui
-            .add(egui::DragValue::new(&mut style.anchor_offset[1]).speed(1.0).prefix("y: "))
+            .add(
+                egui::DragValue::new(&mut style.anchor_offset[1])
+                    .speed(1.0)
+                    .prefix("y: "),
+            )
             .changed();
     });
     changed |= ui

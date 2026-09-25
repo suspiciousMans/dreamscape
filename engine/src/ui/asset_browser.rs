@@ -89,25 +89,33 @@ impl AssetBrowserState {
                     return;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("asset_browser_grid").num_columns(3).show(ui, |ui| {
-                        for (i, path) in self.files.iter().enumerate() {
-                            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                            if let Some(&tex_id) = self.thumbnails.get(path) {
-                                let clicked = ui
-                                    .add(egui::ImageButton::new((tex_id, egui::vec2(64.0, 64.0))))
-                                    .on_hover_text(&name)
-                                    .clicked();
-                                if clicked {
-                                    picked = Some(crate::level::relativize(path, asset_root));
+                    egui::Grid::new("asset_browser_grid")
+                        .num_columns(3)
+                        .show(ui, |ui| {
+                            for (i, path) in self.files.iter().enumerate() {
+                                let name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                if let Some(&tex_id) = self.thumbnails.get(path) {
+                                    let clicked = ui
+                                        .add(egui::ImageButton::new((
+                                            tex_id,
+                                            egui::vec2(64.0, 64.0),
+                                        )))
+                                        .on_hover_text(&name)
+                                        .clicked();
+                                    if clicked {
+                                        picked = Some(crate::level::relativize(path, asset_root));
+                                    }
+                                } else {
+                                    ui.label(&name);
                                 }
-                            } else {
-                                ui.label(&name);
+                                if (i + 1) % 3 == 0 {
+                                    ui.end_row();
+                                }
                             }
-                            if (i + 1) % 3 == 0 {
-                                ui.end_row();
-                            }
-                        }
-                    });
+                        });
                 });
             });
         self.open = still_open && picked.is_none();
@@ -123,7 +131,9 @@ fn scan_for_extensions(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
 }
 
 fn scan_dir(dir: &Path, extensions: &[&str], results: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

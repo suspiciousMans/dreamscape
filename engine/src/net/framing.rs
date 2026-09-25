@@ -270,7 +270,10 @@ mod tests {
         let mut server = NetConnection::wrap(server_stream).unwrap();
         let mut client = NetConnection::wrap(client_stream).unwrap();
 
-        server.send(&Msg { n: 7, text: "hello".to_string() });
+        server.send(&Msg {
+            n: 7,
+            text: "hello".to_string(),
+        });
 
         // The message may take a couple of pump() calls to actually reach
         // the client's socket buffer on some platforms — poll a bounded
@@ -287,7 +290,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        assert_eq!(received, vec![Msg { n: 7, text: "hello".to_string() }]);
+        assert_eq!(
+            received,
+            vec![Msg {
+                n: 7,
+                text: "hello".to_string()
+            }]
+        );
         assert!(!client.is_disconnected());
     }
 }
