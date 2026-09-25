@@ -22,6 +22,7 @@ pub enum Mode {
     Choice,
     /// On waking, before the pack.
     Summary,
+    Settings,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -109,6 +110,7 @@ pub struct HudView {
     pub objective: Option<String>,
     /// First-time hints for this dream's specials (under the title card).
     pub hint: String,
+    pub settings: crate::settings_ui::SettingsView,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -319,6 +321,7 @@ pub fn draw(
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
         Mode::Choice => return crate::upgrade_ui::draw(&p, screen, v, &v.choice),
         Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),
+        Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);

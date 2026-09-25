@@ -33,6 +33,8 @@ mod hunter;
 mod pixels;
 mod records;
 mod reveal_ui;
+mod settings;
+mod settings_ui;
 mod shop_ui;
 mod specials;
 mod store;
@@ -226,6 +228,13 @@ pub struct DreamscapeGame {
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
     dream_hint: String,
+    settings: settings::Settings,
+    settings_path: std::path::PathBuf,
+    settings_sel: usize,
+    /// Waiting for a key to bind on the selected row.
+    settings_capture: bool,
+    /// Where the settings screen returns to.
+    settings_return: hud::Mode,
 
     input: PlayerInputState,
     player: Option<Entity>,
@@ -338,6 +347,11 @@ impl DreamscapeGame {
             shifters: Vec::new(),
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
+            settings: settings::load(&settings::settings_path()),
+            settings_path: settings::settings_path(),
+            settings_sel: 0,
+            settings_capture: false,
+            settings_return: hud::Mode::Title,
             input: PlayerInputState::default(),
             player: None,
             player_position: Vec3::ZERO,
@@ -845,6 +859,18 @@ impl DreamscapeGame {
                 summary_ui::SummaryView::default()
             },
             hint: self.dream_hint.clone(),
+            settings: if self.mode == hud::Mode::Settings {
+                settings_ui::SettingsView {
+                    rows: settings::rows()
+                        .into_iter()
+                        .map(|r| (r.label(), settings::value(&self.settings, r)))
+                        .collect(),
+                    selected: self.settings_sel,
+                    capturing: self.settings_capture,
+                }
+            } else {
+                settings_ui::SettingsView::default()
+            },
             objective: self.hunter.as_ref().map(|_| {
                 if self.sigils_left > 0 {
                     format!(
@@ -1474,7 +1500,86 @@ impl DreamscapeGame {
 
     /// 1 = full motion effects; lower with the reduced-motion setting.
     fn motion_scale(&self) -> f32 {
-        1.0
+        self.settings.motion()
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_return = self.mode;
+        self.settings_sel = 0;
+        self.settings_capture = false;
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Settings;
+    }
+
+    /// Pushes volumes and the window mode out to the engine, and saves.
+    fn apply_settings(&mut self, ctx: &mut Context) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_volume(self.settings.music);
+            audio.set_sfx_volume(self.settings.sfx);
+        }
+        let want = if self.settings.fullscreen {
+            engine::sdl2::video::FullscreenType::Desktop
+        } else {
+            engine::sdl2::video::FullscreenType::Off
+        };
+        if ctx.platform.window.fullscreen_state() != want {
+            if let Err(e) = ctx.platform.window.set_fullscreen(want) {
+                log::warn!("fullscreen: {e}");
+            }
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Err(e) = settings::save(&self.settings_path, &self.settings) {
+            log::warn!("could not save settings: {e}");
+        }
+    }
+
+    /// Keys on the settings screen.
+    fn settings_key(&mut self, ctx: &mut Context, key: Keycode) {
+        let rows = settings::rows();
+        let row = rows[self.settings_sel.min(rows.len() - 1)];
+        if self.settings_capture {
+            self.settings_capture = false;
+            if let (settings::Row::Key(action), false) = (row, key == Keycode::Escape) {
+                self.settings.bind(action, key);
+                log::info!("Bound {action:?} to {}", key.name());
+                self.save_settings();
+            }
+            return;
+        }
+        match key {
+            Keycode::Escape => self.mode = self.settings_return,
+            Keycode::W | Keycode::Up => {
+                self.settings_sel = (self.settings_sel + rows.len() - 1) % rows.len()
+            }
+            Keycode::S | Keycode::Down => self.settings_sel = (self.settings_sel + 1) % rows.len(),
+            Keycode::A | Keycode::Left | Keycode::D | Keycode::Right => {
+                let dir = if matches!(key, Keycode::A | Keycode::Left) {
+                    -1
+                } else {
+                    1
+                };
+                settings::adjust(&mut self.settings, row, dir);
+                self.apply_settings(ctx);
+                self.save_settings();
+                self.tone(440.0 + 220.0 * self.settings.sfx, 0.05);
+            }
+            Keycode::Return | Keycode::Space => match row {
+                settings::Row::Key(_) => self.settings_capture = true,
+                settings::Row::Defaults => {
+                    self.settings = settings::Settings::default();
+                    self.apply_settings(ctx);
+                    self.save_settings();
+                }
+                other => {
+                    settings::adjust(&mut self.settings, other, 1);
+                    self.apply_settings(ctx);
+                    self.save_settings();
+                }
+            },
+            _ => {}
+        }
     }
 
     /// The dreamer's walking speed right now.
@@ -2422,6 +2527,7 @@ impl Game for DreamscapeGame {
             Ok(audio) => self.audio = Some(audio),
             Err(e) => log::warn!("Failed to initialize audio: {e}"),
         }
+        self.apply_settings(ctx);
         if self.mode == hud::Mode::Playing {
             self.begin_run();
         }
@@ -2459,8 +2565,25 @@ impl Game for DreamscapeGame {
             Event::KeyUp {
                 keycode: Some(k), ..
             } => (*k, false, false),
+            // Controller buttons stand in for the keys they map to.
+            Event::ControllerButtonDown { button, .. } => {
+                match settings::pad_key(*button, &self.settings) {
+                    Some(k) => (k, true, false),
+                    None => return,
+                }
+            }
+            Event::ControllerButtonUp { button, .. } => {
+                match settings::pad_key(*button, &self.settings) {
+                    Some(k) => (k, false, false),
+                    None => return,
+                }
+            }
             _ => return,
         };
+        if down && !repeat && self.mode == hud::Mode::Settings {
+            self.settings_key(ctx, key);
+            return;
+        }
         if down && !repeat {
             let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
             if self.mode == hud::Mode::Summary {
@@ -2591,8 +2714,13 @@ impl Game for DreamscapeGame {
                         title_ui::RUN_ROW => self.run_length = self.run_length.toggled(),
                         2 => self.open_store(),
                         3 => self.open_booklet(),
+                        4 => self.open_settings(),
                         _ => ctx.should_quit = true,
                     }
+                    return;
+                }
+                (hud::Mode::Title | hud::Mode::Paused, Keycode::O) => {
+                    self.open_settings();
                     return;
                 }
                 (hud::Mode::Title, Keycode::R) => {
@@ -2622,14 +2750,18 @@ impl Game for DreamscapeGame {
         if self.mode != hud::Mode::Playing {
             return;
         }
+        use settings::Action;
+        match self.settings.action_for(key) {
+            Some(Action::Forward) => self.input.forward = down,
+            Some(Action::Back) => self.input.backward = down,
+            Some(Action::Left) => self.input.left = down,
+            Some(Action::Right) => self.input.right = down,
+            Some(Action::Jump) => self.input.jump = down,
+            Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
+            Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            _ => {}
+        }
         match key {
-            Keycode::W => self.input.forward = down,
-            Keycode::S => self.input.backward = down,
-            Keycode::A => self.input.left = down,
-            Keycode::D => self.input.right = down,
-            Keycode::Space => self.input.jump = down,
-            Keycode::LShift | Keycode::RShift if down && !repeat => self.ability_requests[0] = true,
-            Keycode::E if down && !repeat => self.ability_requests[1] = true,
             Keycode::F2 if down && !repeat => {
                 self.tunnel_on = !self.tunnel_on;
                 log::info!("tunnel vision: {}", self.tunnel_on);
@@ -2733,18 +2865,21 @@ impl Game for DreamscapeGame {
         let (desired, wants_jump) = if self.autopilot {
             self.autopilot_step()
         } else {
-            let mut v = gameplay::horizontal_velocity(&self.input)
-                * (self.player_speed() / gameplay::MOVE_SPEED)
-                * if self.on_vein() {
-                    specials::VEIN_BOOST
-                } else {
-                    1.0
-                }
-                * if self.in_fog() {
-                    specials::FOG_SLOW
-                } else {
-                    1.0
-                };
+            let ground = if self.on_vein() {
+                specials::VEIN_BOOST
+            } else {
+                1.0
+            } * if self.in_fog() {
+                specials::FOG_SLOW
+            } else {
+                1.0
+            };
+            let speed = self.player_speed() * ground;
+            let mut v = gameplay::horizontal_velocity(&self.input) * (speed / gameplay::MOVE_SPEED);
+            // The left stick, if it's pushed, wins (analogue: half-push walks).
+            if let Some((x, z)) = settings::stick_dir(ctx.input.left_stick()) {
+                v = Vec3::new(x, 0.0, z) * speed;
+            }
             if self.inverted() {
                 v = Vec3::new(-v.x, v.y, -v.z);
             }
@@ -3298,6 +3433,7 @@ impl Game for DreamscapeGame {
             },
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
+        let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         let card_art = &mut self.card_art;
         let pack = &self.pack;
         let grain = &mut self.grain;
@@ -3336,7 +3472,16 @@ impl Game for DreamscapeGame {
                         screen.left() + player_uv[0] * screen.width(),
                         screen.top() + player_uv[1] * screen.height(),
                     );
-                    tunnel::draw_overlay(&p, screen, at, strangeness, time, Some(tex));
+                    tunnel::draw_overlay(
+                        &p,
+                        screen,
+                        at,
+                        strangeness,
+                        time,
+                        Some(tex),
+                        grain_strength,
+                        vignette_strength,
+                    );
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack);
             });

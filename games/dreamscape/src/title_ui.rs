@@ -19,11 +19,12 @@ pub fn run_blurb(length: &str) -> &'static str {
 }
 
 /// Menu entries, in order. `[key] label`.
-pub const MENU: [(&str, &str); 5] = [
+pub const MENU: [(&str, &str); 6] = [
     ("enter", "fall asleep"),
     ("r", "run"),
     ("l", "the lucid store"),
     ("b", "dream booklet"),
+    ("o", "settings"),
     ("q", "stay awake"),
 ];
 

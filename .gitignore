@@ -6,3 +6,6 @@ game.log
 games/dreamscape/best_depth.txt
 games/dreamscape/booklet.ron
 games/dreamscape/booklet.ron.*
+games/dreamscape/settings.ron
+games/dreamscape/saved_run.ron
+games/dreamscape/cards/
