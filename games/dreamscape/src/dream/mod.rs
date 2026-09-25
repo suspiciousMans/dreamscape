@@ -11,9 +11,10 @@ mod variant;
 mod vocab;
 
 pub use build::{
-    generate_with, portal_surface, Atmosphere, Block, BlockKind, Dream, Pressure, TexSpec,
+    generate_nightmare, generate_with, portal_surface, Atmosphere, Block, BlockKind, Dream,
+    Pressure, TexSpec, SIGILS,
 };
-pub use director::{DreamDirector, RunLength, DEEPER_SHARDS};
+pub use director::{DreamDirector, RunLength, DEEPER_SHARDS, NIGHTMARE_EVERY};
 pub use meshes::{build as build_mesh, Shape, ALL_SHAPES};
 pub use names::{dream_name, whisper};
 pub use texture::TEX_SIZE;

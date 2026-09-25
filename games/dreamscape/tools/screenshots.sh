@@ -13,13 +13,15 @@ if [ -z "${DISPLAY:-}" ]; then
   export DISPLAY=:97
   sleep 1
 fi
-themes="Lobby LiminalOffice VoidPlatforms Garden NightmareFactory CursedForest DrownedLibrary SkyStairs MirrorHall"
+themes="Lobby LiminalOffice VoidPlatforms Garden NightmareFactory CursedForest DrownedLibrary SkyStairs MirrorHall Nightmare"
 fail=0
 for t in $themes; do
   shot="$out/$t.png"
   rm -f "$shot"
-  LIBGL_ALWAYS_SOFTWARE=1 SDL_AUDIODRIVER=dummy DREAMSCAPE_AUTOPILOT=1 \
-    DREAMSCAPE_SEED=3 DREAMSCAPE_THEME="$t" DREAMSCAPE_BOOKLET="$out/booklet.ron" \
+  extra=()
+  if [ "$t" = Nightmare ]; then extra=(DREAMSCAPE_NIGHTMARE=1); t_theme=MirrorHall; else t_theme="$t"; fi
+  env "${extra[@]}" LIBGL_ALWAYS_SOFTWARE=1 SDL_AUDIODRIVER=dummy DREAMSCAPE_AUTOPILOT=1 \
+    DREAMSCAPE_SEED=3 DREAMSCAPE_THEME="$t_theme" DREAMSCAPE_BOOKLET="$out/booklet.ron" \
     DREAMSCAPE_SHOT="$shot" DREAMSCAPE_SHOT_AT="${SHOT_AT:-5}" \
     timeout 120 ./target/debug/dreamscape >"$out/$t.log" 2>&1 || true
   if [ ! -s "$shot" ]; then

@@ -11,6 +11,9 @@ pub const LUCIDITY_TO_WAKE: u32 = 3;
 pub const LONG_LUCIDITY: u32 = 6;
 /// GO DEEPER at the wake door: this many more shards to wake next time.
 pub const DEEPER_SHARDS: u32 = 3;
+/// Every this-many dreams, the next one is a nightmare arena.
+pub const NIGHTMARE_EVERY: u32 = 5;
+
 /// Chance a (non-lucid) descent dream hides a lucidity shard.
 pub const SHARD_CHANCE: f64 = 0.6;
 
@@ -60,6 +63,8 @@ pub struct DreamDirector {
     pub overdrive: u32,
     /// Added to `SHARD_CHANCE` (run upgrades).
     pub shard_bonus: f64,
+    /// The current dream is a nightmare arena (no shard, a hunter, sigils).
+    pub nightmare: bool,
 }
 
 impl DreamDirector {
@@ -79,6 +84,7 @@ impl DreamDirector {
             hard_from: None,
             overdrive: 0,
             shard_bonus: 0.0,
+            nightmare: false,
         }
     }
 
@@ -144,7 +150,9 @@ impl DreamDirector {
         // Always roll, so the shard sequence doesn't depend on lucidity.
         let roll: f64 = self.rng.gen();
         let lucky = roll < (SHARD_CHANCE + self.shard_bonus).min(0.95);
-        self.has_shard = lucky || self.lucid();
+        self.nightmare = self.depth.is_multiple_of(NIGHTMARE_EVERY);
+        // A nightmare has no shard slot: the wake door waits for the next dream.
+        self.has_shard = !self.nightmare && (lucky || self.lucid());
         Some(self.theme)
     }
 
@@ -154,6 +162,7 @@ impl DreamDirector {
         self.shard_this_dream = false;
         self.theme = DreamTheme::Awakening;
         self.has_shard = false;
+        self.nightmare = false;
     }
 }
 
@@ -226,13 +235,15 @@ mod tests {
         let mut d = DreamDirector::new(9);
         assert!(!d.has_shard, "the lobby never has a shard");
         let n = 2000;
-        let hits = (0..n)
-            .filter(|_| {
-                d.descend();
-                d.has_shard
-            })
-            .count();
-        let rate = hits as f64 / n as f64;
+        let (mut hits, mut dreams) = (0, 0);
+        for _ in 0..n {
+            d.descend();
+            if !d.nightmare {
+                dreams += 1;
+                hits += d.has_shard as u32;
+            }
+        }
+        let rate = hits as f64 / dreams as f64;
         assert!((rate - SHARD_CHANCE).abs() < 0.05, "shard rate {rate}");
     }
 
@@ -288,17 +299,44 @@ mod tests {
     }
 
     #[test]
+    fn every_fifth_dream_is_a_nightmare_without_a_shard() {
+        let mut d = DreamDirector::new(2);
+        for _ in 0..3 {
+            d.collect_shard();
+        }
+        assert!(d.lucid());
+        for _ in 0..30 {
+            d.descend();
+            assert_eq!(
+                d.nightmare,
+                d.depth % NIGHTMARE_EVERY == 0,
+                "depth {}",
+                d.depth
+            );
+            if d.nightmare {
+                assert!(!d.has_shard, "no wake door in a nightmare");
+            } else {
+                assert!(d.has_shard, "lucid dreams have the wake door");
+            }
+        }
+        d.wake();
+        assert!(!d.nightmare);
+    }
+
+    #[test]
     fn shard_bonus_makes_shards_commoner() {
         let mut d = DreamDirector::new(9);
         d.shard_bonus = 0.3;
         let n = 2000;
-        let hits = (0..n)
-            .filter(|_| {
-                d.descend();
-                d.has_shard
-            })
-            .count();
-        let rate = hits as f64 / n as f64;
+        let (mut hits, mut dreams) = (0, 0);
+        for _ in 0..n {
+            d.descend();
+            if !d.nightmare {
+                dreams += 1;
+                hits += d.has_shard as u32;
+            }
+        }
+        let rate = hits as f64 / dreams as f64;
         assert!((rate - 0.9).abs() < 0.05, "shard rate {rate}");
     }
 

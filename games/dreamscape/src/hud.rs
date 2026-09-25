@@ -20,6 +20,8 @@ pub enum Mode {
     Booklet,
     /// Picking a run upgrade, or WAKE / GO DEEPER at the wake door.
     Choice,
+    /// On waking, before the pack.
+    Summary,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -102,6 +104,9 @@ pub struct HudView {
     /// Title screen: "short" / "long".
     pub run_length: &'static str,
     pub choice: crate::upgrade_ui::ChoiceView,
+    pub summary: crate::summary_ui::SummaryView,
+    /// Nightmares: sigils gathered, or the portal is open.
+    pub objective: Option<String>,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -311,6 +316,7 @@ pub fn draw(
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
         Mode::Choice => return crate::upgrade_ui::draw(&p, screen, v, &v.choice),
+        Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);
@@ -390,6 +396,24 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             rgba(hue(v.time * 0.1), 0.9),
         );
         y += 28.0;
+    }
+    if let Some(o) = &v.objective {
+        let open = o.starts_with("THE PORTAL");
+        p.text(
+            right + Vec2::new(0.0, y),
+            Align2::RIGHT_TOP,
+            o,
+            FontId::monospace(32.0),
+            rgba(
+                if open {
+                    [120, 255, 240]
+                } else {
+                    [255, 90, 160]
+                },
+                1.0,
+            ),
+        );
+        y += 40.0;
     }
     if let Some(t) = v.timer {
         let (text, rgb) = if t > 0.0 {

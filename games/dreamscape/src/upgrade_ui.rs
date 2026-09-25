@@ -13,6 +13,8 @@ pub struct ChoiceCard {
     pub desc: String,
     pub icon: Icon,
     pub color: [u8; 3],
+    /// Frame colour (the card's rarity).
+    pub frame: [u8; 3],
     /// Small line under the name ("ability · shift", "x2", ...).
     pub tag: String,
 }
@@ -25,6 +27,8 @@ pub struct ChoiceView {
     pub selected: usize,
     /// Seconds the screen has been up (cards deal in one by one).
     pub age: f32,
+    /// Key hints along the bottom.
+    pub hint: String,
 }
 
 pub fn icon_rows(icon: Icon) -> &'static [&'static str; icons::SIZE] {
@@ -44,7 +48,7 @@ pub fn icon_rows(icon: Icon) -> &'static [&'static str; icons::SIZE] {
 /// Card rectangles, centred on the screen, `n` side by side.
 pub fn card_rects(screen: Rect, n: usize) -> Vec<Rect> {
     let n = n.max(1);
-    let w = (screen.width() * 0.8 / n as f32).min(300.0);
+    let w = (screen.width() * 0.86 / n as f32).min(300.0);
     let h = (w * 1.3).min(screen.height() * 0.55);
     let gap = w * 0.12;
     let total = n as f32 * w + (n - 1) as f32 * gap;
@@ -93,7 +97,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
             0.0
         };
         let r = r.translate(Vec2::new(0.0, (1.0 - t) * 60.0 + lift));
-        let frame = if sel { hue(v.time * 0.2) } else { card.color };
+        let frame = if sel { hue(v.time * 0.2) } else { card.frame };
         p.rect_filled(r, 6.0, rgba([18, 10, 40], 0.95 * t));
         p.rect_stroke(
             r,
@@ -151,7 +155,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
     p.text(
         Pos2::new(screen.center().x, screen.bottom() - 48.0),
         Align2::CENTER_TOP,
-        "[a/d] choose   [enter] take it",
+        &c.hint,
         FontId::monospace(20.0),
         rgba(ink(v), 0.75),
     );
@@ -165,7 +169,7 @@ mod tests {
     fn cards_fit_the_screen_and_do_not_overlap() {
         for (w, h) in [(1280.0, 720.0), (800.0, 600.0), (1920.0, 1080.0)] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h));
-            for n in 1..=3 {
+            for n in 1..=5 {
                 let rs = card_rects(screen, n);
                 assert_eq!(rs.len(), n);
                 for r in &rs {
