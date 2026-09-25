@@ -7,8 +7,38 @@ use rand::distributions::{Distribution, WeightedIndex};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 pub const LUCIDITY_TO_WAKE: u32 = 3;
+/// Shards a LONG run needs before the wake door appears.
+pub const LONG_LUCIDITY: u32 = 6;
+/// GO DEEPER at the wake door: this many more shards to wake next time.
+pub const DEEPER_SHARDS: u32 = 3;
 /// Chance a (non-lucid) descent dream hides a lucidity shard.
 pub const SHARD_CHANCE: f64 = 0.6;
+
+/// Chosen on the title screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunLength {
+    /// Three shards; difficulty climbs gently.
+    #[default]
+    Short,
+    /// Six shards; every dream is harder than the last, exponentially.
+    Long,
+}
+
+impl RunLength {
+    pub fn label(self) -> &'static str {
+        match self {
+            RunLength::Short => "short",
+            RunLength::Long => "long",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            RunLength::Short => RunLength::Long,
+            RunLength::Long => RunLength::Short,
+        }
+    }
+}
 
 pub struct DreamDirector {
     rng: StdRng,
@@ -22,6 +52,14 @@ pub struct DreamDirector {
     pub has_shard: bool,
     /// A shard was collected in the CURRENT dream (droppable if caught).
     pub shard_this_dream: bool,
+    /// Shards needed to become lucid (grows each time you GO DEEPER).
+    pub shards_to_wake: u32,
+    /// Depth where the exponential climb began (`None` = gentle run).
+    pub hard_from: Option<u32>,
+    /// Times the dreamer refused to wake.
+    pub overdrive: u32,
+    /// Added to `SHARD_CHANCE` (run upgrades).
+    pub shard_bonus: f64,
 }
 
 impl DreamDirector {
@@ -37,7 +75,34 @@ impl DreamDirector {
             lucidity: 0,
             has_shard: false,
             shard_this_dream: false,
+            shards_to_wake: LUCIDITY_TO_WAKE,
+            hard_from: None,
+            overdrive: 0,
+            shard_bonus: 0.0,
         }
+    }
+
+    pub fn with_length(run_seed: u64, length: RunLength) -> Self {
+        let mut d = Self::new(run_seed);
+        if length == RunLength::Long {
+            d.shards_to_wake = LONG_LUCIDITY;
+            d.hard_from = Some(0);
+        }
+        d
+    }
+
+    /// Refuse the wake door: the dream tightens its grip. More shards to
+    /// wake, and from here on every dream is harder than the last.
+    pub fn go_deeper(&mut self) {
+        self.shards_to_wake = self.lucidity + DEEPER_SHARDS;
+        self.overdrive += 1;
+        self.hard_from.get_or_insert(self.depth);
+    }
+
+    /// Dreams since the climb began, and how many times you went deeper.
+    pub fn hardness(&self) -> Option<(u32, u32)> {
+        self.hard_from
+            .map(|from| (self.depth.saturating_sub(from), self.overdrive))
     }
 
     /// Seed for the current dream's content (distinct per depth).
@@ -48,7 +113,7 @@ impl DreamDirector {
     }
 
     pub fn lucid(&self) -> bool {
-        self.lucidity >= LUCIDITY_TO_WAKE
+        self.lucidity >= self.shards_to_wake
     }
 
     pub fn collect_shard(&mut self) {
@@ -77,7 +142,8 @@ impl DreamDirector {
         self.theme = self.next;
         self.next = roll(self.theme, &mut self.rng);
         // Always roll, so the shard sequence doesn't depend on lucidity.
-        let lucky = self.rng.gen_bool(SHARD_CHANCE);
+        let roll: f64 = self.rng.gen();
+        let lucky = roll < (SHARD_CHANCE + self.shard_bonus).min(0.95);
         self.has_shard = lucky || self.lucid();
         Some(self.theme)
     }
@@ -187,6 +253,53 @@ mod tests {
         assert_eq!(d.theme, DreamTheme::Awakening);
         assert_eq!(d.depth, depth + 1);
         assert_eq!(d.descend(), None, "waking ends the run");
+    }
+
+    #[test]
+    fn long_runs_need_more_shards_and_start_hard() {
+        let d = DreamDirector::with_length(3, RunLength::Long);
+        assert_eq!(d.shards_to_wake, LONG_LUCIDITY);
+        assert_eq!(d.hardness(), Some((0, 0)));
+        let s = DreamDirector::with_length(3, RunLength::Short);
+        assert_eq!(s.shards_to_wake, LUCIDITY_TO_WAKE);
+        assert_eq!(s.hardness(), None);
+        assert_eq!(RunLength::Short.toggled().toggled(), RunLength::Short);
+    }
+
+    #[test]
+    fn going_deeper_raises_the_goal_and_starts_the_climb() {
+        let mut d = DreamDirector::new(4);
+        for _ in 0..4 {
+            d.descend();
+        }
+        for _ in 0..LUCIDITY_TO_WAKE {
+            d.collect_shard();
+        }
+        assert!(d.lucid());
+        d.go_deeper();
+        assert!(!d.lucid(), "the wake door closes");
+        assert_eq!(d.shards_to_wake, LUCIDITY_TO_WAKE + DEEPER_SHARDS);
+        assert_eq!(d.hardness(), Some((0, 1)));
+        d.descend();
+        d.descend();
+        assert_eq!(d.hardness(), Some((2, 1)));
+        d.go_deeper();
+        assert_eq!(d.hardness(), Some((2, 2)), "the climb keeps its start");
+    }
+
+    #[test]
+    fn shard_bonus_makes_shards_commoner() {
+        let mut d = DreamDirector::new(9);
+        d.shard_bonus = 0.3;
+        let n = 2000;
+        let hits = (0..n)
+            .filter(|_| {
+                d.descend();
+                d.has_shard
+            })
+            .count();
+        let rate = hits as f64 / n as f64;
+        assert!((rate - 0.9).abs() < 0.05, "shard rate {rate}");
     }
 
     #[test]

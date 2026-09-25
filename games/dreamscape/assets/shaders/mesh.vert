@@ -22,6 +22,9 @@ uniform float uStrangeness;
 uniform float uUVScale;
 // Dream transition: 0 = solid, 1 = fully melted into the floor.
 uniform float uMelt;
+// 1 = the dreamer: never vertex-snapped, never fogged, always well lit, so
+// the crystal stays readable in the crunchiest low-poly dreams.
+uniform float uHero;
 
 // Fixed-size point light arrays (simple uniform arrays, not a UBO/SSBO —
 // plenty for a handful of level lights and keeps the shader trivial).
@@ -82,7 +85,7 @@ void main() {
     vec4 viewPos = uView * worldPos;
     vec4 clipPos = uProj * viewPos;
 
-    if (uVertexSnapAmount > 0.0) {
+    if (uVertexSnapAmount > 0.0 && uHero < 0.5) {
         float w = clipPos.w;
         vec2 ndc = clipPos.xy / w;
         ndc = floor(ndc / uVertexSnapAmount + 0.5) * uVertexSnapAmount;
@@ -110,4 +113,8 @@ void main() {
 
     float viewDist = length(viewPos.xyz);
     vFogFactor = clamp((viewDist - uFogStart) / max(uFogEnd - uFogStart, 0.001), 0.0, 1.0);
+    if (uHero > 0.5) {
+        vLight = max(vLight, vec3(0.85));
+        vFogFactor = 0.0;
+    }
 }

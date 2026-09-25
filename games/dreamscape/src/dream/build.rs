@@ -22,6 +22,8 @@ pub enum BlockKind {
     Portal,
     /// Floating, non-solid set dressing.
     Decor,
+    /// Non-solid set dressing that glows through the dark (moons, motes).
+    Sky,
 }
 
 #[derive(Clone, Debug)]
@@ -100,18 +102,41 @@ pub struct Surfaces {
     pub enemy: TexSpec,
 }
 
-/// Dreams get stranger the deeper you go. Waking is always calm.
+/// How hard the run is pushing on this dream (long runs, variants).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pressure {
+    /// Multiplies the enemy count (still limited by room on the route).
+    pub enemies: f32,
+    /// Depth past which dreams stop growing (12 = +6 cells per side).
+    pub growth_cap: u32,
+}
+
+impl Default for Pressure {
+    fn default() -> Self {
+        Self {
+            enemies: 1.0,
+            growth_cap: 12,
+        }
+    }
+}
+
 /// Dreams get bigger the deeper you go: +1 cell per side every 2 dreams, up
 /// to +6. The Lobby and the Awakening never grow.
+#[cfg(test)]
 pub fn grid_size(theme: DreamTheme, depth: u32) -> (i32, i32) {
+    grid_size_capped(theme, depth, Pressure::default().growth_cap)
+}
+
+fn grid_size_capped(theme: DreamTheme, depth: u32, cap: u32) -> (i32, i32) {
     let (lo, hi) = theme.spec().grid_size;
     let grow = match theme {
         DreamTheme::Lobby | DreamTheme::Awakening => 0,
-        _ => (depth.min(12) / 2) as i32,
+        _ => (depth.min(cap) / 2) as i32,
     };
     (lo + grow, hi + grow)
 }
 
+/// Dreams get stranger the deeper you go. Waking is always calm.
 pub fn strangeness(theme: DreamTheme, depth: u32) -> f32 {
     if theme == DreamTheme::Awakening {
         return 0.0;
@@ -151,6 +176,7 @@ pub fn portal_surface(next: DreamTheme, seed: u64) -> TexSpec {
     }
 }
 
+#[cfg(test)]
 pub fn generate(
     theme: DreamTheme,
     seed: u64,
@@ -158,10 +184,25 @@ pub fn generate(
     motif: Option<PropKind>,
     with_shard: bool,
 ) -> Dream {
+    generate_with(theme, seed, depth, motif, with_shard, Pressure::default())
+}
+
+pub fn generate_with(
+    theme: DreamTheme,
+    seed: u64,
+    depth: u32,
+    motif: Option<PropKind>,
+    with_shard: bool,
+    pressure: Pressure,
+) -> Dream {
     let mut spec = theme.spec();
     spec.strangeness = strangeness(theme, depth);
     let mut rng = StdRng::seed_from_u64(seed);
-    let layout = layout::generate(spec.layout, grid_size(theme, depth), &mut rng);
+    let layout = layout::generate(
+        spec.layout,
+        grid_size_capped(theme, depth, pressure.growth_cap),
+        &mut rng,
+    );
     if layout.fallback {
         log::warn!("{theme:?} seed {seed}: layout generator gave up, using fallback hall");
     }
@@ -200,6 +241,7 @@ pub fn generate(
         &mut blocks,
     );
     decor(grid, &spec, &mut rng, &mut blocks);
+    undersides(grid, &spec, &mut rng, &mut blocks);
     let surfaces = Surfaces {
         floor: surface(spec.floor_colors, &spec, &mut rng),
         wall: surface(spec.wall_colors, &spec, &mut rng),
@@ -246,7 +288,7 @@ pub fn generate(
         route: waypoints(&path),
         lucid_route: waypoints(&lucid_path),
         shard: shard_cell.map(|c| grid.world(c)),
-        patrols: patrols(grid, &path, &on_path, &spec, depth, &mut rng),
+        patrols: patrols(grid, &path, &on_path, &spec, depth, pressure, &mut rng),
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
         strangeness: spec.strangeness,
@@ -384,29 +426,126 @@ fn props(
     motif_cell.map(|c| grid.world(c))
 }
 
-/// The dream coming apart underneath: tumbling cubes below the floor plane,
-/// visible past the edges and through void gaps. Count scales with strangeness.
+/// The dream's scenery. Nothing here is solid:
+/// - floating islands drifting beneath the level (seen past its edges and
+///   through the gaps),
+/// - clouds, hoops and tumbling crystals hanging around the edges,
+/// - glowing motes drifting at head height over the floor,
+/// - and a moon at the far end, glowing through the dark.
+///
+/// Counts scale with strangeness, but every dream gets some.
 fn decor(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
-    let half_w = grid.w as f32 * CELL * 0.75;
-    let half_h = grid.h as f32 * CELL * 0.75;
-    for _ in 0..(spec.strangeness * 16.0) as usize {
+    let half_w = grid.w as f32 * CELL * 0.5;
+    let half_h = grid.h as f32 * CELL * 0.5;
+    let s = spec.strangeness;
+    let color = |rng: &mut StdRng| tint(pick(spec.prop_colors, rng), s, rng);
+    let yaw = |rng: &mut StdRng| Quat::from_rotation_y(rng.gen_range(0.0..TAU));
+    // Islands underneath.
+    for _ in 0..4 + (s * 8.0) as usize {
+        let w = rng.gen_range(2.0..5.5);
         out.push(Block {
             kind: BlockKind::Decor,
-            shape: *[Shape::Cube, Shape::Octahedron, Shape::Orb, Shape::Cone]
-                .choose(rng)
-                .expect("non-empty"),
+            shape: Shape::Island,
             pos: Vec3::new(
-                rng.gen_range(-half_w..half_w),
-                rng.gen_range(-10.0..-2.0),
-                rng.gen_range(-half_h..half_h),
+                rng.gen_range(-half_w * 1.3..half_w * 1.3),
+                rng.gen_range(-12.0..-3.5),
+                rng.gen_range(-half_h * 1.3..half_h * 1.3),
             ),
-            size: Vec3::splat(rng.gen_range(0.3..1.5)),
-            rotation: Quat::from_euler(
+            size: Vec3::new(w, w * rng.gen_range(0.5..0.8), w * rng.gen_range(0.8..1.2)),
+            rotation: yaw(rng),
+            color: color(rng),
+        });
+    }
+    // Around the edges: clouds, hoops, tumbling crystals.
+    for _ in 0..6 + (s * 10.0) as usize {
+        let shape = *[
+            Shape::Cloud,
+            Shape::Cloud,
+            Shape::Torus,
+            Shape::Octahedron,
+            Shape::Orb,
+        ]
+        .choose(rng)
+        .expect("non-empty");
+        // A point on a ring just outside the floor plan.
+        let a = rng.gen_range(0.0..TAU);
+        let (rx, rz) = (
+            half_w + rng.gen_range(2.0..7.0),
+            half_h + rng.gen_range(2.0..7.0),
+        );
+        let size = match shape {
+            Shape::Cloud => {
+                let w = rng.gen_range(2.5..5.0);
+                Vec3::new(w, w * 0.5, w * 0.7)
+            }
+            Shape::Torus => Vec3::new(2.4, 2.4, 0.3) * rng.gen_range(0.7..1.6),
+            _ => Vec3::splat(rng.gen_range(0.5..1.4)),
+        };
+        let rotation = match shape {
+            Shape::Cloud => yaw(rng),
+            _ => Quat::from_euler(
                 EulerRot::XYZ,
                 rng.gen_range(0.0..TAU),
                 rng.gen_range(0.0..TAU),
                 rng.gen_range(0.0..TAU),
             ),
+        };
+        out.push(Block {
+            kind: BlockKind::Decor,
+            shape,
+            pos: Vec3::new(a.cos() * rx, rng.gen_range(-1.5..3.5), a.sin() * rz),
+            size,
+            rotation,
+            color: color(rng),
+        });
+    }
+    // Glowing motes at head height (small, so they never hide the dreamer).
+    for _ in 0..6 + (s * 12.0) as usize {
+        out.push(Block {
+            kind: BlockKind::Sky,
+            shape: *[Shape::Octahedron, Shape::Orb]
+                .choose(rng)
+                .expect("non-empty"),
+            pos: Vec3::new(
+                rng.gen_range(-half_w..half_w),
+                rng.gen_range(1.6..2.6),
+                rng.gen_range(-half_h..half_h),
+            ),
+            size: Vec3::splat(rng.gen_range(0.15..0.32)),
+            rotation: yaw(rng),
+            color: color(rng),
+        });
+    }
+    // The moon, beyond the far end.
+    let w = rng.gen_range(5.0..8.0);
+    out.push(Block {
+        kind: BlockKind::Sky,
+        shape: Shape::Crescent,
+        pos: Vec3::new(rng.gen_range(-half_w..half_w), 5.0, half_h + 9.0),
+        size: Vec3::new(w, w, 0.8),
+        rotation: Quat::from_rotation_z(rng.gen_range(-0.6..0.6)),
+        color: color(rng),
+    });
+}
+
+/// Platforms over the void get a rocky underside, so they read as floating
+/// islands instead of paper-thin tiles.
+fn undersides(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
+    for cell in grid.cells_of(Cell::Floor) {
+        let over_void = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .iter()
+            .any(|&(dx, dy)| grid.get((cell.0 + dx, cell.1 + dy)) == Cell::Void);
+        if !over_void {
+            continue;
+        }
+        let depth = rng.gen_range(1.2..2.2);
+        out.push(Block {
+            kind: BlockKind::Decor,
+            shape: Shape::Island,
+            // The rock's peak tucks under the slab; its rim shows below it.
+            pos: grid.world(cell) - Vec3::Y * (SLAB + depth * 0.5 - 0.05),
+            size: Vec3::new(CELL * 1.02, depth, CELL * 1.02),
+            rotation: Quat::from_rotation_y(rng.gen_range(0..4) as f32 * TAU / 4.0),
             color: tint(pick(spec.prop_colors, rng), spec.strangeness, rng),
         });
     }
@@ -428,13 +567,14 @@ fn patrols(
     needed: &HashSet<P>,
     spec: &ThemeSpec,
     depth: u32,
+    pressure: Pressure,
     rng: &mut StdRng,
 ) -> Vec<(Vec3, Vec3)> {
     if spec.enemies.1 == 0 || path.len() < layout::MIN_PATH_CELLS {
         return Vec::new();
     }
-    let count = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 2).min(spec.enemies.1 + 4)
-        as usize;
+    let base = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 2).min(spec.enemies.1 + 4);
+    let count = (base as f32 * pressure.enemies.max(0.0)).round() as usize;
     let on_route = needed;
     // A walkable, off-route neighbour of each candidate post. The pocket must
     // also stay clear of every OTHER route cell (so a corner pocket can't
@@ -589,7 +729,11 @@ mod tests {
     fn solid_blocks_are_axis_aligned() {
         for theme in ALL_THEMES {
             let d = generate(theme, 3, 0, None, true);
-            for b in d.blocks.iter().filter(|b| b.kind != BlockKind::Decor) {
+            for b in d
+                .blocks
+                .iter()
+                .filter(|b| !matches!(b.kind, BlockKind::Decor | BlockKind::Sky))
+            {
                 assert_eq!(
                     b.rotation,
                     Quat::IDENTITY,
@@ -609,7 +753,9 @@ mod tests {
                     let ok = match b.kind {
                         BlockKind::Floor => near_palette(b.color, s.floor_colors),
                         BlockKind::Wall => near_palette(b.color, s.wall_colors),
-                        BlockKind::Prop | BlockKind::Decor => near_palette(b.color, s.prop_colors),
+                        BlockKind::Prop | BlockKind::Decor | BlockKind::Sky => {
+                            near_palette(b.color, s.prop_colors)
+                        }
                         BlockKind::Portal => b.color == PORTAL_COLOR,
                     };
                     assert!(
@@ -1067,7 +1213,7 @@ mod tests {
                 match b.kind {
                     BlockKind::Floor | BlockKind::Wall => assert_eq!(b.shape, Shape::Cube),
                     BlockKind::Portal => assert_eq!(b.shape, Shape::Orb),
-                    BlockKind::Decor => {
+                    BlockKind::Decor | BlockKind::Sky => {
                         decor.insert(b.shape);
                     }
                     BlockKind::Prop => {}

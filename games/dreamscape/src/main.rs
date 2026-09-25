@@ -37,18 +37,23 @@ mod store;
 mod title_ui;
 mod transition;
 mod tunnel;
+mod upgrade_ui;
+mod upgrades;
 
 use dream::{
-    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, PropKind, Shape, TexSpec,
-    LUCIDITY_TO_WAKE, TEX_SIZE,
+    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, Pressure, PropKind, RunLength, Shape,
+    TexSpec, Twists, Variant, TEX_SIZE,
 };
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
+use upgrades::{Ability, RunUpgrades, Upgrade};
 
 const PROFILES_DIR: &str = "games/dreamscape/profiles";
 const SHARD_SIZE: f32 = 0.8;
 const SHARD_SPIN: f32 = 2.0;
 const BEACON_HEIGHT: f32 = 8.0;
+/// The dreamer's dark outline shell, relative to its body.
+const OUTLINE_SCALE: f32 = 1.22;
 
 /// Collect to become lucid.
 #[derive(Clone, Copy)]
@@ -70,6 +75,36 @@ struct NoMelt;
 /// Glows through the tunnel-vision darkness (you, shards, beacons, portal).
 #[derive(Clone, Copy)]
 struct Lit;
+
+/// The dreamer: never vertex-snapped or fogged, and drawn again as a
+/// silhouette wherever something hides it.
+#[derive(Clone, Copy)]
+struct Hero;
+
+/// The glowing ring on the floor under the dreamer.
+#[derive(Clone, Copy)]
+struct Halo;
+
+/// Drawn in the translucent pass (FLOODED water).
+#[derive(Clone, Copy)]
+struct Water;
+
+/// Floats up and down around `base` y.
+#[derive(Clone, Copy)]
+struct Bob {
+    base: f32,
+    amp: f32,
+    speed: f32,
+    phase: f32,
+}
+
+/// What the choice screen is choosing.
+#[derive(Clone, Debug, PartialEq)]
+enum ChoiceKind {
+    Upgrade(Vec<Upgrade>),
+    /// At the wake door: 0 = wake, 1 = go deeper.
+    WakeDoor,
+}
 
 fn init_logging() {
     let _ = env_logger::builder()
@@ -159,6 +194,29 @@ pub struct DreamscapeGame {
     grain: Option<egui::TextureHandle>,
     /// F2 toggles tunnel vision + grain (for screenshots / accessibility).
     tunnel_on: bool,
+    /// Chosen on the title screen for the next run.
+    run_length: RunLength,
+    /// Upgrades and abilities picked up this run.
+    run: RunUpgrades,
+    /// This dream's variant twists.
+    twists: Twists,
+    /// Seconds spent playing this dream (HURRIED timer, FROZEN rhythm).
+    dream_age: f32,
+    /// Dust earned this run on top of the pack (HURRIED, GILDED).
+    bonus_dust: u32,
+    /// Highest difficulty survived this run (scales the dust you wake with).
+    peak_difficulty: f32,
+    /// Offer an upgrade once the next dream has finished reforming.
+    offer_upgrade: bool,
+    choice: Option<ChoiceKind>,
+    choice_view: upgrade_ui::ChoiceView,
+    /// Mid-air jumps used since last touching the ground.
+    air_jumps_used: u32,
+    jump_was_down: bool,
+    /// Last direction the dreamer moved in (dash / blink aim).
+    facing: Vec3,
+    /// Ability keys pressed since the last update.
+    ability_requests: [bool; upgrades::ABILITY_SLOTS],
 }
 
 impl DreamscapeGame {
@@ -230,6 +288,163 @@ impl DreamscapeGame {
             fonts_installed: false,
             grain: None,
             tunnel_on: std::env::var("DREAMSCAPE_NO_TUNNEL").is_err(),
+            run_length: match std::env::var("DREAMSCAPE_RUN").as_deref() {
+                Ok("long") => RunLength::Long,
+                _ => RunLength::Short,
+            },
+            run: RunUpgrades::default(),
+            twists: Twists::default(),
+            dream_age: 0.0,
+            bonus_dust: 0,
+            peak_difficulty: 1.0,
+            offer_upgrade: false,
+            choice: None,
+            choice_view: upgrade_ui::ChoiceView::default(),
+            air_jumps_used: 0,
+            jump_was_down: false,
+            facing: Vec3::Z,
+            ability_requests: [false; upgrades::ABILITY_SLOTS],
+        }
+    }
+
+    fn difficulty(&self) -> f32 {
+        gameplay::difficulty(self.director.hardness())
+    }
+
+    fn pressure(&self) -> Pressure {
+        let hard = self.director.hardness().is_some();
+        Pressure {
+            enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
+            growth_cap: if hard { 24 } else { 12 },
+        }
+    }
+
+    /// Screen-relative controls: in an UPSIDE DOWN dream the camera is
+    /// rolled 180 degrees, so the world directions flip with it.
+    fn inverted(&self) -> bool {
+        self.twists.has(Variant::Inverted)
+    }
+
+    fn open_upgrade_choice(&mut self) {
+        let seed = self.director.dream_seed() ^ 0xC401_CE00;
+        let options = upgrades::roll_choices(seed, &self.run);
+        if options.is_empty() {
+            return;
+        }
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: "THE DREAM OFFERS YOU SOMETHING".into(),
+            subtitle: format!(
+                "depth {} · keep one for the rest of the run",
+                self.director.depth
+            ),
+            cards: options
+                .iter()
+                .map(|&u| {
+                    let info = u.info();
+                    let have = self.run.count(u);
+                    upgrade_ui::ChoiceCard {
+                        name: info.name.into(),
+                        desc: info.desc.into(),
+                        icon: info.icon,
+                        color: info.color,
+                        tag: if u.is_ability() {
+                            let slot = self.run.abilities.len().min(upgrades::ABILITY_SLOTS - 1);
+                            if self.run.abilities.len() >= upgrades::ABILITY_SLOTS {
+                                format!(
+                                    "ability · replaces {}",
+                                    self.run.abilities[0].ability.name()
+                                )
+                            } else {
+                                format!("ability · [{}]", upgrades::SLOT_KEYS[slot])
+                            }
+                        } else if have > 0 {
+                            format!("{} / {}", have + 1, info.max)
+                        } else {
+                            "upgrade".into()
+                        },
+                    }
+                })
+                .collect(),
+            selected: 0,
+            age: 0.0,
+        };
+        self.choice = Some(ChoiceKind::Upgrade(options));
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    fn open_wake_choice(&mut self) {
+        let next = gameplay::difficulty(Some(
+            self.director.hardness().map_or((0, 1), |(n, o)| (n, o + 1)),
+        ));
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: "THE WAKE DOOR".into(),
+            subtitle: "you could wake up now. or you could stay.".into(),
+            cards: vec![
+                upgrade_ui::ChoiceCard {
+                    name: "WAKE".into(),
+                    desc: "open your eyes and keep what you remember".into(),
+                    icon: upgrades::Icon::Eye,
+                    color: [255, 230, 160],
+                    tag: format!("{} dreams deep", self.director.depth),
+                },
+                upgrade_ui::ChoiceCard {
+                    name: "GO DEEPER".into(),
+                    desc: format!(
+                        "{} more shards to wake. every dream harder than the last, and worth more.",
+                        dream::DEEPER_SHARDS
+                    ),
+                    icon: upgrades::Icon::Shard,
+                    color: [255, 90, 140],
+                    tag: format!("nightmare x{next:.1}"),
+                },
+            ],
+            selected: 0,
+            age: 0.0,
+        };
+        self.choice = Some(ChoiceKind::WakeDoor);
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    fn choose(&mut self, index: usize) {
+        let Some(kind) = self.choice.take() else {
+            return;
+        };
+        self.mode = hud::Mode::Playing;
+        match kind {
+            ChoiceKind::Upgrade(options) => {
+                let Some(&u) = options.get(index) else {
+                    self.choice = Some(ChoiceKind::Upgrade(options));
+                    self.mode = hud::Mode::Choice;
+                    return;
+                };
+                self.run.take(u);
+                self.director.shard_bonus = self.run.shard_bonus();
+                log::info!("Upgrade taken: {u:?} (run: {:?})", self.run.taken);
+                self.flash
+                    .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
+                self.tone(523.0, 0.25);
+            }
+            ChoiceKind::WakeDoor if index == 0 => {
+                log::info!("Wake door taken at depth {}", self.director.depth);
+                self.flash.trigger([1.0, 1.0, 1.0], 1.0);
+                self.tone(660.0, 0.6);
+                self.begin_melt(transition::Pending::Wake);
+            }
+            ChoiceKind::WakeDoor => {
+                self.director.go_deeper();
+                log::info!(
+                    "Refused to wake at depth {}: {} shards to wake, difficulty now x{:.2}",
+                    self.director.depth,
+                    self.director.shards_to_wake,
+                    self.difficulty()
+                );
+                self.despawn_shard_slot();
+                self.flash.trigger([1.0, 0.2, 0.4], 0.8);
+                self.tone(98.0, 0.8);
+                self.begin_melt(transition::Pending::Descend);
+            }
         }
     }
 
@@ -275,7 +490,10 @@ impl DreamscapeGame {
         } else {
             format!(
                 "Dreamscape — depth {} — lucidity {}/{} — best {}",
-                self.director.depth, self.director.lucidity, LUCIDITY_TO_WAKE, self.best_depth
+                self.director.depth,
+                self.director.lucidity,
+                self.director.shards_to_wake,
+                self.best_depth
             )
         };
         let _ = ctx.platform.window.set_title(&title);
@@ -334,14 +552,15 @@ impl DreamscapeGame {
             depth: self.director.depth,
             best: self.best_depth,
             lucidity: self.director.lucidity,
-            lucid_target: LUCIDITY_TO_WAKE,
+            lucid_target: self.director.shards_to_wake,
             unbanked: self.director.shard_this_dream,
-            strangeness: self.dream.as_ref().map_or(0.0, |d| d.strangeness),
+            strangeness: self.visual_strangeness(),
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
             title_age: self.title_age,
             shard_dir: target
-                .and_then(|t| hud::compass(self.player_position.to_array(), t.to_array(), 7.0)),
+                .and_then(|t| hud::compass(self.player_position.to_array(), t.to_array(), 7.0))
+                .map(|d| if self.inverted() { [-d[0], -d[1]] } else { d }),
             shard_dist: target.map(|t| {
                 Vec3::new(
                     t.x - self.player_position.x,
@@ -408,7 +627,129 @@ impl DreamscapeGame {
                     .map(|&p| store::Item::Perk(p).info().name)
                     .collect()
             },
+            upgrades: self.run.summary(),
+            abilities: self
+                .run
+                .abilities
+                .iter()
+                .enumerate()
+                .map(|(k, a)| {
+                    (
+                        a.ability.name(),
+                        upgrades::SLOT_KEYS[k],
+                        a.charge(self.run.cooldown()),
+                        a.is_active(),
+                    )
+                })
+                .collect(),
+            twist: self.twists.label(),
+            twist_blurb: self
+                .twists
+                .0
+                .iter()
+                .map(|v| v.blurb())
+                .collect::<Vec<_>>()
+                .join("; "),
+            timer: self.twists.timer().map(|t| t - self.dream_age),
+            difficulty: self.director.hardness().map(|_| self.difficulty()),
+            run_length: self.run_length.label(),
+            choice: if self.mode == hud::Mode::Choice {
+                self.choice_view.clone()
+            } else {
+                upgrade_ui::ChoiceView::default()
+            },
         }
+    }
+
+    /// Fire the ability in `slot`, if held and charged.
+    fn use_ability(&mut self, slot: usize) {
+        let mult = self.run.cooldown();
+        let Some(state) = self.run.abilities.get(slot).copied() else {
+            return;
+        };
+        if state.cooldown > 0.0 {
+            self.tone(140.0, 0.05);
+            return;
+        }
+        if state.ability == Ability::Blink {
+            let Some(at) = self.dream.as_ref().and_then(|d| {
+                gameplay::blink_target(
+                    &d.blocks,
+                    self.player_position,
+                    self.facing,
+                    upgrades::BLINK_CELLS,
+                )
+            }) else {
+                // Nowhere safe to land: don't spend the charge.
+                self.tone(140.0, 0.05);
+                return;
+            };
+            if let Some(p) = self.player {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
+                    t.position = at;
+                }
+                if let Ok(mut b) = self.world.get::<&mut RigidBody>(p) {
+                    b.velocity = Vec3::ZERO;
+                }
+            }
+            self.player_position = at;
+        }
+        if self.run.abilities[slot].try_use(mult) {
+            log::info!("Ability: {:?}", state.ability);
+            let color = match state.ability {
+                Ability::Dash => [0.5, 0.9, 1.0],
+                Ability::Blink => [0.9, 0.5, 1.0],
+                Ability::Stillness => [0.6, 0.7, 1.0],
+                Ability::Phase => [1.0, 1.0, 1.0],
+                Ability::ShardCall => [0.3, 1.0, 1.0],
+            };
+            self.flash.trigger(color, 0.3);
+            self.tone(880.0, 0.1);
+        }
+    }
+
+    /// SHARD CALL: the shard (and its beacon) drift toward the dreamer.
+    fn pull_shard(&mut self, dt: f32) {
+        let to = self.player_position;
+        for &e in &self.shard_entities {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                let d = Vec3::new(to.x - t.position.x, 0.0, to.z - t.position.z);
+                let step = (upgrades::SHARD_CALL_SPEED * dt).min(d.length());
+                t.position += d.normalize_or_zero() * step;
+            }
+        }
+    }
+
+    /// Leaving a dream through the portal: HURRIED and GILDED pay out.
+    fn dream_bonus(&mut self) {
+        let mut bonus = 0;
+        if self.twists.timer().is_some_and(|t| self.dream_age <= t) {
+            bonus += dream::HASTY_DUST;
+            log::info!("Beat the clock in {:.1}s", self.dream_age);
+        }
+        bonus += ((self.twists.dust() - 1.0) * 15.0).round() as u32;
+        if bonus > 0 {
+            self.bonus_dust += bonus;
+            self.flash.trigger([1.0, 0.85, 0.3], 0.5);
+            log::info!("Dream bonus: +{bonus} dust (run bonus {})", self.bonus_dust);
+        }
+    }
+
+    /// The dreamer's walking speed right now.
+    fn player_speed(&self) -> f32 {
+        gameplay::MOVE_SPEED
+            * self.run.speed()
+            * self.twists.walk()
+            * if self.has_perk(store::Perk::LongStride) {
+                store::LONG_STRIDE
+            } else {
+                1.0
+            }
+    }
+
+    /// How strange the dream *looks*: CALM MIND takes the edge off.
+    fn visual_strangeness(&self) -> f32 {
+        self.dream.as_ref().map_or(0.0, |d| d.strangeness) * self.run.calm()
     }
 
     fn has_perk(&self, p: store::Perk) -> bool {
@@ -430,6 +771,7 @@ impl DreamscapeGame {
         let boost = cards::MemoryBoost {
             lucid_wake: true,
             deep_memory: self.has_perk(store::Perk::DeepMemory),
+            extra: self.run.memory_bonus(),
         };
         self.pack = reveal_ui::PackView {
             pack: cards::recall(&self.run_log, boost),
@@ -466,10 +808,16 @@ impl DreamscapeGame {
             self.shards_this_run,
             self.has_perk(store::Perk::DustMagnet),
         );
+        // Run upgrades and hard runs pay out on top of the pack.
+        let mult = self.run.dust() * gameplay::difficulty_reward(self.peak_difficulty);
+        let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust;
+        self.booklet.stash.earn(extra);
+        let dust = dust + extra;
         if self.persist_booklet() {
             log::info!(
-                "Booklet: pressed {added} cards (total {}), +{dust} dust (now {}) -> {:?}",
+                "Booklet: pressed {added} cards (total {}), +{dust} dust (x{mult:.2}, +{} bonus; now {}) -> {:?}",
                 self.booklet.card_count(),
+                self.bonus_dust,
                 self.booklet.stash.dust,
                 self.booklet_path
             );
@@ -520,6 +868,8 @@ impl DreamscapeGame {
 
     /// Enter on the title: the dream already loaded behind it becomes the run.
     fn start_from_title(&mut self) {
+        // The lobby behind the title is the same whatever the length.
+        self.director = DreamDirector::with_length(self.run_seed, self.run_length);
         self.begin_run();
         self.title_age = 0.0;
         self.mode = hud::Mode::Playing;
@@ -533,7 +883,7 @@ impl DreamscapeGame {
             self.run_seed,
             self.run_seed
         );
-        self.director = DreamDirector::new(self.run_seed);
+        self.director = DreamDirector::with_length(self.run_seed, self.run_length);
         self.motif = None;
         self.run_log.clear();
         self.journal_status = None;
@@ -546,6 +896,16 @@ impl DreamscapeGame {
     /// Consume armed perks for the run that is starting.
     fn begin_run(&mut self) {
         self.shards_this_run = 0;
+        self.run = RunUpgrades::default();
+        self.bonus_dust = 0;
+        self.peak_difficulty = 1.0;
+        self.offer_upgrade = false;
+        self.choice = None;
+        log::info!(
+            "Run length: {:?} ({} shards to wake)",
+            self.run_length,
+            self.director.shards_to_wake
+        );
         self.pack = reveal_ui::PackView::default();
         self.perks = if self.autopilot {
             Vec::new()
@@ -609,6 +969,7 @@ impl DreamscapeGame {
         match pending {
             transition::Pending::Descend => {
                 self.director.descend();
+                self.offer_upgrade = true;
                 self.load_dream(ctx)
             }
             transition::Pending::Wake => {
@@ -677,12 +1038,18 @@ impl DreamscapeGame {
                 .insert_one(entity, ShardMarker)
                 .expect("just spawned");
         }
-        // No Collider: purely visual, physics never sees it.
+        // No Collider: purely visual, physics never sees it. In a BLACKOUT
+        // the beacon burns twice as wide.
+        let girth = if self.twists.has(Variant::Blackout) {
+            0.35
+        } else {
+            0.15
+        };
         let beacon = self.world.spawn((
             Transform {
                 position: at + Vec3::Y * (size.y + 0.4 + BEACON_HEIGHT * 0.5),
                 rotation: Quat::IDENTITY,
-                scale: Vec3::new(0.15, BEACON_HEIGHT, 0.15),
+                scale: Vec3::new(girth, BEACON_HEIGHT, girth),
             },
             MeshRenderer {
                 mesh: beacon_mesh,
@@ -705,13 +1072,29 @@ impl DreamscapeGame {
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let theme = self.director.theme;
         let spec = theme.spec();
-        let dream = dream::generate(
+        self.twists = dream::roll_twists(
+            theme,
+            self.director.dream_seed(),
+            self.director.depth,
+            self.director.hardness().is_some(),
+        );
+        if self.twists.has(Variant::Gilded) {
+            self.director.has_shard = true;
+        }
+        self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
+        self.dream_age = 0.0;
+        self.air_jumps_used = 0;
+        let dream = dream::generate_with(
             theme,
             self.director.dream_seed(),
             self.director.depth,
             self.motif,
             self.director.has_shard,
+            self.pressure(),
         );
+        if !self.twists.0.is_empty() {
+            log::info!("Dream twist: {}", self.twists.label());
+        }
         let wake_door = self.director.lucid() && dream.shard.is_some();
         self.dream_name = dream::dream_name(theme, dream.seed);
         self.dream_whisper = dream::whisper(theme, dream.seed);
@@ -736,7 +1119,7 @@ impl DreamscapeGame {
             dream.seed,
             dream.strangeness,
             self.director.lucidity,
-            LUCIDITY_TO_WAKE,
+            self.director.shards_to_wake,
             dream.blocks.len(),
             dream.patrols.len(),
             dream.route.len(),
@@ -788,7 +1171,7 @@ impl DreamscapeGame {
             let (texture, uv) = match block.kind {
                 BlockKind::Floor => (floor_tex.clone(), per_cell),
                 BlockKind::Wall => (wall_tex.clone(), per_cell),
-                BlockKind::Prop | BlockKind::Decor => (prop_tex.clone(), 0.5),
+                BlockKind::Prop | BlockKind::Decor | BlockKind::Sky => (prop_tex.clone(), 0.5),
                 BlockKind::Portal => (portal_tex.clone(), 0.5),
             };
             let mesh = self.mesh(block.shape)?;
@@ -805,8 +1188,34 @@ impl DreamscapeGame {
                 SurfaceUv(uv),
             ));
             let half_extents = block.size * 0.5;
+            // Scenery drifts: a slow spin and a bob, desynchronised by position.
+            let h = (block.pos.x * 12.9898 + block.pos.z * 78.233).sin() * 43_758.547;
+            let h = h - h.floor();
+            let bob = |amp: f32| Bob {
+                base: block.pos.y,
+                amp,
+                speed: 0.4 + 0.6 * h,
+                phase: h * std::f32::consts::TAU,
+            };
             match block.kind {
-                BlockKind::Decor => {}
+                BlockKind::Decor => {
+                    let island_under_floor = block.shape == Shape::Island && block.pos.y > -3.0;
+                    if !island_under_floor {
+                        self.world
+                            .insert(entity, (Spin((h - 0.5) * 0.3), bob(0.25 + 0.35 * h)))
+                            .expect("entity was just spawned");
+                    }
+                }
+                BlockKind::Sky => {
+                    let spin = if block.shape == Shape::Crescent {
+                        0.0
+                    } else {
+                        0.5 + h
+                    };
+                    self.world
+                        .insert(entity, (Spin(spin), bob(0.15 + 0.2 * h), Lit))
+                        .expect("entity was just spawned");
+                }
                 BlockKind::Portal => {
                     self.world
                         .insert(
@@ -843,15 +1252,57 @@ impl DreamscapeGame {
             self.spawn_shard_slot(at, wake_door)?;
         }
 
+        // FLOODED: a sheet of translucent water over the whole floor plan.
+        if self.twists.has(Variant::Flooded) {
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for b in dream.blocks.iter().filter(|b| b.kind == BlockKind::Floor) {
+                lo = lo.min(b.pos - b.size * 0.5);
+                hi = hi.max(b.pos + b.size * 0.5);
+            }
+            if lo.x < hi.x {
+                let water_tex = self.texture(gl, [60, 150, 230, 255]);
+                let cube = self.mesh(Shape::Cube)?;
+                self.world.spawn((
+                    Transform {
+                        position: Vec3::new((lo.x + hi.x) * 0.5, 0.3, (lo.z + hi.z) * 0.5),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(hi.x - lo.x, 0.05, hi.z - lo.z),
+                    },
+                    MeshRenderer {
+                        mesh: cube,
+                        texture: Some(water_tex),
+                    },
+                    Water,
+                ));
+            }
+        }
+
         let spawn = dream.spawn + Vec3::Y;
         self.player_position = spawn;
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
-        let player_texture = self.texture(gl, self.booklet.stash.crystal.rgba());
+        let crystal = self.booklet.stash.crystal.rgba();
+        let player_texture = self.texture(gl, crystal);
+        let halo_mesh = self.mesh(Shape::Torus)?;
+        self.world.spawn((
+            Transform {
+                position: spawn,
+                // A hoop laid flat on the floor.
+                rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                scale: Vec3::new(1.3, 1.3, 0.04),
+            },
+            MeshRenderer {
+                mesh: halo_mesh,
+                texture: Some(player_texture.clone()),
+            },
+            Halo,
+            NoMelt,
+            Lit,
+        ));
         self.player = Some(self.world.spawn((
             Transform {
                 position: spawn,
                 rotation: Quat::IDENTITY,
-                scale: Vec3::new(0.8, 1.1, 0.8),
+                scale: Vec3::new(0.9, 1.25, 0.9),
             },
             MeshRenderer {
                 mesh: player_mesh,
@@ -860,6 +1311,7 @@ impl DreamscapeGame {
             Spin(1.2),
             NoMelt,
             Lit,
+            Hero,
             RigidBody::default(),
             Collider {
                 shape: ColliderShape::Sphere {
@@ -872,6 +1324,17 @@ impl DreamscapeGame {
         let slow_heart = self.has_perk(store::Perk::SlowHeart);
         let eyelids = self.has_perk(store::Perk::HeavyEyelids);
         let enemy_texture = self.upload_surface(gl, &dream.surfaces.enemy)?;
+        let difficulty = self.difficulty();
+        let player_speed = self.player_speed();
+        let speed = (gameplay::pressured_enemy_speed(dream.depth, difficulty, player_speed)
+            * self.twists.enemy_speed()
+            * self.run.enemy_speed()
+            * if slow_heart {
+                store::SLOW_HEART_ENEMY_SPEED
+            } else {
+                1.0
+            })
+        .min(0.92 * player_speed / enemy_ai::CHASE_BOOST);
         for &(a, b) in &dream.patrols {
             let entity = self.world.spawn((
                 Transform {
@@ -890,16 +1353,11 @@ impl DreamscapeGame {
                 EnemyAI::new(
                     a,
                     b,
-                    gameplay::enemy_speed(dream.depth)
-                        * if slow_heart {
-                            store::SLOW_HEART_ENEMY_SPEED
-                        } else {
-                            1.0
-                        },
+                    speed,
                     if eyelids {
                         0.0
                     } else {
-                        gameplay::chase_radius(dream.depth)
+                        gameplay::pressured_chase_radius(dream.depth, difficulty)
                     },
                     gameplay::CHASE_LEASH,
                 ),
@@ -937,6 +1395,7 @@ impl DreamscapeGame {
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
         self.route_index = 0;
         self.grace = gameplay::RESPAWN_GRACE
+            * self.run.grace()
             * if self.has_perk(store::Perk::SlowHeart) {
                 store::SLOW_HEART_GRACE
             } else {
@@ -1006,6 +1465,16 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Playing {
             self.begin_run();
         }
+        // Dev switch: DREAMSCAPE_THEME=SkyStairs starts one dream deep in it.
+        if let Ok(name) = std::env::var("DREAMSCAPE_THEME") {
+            match dream::ALL_THEMES.iter().find(|t| format!("{t:?}") == name) {
+                Some(&t) => {
+                    self.director.theme = t;
+                    self.director.depth = 1;
+                }
+                None => log::warn!("DREAMSCAPE_THEME={name}: no such dream"),
+            }
+        }
         self.load_dream(ctx)?;
         log::info!("Dreamscape initialized");
         Ok(())
@@ -1025,6 +1494,32 @@ impl Game for DreamscapeGame {
         };
         if down && !repeat {
             let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
+            if self.mode == hud::Mode::Choice {
+                let n = self.choice_view.cards.len().max(1);
+                match key {
+                    Keycode::A | Keycode::Left => {
+                        self.choice_view.selected = (self.choice_view.selected + n - 1) % n;
+                    }
+                    Keycode::D | Keycode::Right => {
+                        self.choice_view.selected = (self.choice_view.selected + 1) % n;
+                    }
+                    Keycode::Num1 | Keycode::Num2 | Keycode::Num3 => {
+                        let i = [Keycode::Num1, Keycode::Num2, Keycode::Num3]
+                            .iter()
+                            .position(|&k| k == key)
+                            .expect("matched above");
+                        if i < n {
+                            self.choose(i);
+                        }
+                    }
+                    // Cards deal in first, so a held key can't pick blind.
+                    Keycode::Return | Keycode::Space if self.choice_view.age > 0.4 => {
+                        self.choose(self.choice_view.selected);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match (self.mode, key) {
                 (hud::Mode::Playing, Keycode::Escape) => {
                     self.mode = hud::Mode::Paused;
@@ -1115,10 +1610,16 @@ impl Game for DreamscapeGame {
                 (hud::Mode::Title, Keycode::Return | Keycode::Space) => {
                     match self.title_sel {
                         0 => self.start_from_title(),
-                        1 => self.open_store(),
-                        2 => self.open_booklet(),
+                        title_ui::RUN_ROW => self.run_length = self.run_length.toggled(),
+                        2 => self.open_store(),
+                        3 => self.open_booklet(),
                         _ => ctx.should_quit = true,
                     }
+                    return;
+                }
+                (hud::Mode::Title, Keycode::R) => {
+                    self.run_length = self.run_length.toggled();
+                    self.title_sel = title_ui::RUN_ROW;
                     return;
                 }
                 (hud::Mode::Title, Keycode::L) => {
@@ -1149,6 +1650,8 @@ impl Game for DreamscapeGame {
             Keycode::A => self.input.left = down,
             Keycode::D => self.input.right = down,
             Keycode::Space => self.input.jump = down,
+            Keycode::LShift | Keycode::RShift if down && !repeat => self.ability_requests[0] = true,
+            Keycode::E if down && !repeat => self.ability_requests[1] = true,
             Keycode::F2 if down && !repeat => {
                 self.tunnel_on = !self.tunnel_on;
                 log::info!("tunnel vision: {}", self.tunnel_on);
@@ -1169,7 +1672,19 @@ impl Game for DreamscapeGame {
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
         }
+        let time = self.time;
+        for (_e, (t, bob)) in self.world.query_mut::<(&mut Transform, &Bob)>() {
+            t.position.y = bob.base + bob.amp * (time * bob.speed + bob.phase).sin();
+        }
         self.title_age += dt;
+        if self.mode == hud::Mode::Choice {
+            self.choice_view.age += dt;
+            // E2E runs: take the first card (WAKE at the door) after a beat.
+            if self.autopilot && self.choice_view.age > 0.6 {
+                self.choose(0);
+            }
+            return Ok(());
+        }
         if self.mode == hud::Mode::Reveal && self.pack.age < f32::MAX {
             self.pack.age += dt;
         }
@@ -1204,7 +1719,11 @@ impl Game for DreamscapeGame {
                     return Ok(());
                 }
                 transition::Event::Done => {
-                    log::info!("Melt: reformed at depth {}", self.director.depth)
+                    log::info!("Melt: reformed at depth {}", self.director.depth);
+                    if std::mem::take(&mut self.offer_upgrade) {
+                        self.open_upgrade_choice();
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1215,32 +1734,64 @@ impl Game for DreamscapeGame {
         let Some(player) = self.player else {
             return Ok(());
         };
+        self.dream_age += dt;
+        self.run.tick(dt);
+
+        // 0b. Abilities
+        let requests = std::mem::take(&mut self.ability_requests);
+        for (slot, _) in requests.iter().enumerate().filter(|(_, &r)| r) {
+            self.use_ability(slot);
+        }
+        if self.run.active(Ability::ShardCall) {
+            self.pull_shard(dt);
+        }
 
         // 1. Input (or autopilot) -> player body
         let (desired, wants_jump) = if self.autopilot {
             self.autopilot_step()
         } else {
-            (
-                gameplay::horizontal_velocity(&self.input)
-                    * if self.has_perk(store::Perk::LongStride) {
-                        store::LONG_STRIDE
-                    } else {
-                        1.0
-                    },
-                self.input.jump,
-            )
+            let mut v = gameplay::horizontal_velocity(&self.input)
+                * (self.player_speed() / gameplay::MOVE_SPEED);
+            if self.inverted() {
+                v = Vec3::new(-v.x, v.y, -v.z);
+            }
+            (v, self.input.jump)
         };
+        if desired.length_squared() > 1e-4 {
+            self.facing = desired.normalize();
+        }
+        let jump_pressed = wants_jump && !self.jump_was_down;
+        self.jump_was_down = wants_jump;
+        let jump_speed = gameplay::JUMP_SPEED * self.run.jump() * self.twists.jump();
+        let dashing = self.run.active(Ability::Dash);
         if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
-            body.velocity.x = desired.x;
-            body.velocity.z = desired.z;
+            let v = if dashing {
+                self.facing * gameplay::MOVE_SPEED * upgrades::DASH_SPEED_MULT
+            } else {
+                desired
+            };
+            body.velocity.x = v.x;
+            body.velocity.z = v.z;
+            if body.grounded {
+                self.air_jumps_used = 0;
+            }
             if wants_jump && body.grounded {
-                body.velocity.y = gameplay::JUMP_SPEED;
+                body.velocity.y = jump_speed;
+            } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
+                self.air_jumps_used += 1;
+                body.velocity.y = jump_speed;
+                self.tone(740.0, 0.08);
             }
         }
 
-        // 2. Enemies
+        // 2. Enemies (STILLNESS and STUTTERING dreams hold them in place)
         let target = self.player_position;
+        let held =
+            self.run.active(Ability::Stillness) || self.twists.enemies_frozen(self.dream_age);
         for (entity, ai) in self.enemies.iter_mut() {
+            if held {
+                continue;
+            }
             if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
                 let was = ai.chasing;
                 ai.update(&mut t.position, target, dt);
@@ -1253,15 +1804,25 @@ impl Game for DreamscapeGame {
         }
 
         // 3. Physics: gravity, collision, trigger overlaps
-        let overlaps = engine::physics::step(&mut self.world, dt, &PhysicsParams::default());
+        let physics = PhysicsParams {
+            gravity: PhysicsParams::default().gravity * self.twists.gravity(),
+            ..PhysicsParams::default()
+        };
+        let overlaps = engine::physics::step(&mut self.world, dt, &physics);
         if let Ok(t) = self.world.get::<&Transform>(player) {
             self.player_position = t.position;
+        }
+        let under = self.player_position;
+        for (_e, (t, _)) in self.world.query_mut::<(&mut Transform, &Halo)>() {
+            t.position = Vec3::new(under.x, 0.04, under.z);
         }
         self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
+        let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
         let caught = !self.autopilot
             && self.grace <= 0.0
+            && !untouchable
             && self.enemies.iter().any(|(e, _)| {
                 self.world
                     .get::<&Transform>(*e)
@@ -1280,10 +1841,17 @@ impl Game for DreamscapeGame {
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
                 && self.director.shard_this_dream;
+            let anchored =
+                !forgiven && self.director.shard_this_dream && self.run.anchors_left() > 0;
             if forgiven {
                 self.second_wind_used = true;
                 log::info!("Second wind: the dream lets you keep your shard");
             }
+            if anchored {
+                self.run.anchors_used += 1;
+                log::info!("Dream anchor: the shard stays with you");
+            }
+            let forgiven = forgiven || anchored;
             if !forgiven && self.director.caught() {
                 self.shards_this_run = self.shards_this_run.saturating_sub(1);
                 if let Some(r) = self.run_log.last_mut() {
@@ -1292,7 +1860,7 @@ impl Game for DreamscapeGame {
                 log::info!(
                     "Shard dropped ({}/{}) — it's back where you found it",
                     self.director.lucidity,
-                    LUCIDITY_TO_WAKE
+                    self.director.shards_to_wake
                 );
                 if let Some(at) = self.dream.as_ref().and_then(|d| d.shard) {
                     self.spawn_shard_slot(at, false)?;
@@ -1333,7 +1901,7 @@ impl Game for DreamscapeGame {
                     "Lucidity shard collected at depth {} ({}/{})",
                     self.director.depth,
                     self.director.lucidity,
-                    LUCIDITY_TO_WAKE
+                    self.director.shards_to_wake
                 );
                 self.update_title(ctx);
                 break;
@@ -1343,10 +1911,7 @@ impl Game for DreamscapeGame {
             .iter()
             .any(|&e| self.world.get::<&WakeMarker>(e).is_ok())
         {
-            log::info!("Wake door taken at depth {}", self.director.depth);
-            self.flash.trigger([1.0, 1.0, 1.0], 1.0);
-            self.tone(660.0, 0.6);
-            self.begin_melt(transition::Pending::Wake);
+            self.open_wake_choice();
             return Ok(());
         }
         if touched
@@ -1354,6 +1919,7 @@ impl Game for DreamscapeGame {
             .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
         {
             log::info!("Portal entered at depth {}", self.director.depth);
+            self.dream_bonus();
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {
                 transition::Pending::Finish
             } else {
@@ -1370,12 +1936,19 @@ impl Game for DreamscapeGame {
         let flash = self.flash;
         let melt = self.transition.melt();
         let transition = self.transition;
-        let strangeness = self.dream.as_ref().map_or(0.0, |d| d.strangeness);
+        let strangeness = self.visual_strangeness();
         let player = self.player_position;
+        let up = if self.inverted() && !self.debug_camera {
+            -Vec3::Y
+        } else {
+            Vec3::Y
+        };
+        let sight_scale = self.twists.sight();
+        let sight_bonus = self.run.sight_bonus();
         // Off on the title/menus and in the F1 overview; on while dreaming.
         let tunnel = self.tunnel_on && !self.debug_camera && self.mode != hud::Mode::Title;
         let sight = if tunnel {
-            tunnel::sight_radius(strangeness)
+            tunnel::sight_radius(strangeness) * sight_scale + sight_bonus
         } else {
             0.0
         };
@@ -1411,7 +1984,7 @@ impl Game for DreamscapeGame {
         let aspect = drawable_size.0 as f32 / drawable_size.1.max(1) as f32;
         let aspect_for_overlay = aspect;
         let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 1000.0);
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let view = Mat4::look_at_rh(eye, target, up);
 
         let flags = if params.affine_texture_mapping {
             AFFINE_UV_BIT
@@ -1495,39 +2068,117 @@ impl Game for DreamscapeGame {
         let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
         let melt_loc = unsafe { gl.get_uniform_location(program, "uMelt") };
         let lit_loc = unsafe { gl.get_uniform_location(program, "uLit") };
-        for (_entity, (transform, mesh_renderer, uv, solid, lit)) in self
-            .world
-            .query::<(
-                &Transform,
-                &MeshRenderer,
-                Option<&SurfaceUv>,
-                Option<&NoMelt>,
-                Option<&Lit>,
-            )>()
-            .iter()
-        {
+        let hero_loc = unsafe { gl.get_uniform_location(program, "uHero") };
+        let ghost_loc = unsafe { gl.get_uniform_location(program, "uGhost") };
+        let outline_loc = unsafe { gl.get_uniform_location(program, "uOutline") };
+        unsafe {
+            if let Some(l) = &ghost_loc {
+                gl.uniform_1_f32(Some(l), 0.0);
+            }
+        }
+        // 0: everything opaque. 1: a dark shell around the dreamer (inflated
+        // back faces), so it reads on bright floors as well as dark ones.
+        // 2 (translucent): water. 3: the dreamer's silhouette wherever
+        // something stands in front of it.
+        for pass in 0..4 {
             unsafe {
-                if let Some(l) = &lit_loc {
-                    gl.uniform_1_f32(Some(l), if lit.is_some() { 1.0 } else { 0.0 });
-                }
-                if let Some(l) = &melt_loc {
-                    gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
-                }
-                if let Some(l) = &uv_loc {
-                    gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
-                }
-                if let Some(l) = &model_loc {
-                    gl.uniform_matrix_4_f32_slice(
-                        Some(l),
-                        false,
-                        &transform.matrix().to_cols_array(),
-                    );
+                match pass {
+                    0 => {}
+                    1 => {
+                        gl.enable(engine::glow::CULL_FACE);
+                        gl.cull_face(engine::glow::FRONT);
+                        if let Some(l) = &outline_loc {
+                            gl.uniform_1_f32(Some(l), 1.0);
+                        }
+                    }
+                    2 => {
+                        if params.backface_culling {
+                            gl.cull_face(engine::glow::BACK);
+                        } else {
+                            gl.disable(engine::glow::CULL_FACE);
+                        }
+                        if let Some(l) = &outline_loc {
+                            gl.uniform_1_f32(Some(l), 0.0);
+                        }
+                        gl.enable(engine::glow::BLEND);
+                        gl.blend_func(engine::glow::SRC_ALPHA, engine::glow::ONE_MINUS_SRC_ALPHA);
+                        gl.depth_mask(false);
+                        if let Some(l) = &ghost_loc {
+                            gl.uniform_1_f32(Some(l), 0.45);
+                        }
+                    }
+                    _ => {
+                        gl.depth_func(engine::glow::GREATER);
+                        if let Some(l) = &ghost_loc {
+                            gl.uniform_1_f32(Some(l), 0.4);
+                        }
+                    }
                 }
             }
-            if let Some(texture) = &mesh_renderer.texture {
-                texture.bind(gl, 0);
+            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water)) in self
+                .world
+                .query::<(
+                    &Transform,
+                    &MeshRenderer,
+                    Option<&SurfaceUv>,
+                    Option<&NoMelt>,
+                    Option<&Lit>,
+                    Option<&Hero>,
+                    Option<&Water>,
+                )>()
+                .iter()
+            {
+                let wanted = match pass {
+                    0 => water.is_none(),
+                    2 => water.is_some(),
+                    _ => hero.is_some(),
+                };
+                if !wanted {
+                    continue;
+                }
+                unsafe {
+                    if let Some(l) = &lit_loc {
+                        gl.uniform_1_f32(Some(l), if lit.is_some() { 1.0 } else { 0.0 });
+                    }
+                    if let Some(l) = &hero_loc {
+                        gl.uniform_1_f32(Some(l), if hero.is_some() { 1.0 } else { 0.0 });
+                    }
+                    if let Some(l) = &melt_loc {
+                        gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
+                    }
+                    if let Some(l) = &uv_loc {
+                        gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
+                    }
+                    if let Some(l) = &model_loc {
+                        gl.uniform_matrix_4_f32_slice(
+                            Some(l),
+                            false,
+                            &if pass == 1 {
+                                Transform {
+                                    scale: transform.scale * OUTLINE_SCALE,
+                                    ..*transform
+                                }
+                                .matrix()
+                            } else {
+                                transform.matrix()
+                            }
+                            .to_cols_array(),
+                        );
+                    }
+                }
+                if let Some(texture) = &mesh_renderer.texture {
+                    texture.bind(gl, 0);
+                }
+                mesh_renderer.mesh.draw(gl);
             }
-            mesh_renderer.mesh.draw(gl);
+        }
+        unsafe {
+            gl.depth_func(engine::glow::LESS);
+            gl.depth_mask(true);
+            gl.disable(engine::glow::BLEND);
+            if let Some(l) = &ghost_loc {
+                gl.uniform_1_f32(Some(l), 0.0);
+            }
         }
 
         renderer.present(
@@ -1546,7 +2197,7 @@ impl Game for DreamscapeGame {
         let grain = &mut self.grain;
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
         let clip = Mat4::perspective_rh(60.0_f32.to_radians(), aspect_for_overlay, 0.1, 1000.0)
-            * Mat4::look_at_rh(eye, target, Vec3::Y)
+            * Mat4::look_at_rh(eye, target, up)
             * player.extend(1.0);
         let player_uv = if clip.w > 0.0 {
             [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w]
@@ -1563,13 +2214,9 @@ impl Game for DreamscapeGame {
                 if overlay {
                     let tex = grain
                         .get_or_insert_with(|| {
-                            let size = tunnel::GRAIN_SIZE;
                             egui_ctx.load_texture(
                                 "film-grain",
-                                egui::ColorImage::from_rgba_unmultiplied(
-                                    [size, size],
-                                    &tunnel::grain_pixels(7),
-                                ),
+                                tunnel::grain_image(7),
                                 egui::TextureOptions::NEAREST_REPEAT,
                             )
                         })

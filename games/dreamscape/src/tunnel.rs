@@ -40,7 +40,7 @@ pub fn vignette_radii(strangeness: f32, time: f32) -> (f32, f32) {
 }
 
 /// Max darkness of the screen vignette (0..1 alpha).
-pub const VIGNETTE_MAX: f32 = 0.82;
+pub const VIGNETTE_MAX: f32 = 0.72;
 
 /// Vignette alpha at a normalised distance `d` (0 = centre) given radii.
 pub fn vignette_alpha(d: f32, inner: f32, outer: f32) -> f32 {
@@ -90,10 +90,12 @@ pub fn vignette_mesh(
     m
 }
 
-/// Grain texture side (pixels). Tiled across the screen at 2x2 per texel.
+/// Grain texture side (pixels). Tiled across the screen at `GRAIN_TEXEL` px per texel.
 pub const GRAIN_SIZE: usize = 128;
 /// Strongest a single grain speck gets (alpha).
-pub const GRAIN_ALPHA: f32 = 0.13;
+pub const GRAIN_ALPHA: f32 = 0.08;
+/// Screen pixels per grain texel (finer = subtler).
+pub const GRAIN_TEXEL: f32 = 1.5;
 /// The grain pattern re-rolls this many times a second (film frame rate).
 pub const GRAIN_FPS: f32 = 24.0;
 
@@ -111,6 +113,24 @@ pub fn grain_pixels(seed: u32) -> Vec<u8> {
         out.extend_from_slice(&[c, c, c, a]);
     }
     out
+}
+
+/// The grain as an egui image. Premultiplied by hand, in gamma space (the
+/// space egui blends in): `ColorImage::from_rgba_unmultiplied` premultiplies
+/// in *linear* space, which turns a 6%-alpha white speck into a +27% one and
+/// lays a bright haze over everything.
+pub fn grain_image(seed: u32) -> egui::ColorImage {
+    let pixels = grain_pixels(seed)
+        .chunks(4)
+        .map(|p| {
+            let c = (p[0] as u32 * p[3] as u32 / 255) as u8;
+            Color32::from_rgba_premultiplied(c, c, c, p[3])
+        })
+        .collect();
+    egui::ColorImage {
+        size: [GRAIN_SIZE, GRAIN_SIZE],
+        pixels,
+    }
 }
 
 /// Where the grain tile is offset this frame (UV units). Jumps GRAIN_FPS
@@ -144,7 +164,7 @@ pub fn draw_overlay(
     p.add(egui::Shape::mesh(mesh));
     if let Some(tex) = grain {
         let (ox, oy) = grain_offset(time);
-        let texel = 2.0;
+        let texel = GRAIN_TEXEL;
         let uv = Rect::from_min_size(
             Pos2::new(ox, oy),
             egui::vec2(
@@ -217,7 +237,7 @@ mod tests {
         assert_eq!(m.indices.len(), 3 * (16 + 3 * 16 * 2));
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
         assert_eq!(m.vertices[0].color.a(), 0);
-        assert!(m.vertices.last().unwrap().color.a() > 200);
+        assert!(m.vertices.last().unwrap().color.a() as f32 > VIGNETTE_MAX * 255.0 * 0.9);
         let far = m.vertices.last().unwrap().pos;
         assert!((far - Pos2::new(100.0, 50.0)).length() > 29.0);
     }
@@ -252,6 +272,16 @@ mod tests {
             .sum::<f32>()
             / px.len() as f32;
         assert!(signed.abs() < 1.0, "net cast {signed}");
+    }
+
+    #[test]
+    fn grain_image_adds_no_more_light_than_its_alpha() {
+        let img = grain_image(7);
+        assert_eq!(img.pixels.len(), GRAIN_SIZE * GRAIN_SIZE);
+        let max_a = (GRAIN_ALPHA * 255.0) as u8;
+        for p in &img.pixels {
+            assert!(p.r() <= p.a() && p.a() <= max_a, "{p:?}");
+        }
     }
 
     #[test]

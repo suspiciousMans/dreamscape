@@ -20,6 +20,9 @@ uniform float uSight;   // radius where the world is fully dark
 uniform float uSightFade; // fraction of uSight spent fading
 uniform float uLit;     // 1 = this object glows through the dark (you, shards, portal)
 uniform vec3 uDark;     // colour of the dark
+uniform float uHero;    // 1 = the dreamer (pulsing glow, see mesh.vert)
+uniform float uGhost;   // > 0: translucent pass with this alpha
+uniform float uOutline; // 1 = the dark shell drawn around the dreamer
 
 // Rotate a colour around the grey axis (hue shift that keeps brightness).
 vec3 hueShift(vec3 c, float a) {
@@ -29,6 +32,10 @@ vec3 hueShift(vec3 c, float a) {
 }
 
 void main() {
+    if (uOutline > 0.5) {
+        FragColor = vec4(0.03, 0.01, 0.08, 1.0);
+        return;
+    }
     float s = uStrangeness;
     // Melting UVs: the pattern drifts and ripples across the surface.
     vec2 uv = vUV;
@@ -59,6 +66,18 @@ void main() {
         float edge = smoothstep(uSight * (1.0 - uSightFade), uSight, d);
         float dark = edge * (1.0 - 0.8 * uLit);
         withFog = mix(withFog, uDark, dark);
+    }
+    if (uHero > 0.5) {
+        // Self-lit crystal: a slow pulse keeps it the brightest thing on screen.
+        float pulse = 0.5 + 0.5 * sin(uTime * 3.0);
+        withFog = mix(withFog, vec3(1.0), 0.18 + 0.12 * pulse);
+    }
+    if (uGhost > 0.0) {
+        // Translucent pass: water, or the dreamer's silhouette seen through
+        // a wall (flattened toward white so it reads as a ghost).
+        vec3 c = uHero > 0.5 ? mix(withFog, vec3(1.0), 0.5) : withFog;
+        FragColor = vec4(c, uGhost);
+        return;
     }
     FragColor = vec4(withFog, texColor.a);
 }

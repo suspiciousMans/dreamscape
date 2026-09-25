@@ -63,6 +63,10 @@ pub enum Attribute {
     Bloom,
     Rust,
     Dawn,
+    Hex,
+    Tide,
+    Aether,
+    Glass,
 }
 
 impl Attribute {
@@ -74,6 +78,10 @@ impl Attribute {
             DreamTheme::Garden => Attribute::Bloom,
             DreamTheme::NightmareFactory => Attribute::Rust,
             DreamTheme::Awakening => Attribute::Dawn,
+            DreamTheme::CursedForest => Attribute::Hex,
+            DreamTheme::DrownedLibrary => Attribute::Tide,
+            DreamTheme::SkyStairs => Attribute::Aether,
+            DreamTheme::MirrorHall => Attribute::Glass,
         }
     }
 
@@ -85,6 +93,10 @@ impl Attribute {
             Attribute::Bloom => "BLOOM",
             Attribute::Rust => "RUST",
             Attribute::Dawn => "DAWN",
+            Attribute::Hex => "HEX",
+            Attribute::Tide => "TIDE",
+            Attribute::Aether => "AETHER",
+            Attribute::Glass => "GLASS",
         }
     }
 }
@@ -174,6 +186,8 @@ pub fn base_memory(r: Rarity) -> f32 {
 pub struct MemoryBoost {
     pub lucid_wake: bool,
     pub deep_memory: bool,
+    /// Run upgrades (LUCKY MEMORY).
+    pub extra: f32,
 }
 
 pub fn memory_chance(r: Rarity, depth: u32, boost: MemoryBoost) -> f32 {
@@ -184,6 +198,7 @@ pub fn memory_chance(r: Rarity, depth: u32, boost: MemoryBoost) -> f32 {
     if boost.deep_memory {
         p += crate::store::DEEP_MEMORY_BONUS;
     }
+    p += boost.extra;
     p.min(1.0)
 }
 
@@ -552,6 +567,7 @@ mod tests {
         let all = MemoryBoost {
             lucid_wake: true,
             deep_memory: true,
+            extra: 0.0,
         };
         let mut prev = 0.0;
         for r in [
@@ -601,6 +617,7 @@ mod tests {
             MemoryBoost {
                 lucid_wake: true,
                 deep_memory: true,
+                extra: 0.0,
             },
         );
         assert!(boosted.iter().filter(|r| r.remembered).count() >= kept);

@@ -18,6 +18,8 @@ pub enum Mode {
     Reveal,
     Store,
     Booklet,
+    /// Picking a run upgrade, or WAKE / GO DEEPER at the wake door.
+    Choice,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -86,6 +88,20 @@ pub struct HudView {
     pub store_status: Option<String>,
     /// Perks active this run (shown small under the depth counter).
     pub perks: Vec<&'static str>,
+    /// Run upgrades taken so far ("SWIFT FEET x2").
+    pub upgrades: Vec<String>,
+    /// Held abilities: (name, key, charge 0..1, active).
+    pub abilities: Vec<(&'static str, &'static str, f32, bool)>,
+    /// This dream's twists ("FLOODED · GILDED"), empty for none.
+    pub twist: String,
+    pub twist_blurb: String,
+    /// HURRIED dreams: seconds left (negative = missed).
+    pub timer: Option<f32>,
+    /// Hard runs: current difficulty multiplier.
+    pub difficulty: Option<f32>,
+    /// Title screen: "short" / "long".
+    pub run_length: &'static str,
+    pub choice: crate::upgrade_ui::ChoiceView,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -294,11 +310,13 @@ pub fn draw(
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
+        Mode::Choice => return crate::upgrade_ui::draw(&p, screen, v, &v.choice),
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
+    run_status(&p, screen, v);
     if let Some(dir) = v.shard_dir {
         shard_compass(&p, screen, dir, v);
     }
@@ -326,13 +344,105 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::monospace(20.0),
         rgba(ink(v), 0.55),
     );
-    for (k, perk) in v.perks.iter().enumerate() {
+    let mut y = 76.0;
+    if let Some(d) = v.difficulty {
         p.text(
-            screen.left_top() + Vec2::new(30.0, 96.0 + 20.0 * k as f32),
+            at + Vec2::new(2.0, y),
+            Align2::LEFT_TOP,
+            format!("nightmare x{d:.1}"),
+            FontId::monospace(20.0),
+            rgba([255, 90, 120], 0.85),
+        );
+        y += 22.0;
+    }
+    for perk in &v.perks {
+        p.text(
+            screen.left_top() + Vec2::new(30.0, 20.0 + y),
             Align2::LEFT_TOP,
             format!("+ {perk}"),
             FontId::monospace(18.0),
             rgba([80, 230, 200], 0.8),
+        );
+        y += 20.0;
+    }
+    for u in &v.upgrades {
+        p.text(
+            screen.left_top() + Vec2::new(30.0, 20.0 + y),
+            Align2::LEFT_TOP,
+            format!("* {u}"),
+            FontId::monospace(18.0),
+            rgba([255, 200, 120], 0.8),
+        );
+        y += 20.0;
+    }
+}
+
+/// Top right: the dream's twist and HURRIED timer. Bottom left: abilities.
+fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let right = screen.right_top() + Vec2::new(-28.0, 22.0);
+    let mut y = 0.0;
+    if !v.twist.is_empty() {
+        p.text(
+            right + Vec2::new(0.0, y),
+            Align2::RIGHT_TOP,
+            &v.twist,
+            FontId::monospace(24.0),
+            rgba(hue(v.time * 0.1), 0.9),
+        );
+        y += 28.0;
+    }
+    if let Some(t) = v.timer {
+        let (text, rgb) = if t > 0.0 {
+            let urgent = t < 10.0 && (v.time * 4.0) as i32 % 2 == 0;
+            (
+                format!("{t:>4.1}s"),
+                if urgent { [255, 60, 80] } else { ink(v) },
+            )
+        } else {
+            ("too late".to_string(), [150, 140, 170])
+        };
+        p.text(
+            right + Vec2::new(0.0, y),
+            Align2::RIGHT_TOP,
+            text,
+            FontId::monospace(30.0),
+            rgba(rgb, 0.95),
+        );
+    }
+    for (k, &(name, key, charge, active)) in v.abilities.iter().enumerate() {
+        let r = Rect::from_min_size(
+            screen.left_bottom() + Vec2::new(28.0 + k as f32 * 150.0, -84.0),
+            Vec2::new(136.0, 56.0),
+        );
+        let ready = charge >= 1.0;
+        let rgb = if active {
+            hue(v.time * 0.8)
+        } else if ready {
+            [255, 150, 255]
+        } else {
+            [120, 100, 150]
+        };
+        p.rect_filled(r, 4.0, rgba([12, 6, 28], 0.7));
+        // Recharge fills from the bottom.
+        let fill = Rect::from_min_max(
+            Pos2::new(r.left(), r.bottom() - r.height() * charge),
+            r.right_bottom(),
+        );
+        p.rect_filled(fill, 4.0, rgba(rgb, if ready { 0.25 } else { 0.15 }));
+        p.rect_stroke(r, 4.0, egui::Stroke::new(2.0, rgba(rgb, 0.9)));
+        p.text(
+            r.left_top() + Vec2::new(8.0, 5.0),
+            Align2::LEFT_TOP,
+            format!("[{key}]"),
+            FontId::monospace(16.0),
+            rgba(ink(v), 0.7),
+        );
+        p.text(
+            r.left_top() + Vec2::new(8.0, 24.0),
+            Align2::LEFT_TOP,
+            name,
+            FontId::monospace(22.0),
+            rgba(rgb, 1.0),
         );
     }
 }
@@ -536,6 +646,15 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::proportional(24.0),
         rgba([200, 190, 230], a * 0.85),
     );
+    if !v.twist.is_empty() {
+        p.text(
+            Pos2::new(screen.center().x, y + 86.0),
+            Align2::CENTER_TOP,
+            format!("{} — {}", v.twist, v.twist_blurb),
+            FontId::monospace(22.0),
+            rgba(hue(v.time * 0.1), a),
+        );
+    }
 }
 
 fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {

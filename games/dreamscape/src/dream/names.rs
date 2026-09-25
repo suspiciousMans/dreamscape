@@ -16,12 +16,16 @@ pub const MAX_WHISPER: usize = 56;
 /// Chance a (non-Awakening) dream borrows one word from another dream.
 pub const MASHUP_CHANCE: f64 = 0.25;
 
-const DONORS: [DreamTheme; 5] = [
+const DONORS: [DreamTheme; 9] = [
     DreamTheme::Lobby,
     DreamTheme::LiminalOffice,
     DreamTheme::VoidPlatforms,
     DreamTheme::Garden,
     DreamTheme::NightmareFactory,
+    DreamTheme::CursedForest,
+    DreamTheme::DrownedLibrary,
+    DreamTheme::SkyStairs,
+    DreamTheme::MirrorHall,
 ];
 
 fn pick(list: &'static [&'static str], rng: &mut StdRng) -> &'static str {
@@ -37,7 +41,7 @@ fn sources(theme: DreamTheme, rng: &mut StdRng) -> (Vocab, Vocab) {
             .filter(|&&d| d != theme)
             .collect::<Vec<_>>()
             .choose(rng)
-            .expect("five donors");
+            .expect("many donors");
         (own, vocab(*donor))
     } else {
         (own, vocab(theme))

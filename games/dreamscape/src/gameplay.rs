@@ -119,6 +119,36 @@ impl Flash {
     }
 }
 
+/// BLINK: where you'd land, `cells` cells along `dir` from `from`. Only
+/// onto floor (standing on a slab, not inside a wall or prop); `None` if
+/// the landing isn't safe.
+pub fn blink_target(
+    blocks: &[crate::dream::Block],
+    from: Vec3,
+    dir: Vec3,
+    cells: f32,
+) -> Option<Vec3> {
+    use crate::dream::BlockKind;
+    let dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return None;
+    }
+    let to = from + dir * cells * CELL;
+    let covers = |b: &crate::dream::Block, margin: f32| {
+        let h = b.size * 0.5;
+        (to.x - b.pos.x).abs() < h.x + margin && (to.z - b.pos.z).abs() < h.z + margin
+    };
+    let floor = blocks
+        .iter()
+        .any(|b| b.kind == BlockKind::Floor && covers(b, -PLAYER_RADIUS * 0.5));
+    let blocked = blocks.iter().any(|b| {
+        matches!(b.kind, BlockKind::Wall | BlockKind::Prop)
+            && b.pos.y - b.size.y * 0.5 < 2.0
+            && covers(b, PLAYER_RADIUS)
+    });
+    (floor && !blocked).then(|| Vec3::new(to.x, 1.0, to.z))
+}
+
 /// Seed for "dream again": a fresh, reproducible run derived from the last one.
 pub fn next_run_seed(seed: u64) -> u64 {
     seed.wrapping_mul(6_364_136_223_846_793_005)
@@ -142,6 +172,46 @@ pub fn chase_radius(depth: u32) -> f32 {
 
 /// How far from its patrol an enemy will follow you.
 pub const CHASE_LEASH: f32 = 1.5 * CELL;
+
+/// Long runs / going deeper: each dream is this much harder than the last.
+pub const HARD_GROWTH: f32 = 1.18;
+/// Each refusal to wake multiplies difficulty again.
+pub const OVERDRIVE_STEP: f32 = 1.25;
+pub const MAX_DIFFICULTY: f32 = 1.0e4;
+
+/// 1 = a gentle run. Hard runs grow exponentially: `HARD_GROWTH^dreams`
+/// since the climb began, times `OVERDRIVE_STEP^refusals`.
+pub fn difficulty(hardness: Option<(u32, u32)>) -> f32 {
+    match hardness {
+        None => 1.0,
+        Some((dreams, refusals)) => (HARD_GROWTH.powi(dreams.min(60) as i32)
+            * OVERDRIVE_STEP.powi(refusals.min(30) as i32))
+        .min(MAX_DIFFICULTY),
+    }
+}
+
+/// Enemy speed under pressure. Grows with difficulty but a chasing enemy is
+/// always a bit slower than you, however hard it gets.
+pub fn pressured_enemy_speed(depth: u32, difficulty: f32, player_speed: f32) -> f32 {
+    let cap = 0.92 * player_speed / crate::enemy_ai::CHASE_BOOST;
+    (enemy_speed(depth) * difficulty.sqrt()).min(cap)
+}
+
+/// Alert radius under pressure (0 stays 0: shallow dreams never chase).
+pub fn pressured_chase_radius(depth: u32, difficulty: f32) -> f32 {
+    (chase_radius(depth) * difficulty.powf(0.25)).min(MAX_PRESSURED_CHASE)
+}
+pub const MAX_PRESSURED_CHASE: f32 = 5.0;
+
+/// More enemies under pressure (the route's room still limits them).
+pub fn pressured_enemy_count(difficulty: f32) -> f32 {
+    difficulty.sqrt().min(4.0)
+}
+
+/// Dust multiplier for surviving a hard run.
+pub fn difficulty_reward(difficulty: f32) -> f32 {
+    difficulty.clamp(1.0, 50.0)
+}
 
 #[cfg(test)]
 mod tests {
@@ -356,6 +426,81 @@ mod tests {
             s = next_run_seed(s);
             assert!(seen.insert(s), "repeated after {} runs", seen.len());
         }
+    }
+
+    #[test]
+    fn hard_runs_grow_exponentially_but_stay_playable() {
+        assert_eq!(difficulty(None), 1.0);
+        let d = |n| difficulty(Some((n, 0)));
+        assert_eq!(d(0), 1.0);
+        for n in 1..30 {
+            let ratio = d(n) / d(n - 1);
+            assert!((ratio - HARD_GROWTH).abs() < 1e-3, "not exponential at {n}");
+        }
+        assert!(difficulty(Some((3, 1))) > d(3));
+        assert!(difficulty(Some((u32::MAX, u32::MAX))).is_finite());
+        for n in [0, 5, 20, 1000] {
+            let diff = difficulty(Some((n, n)));
+            for speed in [MOVE_SPEED, MOVE_SPEED * 1.36] {
+                let chase = pressured_enemy_speed(n, diff, speed) * crate::enemy_ai::CHASE_BOOST;
+                assert!(
+                    chase < speed,
+                    "depth {n}: enemies outrun you ({chase} vs {speed})"
+                );
+            }
+            assert!(pressured_chase_radius(n, diff) <= MAX_PRESSURED_CHASE);
+            assert!(pressured_enemy_count(diff) >= 1.0);
+        }
+        assert_eq!(
+            pressured_chase_radius(0, 50.0),
+            0.0,
+            "shallow dreams still never chase"
+        );
+        assert!(pressured_enemy_speed(4, d(10), MOVE_SPEED) > enemy_speed(4));
+        assert_eq!(difficulty_reward(1.0), 1.0);
+        assert!(difficulty_reward(d(10)) > 5.0);
+    }
+
+    #[test]
+    fn a_pressured_chase_is_still_visible_before_it_reaches_you() {
+        let clear = crate::tunnel::sight_radius(1.0) * (1.0 - crate::tunnel::SIGHT_FADE);
+        assert!(clear > MAX_PRESSURED_CHASE + ENEMY_TOUCH_RADIUS, "{clear}");
+    }
+
+    #[test]
+    fn blink_lands_on_floor_and_never_in_walls_or_the_void() {
+        use crate::dream::{generate_with, BlockKind, DreamTheme, Pressure};
+        for theme in [
+            DreamTheme::VoidPlatforms,
+            DreamTheme::LiminalOffice,
+            DreamTheme::SkyStairs,
+        ] {
+            for seed in 0..10 {
+                let d = generate_with(theme, seed, 3, None, false, Pressure::default());
+                let mut landed = 0;
+                for w in d.route.windows(2) {
+                    let dir = w[1].pos - w[0].pos;
+                    if let Some(at) = blink_target(&d.blocks, w[0].pos, dir, 1.5) {
+                        landed += 1;
+                        let on_floor = d.blocks.iter().any(|b| {
+                            b.kind == BlockKind::Floor
+                                && (at.x - b.pos.x).abs() < b.size.x * 0.5
+                                && (at.z - b.pos.z).abs() < b.size.z * 0.5
+                        });
+                        assert!(on_floor, "{theme:?}/{seed}: blinked into the void");
+                        let in_wall = d.blocks.iter().any(|b| {
+                            b.kind == BlockKind::Wall
+                                && (at.x - b.pos.x).abs() < b.size.x * 0.5
+                                && (at.z - b.pos.z).abs() < b.size.z * 0.5
+                        });
+                        assert!(!in_wall, "{theme:?}/{seed}: blinked into a wall");
+                    }
+                }
+                assert!(landed > 0, "{theme:?}/{seed}: blink never works");
+            }
+        }
+        assert_eq!(blink_target(&[], Vec3::ZERO, Vec3::X, 1.5), None);
+        assert_eq!(blink_target(&[], Vec3::ZERO, Vec3::ZERO, 1.5), None);
     }
 
     #[test]

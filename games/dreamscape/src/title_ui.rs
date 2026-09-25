@@ -5,9 +5,23 @@
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Vec2};
 
+/// Menu entries, in order. `[key] label`. Entry `RUN_ROW` toggles the run
+/// length and shows the current one.
+pub const RUN_ROW: usize = 1;
+
+/// What the run-length row says under each setting.
+pub fn run_blurb(length: &str) -> &'static str {
+    if length == "long" {
+        "six shards · every dream harder than the last · richer rewards"
+    } else {
+        "three shards · the classic descent"
+    }
+}
+
 /// Menu entries, in order. `[key] label`.
-pub const MENU: [(&str, &str); 4] = [
+pub const MENU: [(&str, &str); 5] = [
     ("enter", "fall asleep"),
+    ("r", "run"),
     ("l", "the lucid store"),
     ("b", "dream booklet"),
     ("q", "stay awake"),
@@ -66,13 +80,27 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 rgba(col, 1.0),
             );
         }
+        let text = if i == RUN_ROW {
+            format!("[{key}]  {label}: {}", v.run_length)
+        } else {
+            format!("[{key}]  {label}")
+        };
         p.text(
             Pos2::new(cx - 160.0, y),
             Align2::LEFT_TOP,
-            format!("[{key}]  {label}"),
+            text,
             FontId::monospace(28.0),
             rgba(col, if sel { 1.0 } else { 0.7 }),
         );
+        if i == RUN_ROW && sel {
+            p.text(
+                Pos2::new(cx + 150.0, y + 8.0),
+                Align2::LEFT_TOP,
+                run_blurb(v.run_length),
+                FontId::monospace(16.0),
+                rgba([255, 120, 150], 0.85),
+            );
+        }
     }
     p.text(
         Pos2::new(cx, screen.bottom() - 60.0),
