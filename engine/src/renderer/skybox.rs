@@ -53,20 +53,46 @@ impl SkyboxPass {
         let uniform_zenith_color = unsafe { gl.get_uniform_location(program, "uZenithColor") };
         let empty_vao = unsafe { gl.create_vertex_array().map_err(anyhow::Error::msg)? };
 
-        Ok(Self { program, empty_vao, uniform_inv_view_proj, uniform_horizon_color, uniform_zenith_color })
+        Ok(Self {
+            program,
+            empty_vao,
+            uniform_inv_view_proj,
+            uniform_horizon_color,
+            uniform_zenith_color,
+        })
     }
 
     /// Draws the gradient into whatever framebuffer is currently bound.
     /// Call first, before any scene geometry: depth writing is disabled for
     /// the draw (so it never blocks anything drawn afterward) and restored
     /// before returning.
-    pub fn draw(&self, gl: &glow::Context, inv_view_proj: [f32; 16], horizon_color: [f32; 3], zenith_color: [f32; 3]) {
+    pub fn draw(
+        &self,
+        gl: &glow::Context,
+        inv_view_proj: [f32; 16],
+        horizon_color: [f32; 3],
+        zenith_color: [f32; 3],
+    ) {
         unsafe {
             gl.depth_mask(false);
             gl.use_program(Some(self.program));
-            gl.uniform_matrix_4_f32_slice(self.uniform_inv_view_proj.as_ref(), false, &inv_view_proj);
-            gl.uniform_3_f32(self.uniform_horizon_color.as_ref(), horizon_color[0], horizon_color[1], horizon_color[2]);
-            gl.uniform_3_f32(self.uniform_zenith_color.as_ref(), zenith_color[0], zenith_color[1], zenith_color[2]);
+            gl.uniform_matrix_4_f32_slice(
+                self.uniform_inv_view_proj.as_ref(),
+                false,
+                &inv_view_proj,
+            );
+            gl.uniform_3_f32(
+                self.uniform_horizon_color.as_ref(),
+                horizon_color[0],
+                horizon_color[1],
+                horizon_color[2],
+            );
+            gl.uniform_3_f32(
+                self.uniform_zenith_color.as_ref(),
+                zenith_color[0],
+                zenith_color[1],
+                zenith_color[2],
+            );
             gl.bind_vertex_array(Some(self.empty_vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.depth_mask(true);

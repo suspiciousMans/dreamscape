@@ -36,19 +36,33 @@ impl NavGrid {
             .filter(|(_, (_, collider))| !collider.is_trigger)
             .filter_map(|(_, (transform, collider))| {
                 let (half_x, half_y, half_z) = match collider.shape {
-                    ColliderShape::Aabb { half_extents } => (half_extents.x, half_extents.y, half_extents.z),
+                    ColliderShape::Aabb { half_extents } => {
+                        (half_extents.x, half_extents.y, half_extents.z)
+                    }
                     ColliderShape::Sphere { radius } => (radius, radius, radius),
                 };
                 if half_y < MIN_OBSTRUCTION_HEIGHT {
                     return None;
                 }
                 let position = transform.position;
-                Some((position.x - half_x, position.x + half_x, position.z - half_z, position.z + half_z))
+                Some((
+                    position.x - half_x,
+                    position.x + half_x,
+                    position.z - half_z,
+                    position.z + half_z,
+                ))
             })
             .collect();
 
         if obstacles.is_empty() {
-            return Self { origin_x: 0.0, origin_z: 0.0, cell_size, width: 0, depth: 0, walkable: Vec::new() };
+            return Self {
+                origin_x: 0.0,
+                origin_z: 0.0,
+                cell_size,
+                width: 0,
+                depth: 0,
+                walkable: Vec::new(),
+            };
         }
 
         let mut min_x = f32::MAX;
@@ -65,8 +79,12 @@ impl NavGrid {
         let margin = BOUNDS_MARGIN_CELLS * cell_size;
         let origin_x = min_x - margin;
         let origin_z = min_z - margin;
-        let width = (((max_x - min_x) + margin * 2.0) / cell_size).ceil().max(1.0) as usize;
-        let depth = (((max_z - min_z) + margin * 2.0) / cell_size).ceil().max(1.0) as usize;
+        let width = (((max_x - min_x) + margin * 2.0) / cell_size)
+            .ceil()
+            .max(1.0) as usize;
+        let depth = (((max_z - min_z) + margin * 2.0) / cell_size)
+            .ceil()
+            .max(1.0) as usize;
 
         let mut walkable = vec![true; width * depth];
         for cz in 0..depth {
@@ -76,7 +94,10 @@ impl NavGrid {
                 let cell_min_z = origin_z + cz as f32 * cell_size;
                 let cell_max_z = cell_min_z + cell_size;
                 let blocked = obstacles.iter().any(|&(ox_min, ox_max, oz_min, oz_max)| {
-                    cell_min_x < ox_max && cell_max_x > ox_min && cell_min_z < oz_max && cell_max_z > oz_min
+                    cell_min_x < ox_max
+                        && cell_max_x > ox_min
+                        && cell_min_z < oz_max
+                        && cell_max_z > oz_min
                 });
                 if blocked {
                     walkable[cz * width + cx] = false;
@@ -84,7 +105,14 @@ impl NavGrid {
             }
         }
 
-        Self { origin_x, origin_z, cell_size, width, depth, walkable }
+        Self {
+            origin_x,
+            origin_z,
+            cell_size,
+            width,
+            depth,
+            walkable,
+        }
     }
 
     fn cell_of(&self, position: Vec3) -> Option<(usize, usize)> {
@@ -101,7 +129,10 @@ impl NavGrid {
     }
 
     fn is_walkable(&self, cx: usize, cz: usize) -> bool {
-        self.walkable.get(cz * self.width + cx).copied().unwrap_or(false)
+        self.walkable
+            .get(cz * self.width + cx)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn cell_center(&self, cell: (usize, usize), y: f32) -> Vec3 {
@@ -138,7 +169,10 @@ impl NavGrid {
         let mut came_from: Vec<Option<(usize, usize)>> = vec![None; self.width * self.depth];
         let mut visited = vec![false; self.width * self.depth];
         g_score[index(start_cell)] = 0.0;
-        open.push(ScoredCell { cost: octile(start_cell, goal_cell), cell: start_cell });
+        open.push(ScoredCell {
+            cost: octile(start_cell, goal_cell),
+            cell: start_cell,
+        });
 
         while let Some(ScoredCell { cell, .. }) = open.pop() {
             if visited[index(cell)] {
@@ -169,12 +203,19 @@ impl NavGrid {
                             continue;
                         }
                     }
-                    let step_cost = if dx != 0 && dz != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
+                    let step_cost = if dx != 0 && dz != 0 {
+                        std::f32::consts::SQRT_2
+                    } else {
+                        1.0
+                    };
                     let tentative = g_score[index(cell)] + step_cost;
                     if tentative < g_score[index(neighbor)] {
                         g_score[index(neighbor)] = tentative;
                         came_from[index(neighbor)] = Some(cell);
-                        open.push(ScoredCell { cost: tentative + octile(neighbor, goal_cell), cell: neighbor });
+                        open.push(ScoredCell {
+                            cost: tentative + octile(neighbor, goal_cell),
+                            cell: neighbor,
+                        });
                     }
                 }
             }
@@ -192,7 +233,12 @@ impl NavGrid {
         }
         path_cells.reverse();
 
-        Some(path_cells.into_iter().map(|cell| self.cell_center(cell, goal.y)).collect())
+        Some(
+            path_cells
+                .into_iter()
+                .map(|cell| self.cell_center(cell, goal.y))
+                .collect(),
+        )
     }
 }
 
@@ -205,7 +251,10 @@ impl Eq for ScoredCell {}
 impl Ord for ScoredCell {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reversed so `BinaryHeap` (a max-heap) pops the lowest cost first.
-        other.cost.partial_cmp(&self.cost).unwrap_or(std::cmp::Ordering::Equal)
+        other
+            .cost
+            .partial_cmp(&self.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 impl PartialOrd for ScoredCell {
@@ -220,8 +269,15 @@ mod tests {
 
     fn wall(world: &mut hecs::World, position: Vec3, half_extents: Vec3) {
         world.spawn((
-            Transform { position, rotation: glam::Quat::IDENTITY, scale: Vec3::ONE },
-            Collider { shape: ColliderShape::Aabb { half_extents }, is_trigger: false },
+            Transform {
+                position,
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            Collider {
+                shape: ColliderShape::Aabb { half_extents },
+                is_trigger: false,
+            },
         ));
     }
 
@@ -251,10 +307,16 @@ mod tests {
         bordered_room(&mut world);
         // Half-extent 0.1 < MIN_OBSTRUCTION_HEIGHT — must not count as an
         // obstruction, or every cell in the room would be unwalkable.
-        wall(&mut world, Vec3::new(0.0, -0.5, 0.0), Vec3::new(6.0, 0.1, 6.0));
+        wall(
+            &mut world,
+            Vec3::new(0.0, -0.5, 0.0),
+            Vec3::new(6.0, 0.1, 6.0),
+        );
 
         let grid = NavGrid::bake(&world, 1.0);
-        assert!(grid.find_path(Vec3::new(-4.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0)).is_some());
+        assert!(grid
+            .find_path(Vec3::new(-4.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0))
+            .is_some());
     }
 
     #[test]
@@ -263,13 +325,20 @@ mod tests {
         bordered_room(&mut world);
         // A dividing wall down the middle with a gap on the +x side, forcing
         // a detour rather than a straight line from one side to the other.
-        wall(&mut world, Vec3::new(-1.5, 0.0, 0.0), Vec3::new(4.5, 1.0, 0.5));
+        wall(
+            &mut world,
+            Vec3::new(-1.5, 0.0, 0.0),
+            Vec3::new(4.5, 1.0, 0.5),
+        );
 
         let grid = NavGrid::bake(&world, 1.0);
         let path = grid
             .find_path(Vec3::new(-4.0, 0.0, -3.0), Vec3::new(-4.0, 0.0, 3.0))
             .expect("path should route around the dividing wall's open end");
-        assert!(path.iter().any(|p| p.x > 0.0), "path should detour through the wall's gap near x=4");
+        assert!(
+            path.iter().any(|p| p.x > 0.0),
+            "path should detour through the wall's gap near x=4"
+        );
     }
 
     #[test]
@@ -277,9 +346,15 @@ mod tests {
         let mut world = hecs::World::new();
         bordered_room(&mut world);
         // A wall spanning the full width, sealing the room in half with no gap.
-        wall(&mut world, Vec3::new(0.0, 0.0, 0.0), Vec3::new(6.0, 1.0, 0.5));
+        wall(
+            &mut world,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(6.0, 1.0, 0.5),
+        );
 
         let grid = NavGrid::bake(&world, 1.0);
-        assert!(grid.find_path(Vec3::new(-4.0, 0.0, -3.0), Vec3::new(-4.0, 0.0, 3.0)).is_none());
+        assert!(grid
+            .find_path(Vec3::new(-4.0, 0.0, -3.0), Vec3::new(-4.0, 0.0, 3.0))
+            .is_none());
     }
 }

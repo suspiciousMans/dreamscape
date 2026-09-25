@@ -55,19 +55,26 @@ pub enum ClientMessage {
     /// in its own locally-mirrored snapshot state, the same "nearest
     /// target in range" search `interact()` already does locally in
     /// single-player, just resolved against replicated positions instead.
-    Interact { target: NetId },
+    Interact {
+        target: NetId,
+    },
     /// Sent when the client presses a number key while its own
     /// `ServerMessage::Dialogue`-driven choice overlay is showing —
     /// `speaker` names which `Dialogue` (there can only sensibly be one
     /// active at a time client-side, but the host is stateless per
     /// request) to advance, `index` the 0-based choice picked.
-    DialogueChoice { speaker: NetId, index: usize },
+    DialogueChoice {
+        speaker: NetId,
+        index: usize,
+    },
     /// Sent when a connected client changes their player-model appearance
     /// mid-session (see `engine::ui::AppearanceAction`). The host relays
     /// this out to every peer as `ServerMessage::PlayerAppearanceChanged`
     /// so everyone rebuilds that player's proxy with the new model — see
     /// the same field's doc comment on `Hello` for the path convention.
-    SetAppearance { rig_path: Option<PathBuf> },
+    SetAppearance {
+        rig_path: Option<PathBuf>,
+    },
     Disconnect,
 }
 
@@ -84,7 +91,9 @@ pub enum ServerMessage {
         named_net_ids: Vec<(String, NetId)>,
         tick_rate: f32,
     },
-    Reject { reason: String },
+    Reject {
+        reason: String,
+    },
     /// Sent in three situations, all covered by this one shape: to a
     /// newly-joined client about the host's own player, to a newly-joined
     /// client about every already-connected peer (a catch-up loop), and
@@ -93,16 +102,28 @@ pub enum ServerMessage {
     /// Hello`), letting every recipient build the right proxy immediately
     /// instead of defaulting to the gray-cube fallback and correcting it
     /// later.
-    PlayerJoined { net_id: NetId, name: String, appearance: Option<PathBuf> },
-    PlayerLeft { net_id: NetId },
+    PlayerJoined {
+        net_id: NetId,
+        name: String,
+        appearance: Option<PathBuf>,
+    },
+    PlayerLeft {
+        net_id: NetId,
+    },
     /// One-shot broadcast for a player (client or host) changing their
     /// appearance mid-session — every peer, on receipt, despawns that
     /// `NetId`'s current proxy (root + any rig-part children) and rebuilds
     /// it in place with the new appearance, falling back to the default
     /// cube exactly as `PlayerJoined`/initial spawn would on any
     /// resolution failure.
-    PlayerAppearanceChanged { net_id: NetId, appearance: Option<PathBuf> },
-    CharacterSpawned { net_id: NetId, instance: CharacterInstance },
+    PlayerAppearanceChanged {
+        net_id: NetId,
+        appearance: Option<PathBuf>,
+    },
+    CharacterSpawned {
+        net_id: NetId,
+        instance: CharacterInstance,
+    },
     Snapshot {
         tick: u32,
         players: Vec<PlayerSnapshot>,
@@ -110,7 +131,11 @@ pub enum ServerMessage {
         objects: Vec<ObjectSnapshot>,
         removed: Vec<NetId>,
     },
-    Dialogue { speaker: NetId, text: String, choices: Vec<(String, usize)> },
+    Dialogue {
+        speaker: NetId,
+        text: String,
+        choices: Vec<(String, usize)>,
+    },
     DialogueClosed,
     LevelTransition {
         level: Level,
@@ -125,7 +150,11 @@ pub enum ServerMessage {
     /// character, a death, ...) — these have no `Networked` entity of
     /// their own to ride along on a `Snapshot`, so they're broadcast as
     /// their own one-shot event instead, mirroring `Dialogue`'s shape.
-    ParticleBurst { position: [f32; 3], def: ParticleEmitterDef, count: u32 },
+    ParticleBurst {
+        position: [f32; 3],
+        def: ParticleEmitterDef,
+        count: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

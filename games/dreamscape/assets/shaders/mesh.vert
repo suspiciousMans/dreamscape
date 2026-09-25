@@ -25,6 +25,8 @@ uniform float uMelt;
 // 1 = the dreamer: never vertex-snapped, never fogged, always well lit, so
 // the crystal stays readable in the crunchiest low-poly dreams.
 uniform float uHero;
+// Per-dream extra breathing (0..1).
+uniform float uBreathe;
 
 // Fixed-size point light arrays (simple uniform arrays, not a UBO/SSBO —
 // plenty for a handful of level lights and keeps the shader trivial).
@@ -59,7 +61,7 @@ void main() {
     vWorld = worldPos.xyz;
 
     // The world breathes: slow travelling waves through every vertex.
-    float breathe = 0.12 * uStrangeness;
+    float breathe = 0.12 * uStrangeness + 0.3 * uBreathe;
     worldPos.xyz += breathe * vec3(
         sin(uTime * 1.1 + worldPos.z * 0.45 + worldPos.y * 0.3),
         sin(uTime * 0.8 + worldPos.x * 0.35) * 0.6,

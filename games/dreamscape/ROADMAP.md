@@ -31,7 +31,7 @@ Every new enemy must keep the existing guarantee: the patient-walker test proves
 
 ---
 
-## Phase 3: New dream types
+## Phase 3: New dream types (3.1, 3.2 and the first four dreams ✅ done)
 
 Each new dream is built around phenomena that people commonly describe in psilocybin, LSD and DMT trip reports:
 - breathing, flowing surfaces;
@@ -95,7 +95,7 @@ A cracked wall hides a door, and the Blink ability or a DASH through reaches it.
 
 ---
 
-## Phase 4: Meta-progression and replay value
+## Phase 4: Meta-progression and replay value (4.1, 4.3, 4.6 ✅ done)
 
 | # | Feature | Notes |
 |---|---|---|
@@ -106,7 +106,7 @@ A cracked wall hides a door, and the Blink ability or a DASH through reaches it.
 | 4.5 | **Achievements and records** | Fastest wake, deepest long run, wake without taking any upgrades, survive every twist. Saved in the booklet. |
 | 4.6 | **Dream codex** | A booklet page per dream type, filled in as you visit, with its vocabulary, attribute and best depth. |
 
-## Phase 5: Feel and polish
+## Phase 5: Feel and polish (5.2 sound, 5.6 settings/accessibility ✅ done)
 
 | # | Feature | Notes |
 |---|---|---|
@@ -118,7 +118,7 @@ A cracked wall hides a door, and the Blink ability or a DASH through reaches it.
 | 5.6 | **Accessibility** | Sliders for grain and vignette, colour-blind shard and portal markers, key remapping, reduced motion (which caps the breathing, melting and tracer effects). |
 | 5.7 | **Title screen for runs** | Pick the dreamer, run length, ascension level and daily seed on one panel. |
 
-## Phase 6: Infrastructure (6.1 and 6.2 ✅ done)
+## Phase 6: Infrastructure (6.1, 6.2, 6.3 ✅ done)
 
 | # | Feature | Notes |
 |---|---|---|

@@ -38,7 +38,9 @@ impl Platform {
             .build()?;
 
         let gl_context = window.gl_create_context().map_err(anyhow::Error::msg)?;
-        window.gl_make_current(&gl_context).map_err(anyhow::Error::msg)?;
+        window
+            .gl_make_current(&gl_context)
+            .map_err(anyhow::Error::msg)?;
 
         // Must load after the context is current.
         let gl = Arc::new(unsafe {

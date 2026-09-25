@@ -78,7 +78,10 @@ pub fn lex(source: &str) -> Result<Vec<SpannedToken>, ScriptError> {
                     message: format!("invalid number literal '{text}'"),
                     line,
                 })?;
-                tokens.push(SpannedToken { token: Token::Number(value), line });
+                tokens.push(SpannedToken {
+                    token: Token::Number(value),
+                    line,
+                });
             }
             '"' => {
                 i += 1;
@@ -90,11 +93,17 @@ pub fn lex(source: &str) -> Result<Vec<SpannedToken>, ScriptError> {
                     i += 1;
                 }
                 if i >= chars.len() {
-                    return Err(ScriptError { message: "unterminated string literal".to_string(), line });
+                    return Err(ScriptError {
+                        message: "unterminated string literal".to_string(),
+                        line,
+                    });
                 }
                 let text: String = chars[start..i].iter().collect();
                 i += 1; // closing quote
-                tokens.push(SpannedToken { token: Token::Str(text), line });
+                tokens.push(SpannedToken {
+                    token: Token::Str(text),
+                    line,
+                });
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
@@ -119,36 +128,132 @@ pub fn lex(source: &str) -> Result<Vec<SpannedToken>, ScriptError> {
                 };
                 tokens.push(SpannedToken { token, line });
             }
-            '+' => { tokens.push(SpannedToken { token: Token::Plus, line }); i += 1; }
-            '-' => { tokens.push(SpannedToken { token: Token::Minus, line }); i += 1; }
-            '*' => { tokens.push(SpannedToken { token: Token::Star, line }); i += 1; }
-            '/' => { tokens.push(SpannedToken { token: Token::Slash, line }); i += 1; }
-            '%' => { tokens.push(SpannedToken { token: Token::Percent, line }); i += 1; }
-            '(' => { tokens.push(SpannedToken { token: Token::LParen, line }); i += 1; }
-            ')' => { tokens.push(SpannedToken { token: Token::RParen, line }); i += 1; }
-            '{' => { tokens.push(SpannedToken { token: Token::LBrace, line }); i += 1; }
-            '}' => { tokens.push(SpannedToken { token: Token::RBrace, line }); i += 1; }
-            ',' => { tokens.push(SpannedToken { token: Token::Comma, line }); i += 1; }
-            ';' => { tokens.push(SpannedToken { token: Token::Semicolon, line }); i += 1; }
+            '+' => {
+                tokens.push(SpannedToken {
+                    token: Token::Plus,
+                    line,
+                });
+                i += 1;
+            }
+            '-' => {
+                tokens.push(SpannedToken {
+                    token: Token::Minus,
+                    line,
+                });
+                i += 1;
+            }
+            '*' => {
+                tokens.push(SpannedToken {
+                    token: Token::Star,
+                    line,
+                });
+                i += 1;
+            }
+            '/' => {
+                tokens.push(SpannedToken {
+                    token: Token::Slash,
+                    line,
+                });
+                i += 1;
+            }
+            '%' => {
+                tokens.push(SpannedToken {
+                    token: Token::Percent,
+                    line,
+                });
+                i += 1;
+            }
+            '(' => {
+                tokens.push(SpannedToken {
+                    token: Token::LParen,
+                    line,
+                });
+                i += 1;
+            }
+            ')' => {
+                tokens.push(SpannedToken {
+                    token: Token::RParen,
+                    line,
+                });
+                i += 1;
+            }
+            '{' => {
+                tokens.push(SpannedToken {
+                    token: Token::LBrace,
+                    line,
+                });
+                i += 1;
+            }
+            '}' => {
+                tokens.push(SpannedToken {
+                    token: Token::RBrace,
+                    line,
+                });
+                i += 1;
+            }
+            ',' => {
+                tokens.push(SpannedToken {
+                    token: Token::Comma,
+                    line,
+                });
+                i += 1;
+            }
+            ';' => {
+                tokens.push(SpannedToken {
+                    token: Token::Semicolon,
+                    line,
+                });
+                i += 1;
+            }
             '=' if chars.get(i + 1) == Some(&'=') => {
-                tokens.push(SpannedToken { token: Token::EqEq, line });
+                tokens.push(SpannedToken {
+                    token: Token::EqEq,
+                    line,
+                });
                 i += 2;
             }
-            '=' => { tokens.push(SpannedToken { token: Token::Eq, line }); i += 1; }
+            '=' => {
+                tokens.push(SpannedToken {
+                    token: Token::Eq,
+                    line,
+                });
+                i += 1;
+            }
             '!' if chars.get(i + 1) == Some(&'=') => {
-                tokens.push(SpannedToken { token: Token::NotEq, line });
+                tokens.push(SpannedToken {
+                    token: Token::NotEq,
+                    line,
+                });
                 i += 2;
             }
             '<' if chars.get(i + 1) == Some(&'=') => {
-                tokens.push(SpannedToken { token: Token::LtEq, line });
+                tokens.push(SpannedToken {
+                    token: Token::LtEq,
+                    line,
+                });
                 i += 2;
             }
-            '<' => { tokens.push(SpannedToken { token: Token::Lt, line }); i += 1; }
+            '<' => {
+                tokens.push(SpannedToken {
+                    token: Token::Lt,
+                    line,
+                });
+                i += 1;
+            }
             '>' if chars.get(i + 1) == Some(&'=') => {
-                tokens.push(SpannedToken { token: Token::GtEq, line });
+                tokens.push(SpannedToken {
+                    token: Token::GtEq,
+                    line,
+                });
                 i += 2;
             }
-            '>' => { tokens.push(SpannedToken { token: Token::Gt, line }); i += 1; }
+            '>' => {
+                tokens.push(SpannedToken {
+                    token: Token::Gt,
+                    line,
+                });
+                i += 1;
+            }
             other => {
                 return Err(ScriptError {
                     message: format!("unexpected character '{other}'"),
@@ -158,6 +263,9 @@ pub fn lex(source: &str) -> Result<Vec<SpannedToken>, ScriptError> {
         }
     }
 
-    tokens.push(SpannedToken { token: Token::Eof, line });
+    tokens.push(SpannedToken {
+        token: Token::Eof,
+        line,
+    });
     Ok(tokens)
 }

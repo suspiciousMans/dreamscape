@@ -55,7 +55,27 @@ fn attribute_color(a: Attribute) -> [u8; 3] {
         Attribute::Tide => [80, 200, 255],
         Attribute::Aether => [235, 245, 255],
         Attribute::Glass => [255, 170, 250],
+        Attribute::Spore => [120, 255, 200],
+        Attribute::Abyss => [150, 110, 255],
+        Attribute::Halo => [255, 215, 110],
+        Attribute::Jest => [255, 110, 230],
     }
+}
+
+/// Where the cards on a page sit (also used to crop exported card images).
+pub fn card_rects(screen: Rect, n: usize) -> Vec<Rect> {
+    let cx = screen.center().x;
+    let gap = 28.0;
+    let total_w = n as f32 * CARD_SIZE.x + (n as f32 - 1.0).max(0.0) * gap;
+    (0..n)
+        .map(|i| {
+            let min = Pos2::new(
+                cx - total_w * 0.5 + i as f32 * (CARD_SIZE.x + gap),
+                screen.top() + 112.0,
+            );
+            Rect::from_min_size(min, CARD_SIZE)
+        })
+        .collect()
 }
 
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
@@ -92,20 +112,17 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             rgba(ink(v), 0.8),
         );
     }
-    let n = v.booklet_cards.len() as f32;
-    let gap = 28.0;
-    let total_w = n * CARD_SIZE.x + (n - 1.0).max(0.0) * gap;
-    for (i, c) in v.booklet_cards.iter().enumerate() {
-        let min = Pos2::new(
-            cx - total_w * 0.5 + i as f32 * (CARD_SIZE.x + gap),
-            screen.top() + 112.0,
-        );
-        card(ctx, p, Rect::from_min_size(min, CARD_SIZE), c, v, art, 1.0);
+    for (c, r) in v
+        .booklet_cards
+        .iter()
+        .zip(card_rects(screen, v.booklet_cards.len()))
+    {
+        card(ctx, p, r, c, v, art, 1.0);
     }
     p.text(
         Pos2::new(cx, screen.bottom() - 40.0),
         Align2::CENTER_TOP,
-        "[a/d] turn page      [esc] back",
+        "[a/d] turn page      [p] save these cards as images      [esc] back",
         FontId::monospace(22.0),
         rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );

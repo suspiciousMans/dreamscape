@@ -18,7 +18,10 @@ pub fn draw_profiler_overlay(ctx: &egui::Context, stats: &ProfilerStats) {
         .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.label(format!("{:.0} FPS ({:.2} ms)", stats.fps, stats.frame_time_ms));
+                ui.label(format!(
+                    "{:.0} FPS ({:.2} ms)",
+                    stats.fps, stats.frame_time_ms
+                ));
                 ui.label(format!("Entities: {}", stats.entity_count));
                 ui.label(format!("Draw calls: {}", stats.draw_calls));
             });

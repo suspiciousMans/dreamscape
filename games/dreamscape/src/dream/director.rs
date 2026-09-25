@@ -65,6 +65,8 @@ pub struct DreamDirector {
     pub shard_bonus: f64,
     /// The current dream is a nightmare arena (no shard, a hunter, sigils).
     pub nightmare: bool,
+    /// Every this-many dreams is a nightmare (ascension shortens it).
+    pub nightmare_every: u32,
 }
 
 impl DreamDirector {
@@ -85,6 +87,7 @@ impl DreamDirector {
             overdrive: 0,
             shard_bonus: 0.0,
             nightmare: false,
+            nightmare_every: NIGHTMARE_EVERY,
         }
     }
 
@@ -149,8 +152,8 @@ impl DreamDirector {
         self.next = roll(self.theme, &mut self.rng);
         // Always roll, so the shard sequence doesn't depend on lucidity.
         let roll: f64 = self.rng.gen();
-        let lucky = roll < (SHARD_CHANCE + self.shard_bonus).min(0.95);
-        self.nightmare = self.depth.is_multiple_of(NIGHTMARE_EVERY);
+        let lucky = roll < (SHARD_CHANCE + self.shard_bonus).clamp(0.05, 0.95);
+        self.nightmare = self.depth.is_multiple_of(self.nightmare_every.max(2));
         // A nightmare has no shard slot: the wake door waits for the next dream.
         self.has_shard = !self.nightmare && (lucky || self.lucid());
         Some(self.theme)

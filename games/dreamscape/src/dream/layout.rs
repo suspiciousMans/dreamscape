@@ -27,6 +27,9 @@ pub fn generate(kind: LayoutKind, size: (i32, i32), rng: &mut StdRng) -> Layout 
             LayoutKind::ScatterField => scatter_field(side, rng),
             LayoutKind::Spiral => spiral(side, rng),
             LayoutKind::Mirrored => mirrored(side, rng),
+            LayoutKind::Network => network(side, rng),
+            LayoutKind::Corridor => corridor(side, rng),
+            LayoutKind::Recursive => recursive(side, rng),
         };
         if layout
             .grid
@@ -292,12 +295,175 @@ fn mirrored(side: i32, rng: &mut StdRng) -> Layout {
     }
 }
 
+/// Mycelium: round-ish clearings floating in the void, each joined to the
+/// next by a one-cell root bridge. Spawn in the first, portal in the last.
+fn network(side: i32, rng: &mut StdRng) -> Layout {
+    let mut g = Grid::new(side, side, Cell::Void);
+    let n = rng.gen_range(4..=6);
+    let mut centres: Vec<P> = Vec::new();
+    for _ in 0..200 {
+        if centres.len() >= n {
+            break;
+        }
+        let c = (rng.gen_range(2..side - 2), rng.gen_range(2..side - 2));
+        if centres
+            .iter()
+            .all(|o| (o.0 - c.0).abs() + (o.1 - c.1).abs() >= 5)
+        {
+            centres.push(c);
+        }
+    }
+    // Visit clearings nearest-first from the one closest to a corner.
+    centres.sort_by_key(|c| c.0 + c.1);
+    let mut ordered = vec![centres.remove(0)];
+    while !centres.is_empty() {
+        let last = *ordered.last().expect("non-empty");
+        let (i, _) = centres
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| (c.0 - last.0).abs() + (c.1 - last.1).abs())
+            .expect("non-empty");
+        ordered.push(centres.remove(i));
+    }
+    for &c in &ordered {
+        let r = rng.gen_range(1..=2);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r * r + 1 {
+                    let p = (c.0 + dx, c.1 + dy);
+                    if p.0 > 0 && p.1 > 0 && p.0 < side - 1 && p.1 < side - 1 {
+                        g.set(p, Cell::Floor);
+                    }
+                }
+            }
+        }
+    }
+    // Root bridges: an L from each clearing to the next.
+    for w in ordered.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let corner = if rng.gen_bool(0.5) {
+            (b.0, a.1)
+        } else {
+            (a.0, b.1)
+        };
+        for (from, to) in [(a, corner), (corner, b)] {
+            let (dx, dy) = ((to.0 - from.0).signum(), (to.1 - from.1).signum());
+            let mut p = from;
+            g.set(p, Cell::Floor);
+            while p != to {
+                p = (p.0 + dx, p.1 + dy);
+                g.set(p, Cell::Floor);
+            }
+        }
+    }
+    Layout {
+        spawn: ordered[0],
+        portal: *ordered.last().expect("non-empty"),
+        grid: g,
+        fallback: false,
+    }
+}
+
+/// The Tunnel: one corridor snaking back and forth across the dream, walls
+/// on both sides, with the odd alcove off to the side.
+fn corridor(side: i32, rng: &mut StdRng) -> Layout {
+    let side = side | 1;
+    let mut g = Grid::new(side, side, Cell::Wall);
+    let spawn = (1, 1);
+    let mut p = spawn;
+    g.set(p, Cell::Floor);
+    let mut right = true;
+    let mut y = 1;
+    loop {
+        // Across: all the way, or stopping a little short.
+        let end = if right {
+            side - 2 - rng.gen_range(0..=1)
+        } else {
+            1 + rng.gen_range(0..=1)
+        };
+        while p.0 != end {
+            p.0 += if right { 1 } else { -1 };
+            g.set(p, Cell::Floor);
+        }
+        if y + 2 > side - 2 {
+            break;
+        }
+        // Down two (one wall row between the passes).
+        for _ in 0..2 {
+            y += 1;
+            p.1 = y;
+            g.set(p, Cell::Floor);
+        }
+        right = !right;
+    }
+    let portal = p;
+    // Alcoves: single cells off the corridor, into the wall rows.
+    for c in g.cells_of(Cell::Floor) {
+        for d in [(0, 1), (0, -1)] {
+            let a = (c.0 + d.0, c.1 + d.1);
+            let beyond = (a.0 + d.0, a.1 + d.1);
+            if a.1 > 0
+                && a.1 < side - 1
+                && g.get(a) == Cell::Wall
+                && g.get(beyond) != Cell::Floor
+                && rng.gen_bool(0.08)
+            {
+                g.set(a, Cell::Floor);
+            }
+        }
+    }
+    Layout {
+        grid: g,
+        spawn,
+        portal,
+        fallback: false,
+    }
+}
+
+/// Fractal Cathedral: square rooms nested inside each other, each with one
+/// door on a random side. The portal waits in the innermost room.
+fn recursive(side: i32, rng: &mut StdRng) -> Layout {
+    let side = side | 1;
+    let mut g = bordered(side);
+    let mid = side / 2;
+    let mut k = 2;
+    while side - 1 - 2 * k >= 2 {
+        let (lo, hi) = (k, side - 1 - k);
+        for i in lo..=hi {
+            for p in [(i, lo), (i, hi), (lo, i), (hi, i)] {
+                g.set(p, Cell::Wall);
+            }
+        }
+        // A door somewhere along one side (never a corner).
+        let along = rng.gen_range(lo + 1..hi);
+        let door = match rng.gen_range(0..4) {
+            0 => (along, lo),
+            1 => (along, hi),
+            2 => (lo, along),
+            _ => (hi, along),
+        };
+        g.set(door, Cell::Floor);
+        k += 2;
+    }
+    let (spawn, portal) = ((1, 1), (mid, mid));
+    g.set(portal, Cell::Floor);
+    Layout {
+        grid: g,
+        spawn,
+        portal,
+        fallback: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::SeedableRng;
 
-    const KINDS: [LayoutKind; 6] = [
+    const KINDS: [LayoutKind; 9] = [
+        LayoutKind::Network,
+        LayoutKind::Corridor,
+        LayoutKind::Recursive,
         LayoutKind::OpenHall,
         LayoutKind::Maze,
         LayoutKind::PlatformChain,
@@ -371,6 +537,27 @@ mod tests {
                 .count();
         }
         assert!(jumps > 20, "spirals barely need jumping ({jumps})");
+    }
+
+    #[test]
+    fn corridors_are_long_and_cathedrals_nest() {
+        for seed in 0..40 {
+            let l = gen(LayoutKind::Corridor, seed);
+            let path = l.grid.path(l.spawn, l.portal).unwrap();
+            assert!(
+                path.len() as i32 >= l.grid.w * 2,
+                "seed {seed}: corridor only {} long",
+                path.len()
+            );
+            let c = gen(LayoutKind::Recursive, seed);
+            let (mid, w) = (c.grid.w / 2, c.grid.w);
+            assert_eq!(c.portal, (mid, mid));
+            // Walk from the portal outward: you cross a wall ring every 2 cells.
+            let walls = (1..mid)
+                .filter(|&x| c.grid.get((mid - x, mid)) == Cell::Wall)
+                .count();
+            assert!(walls >= 1 || w < 9, "seed {seed}: no nested rooms");
+        }
     }
 
     #[test]

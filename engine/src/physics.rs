@@ -59,7 +59,11 @@ pub struct Collider {
 /// pass per frame (a dynamic body resting on two overlapping surfaces can
 /// jitter slightly rather than settle perfectly) — good enough for a level
 /// full of boxes and a player sphere, not a general-purpose solver.
-pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(hecs::Entity, hecs::Entity)> {
+pub fn step(
+    world: &mut hecs::World,
+    dt: f32,
+    params: &PhysicsParams,
+) -> Vec<(hecs::Entity, hecs::Entity)> {
     for (_entity, (transform, body)) in world.query::<(&mut Transform, &mut RigidBody)>().iter() {
         body.velocity.y -= params.gravity * dt;
         let damping = (1.0 - params.linear_damping * dt).max(0.0);
@@ -74,7 +78,13 @@ pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(he
         .query::<(&Transform, &Collider, Option<&RigidBody>)>()
         .iter()
         .map(|(entity, (transform, collider, body))| {
-            (entity, transform.position, collider.shape, body.is_some(), collider.is_trigger)
+            (
+                entity,
+                transform.position,
+                collider.shape,
+                body.is_some(),
+                collider.is_trigger,
+            )
         })
         .collect();
 
@@ -84,7 +94,9 @@ pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(he
         if !is_dynamic {
             continue;
         }
-        for &(other_entity, other_position, other_shape, other_is_dynamic, other_is_trigger) in &colliders {
+        for &(other_entity, other_position, other_shape, other_is_dynamic, other_is_trigger) in
+            &colliders
+        {
             if other_entity == entity {
                 continue;
             }
@@ -106,7 +118,11 @@ pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(he
                     // depth to each would separate the pair by ~2x the
                     // penetration and pop them apart. Split the correction so
                     // the two half-pushes sum to exactly one penetration depth.
-                    let push = if other_is_dynamic { overlap.push * 0.5 } else { overlap.push };
+                    let push = if other_is_dynamic {
+                        overlap.push * 0.5
+                    } else {
+                        overlap.push
+                    };
                     transform.position += push;
                     let into_surface = body.velocity.dot(overlap.normal);
                     if into_surface < 0.0 {
@@ -137,12 +153,18 @@ fn resolve_overlap(
     other_shape: ColliderShape,
 ) -> Option<Overlap> {
     match (shape, other_shape) {
-        (ColliderShape::Sphere { radius }, ColliderShape::Sphere { radius: other_radius }) => {
-            sphere_vs_sphere(position, radius, other_position, other_radius)
-        }
-        (ColliderShape::Aabb { half_extents }, ColliderShape::Aabb { half_extents: other_half }) => {
-            aabb_vs_aabb(position, half_extents, other_position, other_half)
-        }
+        (
+            ColliderShape::Sphere { radius },
+            ColliderShape::Sphere {
+                radius: other_radius,
+            },
+        ) => sphere_vs_sphere(position, radius, other_position, other_radius),
+        (
+            ColliderShape::Aabb { half_extents },
+            ColliderShape::Aabb {
+                half_extents: other_half,
+            },
+        ) => aabb_vs_aabb(position, half_extents, other_position, other_half),
         (ColliderShape::Sphere { radius }, ColliderShape::Aabb { half_extents }) => {
             sphere_vs_aabb(position, radius, other_position, half_extents)
         }
@@ -198,7 +220,12 @@ fn aabb_vs_aabb(a: Vec3, half_a: Vec3, b: Vec3, half_b: Vec3) -> Option<Overlap>
     }
 }
 
-fn sphere_vs_aabb(sphere_pos: Vec3, radius: f32, box_pos: Vec3, half_extents: Vec3) -> Option<Overlap> {
+fn sphere_vs_aabb(
+    sphere_pos: Vec3,
+    radius: f32,
+    box_pos: Vec3,
+    half_extents: Vec3,
+) -> Option<Overlap> {
     let local = sphere_pos - box_pos;
     let closest_local = local.clamp(-half_extents, half_extents);
     let diff = local - closest_local;
@@ -252,31 +279,53 @@ mod tests {
         // must still produce a separating push rather than returning None and
         // silently tunnelling through.
         let sphere = ColliderShape::Sphere { radius: 0.5 };
-        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        let aabb = ColliderShape::Aabb {
+            half_extents: Vec3::splat(1.0),
+        };
         // Center just above the box's own center — still well inside it.
         let overlap = resolve_overlap(Vec3::new(0.0, 0.2, 0.0), sphere, Vec3::ZERO, aabb)
             .expect("a sphere centered inside the box must be resolved");
         // Nearest face is +Y, so it ejects upward.
-        assert!(overlap.normal.abs_diff_eq(Vec3::Y, 1e-4), "normal was {:?}", overlap.normal);
-        assert!(overlap.push.y > 0.0, "push should be upward, was {:?}", overlap.push);
+        assert!(
+            overlap.normal.abs_diff_eq(Vec3::Y, 1e-4),
+            "normal was {:?}",
+            overlap.normal
+        );
+        assert!(
+            overlap.push.y > 0.0,
+            "push should be upward, was {:?}",
+            overlap.push
+        );
     }
 
     #[test]
     fn sphere_grazing_a_face_still_resolves() {
         // Regression guard for the ordinary center-outside path.
         let sphere = ColliderShape::Sphere { radius: 0.5 };
-        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        let aabb = ColliderShape::Aabb {
+            half_extents: Vec3::splat(1.0),
+        };
         // Top face is at y = 1.0; a center at y = 1.3 with radius 0.5 overlaps by 0.2.
         let overlap = resolve_overlap(Vec3::new(0.0, 1.3, 0.0), sphere, Vec3::ZERO, aabb)
             .expect("a sphere grazing the top face must be resolved");
-        assert!(overlap.normal.abs_diff_eq(Vec3::Y, 1e-4), "normal was {:?}", overlap.normal);
-        assert!((overlap.push.y - 0.2).abs() < 1e-3, "push.y was {}", overlap.push.y);
+        assert!(
+            overlap.normal.abs_diff_eq(Vec3::Y, 1e-4),
+            "normal was {:?}",
+            overlap.normal
+        );
+        assert!(
+            (overlap.push.y - 0.2).abs() < 1e-3,
+            "push.y was {}",
+            overlap.push.y
+        );
     }
 
     #[test]
     fn distant_shapes_do_not_overlap() {
         let sphere = ColliderShape::Sphere { radius: 0.5 };
-        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        let aabb = ColliderShape::Aabb {
+            half_extents: Vec3::splat(1.0),
+        };
         assert!(resolve_overlap(Vec3::new(0.0, 5.0, 0.0), sphere, Vec3::ZERO, aabb).is_none());
     }
 }

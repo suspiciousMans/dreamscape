@@ -14,6 +14,8 @@ pub struct AudioContext {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     music: Option<Sink>,
+    music_volume: f32,
+    sfx_volume: f32,
 }
 
 impl AudioContext {
@@ -23,6 +25,8 @@ impl AudioContext {
             _stream: stream,
             handle,
             music: None,
+            music_volume: 1.0,
+            sfx_volume: 1.0,
         })
     }
 
@@ -32,6 +36,7 @@ impl AudioContext {
         let file = File::open(path)?;
         let source = Decoder::new(BufReader::new(file))?;
         let sink = Sink::try_new(&self.handle)?;
+        sink.set_volume(self.sfx_volume);
         sink.append(source);
         sink.detach();
         Ok(())
@@ -46,15 +51,33 @@ impl AudioContext {
         // otherwise crash the whole single-threaded engine mid-frame
         // instead of just skipping the blip — sanitize to a finite,
         // non-negative value first (and skip a zero-length source).
-        let secs = if duration_secs.is_finite() { duration_secs.max(0.0) } else { 0.0 };
+        let secs = if duration_secs.is_finite() {
+            duration_secs.max(0.0)
+        } else {
+            0.0
+        };
         if secs <= 0.0 {
             return;
         }
         let source = SineWave::new(frequency_hz)
             .take_duration(Duration::from_secs_f32(secs))
-            .amplify(0.3);
+            .amplify(0.3 * self.sfx_volume);
         if let Ok(sink) = Sink::try_new(&self.handle) {
             sink.append(source);
+            sink.detach();
+        }
+    }
+
+    /// Plays raw mono samples (-1..=1) once, at the sfx volume — for sounds
+    /// a game synthesizes itself.
+    pub fn play_samples(&self, samples: &[f32], sample_rate: u32) {
+        if samples.is_empty() || self.sfx_volume <= 0.0 {
+            return;
+        }
+        let buffer = rodio::buffer::SamplesBuffer::new(1, sample_rate, samples.to_vec());
+        if let Ok(sink) = Sink::try_new(&self.handle) {
+            sink.set_volume(self.sfx_volume);
+            sink.append(buffer);
             sink.detach();
         }
     }
@@ -77,6 +100,7 @@ impl AudioContext {
             sink.append(source);
         }
 
+        sink.set_volume(self.music_volume);
         self.music = Some(sink);
         Ok(())
     }
@@ -87,7 +111,22 @@ impl AudioContext {
         }
     }
 
+    /// Volume for `play_tone` and `play_sfx_file` (0..=1).
+    pub fn set_sfx_volume(&mut self, volume: f32) {
+        self.sfx_volume = volume.clamp(0.0, 1.0);
+    }
+
+    pub fn sfx_volume(&self) -> f32 {
+        self.sfx_volume
+    }
+
+    /// The handle, for games that build their own sources.
+    pub fn handle(&self) -> &OutputStreamHandle {
+        &self.handle
+    }
+
     pub fn set_music_volume(&mut self, volume: f32) {
+        self.music_volume = volume.clamp(0.0, 1.0);
         if let Some(sink) = &self.music {
             sink.set_volume(volume);
         }

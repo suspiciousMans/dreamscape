@@ -18,7 +18,11 @@ pub struct SmokeTestHost {
 
 impl SmokeTestHost {
     pub fn new() -> Self {
-        Self { elapsed: 0.0, result: None, pending_events: Vec::new() }
+        Self {
+            elapsed: 0.0,
+            result: None,
+            pending_events: Vec::new(),
+        }
     }
 
     /// Called once per frame by `run_scripted` before invoking `tick`, so
@@ -42,9 +46,23 @@ impl SmokeTestHost {
 
     fn queue_key_event(&mut self, name: &str, keycode: Keycode) {
         let event = if name == "press" {
-            Event::KeyDown { timestamp: 0, window_id: 0, keycode: Some(keycode), scancode: None, keymod: Mod::empty(), repeat: false }
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(keycode),
+                scancode: None,
+                keymod: Mod::empty(),
+                repeat: false,
+            }
         } else {
-            Event::KeyUp { timestamp: 0, window_id: 0, keycode: Some(keycode), scancode: None, keymod: Mod::empty(), repeat: false }
+            Event::KeyUp {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(keycode),
+                scancode: None,
+                keymod: Mod::empty(),
+                repeat: false,
+            }
         };
         self.pending_events.push(event);
     }
@@ -66,10 +84,16 @@ impl Host for SmokeTestHost {
         match name {
             "press" | "release" => {
                 let Some(Value::Str(key_name)) = args.first() else {
-                    return Err(ScriptError { message: format!("'{name}' expects a string key name first"), line: 0 });
+                    return Err(ScriptError {
+                        message: format!("'{name}' expects a string key name first"),
+                        line: 0,
+                    });
                 };
                 let Some(keycode) = Keycode::from_name(key_name) else {
-                    return Err(ScriptError { message: format!("'{name}': unknown key '{key_name}'"), line: 0 });
+                    return Err(ScriptError {
+                        message: format!("'{name}': unknown key '{key_name}'"),
+                        line: 0,
+                    });
                 };
                 self.queue_key_event(name, keycode);
                 Ok(Value::Nil)
@@ -77,7 +101,10 @@ impl Host for SmokeTestHost {
             "time" => Ok(Value::Number(self.elapsed as f64)),
             "assert_true" => {
                 let Some(cond) = args.first() else {
-                    return Err(ScriptError { message: "'assert_true' expects a condition".to_string(), line: 0 });
+                    return Err(ScriptError {
+                        message: "'assert_true' expects a condition".to_string(),
+                        line: 0,
+                    });
                 };
                 let message = args.get(1).map(Value::to_string).unwrap_or_default();
                 if !cond.truthy() {
@@ -88,7 +115,10 @@ impl Host for SmokeTestHost {
             }
             "assert_eq" => {
                 let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
-                    return Err(ScriptError { message: "'assert_eq' expects two values".to_string(), line: 0 });
+                    return Err(ScriptError {
+                        message: "'assert_eq' expects two values".to_string(),
+                        line: 0,
+                    });
                 };
                 let message = args.get(2).map(Value::to_string).unwrap_or_default();
                 if a != b {
@@ -107,11 +137,18 @@ impl Host for SmokeTestHost {
                 Ok(Value::Nil)
             }
             "log" => {
-                let message = args.iter().map(Value::to_string).collect::<Vec<_>>().join(" ");
+                let message = args
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 log::info!("[smoke test] {message}");
                 Ok(Value::Nil)
             }
-            _ => Err(ScriptError { message: format!("unknown function '{name}'"), line: 0 }),
+            _ => Err(ScriptError {
+                message: format!("unknown function '{name}'"),
+                line: 0,
+            }),
         }
     }
 }

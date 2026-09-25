@@ -8,7 +8,10 @@ pub enum MultiplayerAction {
     Disconnect,
     /// Host-only: the "Can switch levels" checkbox for one connected
     /// player was toggled — see `Sandbox.remote_level_switch_permission`.
-    SetLevelSwitchPermission { net_id: NetId, allowed: bool },
+    SetLevelSwitchPermission {
+        net_id: NetId,
+        allowed: bool,
+    },
     /// Client-side: bails out of an automatic reconnect sequence early —
     /// see `Sandbox.net_reconnect_attempts_left`.
     CancelReconnect,

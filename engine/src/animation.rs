@@ -36,12 +36,14 @@ pub struct Animator {
 /// of `RigidBody` presence, so this doubles as a free kinematic mover with no
 /// special-casing.
 pub fn step(world: &mut hecs::World, dt: f32) {
-    for (_entity, (transform, animator)) in
-        world.query::<(&mut Transform, &mut Animator)>().iter()
+    for (_entity, (transform, animator)) in world.query::<(&mut Transform, &mut Animator)>().iter()
     {
         animator.elapsed += dt;
         match animator.kind {
-            AnimationKind::Orbit { axis, speed_deg_per_sec } => {
+            AnimationKind::Orbit {
+                axis,
+                speed_deg_per_sec,
+            } => {
                 let angle = (speed_deg_per_sec * animator.elapsed).to_radians();
                 // `Quat::from_axis_angle` assumes a unit axis. A degenerate
                 // (zero) axis — which `normalize_or_zero` yields rather than
@@ -58,7 +60,11 @@ pub fn step(world: &mut hecs::World, dt: f32) {
                 transform.position = animator.base_position;
                 transform.rotation = spin * animator.base_rotation;
             }
-            AnimationKind::Bob { axis, amplitude, period_secs } => {
+            AnimationKind::Bob {
+                axis,
+                amplitude,
+                period_secs,
+            } => {
                 let phase = if period_secs > 0.0 {
                     (animator.elapsed / period_secs) * std::f32::consts::TAU
                 } else {

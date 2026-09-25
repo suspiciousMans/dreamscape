@@ -148,6 +148,8 @@ pub fn draw_overlay(
     strangeness: f32,
     time: f32,
     grain: Option<TextureId>,
+    grain_strength: f32,
+    vignette_strength: f32,
 ) {
     let half_diag = screen.size().length() * 0.5;
     let (inner, outer) = vignette_radii(strangeness, time);
@@ -159,10 +161,11 @@ pub fn draw_overlay(
     radii.insert(0, inner * 0.5);
     radii.push(3.0);
     let mesh = vignette_mesh(player_px, half_diag, &radii, 48, [0, 0, 0], |d| {
-        vignette_alpha(d, inner, outer)
+        vignette_alpha(d, inner, outer) * vignette_strength.clamp(0.0, 1.0)
     });
     p.add(egui::Shape::mesh(mesh));
-    if let Some(tex) = grain {
+    let g = (grain_strength.clamp(0.0, 1.0) * 255.0) as u8;
+    if let (Some(tex), true) = (grain, g > 0) {
         let (ox, oy) = grain_offset(time);
         let texel = GRAIN_TEXEL;
         let uv = Rect::from_min_size(
@@ -173,7 +176,8 @@ pub fn draw_overlay(
             ),
         );
         let mut m = Mesh::with_texture(tex);
-        m.add_rect_with_uv(screen, uv, Color32::WHITE);
+        // Premultiplied tint: scales the whole speck, colour and alpha alike.
+        m.add_rect_with_uv(screen, uv, Color32::from_rgba_premultiplied(g, g, g, g));
         p.add(egui::Shape::mesh(m));
     }
 }

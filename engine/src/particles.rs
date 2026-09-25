@@ -98,7 +98,12 @@ pub struct ParticleEmitter {
 
 impl ParticleEmitter {
     pub fn new(def: ParticleEmitterDef) -> Self {
-        Self { def, particles: Vec::new(), spawn_accumulator: 0.0, rng: Rng::seeded() }
+        Self {
+            def,
+            particles: Vec::new(),
+            spawn_accumulator: 0.0,
+            rng: Rng::seeded(),
+        }
     }
 
     fn spawn_one(&mut self, origin: Vec3) -> Particle {
@@ -111,7 +116,10 @@ impl ParticleEmitter {
             position: origin,
             velocity: direction * speed,
             age: 0.0,
-            lifetime: self.rng.range(self.def.lifetime_min.max(0.01), self.def.lifetime_max.max(0.01)),
+            lifetime: self.rng.range(
+                self.def.lifetime_min.max(0.01),
+                self.def.lifetime_max.max(0.01),
+            ),
         }
     }
 
@@ -157,7 +165,8 @@ pub fn step(world: &mut hecs::World, dt: f32) -> Vec<Entity> {
     const GRAVITY: f32 = 9.8;
     let mut spent = Vec::new();
 
-    for (entity, (transform, emitter)) in world.query::<(&Transform, &mut ParticleEmitter)>().iter() {
+    for (entity, (transform, emitter)) in world.query::<(&Transform, &mut ParticleEmitter)>().iter()
+    {
         emitter.particles.retain_mut(|particle| {
             particle.age += dt;
             particle.velocity.y -= GRAVITY * emitter.def.gravity_scale * dt;
@@ -167,7 +176,9 @@ pub fn step(world: &mut hecs::World, dt: f32) -> Vec<Entity> {
 
         if emitter.def.rate_per_sec > 0.0 {
             emitter.spawn_accumulator += emitter.def.rate_per_sec * dt;
-            while emitter.spawn_accumulator >= 1.0 && emitter.particles.len() < emitter.def.max_particles as usize {
+            while emitter.spawn_accumulator >= 1.0
+                && emitter.particles.len() < emitter.def.max_particles as usize
+            {
                 emitter.spawn_accumulator -= 1.0;
                 let particle = emitter.spawn_one(transform.position);
                 emitter.particles.push(particle);
@@ -193,7 +204,13 @@ mod tests {
     use super::*;
 
     fn burst_def() -> ParticleEmitterDef {
-        ParticleEmitterDef { rate_per_sec: 0.0, lifetime_min: 0.2, lifetime_max: 0.2, max_particles: 10, ..ParticleEmitterDef::default() }
+        ParticleEmitterDef {
+            rate_per_sec: 0.0,
+            lifetime_min: 0.2,
+            lifetime_max: 0.2,
+            max_particles: 10,
+            ..ParticleEmitterDef::default()
+        }
     }
 
     #[test]
@@ -211,10 +228,26 @@ mod tests {
         let entity = world.spawn((Transform::default(), emitter));
 
         step(&mut world, 0.1);
-        assert_eq!(world.get::<&ParticleEmitter>(entity).unwrap().particles.len(), 3, "not yet past lifetime");
+        assert_eq!(
+            world
+                .get::<&ParticleEmitter>(entity)
+                .unwrap()
+                .particles
+                .len(),
+            3,
+            "not yet past lifetime"
+        );
 
         step(&mut world, 0.2);
-        assert_eq!(world.get::<&ParticleEmitter>(entity).unwrap().particles.len(), 0, "should have aged out");
+        assert_eq!(
+            world
+                .get::<&ParticleEmitter>(entity)
+                .unwrap()
+                .particles
+                .len(),
+            0,
+            "should have aged out"
+        );
     }
 
     #[test]
@@ -234,11 +267,17 @@ mod tests {
     #[test]
     fn continuous_emitter_never_reported_as_spent() {
         let mut world = hecs::World::new();
-        let def = ParticleEmitterDef { rate_per_sec: 5.0, ..burst_def() };
+        let def = ParticleEmitterDef {
+            rate_per_sec: 5.0,
+            ..burst_def()
+        };
         world.spawn((Transform::default(), ParticleEmitter::new(def)));
 
         let spent = step(&mut world, 1.0);
-        assert!(spent.is_empty(), "a continuous emitter with rate > 0 is never 'spent'");
+        assert!(
+            spent.is_empty(),
+            "a continuous emitter with rate > 0 is never 'spent'"
+        );
     }
 
     #[test]
@@ -258,6 +297,9 @@ mod tests {
 
         step(&mut world, 0.5);
         let emitter = world.get::<&ParticleEmitter>(entity).unwrap();
-        assert!(emitter.particles[0].position.y < 0.0, "gravity should have pulled the particle down");
+        assert!(
+            emitter.particles[0].position.y < 0.0,
+            "gravity should have pulled the particle down"
+        );
     }
 }

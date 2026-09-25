@@ -28,10 +28,22 @@ pub enum Pattern {
     Eyes,
     /// Mirror-folded plasma, like looking through a kaleidoscope.
     Kaleido,
+    /// A honeycomb-like lattice (a "form constant").
+    Lattice,
+    /// Radial threads crossed by rings (a "form constant").
+    Cobweb,
+    /// Rings receding into a vanishing point.
+    Tunnel,
+    /// Branching glowing veins on a dark ground (mycelium).
+    Veins,
+    /// Many-fold rotational symmetry.
+    Mandala,
+    /// Faces hiding in the pattern (pareidolia).
+    Faces,
 }
 
 #[cfg(test)]
-pub const ALL_PATTERNS: [Pattern; 8] = [
+pub const ALL_PATTERNS: [Pattern; 14] = [
     Pattern::Plasma,
     Pattern::Stripes,
     Pattern::Rings,
@@ -40,6 +52,12 @@ pub const ALL_PATTERNS: [Pattern; 8] = [
     Pattern::Swirl,
     Pattern::Eyes,
     Pattern::Kaleido,
+    Pattern::Lattice,
+    Pattern::Cobweb,
+    Pattern::Tunnel,
+    Pattern::Veins,
+    Pattern::Mandala,
+    Pattern::Faces,
 ];
 
 /// One periodic wave: sin(2π(a·u + b·v) + phase).
@@ -177,6 +195,71 @@ pub fn generate(pattern: Pattern, palette: &[[u8; 3]], bands: f32, seed: u64) ->
                     let b = tri_wave(2.0 * v);
                     let (a, b) = if a > b { (a, b) } else { (b, a) }; // mirror on the diagonal
                     waves.iter().map(|w| w.at(a * 0.5, b * 0.5)).sum::<f32>() / 8.0 + 0.5
+                }
+                Pattern::Lattice => {
+                    // Three waves 60° apart on the integer lattice: hexagonal cells.
+                    let n = checker_n;
+                    let l = (TAU * n * (u + wu)).cos()
+                        + (TAU * n * (v + wv)).cos()
+                        + (TAU * n * (u + v)).cos();
+                    ((l / 3.0 + 0.5) * 4.0).floor() / 4.0 + 0.1
+                }
+                Pattern::Cobweb => {
+                    let n = checker_n;
+                    let lu = (u * n).fract() * 2.0 - 1.0;
+                    let lv = (v * n).fract() * 2.0 - 1.0;
+                    let r = (lu * lu + lv * lv).sqrt();
+                    let a = lv.atan2(lu);
+                    let thread = (a * 4.0).cos().abs().powf(40.0);
+                    let ring = (r * 9.0 + wu * 4.0).sin().abs().powf(12.0);
+                    0.2 + 0.7 * thread.max(ring) * (1.0 - r * 0.3).max(0.0)
+                }
+                Pattern::Tunnel => {
+                    // Periodic distance to the tile centre; rings bunch up
+                    // toward it like a corridor vanishing into the distance.
+                    let d = ((std::f32::consts::PI * u).sin().powi(2)
+                        + (std::f32::consts::PI * v).sin().powi(2))
+                    .sqrt();
+                    let depth = 0.35 / (1.45 - d + 0.1);
+                    (depth * ring_k + wu).rem_euclid(1.0)
+                }
+                Pattern::Veins => {
+                    // Ridged noise: bright where a wave sum crosses zero.
+                    let a: f32 = waves[..2].iter().map(|w| w.at(u + wu, v + wv)).sum();
+                    let b: f32 = waves[2..].iter().map(|w| w.at(u - wv, v + wu)).sum();
+                    let ridge = (1.0 - a.abs().min(1.0))
+                        .powf(6.0)
+                        .max((1.0 - b.abs().min(1.0)).powf(8.0));
+                    0.05 + 0.9 * ridge
+                }
+                Pattern::Mandala => {
+                    let n = checker_n.min(3.0);
+                    let lu = (u * n).fract() * 2.0 - 1.0;
+                    let lv = (v * n).fract() * 2.0 - 1.0;
+                    let r = (lu * lu + lv * lv).sqrt();
+                    let a = lv.atan2(lu) / TAU + 0.5;
+                    let folds = 8.0;
+                    let petal = tri_wave(a * folds);
+                    let wave = (r * 7.0 - petal * 2.0 + waves[0].phase).sin();
+                    (wave * 0.5 + 0.5) * (1.0 - r * 0.4).max(0.0) + 0.1
+                }
+                Pattern::Faces => {
+                    let n = checker_n;
+                    let (cu, cv) = ((u * n).floor(), (v * n).floor());
+                    let lu = (u * n).fract() * 2.0 - 1.0;
+                    let lv = (v * n).fract() * 2.0 - 1.0;
+                    let tilt = 0.15 * warp[0].at((cu + 0.5) / n, (cv + 0.5) / n);
+                    let eye =
+                        |x: f32| ((lu - x).powi(2) + (lv + 0.25 + tilt * x).powi(2)).sqrt() < 0.14;
+                    let mouth = (lv - 0.35 - 0.25 * lu * lu).abs() < 0.07 && lu.abs() < 0.45;
+                    let head = lu * lu + lv * lv * 0.8 < 0.75;
+                    if eye(-0.35) || eye(0.35) || mouth {
+                        0.8
+                    } else if head {
+                        0.45 + 0.05 * wu
+                    } else {
+                        0.1
+                    }
                 }
                 Pattern::Swirl => {
                     let a = (TAU * u).sin();

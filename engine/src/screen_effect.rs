@@ -50,7 +50,11 @@ impl ScreenEffectState {
         };
         let t = *elapsed;
         let envelope = if t < spec.fade_in_secs {
-            if spec.fade_in_secs > 0.0 { t / spec.fade_in_secs } else { 1.0 }
+            if spec.fade_in_secs > 0.0 {
+                t / spec.fade_in_secs
+            } else {
+                1.0
+            }
         } else if t < spec.fade_in_secs + spec.hold_secs {
             1.0
         } else {

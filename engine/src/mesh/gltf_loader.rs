@@ -65,7 +65,10 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
         if node.mesh().is_none() {
             continue;
         }
-        let name = node.name().map(str::to_string).unwrap_or_else(|| format!("node_{}", node.index()));
+        let name = node
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("node_{}", node.index()));
         for child in node.children() {
             parent_name_of.insert(child.index(), name.clone());
         }
@@ -73,11 +76,15 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
 
     for node in document.nodes() {
         let Some(mesh) = node.mesh() else { continue };
-        let node_name = node.name().map(str::to_string).unwrap_or_else(|| format!("node_{}", node.index()));
+        let node_name = node
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("node_{}", node.index()));
         let parent_name = parent_name_of.get(&node.index()).cloned();
 
         let (translation, rotation, scale) = node.transform().decomposed();
-        let (rx, ry, rz) = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]).to_euler(EulerRot::XYZ);
+        let (rx, ry, rz) = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3])
+            .to_euler(EulerRot::XYZ);
         let local_rotation_euler_deg = [rx.to_degrees(), ry.to_degrees(), rz.to_degrees()];
 
         // Only the first triangle-mode primitive per node is imported —
@@ -85,7 +92,10 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
         // objects" convention; non-triangle primitives (points/lines) are
         // skipped with a warning, matching the OBJ loader's precedent of
         // silently discarding what the engine's renderer can't represent.
-        let Some(primitive) = mesh.primitives().find(|p| p.mode() == gltf::mesh::Mode::Triangles) else {
+        let Some(primitive) = mesh
+            .primitives()
+            .find(|p| p.mode() == gltf::mesh::Mode::Triangles)
+        else {
             log::warn!("gltf node '{node_name}' has no triangle-mode primitive; skipping");
             continue;
         };
@@ -96,8 +106,10 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
             continue;
         };
         let positions: Vec<[f32; 3]> = positions.collect();
-        let normals: Vec<[f32; 3]> =
-            reader.read_normals().map(Iterator::collect).unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+        let normals: Vec<[f32; 3]> = reader
+            .read_normals()
+            .map(Iterator::collect)
+            .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
         let uvs: Vec<[f32; 2]> = reader
             .read_tex_coords(0)
             .map(|iter| iter.into_f32().collect())
@@ -116,12 +128,20 @@ pub fn load_gltf(path: &Path) -> anyhow::Result<GltfScene> {
             })
             .collect();
 
-        let image = primitive.material().pbr_metallic_roughness().base_color_texture().and_then(|info| {
-            let source = info.texture().source();
-            images.get(source.index()).and_then(|data| {
-                to_rgba8(&data.pixels, data.format).map(|rgba| GltfImage { rgba, width: data.width, height: data.height })
-            })
-        });
+        let image = primitive
+            .material()
+            .pbr_metallic_roughness()
+            .base_color_texture()
+            .and_then(|info| {
+                let source = info.texture().source();
+                images.get(source.index()).and_then(|data| {
+                    to_rgba8(&data.pixels, data.format).map(|rgba| GltfImage {
+                        rgba,
+                        width: data.width,
+                        height: data.height,
+                    })
+                })
+            });
 
         meshes.push(GltfMeshEntry {
             name: node_name,
@@ -145,9 +165,19 @@ fn to_rgba8(pixels: &[u8], format: gltf::image::Format) -> Option<Vec<u8>> {
     use gltf::image::Format;
     match format {
         Format::R8G8B8A8 => Some(pixels.to_vec()),
-        Format::R8G8B8 => Some(pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()),
+        Format::R8G8B8 => Some(
+            pixels
+                .chunks_exact(3)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+        ),
         Format::R8 => Some(pixels.iter().flat_map(|&p| [p, p, p, 255]).collect()),
-        Format::R8G8 => Some(pixels.chunks_exact(2).flat_map(|p| [p[0], p[1], 0, 255]).collect()),
+        Format::R8G8 => Some(
+            pixels
+                .chunks_exact(2)
+                .flat_map(|p| [p[0], p[1], 0, 255])
+                .collect(),
+        ),
         _ => None,
     }
 }

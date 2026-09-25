@@ -115,3 +115,70 @@ impl CompositePass {
         gl.delete_vertex_array(self.empty_vao);
     }
 }
+
+const TRAIL_FRAGMENT_SRC: &str = r#"
+#version 330 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uCurrent;
+uniform sampler2D uPrevious;
+uniform float uAmount;
+void main() {
+    vec4 now = texture(uCurrent, vUV);
+    vec4 before = texture(uPrevious, vUV);
+    // Moving things leave fading afterimages: the old frame lingers, but
+    // never darker than what's there now (so the scene doesn't dim).
+    FragColor = vec4(max(now.rgb, mix(now.rgb, before.rgb, uAmount)), 1.0);
+}
+"#;
+
+/// Tracers: blends the new frame with the last blended frame, so anything
+/// that moves leaves a fading trail. Drawn into a ping-pong target before
+/// the composite pass.
+pub struct TrailPass {
+    program: glow::Program,
+    empty_vao: glow::VertexArray,
+    uniform_current: Option<glow::UniformLocation>,
+    uniform_previous: Option<glow::UniformLocation>,
+    uniform_amount: Option<glow::UniformLocation>,
+}
+
+impl TrailPass {
+    pub fn new(gl: &glow::Context) -> anyhow::Result<Self> {
+        let program = link_program(gl, VERTEX_SRC, TRAIL_FRAGMENT_SRC)?;
+        unsafe {
+            Ok(Self {
+                uniform_current: gl.get_uniform_location(program, "uCurrent"),
+                uniform_previous: gl.get_uniform_location(program, "uPrevious"),
+                uniform_amount: gl.get_uniform_location(program, "uAmount"),
+                empty_vao: gl.create_vertex_array().map_err(anyhow::Error::msg)?,
+                program,
+            })
+        }
+    }
+
+    pub fn draw(
+        &self,
+        gl: &glow::Context,
+        current: glow::Texture,
+        previous: glow::Texture,
+        amount: f32,
+    ) {
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+            gl.use_program(Some(self.program));
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(current));
+            gl.uniform_1_i32(self.uniform_current.as_ref(), 0);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(previous));
+            gl.uniform_1_i32(self.uniform_previous.as_ref(), 1);
+            gl.uniform_1_f32(self.uniform_amount.as_ref(), amount);
+            gl.bind_vertex_array(Some(self.empty_vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.active_texture(glow::TEXTURE0);
+            gl.enable(glow::DEPTH_TEST);
+        }
+    }
+}

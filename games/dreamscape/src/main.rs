@@ -25,15 +25,20 @@ use engine::ui::egui;
 
 mod booklet_ui;
 mod cards;
+mod codex_ui;
 mod dream;
 mod enemy_ai;
 mod gameplay;
 mod hud;
 mod hunter;
 mod pixels;
+mod progress;
 mod records;
 mod reveal_ui;
+mod settings;
+mod settings_ui;
 mod shop_ui;
+mod sounds;
 mod specials;
 mod store;
 mod summary_ui;
@@ -49,6 +54,7 @@ use dream::{
 };
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
+use sounds::Sound;
 use specials::Elite;
 use upgrades::{Ability, RunUpgrades, Upgrade};
 
@@ -152,6 +158,35 @@ struct CrumbleTile {
     state: Crumble,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StartKind {
+    Daily,
+    Continue,
+}
+
+/// Title menu entries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TitleItem {
+    Continue,
+    Start,
+    Daily,
+    RunLength,
+    Ascension,
+    Store,
+    Booklet,
+    Codex,
+    Settings,
+    Quit,
+}
+
+fn today() -> u64 {
+    progress::day_number(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
 /// Tallies for the end-of-run summary.
 #[derive(Clone, Debug, Default)]
 struct RunStats {
@@ -216,10 +251,40 @@ pub struct DreamscapeGame {
     jester_cooldown: f32,
     crumbles: Vec<CrumbleTile>,
     fog: Vec<(Vec3, f32)>,
+    /// Mycelium veins (segments you walk faster on).
+    veins: Vec<(Vec3, Vec3)>,
+    /// Tunnel gates: (membrane entity, centre, direction, phase).
+    gates: Vec<(Entity, Vec3, Vec3, f32)>,
+    /// Elfworks shifting tiles: (entity, level position, phase).
+    shifters: Vec<(Entity, Vec3, f32)>,
     /// Special kinds met so far this run (each gets a hint the first time).
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
     dream_hint: String,
+    /// Every sound effect, synthesized at start-up.
+    sounds: HashMap<Sound, Vec<f32>>,
+    /// Booklet [p]: save this page's cards as images after the next frame.
+    export_requested: bool,
+    settings: settings::Settings,
+    settings_path: std::path::PathBuf,
+    settings_sel: usize,
+    /// Waiting for a key to bind on the selected row.
+    settings_capture: bool,
+    /// Where the settings screen returns to.
+    settings_return: hud::Mode,
+    /// Ascension level picked on the title screen for the next run.
+    ascension: u32,
+    /// The rules of the run in progress.
+    active_asc: progress::Ascension,
+    /// The run in progress is today's daily dream (day number).
+    daily: Option<u64>,
+    /// A run is in progress (saved at the start of each dream).
+    run_active: bool,
+    save_path: std::path::PathBuf,
+    /// A start requested from the title (handled next update, with a GL context).
+    pending_start: Option<StartKind>,
+    /// Where the codex screen returns to.
+    codex_return: hud::Mode,
 
     input: PlayerInputState,
     player: Option<Entity>,
@@ -327,8 +392,28 @@ impl DreamscapeGame {
             jester_cooldown: 0.0,
             crumbles: Vec::new(),
             fog: Vec::new(),
+            veins: Vec::new(),
+            gates: Vec::new(),
+            shifters: Vec::new(),
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
+            export_requested: false,
+            sounds: sounds::ALL_SOUNDS
+                .iter()
+                .map(|&s| (s, sounds::synth(s)))
+                .collect(),
+            settings: settings::load(&settings::settings_path()),
+            settings_path: settings::settings_path(),
+            settings_sel: 0,
+            settings_capture: false,
+            settings_return: hud::Mode::Title,
+            ascension: 0,
+            active_asc: progress::Ascension(0),
+            daily: None,
+            run_active: false,
+            save_path: progress::save_path(),
+            pending_start: None,
+            codex_return: hud::Mode::Title,
             input: PlayerInputState::default(),
             player: None,
             player_position: Vec3::ZERO,
@@ -509,7 +594,7 @@ impl DreamscapeGame {
         }
         self.run.rerolls_used += 1;
         log::info!("Rerolled the pick");
-        self.tone(330.0, 0.15);
+        self.sfx(Sound::Reroll);
         self.open_upgrade_choice();
     }
 
@@ -577,7 +662,7 @@ impl DreamscapeGame {
                 let before = self.run.synergies();
                 self.run.take(u);
                 self.boss_reward = false;
-                self.director.shard_bonus = self.run.shard_bonus();
+                self.director.shard_bonus = self.shard_bonus();
                 if u == Upgrade::LucidHeart {
                     // Banked straight away: it can't be dropped.
                     self.director.lucidity += 1;
@@ -591,12 +676,12 @@ impl DreamscapeGame {
                 log::info!("Upgrade taken: {u:?} (run: {:?})", self.run.taken);
                 self.flash
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
-                self.tone(523.0, 0.25);
+                self.sfx(Sound::Pick);
             }
             ChoiceKind::WakeDoor if index == 0 => {
                 log::info!("Wake door taken at depth {}", self.director.depth);
                 self.flash.trigger([1.0, 1.0, 1.0], 1.0);
-                self.tone(660.0, 0.6);
+                self.sfx(Sound::WakeDoor);
                 self.begin_melt(transition::Pending::Wake);
             }
             ChoiceKind::WakeDoor => {
@@ -609,7 +694,7 @@ impl DreamscapeGame {
                 );
                 self.despawn_shard_slot();
                 self.flash.trigger([1.0, 0.2, 0.4], 0.8);
-                self.tone(98.0, 0.8);
+                self.sfx(Sound::Deeper);
                 self.begin_melt(transition::Pending::Descend);
             }
         }
@@ -829,13 +914,62 @@ impl DreamscapeGame {
                 .join("; "),
             timer: self.twists.timer().map(|t| t - self.dream_age),
             difficulty: self.director.hardness().map(|_| self.difficulty()),
-            run_length: self.run_length.label(),
             summary: if self.mode == hud::Mode::Summary {
                 self.summary_view()
             } else {
                 summary_ui::SummaryView::default()
             },
             hint: self.dream_hint.clone(),
+            menu: if self.mode == hud::Mode::Title {
+                self.title_items()
+                    .into_iter()
+                    .map(|i| {
+                        let (k, l, n) = self.title_label(i);
+                        (k.to_string(), l, n)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            codex: if self.mode == hud::Mode::Codex {
+                let c = &self.booklet.codex;
+                codex_ui::CodexView {
+                    dreams: dream::ALL_THEMES
+                        .iter()
+                        .map(|&t| (codex_ui::spaced(&format!("{t:?}")), c.best_in(t)))
+                        .collect(),
+                    enemies: dream::ALL_ENEMY_KINDS
+                        .iter()
+                        .map(|&k| {
+                            (
+                                codex_ui::spaced(&format!("{k:?}")),
+                                c.enemies.contains(&k).then(|| k.hint().to_string()),
+                            )
+                        })
+                        .collect(),
+                    footer: format!(
+                        "{} of {} dreams · {} nightmares beaten · ascension unlocked: {}",
+                        c.dreams.len(),
+                        dream::ALL_THEMES.len(),
+                        c.nightmares_beaten,
+                        c.ascension_unlocked
+                    ),
+                }
+            } else {
+                codex_ui::CodexView::default()
+            },
+            settings: if self.mode == hud::Mode::Settings {
+                settings_ui::SettingsView {
+                    rows: settings::rows()
+                        .into_iter()
+                        .map(|r| (r.label(), settings::value(&self.settings, r)))
+                        .collect(),
+                    selected: self.settings_sel,
+                    capturing: self.settings_capture,
+                }
+            } else {
+                settings_ui::SettingsView::default()
+            },
             objective: self.hunter.as_ref().map(|_| {
                 if self.sigils_left > 0 {
                     format!(
@@ -876,6 +1010,121 @@ impl DreamscapeGame {
                 is_trigger: false,
             },
         )))
+    }
+
+    /// Veins along the floor and gates across the tunnel.
+    fn spawn_features(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        if !dream.veins.is_empty() {
+            let spec = dream.theme.spec();
+            let tex = self.upload_surface(
+                gl,
+                &TexSpec {
+                    pattern: dream::Pattern::Veins,
+                    palette: spec.accents.to_vec(),
+                    bands: 1.0,
+                    seed: dream.seed ^ 0x7E1,
+                },
+            )?;
+            let cube = self.mesh(Shape::Cube)?;
+            for &(a, b) in &dream.veins {
+                let d = b - a;
+                let size = if d.x.abs() > d.z.abs() {
+                    Vec3::new(d.x.abs() + 0.4, 0.03, 0.4)
+                } else {
+                    Vec3::new(0.4, 0.03, d.z.abs() + 0.4)
+                };
+                self.world.spawn((
+                    Transform {
+                        position: (a + b) * 0.5 + Vec3::Y * 0.02,
+                        rotation: Quat::IDENTITY,
+                        scale: size,
+                    },
+                    MeshRenderer {
+                        mesh: cube.clone(),
+                        texture: Some(tex.clone()),
+                    },
+                    SurfaceUv(0.6),
+                    Lit,
+                    NoMelt,
+                ));
+            }
+        }
+        if !dream.gates.is_empty() {
+            let skin = self.texture(gl, [200, 150, 255, 255]);
+            let frame_tex = self.texture(gl, [255, 245, 210, 255]);
+            let orb = self.mesh(Shape::Orb)?;
+            let ring = self.mesh(Shape::Torus)?;
+            for &(at, dir, phase) in &dream.gates {
+                let facing = Quat::from_rotation_arc(Vec3::Z, dir);
+                self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 1.3,
+                        rotation: facing,
+                        scale: Vec3::new(2.9, 2.6, 0.3),
+                    },
+                    MeshRenderer {
+                        mesh: ring.clone(),
+                        texture: Some(frame_tex.clone()),
+                    },
+                    Lit,
+                ));
+                let membrane = self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 1.3,
+                        rotation: facing,
+                        scale: Vec3::ZERO,
+                    },
+                    MeshRenderer {
+                        mesh: orb.clone(),
+                        texture: Some(skin.clone()),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+                self.gates.push((membrane, at, dir, phase));
+            }
+        }
+        Ok(())
+    }
+
+    /// Gates breathe open and shut; shifting tiles sink and rise.
+    fn update_features(&mut self) {
+        let t = self.dream_age;
+        for &(e, _, _, phase) in &self.gates {
+            if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                let shut = specials::gate_closed(t, phase);
+                let target = if shut {
+                    Vec3::new(2.3, 2.2, 0.25)
+                } else {
+                    Vec3::ZERO
+                };
+                tr.scale = tr.scale.lerp(target, 0.25);
+            }
+        }
+        if self.autopilot {
+            return; // E2E runs walk a level floor
+        }
+        for &(e, base, phase) in &self.shifters {
+            if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                tr.position =
+                    base - Vec3::Y * specials::SHIFT_DROP * specials::shift_depth(t, phase);
+            }
+        }
+    }
+
+    /// Wading through a fog pocket?
+    fn in_fog(&self) -> bool {
+        self.fog.iter().any(|&(at, r)| {
+            let d = at - self.player_position;
+            Vec3::new(d.x, 0.0, d.z).length() < r
+        })
+    }
+
+    /// Standing on a mycelium vein?
+    fn on_vein(&self) -> bool {
+        self.veins
+            .iter()
+            .any(|&(a, b)| specials::dist_to_segment(self.player_position, a, b) < 0.6)
     }
 
     /// Stalkers, mimics, sentries, drifters and jesters, plus fog pockets.
@@ -1068,7 +1317,7 @@ impl DreamscapeGame {
         for at in calls {
             log::info!("A sentry saw you");
             self.flash.trigger([1.0, 0.9, 0.4], 0.35);
-            self.tone(1200.0, 0.12);
+            self.sfx(Sound::SentrySaw);
             for p in &mut self.enemies {
                 let near = self
                     .world
@@ -1087,7 +1336,7 @@ impl DreamscapeGame {
                         let d = t.position - player;
                         if Vec3::new(d.x, 0.0, d.z).length() < gameplay::ENEMY_TOUCH_RADIUS {
                             t.position = s.lair;
-                            self.tone(300.0, 0.1);
+                            self.sfx(Sound::StalkerShatter);
                         }
                     }
                 }
@@ -1133,7 +1382,7 @@ impl DreamscapeGame {
             }
             self.player_position = at;
             self.flash.trigger([1.0, 0.5, 1.0], 0.4);
-            self.tone(520.0, 0.15);
+            self.sfx(Sound::JesterThrow);
             log::info!("A jester threw you");
         }
     }
@@ -1150,12 +1399,14 @@ impl DreamscapeGame {
                 && (player.z - b.pos.z).abs() < b.size.z * 0.5
         };
         let mut respawn = Vec::new();
+        let mut fell = false;
         for (i, tile) in self.crumbles.iter_mut().enumerate() {
             tile.state = match tile.state {
                 Crumble::Solid if grounded && over(&tile.block) => Crumble::Shaking(CRUMBLE_SHAKE),
                 Crumble::Shaking(t) if t - dt <= 0.0 => {
                     if let Some(e) = tile.entity.take() {
                         let _ = self.world.despawn(e);
+                        fell = true;
                     }
                     Crumble::Gone(CRUMBLE_GONE)
                 }
@@ -1176,6 +1427,9 @@ impl DreamscapeGame {
                 Crumble::Gone(t) => Crumble::Gone((t - dt).max(0.0)),
                 s => s,
             };
+        }
+        if fell {
+            self.sfx(Sound::Crumble);
         }
         for i in respawn {
             let (block, texture) = (
@@ -1219,7 +1473,13 @@ impl DreamscapeGame {
                 && at(sp.entity)
                     .is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
         });
-        pacers || hunter || special
+        let gate = self.gates.iter().any(|&(_, at, _, phase)| {
+            specials::gate_closed(self.dream_age, phase) && {
+                let d = at - player;
+                Vec3::new(d.x, 0.0, d.z).length() < 0.9
+            }
+        });
+        pacers || hunter || special || gate
     }
 
     /// Every sigil taken: the nightmare's portal opens.
@@ -1252,7 +1512,7 @@ impl DreamscapeGame {
         ));
         log::info!("The nightmare's portal opens");
         self.flash.trigger([0.3, 1.0, 1.0], 0.8);
-        self.tone(990.0, 0.5);
+        self.sfx(Sound::PortalOpen);
         Ok(())
     }
 
@@ -1264,7 +1524,7 @@ impl DreamscapeGame {
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
         if state.cooldown > 0.0 {
-            self.tone(140.0, 0.05);
+            self.sfx(Sound::Denied);
             return;
         }
         if state.ability == Ability::Blink {
@@ -1277,7 +1537,7 @@ impl DreamscapeGame {
                 )
             }) else {
                 // Nowhere safe to land: don't spend the charge.
-                self.tone(140.0, 0.05);
+                self.sfx(Sound::Denied);
                 return;
             };
             if let Some(p) = self.player {
@@ -1311,7 +1571,13 @@ impl DreamscapeGame {
                 Ability::ShardCall => [0.3, 1.0, 1.0],
             };
             self.flash.trigger(color, 0.3);
-            self.tone(880.0, 0.1);
+            self.sfx(match state.ability {
+                Ability::Dash => Sound::Dash,
+                Ability::Blink => Sound::Blink,
+                Ability::Stillness => Sound::Stillness,
+                Ability::Phase => Sound::Phase,
+                Ability::ShardCall => Sound::ShardCall,
+            });
         }
     }
 
@@ -1339,6 +1605,283 @@ impl DreamscapeGame {
             self.bonus_dust += bonus;
             self.flash.trigger([1.0, 0.85, 0.3], 0.5);
             log::info!("Dream bonus: +{bonus} dust (run bonus {})", self.bonus_dust);
+        }
+    }
+
+    /// 1 = full motion effects; lower with the reduced-motion setting.
+    fn motion_scale(&self) -> f32 {
+        self.settings.motion()
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_return = self.mode;
+        self.settings_sel = 0;
+        self.settings_capture = false;
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Settings;
+    }
+
+    /// Pushes volumes and the window mode out to the engine, and saves.
+    fn apply_settings(&mut self, ctx: &mut Context) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_volume(self.settings.music);
+            audio.set_sfx_volume(self.settings.sfx);
+        }
+        let want = if self.settings.fullscreen {
+            engine::sdl2::video::FullscreenType::Desktop
+        } else {
+            engine::sdl2::video::FullscreenType::Off
+        };
+        if ctx.platform.window.fullscreen_state() != want {
+            if let Err(e) = ctx.platform.window.set_fullscreen(want) {
+                log::warn!("fullscreen: {e}");
+            }
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Err(e) = settings::save(&self.settings_path, &self.settings) {
+            log::warn!("could not save settings: {e}");
+        }
+    }
+
+    /// Keys on the settings screen.
+    fn settings_key(&mut self, ctx: &mut Context, key: Keycode) {
+        let rows = settings::rows();
+        let row = rows[self.settings_sel.min(rows.len() - 1)];
+        if self.settings_capture {
+            self.settings_capture = false;
+            if let (settings::Row::Key(action), false) = (row, key == Keycode::Escape) {
+                self.settings.bind(action, key);
+                log::info!("Bound {action:?} to {}", key.name());
+                self.save_settings();
+            }
+            return;
+        }
+        match key {
+            Keycode::Escape => self.mode = self.settings_return,
+            Keycode::W | Keycode::Up => {
+                self.settings_sel = (self.settings_sel + rows.len() - 1) % rows.len()
+            }
+            Keycode::S | Keycode::Down => self.settings_sel = (self.settings_sel + 1) % rows.len(),
+            Keycode::A | Keycode::Left | Keycode::D | Keycode::Right => {
+                let dir = if matches!(key, Keycode::A | Keycode::Left) {
+                    -1
+                } else {
+                    1
+                };
+                settings::adjust(&mut self.settings, row, dir);
+                self.apply_settings(ctx);
+                self.save_settings();
+                self.sfx(Sound::Menu);
+            }
+            Keycode::Return | Keycode::Space => match row {
+                settings::Row::Key(_) => self.settings_capture = true,
+                settings::Row::Defaults => {
+                    self.settings = settings::Settings::default();
+                    self.apply_settings(ctx);
+                    self.save_settings();
+                }
+                other => {
+                    settings::adjust(&mut self.settings, other, 1);
+                    self.apply_settings(ctx);
+                    self.save_settings();
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn shard_bonus(&self) -> f64 {
+        self.run.shard_bonus() - self.active_asc.shard_penalty()
+    }
+
+    /// The title menu, top to bottom.
+    fn title_items(&self) -> Vec<TitleItem> {
+        let mut items = Vec::new();
+        if progress::load(&self.save_path).is_some() {
+            items.push(TitleItem::Continue);
+        }
+        items.extend([TitleItem::Start, TitleItem::Daily, TitleItem::RunLength]);
+        if self.booklet.codex.ascension_unlocked > 0 {
+            items.push(TitleItem::Ascension);
+        }
+        items.extend([
+            TitleItem::Store,
+            TitleItem::Booklet,
+            TitleItem::Codex,
+            TitleItem::Settings,
+            TitleItem::Quit,
+        ]);
+        items
+    }
+
+    fn title_label(&self, item: TitleItem) -> (&'static str, String, String) {
+        let codex = &self.booklet.codex;
+        match item {
+            TitleItem::Continue => ("c", "continue the dream".into(), {
+                progress::load(&self.save_path)
+                    .map(|s| format!("depth {} · {} shards", s.depth, s.lucidity))
+                    .unwrap_or_default()
+            }),
+            TitleItem::Start => ("enter", "fall asleep".into(), String::new()),
+            TitleItem::Daily => (
+                "t",
+                "today's dream".into(),
+                match codex.daily_best_for(today()) {
+                    Some(d) => format!("the same dream for everyone today · your best: depth {d}"),
+                    None => "the same dream for everyone today".into(),
+                },
+            ),
+            TitleItem::RunLength => (
+                "r",
+                format!("run: {}", self.run_length.label()),
+                title_ui::run_blurb(self.run_length.label()).into(),
+            ),
+            TitleItem::Ascension => (
+                "a/d",
+                format!("ascension: {}", self.ascension),
+                format!(
+                    "{} (unlocked up to {})",
+                    progress::ascension_rule(self.ascension),
+                    codex.ascension_unlocked
+                ),
+            ),
+            TitleItem::Store => ("l", "the lucid store".into(), String::new()),
+            TitleItem::Booklet => ("b", "dream booklet".into(), String::new()),
+            TitleItem::Codex => (
+                "x",
+                "codex".into(),
+                format!(
+                    "{} dreams · {} strange things met",
+                    codex.dreams.len(),
+                    codex.enemies.len()
+                ),
+            ),
+            TitleItem::Settings => ("o", "settings".into(), String::new()),
+            TitleItem::Quit => ("q", "stay awake".into(), String::new()),
+        }
+    }
+
+    fn title_select(&mut self, ctx: &mut Context, item: TitleItem, dir: i32) {
+        match item {
+            TitleItem::Continue => self.pending_start = Some(StartKind::Continue),
+            TitleItem::Start => self.start_from_title(),
+            TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
+            TitleItem::RunLength => self.run_length = self.run_length.toggled(),
+            TitleItem::Ascension => {
+                let max = self.booklet.codex.ascension_unlocked as i32;
+                self.ascension = (self.ascension as i32 + dir).rem_euclid(max + 1) as u32;
+            }
+            TitleItem::Store => self.open_store(),
+            TitleItem::Booklet => self.open_booklet(),
+            TitleItem::Codex => self.open_codex(),
+            TitleItem::Settings => self.open_settings(),
+            TitleItem::Quit => ctx.should_quit = true,
+        }
+    }
+
+    fn open_codex(&mut self) {
+        self.codex_return = self.mode;
+        self.mode = hud::Mode::Codex;
+    }
+
+    /// Starts today's dream, or continues a saved run.
+    fn start_pending(&mut self, ctx: &mut Context, kind: StartKind) -> anyhow::Result<()> {
+        self.transition.cancel();
+        self.journal_status = None;
+        match kind {
+            StartKind::Daily => {
+                let day = today();
+                self.run_seed = progress::daily_seed(day);
+                self.daily = Some(day);
+                self.director = DreamDirector::with_length(self.run_seed, RunLength::Short);
+                self.motif = None;
+                self.run_log.clear();
+                self.begin_run();
+                log::info!("Today's dream (day {day}, seed {})", self.run_seed);
+            }
+            StartKind::Continue => {
+                let Some(s) = progress::load(&self.save_path) else {
+                    return Ok(());
+                };
+                self.run_seed = s.run_seed;
+                self.run_length = s.length.into();
+                self.daily = s.daily;
+                self.active_asc = progress::Ascension(s.ascension);
+                self.director = s.director();
+                self.director.nightmare_every = self.active_asc.nightmare_every();
+                self.run = s.upgrades();
+                self.run.penalty_cards = self.active_asc.fewer_cards();
+                self.run.no_free_reroll = !self.active_asc.free_rerolls();
+                self.director.shard_bonus = self.shard_bonus();
+                self.motif = s.motif.map(|m| m.kind());
+                self.perks = s.perks.clone();
+                self.shards_this_run = s.shards_this_run;
+                self.bonus_dust = s.bonus_dust;
+                self.peak_difficulty = s.peak_difficulty;
+                self.run_log = s.run_log.clone();
+                self.seen_kinds = s.seen_kinds.clone();
+                let (caught, fell, nightmares, time, skipped) = s.stats;
+                self.stats = RunStats {
+                    caught,
+                    fell,
+                    nightmares,
+                    twists: Vec::new(),
+                    time,
+                    skipped,
+                };
+                self.run_active = true;
+                self.pack = reveal_ui::PackView::default();
+                self.choice = None;
+                self.offer_upgrade = false;
+                // The dream is regenerated; don't log it twice.
+                self.run_log.pop();
+                log::info!("Continuing a run at depth {}", self.director.depth);
+            }
+        }
+        self.title_age = 0.0;
+        self.mode = hud::Mode::Playing;
+        self.load_dream(ctx)
+    }
+
+    /// Written at the start of every dream while a run is on.
+    fn save_run(&self) {
+        if !self.run_active || self.director.theme == DreamTheme::Awakening {
+            return;
+        }
+        let s = progress::SavedRun {
+            run_seed: self.run_seed,
+            length: self.run_length.into(),
+            ascension: self.active_asc.0,
+            daily: self.daily,
+            depth: self.director.depth,
+            lucidity: self.director.lucidity,
+            shards_to_wake: self.director.shards_to_wake,
+            hard_from: self.director.hard_from,
+            overdrive: self.director.overdrive,
+            has_shard: self.director.has_shard,
+            nightmare: self.director.nightmare,
+            motif: self.motif.map(progress::PropKindSave::from_kind),
+            taken: self.run.taken.clone(),
+            anchors_used: self.run.anchors_used,
+            rerolls_used: self.run.rerolls_used,
+            perks: self.perks.clone(),
+            shards_this_run: self.shards_this_run,
+            bonus_dust: self.bonus_dust,
+            peak_difficulty: self.peak_difficulty,
+            run_log: self.run_log.clone(),
+            seen_kinds: self.seen_kinds.clone(),
+            stats: (
+                self.stats.caught,
+                self.stats.fell,
+                self.stats.nightmares,
+                self.stats.time,
+                self.stats.skipped,
+            ),
+        };
+        if let Err(e) = progress::save(&self.save_path, &s) {
+            log::warn!("could not save the run: {e}");
         }
     }
 
@@ -1476,6 +2019,7 @@ impl DreamscapeGame {
     /// Enter on the title: the dream already loaded behind it becomes the run.
     fn start_from_title(&mut self) {
         // The lobby behind the title is the same whatever the length.
+        self.daily = None;
         self.director = DreamDirector::with_length(self.run_seed, self.run_length);
         self.begin_run();
         self.title_age = 0.0;
@@ -1490,6 +2034,7 @@ impl DreamscapeGame {
             self.run_seed,
             self.run_seed
         );
+        self.daily = None;
         self.director = DreamDirector::with_length(self.run_seed, self.run_length);
         self.motif = None;
         self.run_log.clear();
@@ -1504,6 +2049,25 @@ impl DreamscapeGame {
     fn begin_run(&mut self) {
         self.shards_this_run = 0;
         self.run = RunUpgrades::default();
+        let asc = progress::Ascension(if self.daily.is_some() || self.autopilot {
+            0
+        } else {
+            self.ascension
+        });
+        self.active_asc = asc;
+        self.director.shards_to_wake += asc.extra_shards();
+        self.director.nightmare_every = asc.nightmare_every();
+        if asc.always_hard() {
+            self.director.hard_from.get_or_insert(0);
+        }
+        self.run.penalty_cards = asc.fewer_cards();
+        self.run.no_free_reroll = !asc.free_rerolls();
+        self.director.shard_bonus = self.shard_bonus();
+        self.run_active = !self.autopilot;
+        progress::clear(&self.save_path);
+        if asc.0 > 0 {
+            log::info!("Ascension {}: {}", asc.0, progress::ascension_rule(asc.0));
+        }
         self.stats = RunStats::default();
         self.seen_kinds.clear();
         self.boss_reward = false;
@@ -1537,12 +2101,33 @@ impl DreamscapeGame {
     fn complete_run(&mut self) {
         log::info!("Game complete! You woke up.");
         self.title_age = 0.0;
+        if self.run_active {
+            let depth = self.director.depth;
+            if let Some(day) = self.daily {
+                self.booklet.codex.record_daily(day, depth);
+            }
+            if self.run_length == RunLength::Long
+                && self.daily.is_none()
+                && self.booklet.codex.beat_long_run(self.active_asc.0)
+            {
+                log::info!(
+                    "Ascension {} unlocked",
+                    self.booklet.codex.ascension_unlocked
+                );
+            }
+            self.persist_booklet();
+            self.run_active = false;
+            progress::clear(&self.save_path);
+        }
         if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
             self.open_pack();
             self.pack.age = f32::MAX;
             self.save_journal();
             match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
-                Ok("booklet") => self.open_booklet(),
+                Ok("booklet") => {
+                    self.open_booklet();
+                    self.export_requested = std::env::var("DREAMSCAPE_CARDS").is_ok();
+                }
                 Ok("store") => {
                     self.open_store();
                     self.shop_shelf = 2;
@@ -1592,6 +2177,15 @@ impl DreamscapeGame {
                 format!("{}x", self.director.overdrive),
             ));
         }
+        if self.active_asc.0 > 0 {
+            rows.push(("ascension".into(), self.active_asc.0.to_string()));
+        }
+        if self.daily.is_some() {
+            rows.push((
+                "today's dream".into(),
+                "the same one everyone dreamt".into(),
+            ));
+        }
         if self.peak_difficulty > 1.0 {
             rows.push((
                 "peak nightmare".into(),
@@ -1634,7 +2228,7 @@ impl DreamscapeGame {
         };
         if self.transition.start(pending, fog) {
             log::info!("Melt: {pending:?} begins at depth {}", self.director.depth);
-            self.tone(196.0, 0.9);
+            self.sfx(Sound::MeltStart);
             self.input = PlayerInputState::default();
         }
     }
@@ -1663,9 +2257,10 @@ impl DreamscapeGame {
         }
     }
 
-    fn tone(&self, hz: f32, secs: f32) {
-        if let Some(audio) = &self.audio {
-            audio.play_tone(hz, secs);
+    /// A synthesized sound effect (built once, at start-up).
+    fn sfx(&self, sound: Sound) {
+        if let (Some(audio), Some(samples)) = (&self.audio, self.sounds.get(&sound)) {
+            audio.play_samples(samples, sounds::RATE);
         }
     }
 
@@ -1764,6 +2359,7 @@ impl DreamscapeGame {
                 self.director.dream_seed(),
                 self.director.depth,
                 self.director.hardness().is_some(),
+                self.active_asc.twist_bonus(),
             )
         };
         if self.twists.has(Variant::Gilded) {
@@ -1843,6 +2439,9 @@ impl DreamscapeGame {
         self.mimic_awake_at = specials::MIMIC_DELAY;
         self.jester_cooldown = 0.0;
         self.fog = dream.fog_pockets.clone();
+        self.veins = dream.veins.clone();
+        self.gates.clear();
+        self.shifters.clear();
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
@@ -1872,6 +2471,18 @@ impl DreamscapeGame {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
                 self.sealed_portal = Some((block.clone(), portal_tex.clone()));
+                continue;
+            }
+            let shifter = (block.kind == BlockKind::Floor)
+                .then(|| {
+                    dream.shifters.iter().find(|(c, _)| {
+                        (c.x - block.pos.x).abs() < 1e-3 && (c.z - block.pos.z).abs() < 1e-3
+                    })
+                })
+                .flatten();
+            if let Some(&(_, phase)) = shifter {
+                let e = self.spawn_tile(block, floor_tex.clone())?;
+                self.shifters.push((e, block.pos, phase));
                 continue;
             }
             let crumbly = block.kind == BlockKind::Floor
@@ -2052,6 +2663,7 @@ impl DreamscapeGame {
         let speed = (gameplay::pressured_enemy_speed(dream.depth, difficulty, player_speed)
             * self.twists.enemy_speed()
             * self.run.enemy_speed()
+            * self.active_asc.enemy_speed()
             * if slow_heart {
                 store::SLOW_HEART_ENEMY_SPEED
             } else {
@@ -2061,7 +2673,9 @@ impl DreamscapeGame {
         let alert = if eyelids {
             0.0
         } else {
-            gameplay::pressured_chase_radius(dream.depth, difficulty) * self.run.alert()
+            gameplay::pressured_chase_radius(dream.depth, difficulty)
+                * self.run.alert()
+                * self.active_asc.alert()
         };
         let cap = 0.92 * player_speed / enemy_ai::CHASE_BOOST;
         let mut elite_tex: HashMap<Elite, Arc<GpuTexture>> = HashMap::new();
@@ -2110,6 +2724,7 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        self.spawn_features(gl, &dream)?;
 
         // Nightmare: sigils round the edge, and the hunter in the middle.
         let sigil_tex = self
@@ -2185,6 +2800,17 @@ impl DreamscapeGame {
                 log::warn!("could not save best depth: {e}");
             }
         }
+        // The codex remembers every dream and strange thing met.
+        if self.run_active {
+            let mut changed = self.booklet.codex.visit(theme, self.director.depth);
+            for &k in &self.seen_kinds {
+                changed |= self.booklet.codex.meet(k);
+            }
+            if changed {
+                self.persist_booklet();
+            }
+            self.save_run();
+        }
         self.update_title(ctx);
         Ok(())
     }
@@ -2205,6 +2831,7 @@ impl DreamscapeGame {
         self.route_index = 0;
         self.grace = gameplay::RESPAWN_GRACE
             * self.run.grace()
+            * self.active_asc.grace()
             * if self.has_perk(store::Perk::SlowHeart) {
                 store::SLOW_HEART_GRACE
             } else {
@@ -2271,6 +2898,7 @@ impl Game for DreamscapeGame {
             Ok(audio) => self.audio = Some(audio),
             Err(e) => log::warn!("Failed to initialize audio: {e}"),
         }
+        self.apply_settings(ctx);
         if self.mode == hud::Mode::Playing {
             self.begin_run();
         }
@@ -2294,6 +2922,15 @@ impl Game for DreamscapeGame {
             self.director.has_shard = false;
         }
         self.load_dream(ctx)?;
+        // Dev switch: DREAMSCAPE_SCREEN=codex|settings opens that screen.
+        match std::env::var("DREAMSCAPE_SCREEN").as_deref() {
+            Ok("codex") => self.open_codex(),
+            Ok("settings") => self.open_settings(),
+            _ => {}
+        }
+        if std::env::var("DREAMSCAPE_CONTINUE").is_ok() {
+            self.pending_start = Some(StartKind::Continue);
+        }
         log::info!("Dreamscape initialized");
         Ok(())
     }
@@ -2308,8 +2945,25 @@ impl Game for DreamscapeGame {
             Event::KeyUp {
                 keycode: Some(k), ..
             } => (*k, false, false),
+            // Controller buttons stand in for the keys they map to.
+            Event::ControllerButtonDown { button, .. } => {
+                match settings::pad_key(*button, &self.settings) {
+                    Some(k) => (k, true, false),
+                    None => return,
+                }
+            }
+            Event::ControllerButtonUp { button, .. } => {
+                match settings::pad_key(*button, &self.settings) {
+                    Some(k) => (k, false, false),
+                    None => return,
+                }
+            }
             _ => return,
         };
+        if down && !repeat && self.mode == hud::Mode::Settings {
+            self.settings_key(ctx, key);
+            return;
+        }
         if down && !repeat {
             let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
             if self.mode == hud::Mode::Summary {
@@ -2395,6 +3049,10 @@ impl Game for DreamscapeGame {
                     self.mode = self.booklet_return;
                     return;
                 }
+                (hud::Mode::Booklet, Keycode::P) => {
+                    self.export_requested = true;
+                    return;
+                }
                 (hud::Mode::Booklet, Keycode::A | Keycode::Left) => {
                     self.booklet_page = self.booklet_page.saturating_sub(1);
                     return;
@@ -2426,27 +3084,60 @@ impl Game for DreamscapeGame {
                     return;
                 }
                 (hud::Mode::Title, Keycode::W | Keycode::Up) => {
-                    let n = title_ui::MENU.len();
+                    let n = self.title_items().len();
                     self.title_sel = (self.title_sel + n - 1) % n;
                     return;
                 }
                 (hud::Mode::Title, Keycode::S | Keycode::Down) => {
-                    self.title_sel = (self.title_sel + 1) % title_ui::MENU.len();
+                    self.title_sel = (self.title_sel + 1) % self.title_items().len();
                     return;
                 }
                 (hud::Mode::Title, Keycode::Return | Keycode::Space) => {
-                    match self.title_sel {
-                        0 => self.start_from_title(),
-                        title_ui::RUN_ROW => self.run_length = self.run_length.toggled(),
-                        2 => self.open_store(),
-                        3 => self.open_booklet(),
-                        _ => ctx.should_quit = true,
+                    let items = self.title_items();
+                    let item = items[self.title_sel.min(items.len() - 1)];
+                    self.title_select(ctx, item, 1);
+                    return;
+                }
+                (hud::Mode::Title, Keycode::A | Keycode::Left | Keycode::D | Keycode::Right) => {
+                    let items = self.title_items();
+                    let item = items[self.title_sel.min(items.len() - 1)];
+                    if matches!(item, TitleItem::Ascension | TitleItem::RunLength) {
+                        let dir = if matches!(key, Keycode::A | Keycode::Left) {
+                            -1
+                        } else {
+                            1
+                        };
+                        self.title_select(ctx, item, dir);
                     }
+                    return;
+                }
+                (hud::Mode::Title, Keycode::C) => {
+                    self.title_select(ctx, TitleItem::Continue, 1);
+                    return;
+                }
+                (hud::Mode::Title, Keycode::T) => {
+                    self.title_select(ctx, TitleItem::Daily, 1);
+                    return;
+                }
+                (hud::Mode::Title | hud::Mode::Paused, Keycode::X) => {
+                    self.open_codex();
+                    return;
+                }
+                (hud::Mode::Codex, Keycode::Escape) => {
+                    self.mode = self.codex_return;
+                    return;
+                }
+                (hud::Mode::Title | hud::Mode::Paused, Keycode::O) => {
+                    self.open_settings();
                     return;
                 }
                 (hud::Mode::Title, Keycode::R) => {
                     self.run_length = self.run_length.toggled();
-                    self.title_sel = title_ui::RUN_ROW;
+                    self.title_sel = self
+                        .title_items()
+                        .iter()
+                        .position(|&i| i == TitleItem::RunLength)
+                        .unwrap_or(0);
                     return;
                 }
                 (hud::Mode::Title, Keycode::L) => {
@@ -2471,14 +3162,18 @@ impl Game for DreamscapeGame {
         if self.mode != hud::Mode::Playing {
             return;
         }
+        use settings::Action;
+        match self.settings.action_for(key) {
+            Some(Action::Forward) => self.input.forward = down,
+            Some(Action::Back) => self.input.backward = down,
+            Some(Action::Left) => self.input.left = down,
+            Some(Action::Right) => self.input.right = down,
+            Some(Action::Jump) => self.input.jump = down,
+            Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
+            Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            _ => {}
+        }
         match key {
-            Keycode::W => self.input.forward = down,
-            Keycode::S => self.input.backward = down,
-            Keycode::A => self.input.left = down,
-            Keycode::D => self.input.right = down,
-            Keycode::Space => self.input.jump = down,
-            Keycode::LShift | Keycode::RShift if down && !repeat => self.ability_requests[0] = true,
-            Keycode::E if down && !repeat => self.ability_requests[1] = true,
             Keycode::F2 if down && !repeat => {
                 self.tunnel_on = !self.tunnel_on;
                 log::info!("tunnel vision: {}", self.tunnel_on);
@@ -2521,6 +3216,9 @@ impl Game for DreamscapeGame {
         }
         if std::mem::take(&mut self.restart_requested) {
             return self.restart(ctx);
+        }
+        if let Some(kind) = self.pending_start.take() {
+            return self.start_pending(ctx, kind);
         }
         // E2E runs: show the journal briefly (for screenshots), then exit.
         if self.autopilot
@@ -2582,8 +3280,21 @@ impl Game for DreamscapeGame {
         let (desired, wants_jump) = if self.autopilot {
             self.autopilot_step()
         } else {
-            let mut v = gameplay::horizontal_velocity(&self.input)
-                * (self.player_speed() / gameplay::MOVE_SPEED);
+            let ground = if self.on_vein() {
+                specials::VEIN_BOOST
+            } else {
+                1.0
+            } * if self.in_fog() {
+                specials::FOG_SLOW
+            } else {
+                1.0
+            };
+            let speed = self.player_speed() * ground;
+            let mut v = gameplay::horizontal_velocity(&self.input) * (speed / gameplay::MOVE_SPEED);
+            // The left stick, if it's pushed, wins (analogue: half-push walks).
+            if let Some((x, z)) = settings::stick_dir(ctx.input.left_stick()) {
+                v = Vec3::new(x, 0.0, z) * speed;
+            }
             if self.inverted() {
                 v = Vec3::new(-v.x, v.y, -v.z);
             }
@@ -2609,10 +3320,13 @@ impl Game for DreamscapeGame {
             }
             if wants_jump && body.grounded {
                 body.velocity.y = jump_speed;
+                if jump_pressed {
+                    self.sfx(Sound::Jump);
+                }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
                 body.velocity.y = jump_speed;
-                self.tone(740.0, 0.08);
+                self.sfx(Sound::AirJump);
             }
         }
 
@@ -2670,6 +3384,7 @@ impl Game for DreamscapeGame {
                 Spin(-0.9),
             ));
             log::info!("A splitter split");
+            self.sfx(Sound::Split);
             self.enemies.push(Pacer {
                 entity,
                 ai: EnemyAI::new(a, b, speed, 0.0, gameplay::CHASE_LEASH),
@@ -2680,6 +3395,7 @@ impl Game for DreamscapeGame {
             });
         }
         self.update_specials(dt, held)?;
+        self.update_features();
         if let Some((entity, h, _)) = self.hunter.as_mut() {
             if !held {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
@@ -2709,7 +3425,7 @@ impl Game for DreamscapeGame {
         let caught = !self.autopilot && self.grace <= 0.0 && !untouchable && self.touching_threat();
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
-            self.tone(110.0, 0.35);
+            self.sfx(Sound::Caught);
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
                 && self.director.shard_this_dream;
@@ -2725,6 +3441,7 @@ impl Game for DreamscapeGame {
             }
             let forgiven = forgiven || anchored;
             if !forgiven && self.director.caught() {
+                self.sfx(Sound::ShardLost);
                 self.shards_this_run = self.shards_this_run.saturating_sub(1);
                 if let Some(r) = self.run_log.last_mut() {
                     r.shard_taken = false;
@@ -2785,7 +3502,7 @@ impl Game for DreamscapeGame {
             if self.world.get::<&ShardMarker>(e).is_ok() {
                 self.despawn_shard_slot();
                 self.flash.trigger([0.3, 1.0, 1.0], 0.6);
-                self.tone(880.0, 0.2);
+                self.sfx(Sound::Shard);
                 self.director.collect_shard();
                 self.shards_this_run += 1;
                 if let Some(r) = self.run_log.last_mut() {
@@ -2810,10 +3527,7 @@ impl Game for DreamscapeGame {
             let _ = self.world.despawn(e);
             self.sigils_left = self.sigils_left.saturating_sub(1);
             self.flash.trigger([1.0, 0.4, 1.0], 0.5);
-            self.tone(
-                660.0 + 110.0 * (dream::SIGILS - self.sigils_left) as f32,
-                0.2,
-            );
+            self.sfx(Sound::Sigil);
             log::info!("Sigil taken ({} left)", self.sigils_left);
             if self.sigils_left == 0 {
                 self.open_portal()?;
@@ -2836,6 +3550,9 @@ impl Game for DreamscapeGame {
             if self.director.nightmare {
                 self.stats.nightmares += 1;
                 self.boss_reward = true;
+                if self.run_active {
+                    self.booklet.codex.nightmares_beaten += 1;
+                }
                 log::info!("Nightmare beaten at depth {}", self.director.depth);
             }
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {
@@ -2855,6 +3572,12 @@ impl Game for DreamscapeGame {
         let melt = self.transition.melt();
         let transition = self.transition;
         let strangeness = self.visual_strangeness();
+        let mood = self
+            .dream
+            .as_ref()
+            .map_or(dream::Mood::PLAIN, |d| d.theme.spec().mood);
+        let motion = self.motion_scale();
+        let pulse = mood.pulse(self.time) * motion;
         let player = self.player_position;
         let up = if self.inverted() && !self.debug_camera {
             -Vec3::Y
@@ -2893,6 +3616,11 @@ impl Game for DreamscapeGame {
         let dark = tunnel::darkness(fog);
         let clear = if tunnel { dark } else { fog };
         renderer.resize_if_needed(gl, drawable_size)?;
+        renderer.set_trails(if self.mode == hud::Mode::Title {
+            0.0
+        } else {
+            mood.trails * motion
+        });
         renderer.begin_scene(gl);
         unsafe {
             // egui (drawn last frame) leaves depth test off and blending/scissor on.
@@ -2973,6 +3701,15 @@ impl Game for DreamscapeGame {
             }
             if let Some(l) = loc("uStrangeness") {
                 gl.uniform_1_f32(Some(&l), strangeness);
+            }
+            if let Some(l) = loc("uBreathe") {
+                gl.uniform_1_f32(Some(&l), mood.breathe * motion);
+            }
+            if let Some(l) = loc("uPulse") {
+                gl.uniform_1_f32(Some(&l), pulse);
+            }
+            if let Some(l) = loc("uGlow") {
+                gl.uniform_1_f32(Some(&l), mood.glow);
             }
             if let Some(l) = loc("uPlayer") {
                 gl.uniform_3_f32(Some(&l), player.x, player.y, player.z);
@@ -3116,6 +3853,7 @@ impl Game for DreamscapeGame {
             },
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
+        let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         let card_art = &mut self.card_art;
         let pack = &self.pack;
         let grain = &mut self.grain;
@@ -3154,11 +3892,23 @@ impl Game for DreamscapeGame {
                         screen.left() + player_uv[0] * screen.width(),
                         screen.top() + player_uv[1] * screen.height(),
                     );
-                    tunnel::draw_overlay(&p, screen, at, strangeness, time, Some(tex));
+                    tunnel::draw_overlay(
+                        &p,
+                        screen,
+                        at,
+                        strangeness,
+                        time,
+                        Some(tex),
+                        grain_strength,
+                        vignette_strength,
+                    );
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack);
             });
             ui.paint(drawable_size, output);
+        }
+        if std::mem::take(&mut self.export_requested) && self.mode == hud::Mode::Booklet {
+            self.export_cards(ctx);
         }
         self.maybe_screenshot(ctx);
         Ok(())
@@ -3179,6 +3929,69 @@ impl DreamscapeGame {
         if self.time < at || ctx.should_quit {
             return;
         }
+        match Self::read_frame(ctx).map(|img| img.save(&path)) {
+            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
+            other => log::error!("Screenshot {path} failed: {other:?}"),
+        }
+        ctx.should_quit = true;
+    }
+
+    /// Booklet [p]: each card on the page, cropped out of the frame, as a PNG.
+    fn export_cards(&mut self, ctx: &mut Context) {
+        let Some(frame) = Self::read_frame(ctx) else {
+            return;
+        };
+        let dir = std::env::var_os("DREAMSCAPE_CARDS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("games/dreamscape/cards"));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::error!("could not create {dir:?}: {e}");
+            return;
+        }
+        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        let page = &all[cards::page_range(all.len(), self.booklet_page)];
+        let screen = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(frame.width() as f32, frame.height() as f32),
+        );
+        let mut saved = 0;
+        for (card, r) in page.iter().zip(booklet_ui::card_rects(screen, page.len())) {
+            let x = r.left().max(0.0) as u32;
+            let y = r.top().max(0.0) as u32;
+            let w = (r.width() as u32).min(frame.width().saturating_sub(x));
+            let h = (r.height() as u32).min(frame.height().saturating_sub(y));
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let crop = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
+            let slug: String = card
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let path = dir.join(format!("card_{:03}_{slug}.png", card.number));
+            match crop.save(&path) {
+                Ok(()) => {
+                    saved += 1;
+                    log::info!("Card saved to {path:?}");
+                }
+                Err(e) => log::error!("could not save {path:?}: {e}"),
+            }
+        }
+        if saved > 0 {
+            self.flash.trigger([1.0, 1.0, 0.8], 0.4);
+            self.sfx(Sound::Pick);
+        }
+    }
+
+    /// The finished frame, top row first.
+    fn read_frame(ctx: &mut Context) -> Option<image::RgbaImage> {
         let (w, h) = ctx.drawable_size();
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         unsafe {
@@ -3197,11 +4010,7 @@ impl DreamscapeGame {
         // GL rows run bottom-up.
         let row = (w * 4) as usize;
         let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
-        match image::RgbaImage::from_raw(w, h, flipped).map(|img| img.save(&path)) {
-            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
-            other => log::error!("Screenshot {path} failed: {other:?}"),
-        }
-        ctx.should_quit = true;
+        image::RgbaImage::from_raw(w, h, flipped)
     }
 }
 

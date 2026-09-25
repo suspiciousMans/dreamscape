@@ -107,14 +107,20 @@ impl Dialogue {
     /// a `Dialogue` is only ever attached to a character authored with at
     /// least one.
     pub fn current_text(&self) -> &str {
-        self.nodes.get(self.current).map(|node| node.text.as_str()).unwrap_or("")
+        self.nodes
+            .get(self.current)
+            .map(|node| node.text.as_str())
+            .unwrap_or("")
     }
 
     /// The current node's choices, if any — an empty slice means the
     /// conversation is linear at this point (`advance()` is what moves it
     /// forward, not `choose()`).
     pub fn current_choices(&self) -> &[(String, usize)] {
-        self.nodes.get(self.current).map(|node| node.choices.as_slice()).unwrap_or(&[])
+        self.nodes
+            .get(self.current)
+            .map(|node| node.choices.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Moves to the next node, wrapping around. A no-op if the current
@@ -132,8 +138,12 @@ impl Dialogue {
     /// Jumps to the target node of the current node's `index`-th choice.
     /// Returns `false` (no-op) if `index` or the target is out of range.
     pub fn choose(&mut self, index: usize) -> bool {
-        let Some(node) = self.nodes.get(self.current) else { return false };
-        let Some(&(_, target)) = node.choices.get(index) else { return false };
+        let Some(node) = self.nodes.get(self.current) else {
+            return false;
+        };
+        let Some(&(_, target)) = node.choices.get(index) else {
+            return false;
+        };
         if target >= self.nodes.len() {
             return false;
         }
@@ -216,7 +226,12 @@ pub struct CharacterBrain {
 
 impl CharacterBrain {
     pub fn new(home: Vec3) -> Self {
-        Self { home, state: BrainState::Idle { timer: 0.0 }, repath_timer: 0.0, rng: Rng::seeded() }
+        Self {
+            home,
+            state: BrainState::Idle { timer: 0.0 },
+            repath_timer: 0.0,
+            rng: Rng::seeded(),
+        }
     }
 }
 
@@ -229,8 +244,15 @@ pub enum AiEvent {
     /// entity was actually nearest when the attack landed — in
     /// multiplayer that may be a remote player, not the host's own local
     /// one, so the caller shouldn't assume `player == self.player_entity`.
-    AttackedPlayer { entity: Entity, player: Entity, damage: f32 },
-    CharacterDied { entity: Entity, position: Vec3 },
+    AttackedPlayer {
+        entity: Entity,
+        player: Entity,
+        damage: f32,
+    },
+    CharacterDied {
+        entity: Entity,
+        position: Vec3,
+    },
 }
 
 /// How much farther than `sight_range` a character keeps tracking the
@@ -259,11 +281,22 @@ const FLEE_DISTANCE: f32 = 4.0;
 /// check against the nearest one, not a line-of-sight raycast — a stated
 /// simplification, matching the Glow-mushroom-darkness precedent
 /// elsewhere in this codebase.
-pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)], nav_grid: &NavGrid) -> Vec<AiEvent> {
+pub fn step(
+    world: &mut hecs::World,
+    dt: f32,
+    player_positions: &[(Entity, Vec3)],
+    nav_grid: &NavGrid,
+) -> Vec<AiEvent> {
     let mut events = Vec::new();
 
-    for (entity, (transform, body, meta, brain)) in
-        world.query::<(&Transform, &mut RigidBody, &CharacterMeta, &mut CharacterBrain)>().iter()
+    for (entity, (transform, body, meta, brain)) in world
+        .query::<(
+            &Transform,
+            &mut RigidBody,
+            &CharacterMeta,
+            &mut CharacterBrain,
+        )>()
+        .iter()
     {
         let position = transform.position;
         // Whichever connected player is physically nearest drives this
@@ -272,18 +305,20 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
         // mid-chase (or mid-attack-cooldown), behavior naturally retargets
         // rather than sticking to whoever was nearest when the state was
         // first entered.
-        let Some(&(nearest_player_entity, player_position)) = player_positions.iter().min_by(|&&(_, a), &&(_, b)| {
-            // A remote player's position comes from network peer data, so a
-            // single NaN component would make `distance_squared` NaN and
-            // `partial_cmp` return `None` — an `unwrap()` there would panic
-            // the whole AI step (and the frame) on one malformed packet.
-            // Order NaN arbitrarily instead, the same guard `pathfinding`'s
-            // `ScoredCell` already uses.
-            position
-                .distance_squared(a)
-                .partial_cmp(&position.distance_squared(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) else {
+        let Some(&(nearest_player_entity, player_position)) =
+            player_positions.iter().min_by(|&&(_, a), &&(_, b)| {
+                // A remote player's position comes from network peer data, so a
+                // single NaN component would make `distance_squared` NaN and
+                // `partial_cmp` return `None` — an `unwrap()` there would panic
+                // the whole AI step (and the frame) on one malformed packet.
+                // Order NaN arbitrarily instead, the same guard `pathfinding`'s
+                // `ScoredCell` already uses.
+                position
+                    .distance_squared(a)
+                    .partial_cmp(&position.distance_squared(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        else {
             continue; // no players connected at all — nothing to react to
         };
         let distance_to_player = position.distance(player_position);
@@ -294,10 +329,14 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
 
         match meta.disposition {
             Disposition::Hostile => {
-                let in_attack_range = meta.damage.is_some() && distance_to_player <= meta.attack_range;
+                let in_attack_range =
+                    meta.damage.is_some() && distance_to_player <= meta.attack_range;
                 if current_kind == BrainKind::Attacking {
                     if distance_to_player > meta.attack_range {
-                        brain.state = BrainState::Chasing { path: Vec::new(), index: 0 };
+                        brain.state = BrainState::Chasing {
+                            path: Vec::new(),
+                            index: 0,
+                        };
                         brain.repath_timer = 0.0;
                     }
                 } else if in_attack_range {
@@ -307,7 +346,10 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
                         brain.state = BrainState::Idle { timer: 0.0 };
                     }
                 } else if distance_to_player <= meta.sight_range {
-                    brain.state = BrainState::Chasing { path: Vec::new(), index: 0 };
+                    brain.state = BrainState::Chasing {
+                        path: Vec::new(),
+                        index: 0,
+                    };
                     brain.repath_timer = 0.0;
                 }
             }
@@ -317,7 +359,10 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
                         brain.state = BrainState::Idle { timer: 0.0 };
                     }
                 } else if distance_to_player <= meta.sight_range {
-                    brain.state = BrainState::Fleeing { path: Vec::new(), index: 0 };
+                    brain.state = BrainState::Fleeing {
+                        path: Vec::new(),
+                        index: 0,
+                    };
                     brain.repath_timer = 0.0;
                 }
             }
@@ -329,10 +374,13 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
             if remaining <= 0.0 && meta.wander_radius > 0.0 {
                 let angle = brain.rng.range(0.0, std::f32::consts::TAU);
                 let radius = brain.rng.range(0.0, meta.wander_radius);
-                let target = brain.home + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
+                let target =
+                    brain.home + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
                 brain.state = match nav_grid.find_path(position, target) {
                     Some(path) => BrainState::Wandering { path, index: 0 },
-                    None => BrainState::Idle { timer: IDLE_DWELL_SECS },
+                    None => BrainState::Idle {
+                        timer: IDLE_DWELL_SECS,
+                    },
                 };
             } else {
                 brain.state = BrainState::Idle { timer: remaining };
@@ -383,14 +431,20 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
         let wandering_finished =
             matches!(&brain.state, BrainState::Wandering { path, index } if *index >= path.len());
         if wandering_finished {
-            brain.state = BrainState::Idle { timer: IDLE_DWELL_SECS };
+            brain.state = BrainState::Idle {
+                timer: IDLE_DWELL_SECS,
+            };
         }
 
         if let BrainState::Attacking { cooldown } = &mut brain.state {
             *cooldown -= dt;
             if *cooldown <= 0.0 {
                 if let Some(damage) = meta.damage {
-                    events.push(AiEvent::AttackedPlayer { entity, player: nearest_player_entity, damage });
+                    events.push(AiEvent::AttackedPlayer {
+                        entity,
+                        player: nearest_player_entity,
+                        damage,
+                    });
                 }
                 *cooldown = meta.attack_cooldown_secs.max(0.1);
             }
@@ -399,7 +453,10 @@ pub fn step(world: &mut hecs::World, dt: f32, player_positions: &[(Entity, Vec3)
 
     for (entity, (transform, health)) in world.query::<(&Transform, &Health)>().iter() {
         if health.is_dead() {
-            events.push(AiEvent::CharacterDied { entity, position: transform.position });
+            events.push(AiEvent::CharacterDied {
+                entity,
+                position: transform.position,
+            });
         }
     }
 
@@ -437,7 +494,11 @@ pub struct SpawnerState {
 
 impl SpawnerState {
     pub fn new() -> Self {
-        Self { elapsed_since_last: 0.0, spawned_count: 0, alive: Vec::new() }
+        Self {
+            elapsed_since_last: 0.0,
+            spawned_count: 0,
+            alive: Vec::new(),
+        }
     }
 
     /// Called by the game right after `spawn_character` fulfills a
@@ -471,8 +532,9 @@ pub fn step_spawners(world: &mut hecs::World, dt: f32) -> Vec<SpawnRequest> {
     let mut requests = Vec::new();
     let mut rng = Rng::seeded();
 
-    for (spawner_entity, (transform, config, state)) in
-        world.query::<(&Transform, &SpawnerConfig, &mut SpawnerState)>().iter()
+    for (spawner_entity, (transform, config, state)) in world
+        .query::<(&Transform, &SpawnerConfig, &mut SpawnerState)>()
+        .iter()
     {
         state.alive.retain(|&entity| world.contains(entity));
 
@@ -499,7 +561,10 @@ pub fn step_spawners(world: &mut hecs::World, dt: f32) -> Vec<SpawnRequest> {
 
         let mut instance = config.template.clone();
         instance.position = position.to_array();
-        requests.push(SpawnRequest { spawner: spawner_entity, instance });
+        requests.push(SpawnRequest {
+            spawner: spawner_entity,
+            instance,
+        });
     }
 
     requests

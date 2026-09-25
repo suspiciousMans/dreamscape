@@ -23,6 +23,8 @@ uniform vec3 uDark;     // colour of the dark
 uniform float uHero;    // 1 = the dreamer (pulsing glow, see mesh.vert)
 uniform float uGhost;   // > 0: translucent pass with this alpha
 uniform float uOutline; // 1 = the dark shell drawn around the dreamer
+uniform float uPulse;   // 0..1, the dream's beat
+uniform float uGlow;    // bright parts of the texture glow in the dark
 
 // Rotate a colour around the grey axis (hue shift that keeps brightness).
 vec3 hueShift(vec3 c, float a) {
@@ -67,6 +69,14 @@ void main() {
         float dark = edge * (1.0 - 0.8 * uLit);
         withFog = mix(withFog, uDark, dark);
     }
+    // Glow: the texture's brightest parts light themselves, even in the dark.
+    if (uGlow > 0.0 && uGhost <= 0.0) {
+        float luma = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
+        float mask = smoothstep(0.55, 0.9, luma) * uGlow;
+        withFog = mix(withFog, col * 1.2, mask);
+    }
+    // The beat: everything flares a little on each pulse.
+    withFog *= 1.0 + 0.25 * uPulse;
     if (uHero > 0.5) {
         // Self-lit crystal: a slow pulse keeps it the brightest thing on screen.
         float pulse = 0.5 + 0.5 * sin(uTime * 3.0);

@@ -23,7 +23,10 @@ impl HotReloadWatcher {
         let (tx, rx) = channel();
         let mut watcher = notify::recommended_watcher(tx)?;
         watcher.watch(asset_root, RecursiveMode::Recursive)?;
-        Ok(Self { _watcher: watcher, rx })
+        Ok(Self {
+            _watcher: watcher,
+            rx,
+        })
     }
 
     /// Drains every pending filesystem event, de-duplicating paths that

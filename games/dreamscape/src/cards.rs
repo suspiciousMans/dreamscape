@@ -67,6 +67,10 @@ pub enum Attribute {
     Tide,
     Aether,
     Glass,
+    Spore,
+    Abyss,
+    Halo,
+    Jest,
 }
 
 impl Attribute {
@@ -82,6 +86,10 @@ impl Attribute {
             DreamTheme::DrownedLibrary => Attribute::Tide,
             DreamTheme::SkyStairs => Attribute::Aether,
             DreamTheme::MirrorHall => Attribute::Glass,
+            DreamTheme::MyceliumGrove => Attribute::Spore,
+            DreamTheme::TheTunnel => Attribute::Abyss,
+            DreamTheme::FractalCathedral => Attribute::Halo,
+            DreamTheme::Elfworks => Attribute::Jest,
         }
     }
 
@@ -97,12 +105,16 @@ impl Attribute {
             Attribute::Tide => "TIDE",
             Attribute::Aether => "AETHER",
             Attribute::Glass => "GLASS",
+            Attribute::Spore => "SPORE",
+            Attribute::Abyss => "ABYSS",
+            Attribute::Halo => "HALO",
+            Attribute::Jest => "JEST",
         }
     }
 }
 
 /// What happened in one dream of the current run (collected while playing).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DreamRecord {
     pub theme: DreamTheme,
     pub seed: u64,
@@ -248,6 +260,9 @@ pub struct Booklet {
     /// Dream Dust and Lucid Store purchases.
     #[serde(default)]
     pub stash: crate::store::Stash,
+    /// Dreams and enemies met, ascension, daily bests.
+    #[serde(default)]
+    pub codex: crate::progress::Codex,
 }
 
 impl Booklet {
