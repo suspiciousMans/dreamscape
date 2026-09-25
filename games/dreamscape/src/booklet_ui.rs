@@ -55,6 +55,10 @@ fn attribute_color(a: Attribute) -> [u8; 3] {
         Attribute::Tide => [80, 200, 255],
         Attribute::Aether => [235, 245, 255],
         Attribute::Glass => [255, 170, 250],
+        Attribute::Spore => [120, 255, 200],
+        Attribute::Abyss => [150, 110, 255],
+        Attribute::Halo => [255, 215, 110],
+        Attribute::Jest => [255, 110, 230],
     }
 }
 

@@ -165,6 +165,40 @@ pub fn throw_directions(seed: u32) -> Vec<Vec3> {
         .collect()
 }
 
+/// Tunnel gates: one full open-close cycle, and how long of it they're shut.
+pub const GATE_PERIOD: f32 = 3.2;
+pub const GATE_CLOSED: f32 = 1.2;
+
+/// Is a gate with this phase shut at time `t`? Shut less than half the time.
+pub fn gate_closed(t: f32, phase: f32) -> bool {
+    (t + phase).rem_euclid(GATE_PERIOD) < GATE_CLOSED
+}
+
+/// How far a shifting tile has sunk at time `t` (0 = level, 1 = lowest).
+pub fn shift_depth(t: f32, phase: f32) -> f32 {
+    0.5 - 0.5 * (t * std::f32::consts::TAU / 4.0 + phase).cos()
+}
+/// The lowest a shifting tile sinks (you can always hop back up).
+pub const SHIFT_DROP: f32 = 0.7;
+
+/// Fog pockets slow you to this fraction of your speed.
+pub const FOG_SLOW: f32 = 0.6;
+
+/// Mycelium: walking on a vein speeds you up by this much.
+pub const VEIN_BOOST: f32 = 1.2;
+
+/// Distance on the floor plane from `p` to the segment `a`-`b`.
+pub fn dist_to_segment(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let (p, a, b) = (flat(p), flat(a), flat(b));
+    let ab = b - a;
+    let t = if ab.length_squared() < 1e-6 {
+        0.0
+    } else {
+        ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0)
+    };
+    (p - (a + ab * t)).length()
+}
+
 /// Elite pacers, in long or deepened runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Elite {
@@ -318,6 +352,32 @@ mod tests {
                 assert!(a.distance(*b) > 0.5);
             }
         }
+    }
+
+    #[test]
+    fn gates_are_open_more_than_half_the_time() {
+        let open = (0..3200)
+            .filter(|&i| !gate_closed(i as f32 / 1000.0, 0.4))
+            .count();
+        assert!(open as f32 / 3200.0 > 0.55, "{open}");
+        assert!(gate_closed(0.0, 0.0) && !gate_closed(GATE_CLOSED + 0.1, 0.0));
+    }
+
+    #[test]
+    fn shifting_tiles_stay_within_a_hop() {
+        for i in 0..400 {
+            let d = shift_depth(i as f32 * 0.05, 1.3);
+            assert!((-1e-6..=1.0 + 1e-6).contains(&d));
+        }
+        let hop = crate::gameplay::JUMP_SPEED.powi(2) / (2.0 * 9.8);
+        assert!(SHIFT_DROP < hop * 0.6, "you couldn't hop back up");
+    }
+
+    #[test]
+    fn segment_distance() {
+        let (a, b) = (Vec3::ZERO, Vec3::X * 3.0);
+        assert!((dist_to_segment(Vec3::new(1.5, 5.0, 1.0), a, b) - 1.0).abs() < 1e-5);
+        assert!((dist_to_segment(Vec3::new(-2.0, 0.0, 0.0), a, b) - 2.0).abs() < 1e-5);
     }
 
     #[test]

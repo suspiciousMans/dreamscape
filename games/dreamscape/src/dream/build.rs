@@ -4,7 +4,7 @@ use super::grid::{Cell, Grid, P};
 use super::layout;
 use super::meshes::Shape;
 use super::texture::{self as tex, Pattern};
-use super::theme::{DreamTheme, EnemyKind, LayoutKind, PropKind, ThemeSpec};
+use super::theme::{DreamTheme, EnemyKind, Feature, LayoutKind, PropKind, ThemeSpec};
 use crate::gameplay::{CELL, SLAB};
 use engine::glam::{EulerRot, Quat, Vec3};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
@@ -88,6 +88,12 @@ pub struct Dream {
     pub crumbles: Vec<Vec3>,
     /// Slow fog: (centre on the floor, radius).
     pub fog_pockets: Vec<(Vec3, f32)>,
+    /// Mycelium veins: glowing floor segments along the way (from, to).
+    pub veins: Vec<(Vec3, Vec3)>,
+    /// Tunnel gates: (centre on the floor, direction of travel, phase).
+    pub gates: Vec<(Vec3, Vec3, f32)>,
+    /// Elfworks: route tiles that sink and rise (each its own slab), with phase.
+    pub shifters: Vec<(Vec3, f32)>,
 }
 
 /// One special enemy. `at` is where it starts; `a`/`b` are its two ends
@@ -260,8 +266,18 @@ pub fn generate_with(
     on_path.extend(lucid_path.iter().map(|&(p, _)| p));
 
     let crumbles = crumble_cells(&spec, &path, depth, &mut rng);
+    let shifter_cells = if spec.feature == Feature::Shifters {
+        shifter_cells(&path, &crumbles, &mut rng)
+    } else {
+        Vec::new()
+    };
+    let single: HashSet<P> = crumbles
+        .iter()
+        .copied()
+        .chain(shifter_cells.iter().map(|s| s.0))
+        .collect();
     let mut blocks = Vec::new();
-    floor_slabs(grid, &spec, &crumbles, &mut rng, &mut blocks);
+    floor_slabs(grid, &spec, &single, &mut rng, &mut blocks);
     walls(grid, &spec, &mut rng, &mut blocks);
     let motif_at = props(
         grid,
@@ -336,7 +352,65 @@ pub fn generate_with(
             ],
             &mut rng,
         ),
+        veins: if spec.feature == Feature::Veins {
+            lucid_path
+                .windows(2)
+                .filter(|w| !w[1].1)
+                .map(|w| (grid.world(w[0].0), grid.world(w[1].0)))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        gates: if spec.feature == Feature::Gates {
+            gates(grid, &path)
+        } else {
+            Vec::new()
+        },
+        shifters: shifter_cells
+            .iter()
+            .map(|&(c, phase)| (grid.world(c), phase))
+            .collect(),
     }
+}
+
+/// Route tiles that sink and rise (Elfworks). Never next to a jump, never
+/// the first or last two, and never a crumble tile.
+fn shifter_cells(path: &[(P, bool)], crumbles: &HashSet<P>, rng: &mut StdRng) -> Vec<(P, f32)> {
+    let mut out = Vec::new();
+    if path.len() < 6 {
+        return out;
+    }
+    for k in 2..path.len() - 2 {
+        let near_jump = path[k].1 || path[k + 1].1;
+        if !near_jump && !crumbles.contains(&path[k].0) && rng.gen_bool(0.3) {
+            out.push((path[k].0, rng.gen_range(0.0..TAU)));
+        }
+    }
+    out
+}
+
+/// Tunnel gates: across the corridor every few cells, where the corridor
+/// really is one cell wide. Phases step along the route so the openings
+/// travel down the tunnel like a wave you can ride.
+fn gates(grid: &Grid, path: &[(P, bool)]) -> Vec<(Vec3, Vec3, f32)> {
+    let mut out = Vec::new();
+    let mut k = 4;
+    while k + 2 < path.len() {
+        let (prev, here, next) = (path[k - 1].0, path[k].0, path[k + 1].0);
+        let straight = (next.0 - prev.0, next.1 - prev.1);
+        let is_straight = straight.0.abs() == 2 || straight.1.abs() == 2;
+        let (sx, sy) = (straight.1.signum(), straight.0.signum());
+        let walled = grid.get((here.0 + sx, here.1 + sy)) == Cell::Wall
+            && grid.get((here.0 - sx, here.1 - sy)) == Cell::Wall;
+        if is_straight && walled && !path[k].1 && !path[k + 1].1 {
+            let dir = (grid.world(next) - grid.world(prev)).normalize_or_zero();
+            out.push((grid.world(here), dir, out.len() as f32 * 0.7));
+            k += 6;
+        } else {
+            k += 1;
+        }
+    }
+    out
 }
 
 fn surfaces(spec: &ThemeSpec, rng: &mut StdRng) -> Surfaces {
@@ -458,6 +532,9 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         specials: Vec::new(),
         crumbles: Vec::new(),
         fog_pockets: Vec::new(),
+        veins: Vec::new(),
+        gates: Vec::new(),
+        shifters: Vec::new(),
     }
 }
 
@@ -1787,6 +1864,58 @@ mod tests {
         assert!(with_special(DreamTheme::LiminalOffice, 1, 9, None)
             .fog_pockets
             .is_empty());
+    }
+
+    #[test]
+    fn signature_mechanics_turn_up_in_their_dreams() {
+        for seed in 0..20 {
+            let m = generate(DreamTheme::MyceliumGrove, seed, 3, None, true);
+            assert!(!m.veins.is_empty(), "seed {seed}: no veins");
+            // Veins run along the route to the shard and the portal.
+            let ends: Vec<Vec3> = m.lucid_route.iter().map(|w| w.pos).collect();
+            for (a, b) in &m.veins {
+                assert!(ends.iter().any(|p| p.distance(*a) < 1e-3));
+                assert!(
+                    (a.distance(*b) - CELL).abs() < 1e-3,
+                    "veins join neighbours"
+                );
+            }
+            let t = generate(DreamTheme::TheTunnel, seed, 3, None, true);
+            assert!(!t.gates.is_empty(), "seed {seed}: no gates");
+            for (i, (at, dir, _)) in t.gates.iter().enumerate() {
+                assert!(
+                    t.route.iter().any(|w| w.pos.distance(*at) < 1e-3),
+                    "gate off the route"
+                );
+                assert!((dir.length() - 1.0).abs() < 1e-4);
+                let k = t
+                    .route
+                    .iter()
+                    .position(|w| w.pos.distance(*at) < 1e-3)
+                    .unwrap();
+                assert!(k >= 4, "gate at the start");
+                for other in &t.gates[i + 1..] {
+                    assert!(at.distance(other.0) > 1.5 * CELL, "gates bunched");
+                }
+            }
+            let e = generate(DreamTheme::Elfworks, seed, 3, None, true);
+            for (at, _) in &e.shifters {
+                assert!(e.route.iter().any(|w| w.pos.distance(*at) < 1e-3));
+                assert!(
+                    e.blocks.iter().any(|b| b.kind == BlockKind::Floor
+                        && b.pos.distance(*at - Vec3::Y * SLAB * 0.5) < 1e-3
+                        && (b.size.x - CELL).abs() < 1e-3),
+                    "shifter isn't its own slab"
+                );
+            }
+            let plain = generate(DreamTheme::Garden, seed, 3, None, true);
+            assert!(plain.veins.is_empty() && plain.gates.is_empty() && plain.shifters.is_empty());
+        }
+        assert!(
+            (0..20).any(|s| !generate(DreamTheme::Elfworks, s, 3, None, true)
+                .shifters
+                .is_empty())
+        );
     }
 
     #[test]

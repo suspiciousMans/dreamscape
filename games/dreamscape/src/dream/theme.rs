@@ -18,9 +18,13 @@ pub enum DreamTheme {
     DrownedLibrary,
     SkyStairs,
     MirrorHall,
+    MyceliumGrove,
+    TheTunnel,
+    FractalCathedral,
+    Elfworks,
 }
 
-pub const ALL_THEMES: [DreamTheme; 10] = [
+pub const ALL_THEMES: [DreamTheme; 14] = [
     DreamTheme::Lobby,
     DreamTheme::LiminalOffice,
     DreamTheme::VoidPlatforms,
@@ -31,7 +35,23 @@ pub const ALL_THEMES: [DreamTheme; 10] = [
     DreamTheme::DrownedLibrary,
     DreamTheme::SkyStairs,
     DreamTheme::MirrorHall,
+    DreamTheme::MyceliumGrove,
+    DreamTheme::TheTunnel,
+    DreamTheme::FractalCathedral,
+    DreamTheme::Elfworks,
 ];
+
+/// A dream's signature mechanic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    None,
+    /// Glowing veins along the way: follow them, and walk faster on them.
+    Veins,
+    /// Membranes across the corridor that open and close in sequence.
+    Gates,
+    /// Floor tiles on the way that sink and rise.
+    Shifters,
+}
 
 /// How a dream *feels* beyond its colours: shader and post-effect levels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,6 +139,12 @@ pub enum LayoutKind {
     Spiral,
     /// A hall whose left half is reflected onto its right.
     Mirrored,
+    /// Clearings over the void joined by root bridges.
+    Network,
+    /// One long winding corridor with side alcoves.
+    Corridor,
+    /// Square rooms nested inside each other, a door in each.
+    Recursive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +279,7 @@ pub struct ThemeSpec {
     /// Slow fog pockets drift through this dream.
     pub fog_pockets: bool,
     pub mood: Mood,
+    pub feature: Feature,
 }
 
 impl DreamTheme {
@@ -289,12 +316,15 @@ impl DreamTheme {
                     (CursedForest, 1),
                     (MirrorHall, 1),
                     (SkyStairs, 1),
+                    (MyceliumGrove, 1),
+                    (Elfworks, 1),
                 ],
                 patterns: &[Pattern::Plasma, Pattern::Rings, Pattern::Kaleido],
                 accents: &[[255, 150, 220], [150, 200, 255]],
                 specials: &[],
                 fog_pockets: false,
                 mood: Mood::PLAIN,
+                feature: Feature::None,
             },
             LiminalOffice => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -324,12 +354,14 @@ impl DreamTheme {
                     (Garden, 1),
                     (DrownedLibrary, 2),
                     (MirrorHall, 1),
+                    (TheTunnel, 1),
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Checker],
                 accents: &[[210, 255, 60], [255, 220, 40]],
                 specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Sentry, 1)],
                 fog_pockets: false,
                 mood: Mood::new(0.15, 0.0, 0.0, 0.0),
+                feature: Feature::None,
             },
             VoidPlatforms => ThemeSpec {
                 layout: LayoutKind::PlatformChain,
@@ -359,12 +391,14 @@ impl DreamTheme {
                     (NightmareFactory, 2),
                     (LiminalOffice, 1),
                     (SkyStairs, 2),
+                    (TheTunnel, 1),
                 ],
                 patterns: &[Pattern::Swirl, Pattern::Plasma, Pattern::Kaleido],
                 accents: &[[255, 40, 220], [40, 240, 255]],
                 specials: &[(EnemyKind::Drifter, 1)],
                 fog_pockets: false,
                 mood: Mood::new(0.0, 0.35, 0.2, 0.0),
+                feature: Feature::None,
             },
             Garden => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -395,6 +429,7 @@ impl DreamTheme {
                     (NightmareFactory, 2),
                     (CursedForest, 2),
                     (SkyStairs, 1),
+                    (MyceliumGrove, 1),
                 ],
                 patterns: &[
                     Pattern::Cells,
@@ -406,6 +441,7 @@ impl DreamTheme {
                 specials: &[(EnemyKind::Jester, 1)],
                 fog_pockets: true,
                 mood: Mood::new(0.4, 0.0, 0.0, 0.0),
+                feature: Feature::None,
             },
             NightmareFactory => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -430,6 +466,7 @@ impl DreamTheme {
                     (Garden, 1),
                     (CursedForest, 1),
                     (DrownedLibrary, 1),
+                    (Elfworks, 1),
                 ],
                 patterns: &[
                     Pattern::Checker,
@@ -441,6 +478,7 @@ impl DreamTheme {
                 specials: &[(EnemyKind::Sentry, 2), (EnemyKind::Mimic, 1)],
                 fog_pockets: false,
                 mood: Mood::new(0.1, 0.0, 0.1, 96.0),
+                feature: Feature::None,
             },
             Awakening => ThemeSpec {
                 layout: LayoutKind::OpenHall,
@@ -465,6 +503,7 @@ impl DreamTheme {
                 specials: &[],
                 fog_pockets: false,
                 mood: Mood::PLAIN,
+                feature: Feature::None,
             },
             CursedForest => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -493,12 +532,14 @@ impl DreamTheme {
                     (DrownedLibrary, 1),
                     (NightmareFactory, 1),
                     (MirrorHall, 1),
+                    (MyceliumGrove, 2),
                 ],
                 patterns: &[Pattern::Cells, Pattern::Eyes, Pattern::Swirl],
                 accents: &[[120, 255, 90], [255, 60, 200]],
                 specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Jester, 1)],
                 fog_pockets: true,
                 mood: Mood::new(0.5, 0.0, 0.25, 0.0),
+                feature: Feature::None,
             },
             DrownedLibrary => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -522,12 +563,14 @@ impl DreamTheme {
                     (MirrorHall, 1),
                     (CursedForest, 1),
                     (SkyStairs, 1),
+                    (FractalCathedral, 1),
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Rings, Pattern::Plasma],
                 accents: &[[80, 220, 255], [180, 120, 255]],
                 specials: &[(EnemyKind::Sentry, 1), (EnemyKind::Mimic, 1)],
                 fog_pockets: true,
                 mood: Mood::new(0.2, 0.25, 0.0, 0.0),
+                feature: Feature::None,
             },
             SkyStairs => ThemeSpec {
                 layout: LayoutKind::Spiral,
@@ -556,6 +599,7 @@ impl DreamTheme {
                 specials: &[(EnemyKind::Drifter, 1)],
                 fog_pockets: false,
                 mood: Mood::new(0.0, 0.3, 0.0, 0.0),
+                feature: Feature::None,
             },
             MirrorHall => ThemeSpec {
                 layout: LayoutKind::Mirrored,
@@ -584,12 +628,144 @@ impl DreamTheme {
                     (SkyStairs, 1),
                     (LiminalOffice, 1),
                     (NightmareFactory, 1),
+                    (FractalCathedral, 1),
                 ],
                 patterns: &[Pattern::Kaleido, Pattern::Checker, Pattern::Rings],
                 accents: &[[255, 160, 255], [120, 255, 240]],
                 specials: &[(EnemyKind::Mimic, 2), (EnemyKind::Stalker, 1)],
                 fog_pockets: false,
                 mood: Mood::new(0.0, 0.3, 0.1, 0.0),
+                feature: Feature::None,
+            },
+            MyceliumGrove => ThemeSpec {
+                layout: LayoutKind::Network,
+                grid_size: (15, 19),
+                wall_height: 0.0,
+                floor_colors: &[[42, 30, 52], [52, 36, 46]],
+                wall_colors: &[[30, 24, 40]],
+                prop_colors: &[[200, 170, 230], [90, 220, 170], [255, 150, 220]],
+                props: &[PropKind::Mushroom, PropKind::Tree, PropKind::CloudPuff],
+                prop_density: 0.25,
+                strangeness: 0.4,
+                fog_color: [0.08, 0.12, 0.1],
+                ambient: [0.32, 0.3, 0.36],
+                fog_start: 8.0,
+                fog_end: 32.0,
+                base_profile: "mycelium_grove",
+                music: "games/dreamscape/assets/music/dream_lobby.wav",
+                enemies: (1, 2),
+                next: &[
+                    (Garden, 2),
+                    (CursedForest, 2),
+                    (TheTunnel, 1),
+                    (SkyStairs, 1),
+                ],
+                patterns: &[Pattern::Veins, Pattern::Cells, Pattern::Lattice],
+                accents: &[[120, 255, 200], [255, 120, 240]],
+                specials: &[(EnemyKind::Jester, 2), (EnemyKind::Drifter, 1)],
+                fog_pockets: true,
+                mood: Mood::new(0.6, 0.1, 0.8, 0.0),
+                feature: Feature::Veins,
+            },
+            TheTunnel => ThemeSpec {
+                layout: LayoutKind::Corridor,
+                grid_size: (13, 17),
+                wall_height: 3.0,
+                floor_colors: &[[62, 42, 92], [72, 52, 102]],
+                wall_colors: &[[122, 82, 182], [92, 62, 162]],
+                prop_colors: &[[255, 240, 200], [180, 140, 255]],
+                props: &[PropKind::RingGate, PropKind::Lamp],
+                prop_density: 0.3,
+                strangeness: 0.45,
+                fog_color: [0.1, 0.05, 0.2],
+                ambient: [0.36, 0.3, 0.46],
+                fog_start: 8.0,
+                fog_end: 30.0,
+                base_profile: "the_tunnel",
+                music: "games/dreamscape/assets/music/void_platform.wav",
+                enemies: (1, 3),
+                next: &[(FractalCathedral, 2), (MirrorHall, 1), (VoidPlatforms, 1)],
+                patterns: &[Pattern::Tunnel, Pattern::Rings, Pattern::Swirl],
+                accents: &[[255, 255, 200], [180, 120, 255]],
+                specials: &[(EnemyKind::Mimic, 2), (EnemyKind::Stalker, 1)],
+                fog_pockets: false,
+                mood: Mood::new(0.2, 0.45, 0.3, 0.0),
+                feature: Feature::Gates,
+            },
+            FractalCathedral => ThemeSpec {
+                layout: LayoutKind::Recursive,
+                grid_size: (15, 19),
+                wall_height: 3.0,
+                floor_colors: &[[200, 180, 240], [180, 200, 240]],
+                wall_colors: &[[240, 222, 255], [212, 192, 250]],
+                prop_colors: &[[255, 220, 120], [160, 220, 255], [255, 160, 220]],
+                props: &[PropKind::Crystal, PropKind::Pillar, PropKind::Doorway],
+                prop_density: 0.2,
+                strangeness: 0.5,
+                fog_color: [0.5, 0.45, 0.7],
+                ambient: [0.5, 0.46, 0.6],
+                fog_start: 10.0,
+                fog_end: 45.0,
+                base_profile: "fractal_cathedral",
+                music: "games/dreamscape/assets/music/liminal_office.wav",
+                enemies: (1, 3),
+                next: &[
+                    (Elfworks, 2),
+                    (MirrorHall, 1),
+                    (TheTunnel, 1),
+                    (DrownedLibrary, 1),
+                ],
+                patterns: &[
+                    Pattern::Mandala,
+                    Pattern::Lattice,
+                    Pattern::Kaleido,
+                    Pattern::Cobweb,
+                ],
+                accents: &[[255, 200, 80], [120, 220, 255], [255, 120, 200]],
+                specials: &[(EnemyKind::Sentry, 2), (EnemyKind::Stalker, 1)],
+                fog_pockets: false,
+                mood: Mood::new(0.15, 0.15, 0.35, 72.0),
+                feature: Feature::None,
+            },
+            Elfworks => ThemeSpec {
+                layout: LayoutKind::ScatterField,
+                grid_size: (13, 17),
+                wall_height: 1.2,
+                floor_colors: &[[40, 200, 160], [255, 120, 200]],
+                wall_colors: &[[255, 220, 60], [120, 80, 255]],
+                prop_colors: &[[255, 230, 90], [90, 255, 230], [255, 90, 230]],
+                props: &[
+                    PropKind::Machine,
+                    PropKind::Crystal,
+                    PropKind::RingGate,
+                    PropKind::Mushroom,
+                ],
+                prop_density: 0.3,
+                strangeness: 0.6,
+                fog_color: [0.4, 0.2, 0.5],
+                ambient: [0.5, 0.42, 0.56],
+                fog_start: 8.0,
+                fog_end: 40.0,
+                base_profile: "elfworks",
+                music: "games/dreamscape/assets/music/nightmare_factory.wav",
+                enemies: (1, 2),
+                next: &[
+                    (FractalCathedral, 1),
+                    (MyceliumGrove, 1),
+                    (Garden, 1),
+                    (NightmareFactory, 1),
+                ],
+                patterns: &[
+                    Pattern::Kaleido,
+                    Pattern::Faces,
+                    Pattern::Mandala,
+                    Pattern::Checker,
+                ],
+                accents: &[[255, 255, 80], [80, 255, 255], [255, 80, 255]],
+                specials: &[(EnemyKind::Jester, 3), (EnemyKind::Sentry, 1)],
+                fog_pockets: false,
+                mood: Mood::new(0.35, 0.25, 0.3, 128.0),
+                feature: Feature::Shifters,
             },
         }
     }

@@ -16,7 +16,7 @@ pub const MAX_WHISPER: usize = 56;
 /// Chance a (non-Awakening) dream borrows one word from another dream.
 pub const MASHUP_CHANCE: f64 = 0.25;
 
-const DONORS: [DreamTheme; 9] = [
+const DONORS: [DreamTheme; 13] = [
     DreamTheme::Lobby,
     DreamTheme::LiminalOffice,
     DreamTheme::VoidPlatforms,
@@ -26,6 +26,10 @@ const DONORS: [DreamTheme; 9] = [
     DreamTheme::DrownedLibrary,
     DreamTheme::SkyStairs,
     DreamTheme::MirrorHall,
+    DreamTheme::MyceliumGrove,
+    DreamTheme::TheTunnel,
+    DreamTheme::FractalCathedral,
+    DreamTheme::Elfworks,
 ];
 
 fn pick(list: &'static [&'static str], rng: &mut StdRng) -> &'static str {

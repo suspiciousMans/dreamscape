@@ -25,6 +25,10 @@ CursedForest:CursedForest:
 DrownedLibrary:DrownedLibrary:
 SkyStairs:SkyStairs:
 MirrorHall:MirrorHall:
+MyceliumGrove:MyceliumGrove:
+TheTunnel:TheTunnel:
+FractalCathedral:FractalCathedral:
+Elfworks:Elfworks:
 Nightmare:MirrorHall:DREAMSCAPE_NIGHTMARE=1
 Stalker:LiminalOffice:DREAMSCAPE_SPECIAL=Stalker
 Mimic:MirrorHall:DREAMSCAPE_SPECIAL=Mimic

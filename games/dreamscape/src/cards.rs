@@ -67,6 +67,10 @@ pub enum Attribute {
     Tide,
     Aether,
     Glass,
+    Spore,
+    Abyss,
+    Halo,
+    Jest,
 }
 
 impl Attribute {
@@ -82,6 +86,10 @@ impl Attribute {
             DreamTheme::DrownedLibrary => Attribute::Tide,
             DreamTheme::SkyStairs => Attribute::Aether,
             DreamTheme::MirrorHall => Attribute::Glass,
+            DreamTheme::MyceliumGrove => Attribute::Spore,
+            DreamTheme::TheTunnel => Attribute::Abyss,
+            DreamTheme::FractalCathedral => Attribute::Halo,
+            DreamTheme::Elfworks => Attribute::Jest,
         }
     }
 
@@ -97,6 +105,10 @@ impl Attribute {
             Attribute::Tide => "TIDE",
             Attribute::Aether => "AETHER",
             Attribute::Glass => "GLASS",
+            Attribute::Spore => "SPORE",
+            Attribute::Abyss => "ABYSS",
+            Attribute::Halo => "HALO",
+            Attribute::Jest => "JEST",
         }
     }
 }

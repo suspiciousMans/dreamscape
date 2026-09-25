@@ -216,6 +216,12 @@ pub struct DreamscapeGame {
     jester_cooldown: f32,
     crumbles: Vec<CrumbleTile>,
     fog: Vec<(Vec3, f32)>,
+    /// Mycelium veins (segments you walk faster on).
+    veins: Vec<(Vec3, Vec3)>,
+    /// Tunnel gates: (membrane entity, centre, direction, phase).
+    gates: Vec<(Entity, Vec3, Vec3, f32)>,
+    /// Elfworks shifting tiles: (entity, level position, phase).
+    shifters: Vec<(Entity, Vec3, f32)>,
     /// Special kinds met so far this run (each gets a hint the first time).
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
@@ -327,6 +333,9 @@ impl DreamscapeGame {
             jester_cooldown: 0.0,
             crumbles: Vec::new(),
             fog: Vec::new(),
+            veins: Vec::new(),
+            gates: Vec::new(),
+            shifters: Vec::new(),
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
             input: PlayerInputState::default(),
@@ -878,6 +887,121 @@ impl DreamscapeGame {
         )))
     }
 
+    /// Veins along the floor and gates across the tunnel.
+    fn spawn_features(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        if !dream.veins.is_empty() {
+            let spec = dream.theme.spec();
+            let tex = self.upload_surface(
+                gl,
+                &TexSpec {
+                    pattern: dream::Pattern::Veins,
+                    palette: spec.accents.to_vec(),
+                    bands: 1.0,
+                    seed: dream.seed ^ 0x7E1,
+                },
+            )?;
+            let cube = self.mesh(Shape::Cube)?;
+            for &(a, b) in &dream.veins {
+                let d = b - a;
+                let size = if d.x.abs() > d.z.abs() {
+                    Vec3::new(d.x.abs() + 0.4, 0.03, 0.4)
+                } else {
+                    Vec3::new(0.4, 0.03, d.z.abs() + 0.4)
+                };
+                self.world.spawn((
+                    Transform {
+                        position: (a + b) * 0.5 + Vec3::Y * 0.02,
+                        rotation: Quat::IDENTITY,
+                        scale: size,
+                    },
+                    MeshRenderer {
+                        mesh: cube.clone(),
+                        texture: Some(tex.clone()),
+                    },
+                    SurfaceUv(0.6),
+                    Lit,
+                    NoMelt,
+                ));
+            }
+        }
+        if !dream.gates.is_empty() {
+            let skin = self.texture(gl, [200, 150, 255, 255]);
+            let frame_tex = self.texture(gl, [255, 245, 210, 255]);
+            let orb = self.mesh(Shape::Orb)?;
+            let ring = self.mesh(Shape::Torus)?;
+            for &(at, dir, phase) in &dream.gates {
+                let facing = Quat::from_rotation_arc(Vec3::Z, dir);
+                self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 1.3,
+                        rotation: facing,
+                        scale: Vec3::new(2.9, 2.6, 0.3),
+                    },
+                    MeshRenderer {
+                        mesh: ring.clone(),
+                        texture: Some(frame_tex.clone()),
+                    },
+                    Lit,
+                ));
+                let membrane = self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 1.3,
+                        rotation: facing,
+                        scale: Vec3::ZERO,
+                    },
+                    MeshRenderer {
+                        mesh: orb.clone(),
+                        texture: Some(skin.clone()),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+                self.gates.push((membrane, at, dir, phase));
+            }
+        }
+        Ok(())
+    }
+
+    /// Gates breathe open and shut; shifting tiles sink and rise.
+    fn update_features(&mut self) {
+        let t = self.dream_age;
+        for &(e, _, _, phase) in &self.gates {
+            if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                let shut = specials::gate_closed(t, phase);
+                let target = if shut {
+                    Vec3::new(2.3, 2.2, 0.25)
+                } else {
+                    Vec3::ZERO
+                };
+                tr.scale = tr.scale.lerp(target, 0.25);
+            }
+        }
+        if self.autopilot {
+            return; // E2E runs walk a level floor
+        }
+        for &(e, base, phase) in &self.shifters {
+            if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                tr.position =
+                    base - Vec3::Y * specials::SHIFT_DROP * specials::shift_depth(t, phase);
+            }
+        }
+    }
+
+    /// Wading through a fog pocket?
+    fn in_fog(&self) -> bool {
+        self.fog.iter().any(|&(at, r)| {
+            let d = at - self.player_position;
+            Vec3::new(d.x, 0.0, d.z).length() < r
+        })
+    }
+
+    /// Standing on a mycelium vein?
+    fn on_vein(&self) -> bool {
+        self.veins
+            .iter()
+            .any(|&(a, b)| specials::dist_to_segment(self.player_position, a, b) < 0.6)
+    }
+
     /// Stalkers, mimics, sentries, drifters and jesters, plus fog pockets.
     fn spawn_specials(
         &mut self,
@@ -1219,7 +1343,13 @@ impl DreamscapeGame {
                 && at(sp.entity)
                     .is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
         });
-        pacers || hunter || special
+        let gate = self.gates.iter().any(|&(_, at, _, phase)| {
+            specials::gate_closed(self.dream_age, phase) && {
+                let d = at - player;
+                Vec3::new(d.x, 0.0, d.z).length() < 0.9
+            }
+        });
+        pacers || hunter || special || gate
     }
 
     /// Every sigil taken: the nightmare's portal opens.
@@ -1848,6 +1978,9 @@ impl DreamscapeGame {
         self.mimic_awake_at = specials::MIMIC_DELAY;
         self.jester_cooldown = 0.0;
         self.fog = dream.fog_pockets.clone();
+        self.veins = dream.veins.clone();
+        self.gates.clear();
+        self.shifters.clear();
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
@@ -1877,6 +2010,18 @@ impl DreamscapeGame {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
                 self.sealed_portal = Some((block.clone(), portal_tex.clone()));
+                continue;
+            }
+            let shifter = (block.kind == BlockKind::Floor)
+                .then(|| {
+                    dream.shifters.iter().find(|(c, _)| {
+                        (c.x - block.pos.x).abs() < 1e-3 && (c.z - block.pos.z).abs() < 1e-3
+                    })
+                })
+                .flatten();
+            if let Some(&(_, phase)) = shifter {
+                let e = self.spawn_tile(block, floor_tex.clone())?;
+                self.shifters.push((e, block.pos, phase));
                 continue;
             }
             let crumbly = block.kind == BlockKind::Floor
@@ -2115,6 +2260,7 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        self.spawn_features(gl, &dream)?;
 
         // Nightmare: sigils round the edge, and the hunter in the middle.
         let sigil_tex = self
@@ -2588,7 +2734,17 @@ impl Game for DreamscapeGame {
             self.autopilot_step()
         } else {
             let mut v = gameplay::horizontal_velocity(&self.input)
-                * (self.player_speed() / gameplay::MOVE_SPEED);
+                * (self.player_speed() / gameplay::MOVE_SPEED)
+                * if self.on_vein() {
+                    specials::VEIN_BOOST
+                } else {
+                    1.0
+                }
+                * if self.in_fog() {
+                    specials::FOG_SLOW
+                } else {
+                    1.0
+                };
             if self.inverted() {
                 v = Vec3::new(-v.x, v.y, -v.z);
             }
@@ -2685,6 +2841,7 @@ impl Game for DreamscapeGame {
             });
         }
         self.update_specials(dt, held)?;
+        self.update_features();
         if let Some((entity, h, _)) = self.hunter.as_mut() {
             if !held {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
