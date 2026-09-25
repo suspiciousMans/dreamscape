@@ -138,9 +138,25 @@ pub fn blink_target(
         let h = b.size * 0.5;
         (to.x - b.pos.x).abs() < h.x + margin && (to.z - b.pos.z).abs() < h.z + margin
     };
-    let floor = blocks
-        .iter()
-        .any(|b| b.kind == BlockKind::Floor && covers(b, -PLAYER_RADIUS * 0.5));
+    // The whole footprint must be over floor (it may straddle two slabs).
+    let on_floor = |p: Vec3| {
+        blocks.iter().any(|b| {
+            let h = b.size * 0.5;
+            b.kind == BlockKind::Floor
+                && (p.x - b.pos.x).abs() <= h.x + 1e-3
+                && (p.z - b.pos.z).abs() <= h.z + 1e-3
+        })
+    };
+    let r = PLAYER_RADIUS * 0.5;
+    let floor = [
+        Vec3::ZERO,
+        Vec3::X * r,
+        -Vec3::X * r,
+        Vec3::Z * r,
+        -Vec3::Z * r,
+    ]
+    .iter()
+    .all(|&o| on_floor(to + o));
     let blocked = blocks.iter().any(|b| {
         matches!(b.kind, BlockKind::Wall | BlockKind::Prop)
             && b.pos.y - b.size.y * 0.5 < 2.0
@@ -484,8 +500,8 @@ mod tests {
                         landed += 1;
                         let on_floor = d.blocks.iter().any(|b| {
                             b.kind == BlockKind::Floor
-                                && (at.x - b.pos.x).abs() < b.size.x * 0.5
-                                && (at.z - b.pos.z).abs() < b.size.z * 0.5
+                                && (at.x - b.pos.x).abs() <= b.size.x * 0.5 + 1e-3
+                                && (at.z - b.pos.z).abs() <= b.size.z * 0.5 + 1e-3
                         });
                         assert!(on_floor, "{theme:?}/{seed}: blinked into the void");
                         let in_wall = d.blocks.iter().any(|b| {

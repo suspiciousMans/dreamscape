@@ -33,6 +33,42 @@ pub const ALL_THEMES: [DreamTheme; 10] = [
     DreamTheme::MirrorHall,
 ];
 
+/// Special enemies (on top of the pacers every dream has).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EnemyKind {
+    /// Only moves while you can't see it.
+    Stalker,
+    /// Walks your own path, three seconds behind you.
+    Mimic,
+    /// Sweeps a beam; being seen calls the pacers.
+    Sentry,
+    /// Floats across the gaps you have to jump.
+    Drifter,
+    /// Harmless, but its touch throws you somewhere else.
+    Jester,
+}
+
+pub const ALL_ENEMY_KINDS: [EnemyKind; 5] = [
+    EnemyKind::Stalker,
+    EnemyKind::Mimic,
+    EnemyKind::Sentry,
+    EnemyKind::Drifter,
+    EnemyKind::Jester,
+];
+
+impl EnemyKind {
+    /// Shown the first time each kind turns up in a run.
+    pub fn hint(self) -> &'static str {
+        match self {
+            EnemyKind::Stalker => "something only moves when you're not looking",
+            EnemyKind::Mimic => "something is walking in your footsteps. keep moving.",
+            EnemyKind::Sentry => "a light is searching for you. it will call the others.",
+            EnemyKind::Drifter => "something drifts across the gaps. time your jumps.",
+            EnemyKind::Jester => "a jester. it won't hurt you, but it will move you.",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutKind {
     OpenHall,
@@ -172,6 +208,10 @@ pub struct ThemeSpec {
     pub patterns: &'static [Pattern],
     /// Vivid colours that bleed into the textures once the dream gets strange.
     pub accents: &'static [[u8; 3]],
+    /// Special enemies this dream can hold, weighted.
+    pub specials: &'static [(EnemyKind, u32)],
+    /// Slow fog pockets drift through this dream.
+    pub fog_pockets: bool,
 }
 
 impl DreamTheme {
@@ -211,6 +251,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Plasma, Pattern::Rings, Pattern::Kaleido],
                 accents: &[[255, 150, 220], [150, 200, 255]],
+                specials: &[],
+                fog_pockets: false,
             },
             LiminalOffice => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -243,6 +285,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Checker],
                 accents: &[[210, 255, 60], [255, 220, 40]],
+                specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Sentry, 1)],
+                fog_pockets: false,
             },
             VoidPlatforms => ThemeSpec {
                 layout: LayoutKind::PlatformChain,
@@ -275,6 +319,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Swirl, Pattern::Plasma, Pattern::Kaleido],
                 accents: &[[255, 40, 220], [40, 240, 255]],
+                specials: &[(EnemyKind::Drifter, 1)],
+                fog_pockets: false,
             },
             Garden => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -313,6 +359,8 @@ impl DreamTheme {
                     Pattern::Kaleido,
                 ],
                 accents: &[[255, 90, 200], [180, 255, 40]],
+                specials: &[(EnemyKind::Jester, 1)],
+                fog_pockets: true,
             },
             NightmareFactory => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -345,6 +393,8 @@ impl DreamTheme {
                     Pattern::Eyes,
                 ],
                 accents: &[[255, 120, 0], [255, 20, 60]],
+                specials: &[(EnemyKind::Sentry, 2), (EnemyKind::Mimic, 1)],
+                fog_pockets: false,
             },
             Awakening => ThemeSpec {
                 layout: LayoutKind::OpenHall,
@@ -366,6 +416,8 @@ impl DreamTheme {
                 next: &[],
                 patterns: &[Pattern::Plasma],
                 accents: &[[255, 240, 200]],
+                specials: &[],
+                fog_pockets: false,
             },
             CursedForest => ThemeSpec {
                 layout: LayoutKind::ScatterField,
@@ -397,6 +449,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Cells, Pattern::Eyes, Pattern::Swirl],
                 accents: &[[120, 255, 90], [255, 60, 200]],
+                specials: &[(EnemyKind::Stalker, 2), (EnemyKind::Jester, 1)],
+                fog_pockets: true,
             },
             DrownedLibrary => ThemeSpec {
                 layout: LayoutKind::Maze,
@@ -423,6 +477,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Rings, Pattern::Plasma],
                 accents: &[[80, 220, 255], [180, 120, 255]],
+                specials: &[(EnemyKind::Sentry, 1), (EnemyKind::Mimic, 1)],
+                fog_pockets: true,
             },
             SkyStairs => ThemeSpec {
                 layout: LayoutKind::Spiral,
@@ -448,6 +504,8 @@ impl DreamTheme {
                 next: &[(VoidPlatforms, 1), (MirrorHall, 2), (Garden, 1)],
                 patterns: &[Pattern::Plasma, Pattern::Swirl, Pattern::Rings],
                 accents: &[[255, 200, 120], [140, 220, 255]],
+                specials: &[(EnemyKind::Drifter, 1)],
+                fog_pockets: false,
             },
             MirrorHall => ThemeSpec {
                 layout: LayoutKind::Mirrored,
@@ -479,6 +537,8 @@ impl DreamTheme {
                 ],
                 patterns: &[Pattern::Kaleido, Pattern::Checker, Pattern::Rings],
                 accents: &[[255, 160, 255], [120, 255, 240]],
+                specials: &[(EnemyKind::Mimic, 2), (EnemyKind::Stalker, 1)],
+                fog_pockets: false,
             },
         }
     }

@@ -27,6 +27,8 @@ pub struct EnemyAI {
     pub chasing: bool,
     chase_left: f32,
     cooldown: f32,
+    /// Seconds left of a forced lunge (a sentry called it).
+    alerted: f32,
 }
 
 fn flat(v: Vec3) -> Vec3 {
@@ -45,7 +47,20 @@ impl EnemyAI {
             chasing: false,
             chase_left: CHASE_TIME,
             cooldown: 0.0,
+            alerted: 0.0,
         }
+    }
+
+    /// A sentry saw you: lunge now, whatever the alert radius (still on the
+    /// leash, still tiring and cooling down as usual).
+    pub fn alert(&mut self) {
+        if self.cooldown <= 0.0 {
+            self.alerted = CHASE_TIME;
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed
     }
 
     /// The side pocket: the leash centre, so chases pull away from the route.
@@ -56,15 +71,18 @@ impl EnemyAI {
     /// Moves the enemy one step. Height never changes.
     pub fn update(&mut self, pos: &mut Vec3, player: Vec3, dt: f32) {
         self.cooldown = (self.cooldown - dt).max(0.0);
+        self.alerted = (self.alerted - dt).max(0.0);
         let near = flat(player - *pos).length() < self.alert_radius;
         let in_leash = flat(player - self.home()).length() < self.leash;
-        let wants = self.alert_radius > 0.0 && near && in_leash && self.cooldown <= 0.0;
+        let noticed = (self.alert_radius > 0.0 && near) || self.alerted > 0.0;
+        let wants = noticed && in_leash && self.cooldown <= 0.0;
         if wants {
             self.chase_left -= dt;
             if self.chase_left <= 0.0 {
                 // Out of breath: give up and wander home.
                 self.cooldown = CHASE_COOLDOWN;
                 self.chase_left = CHASE_TIME;
+                self.alerted = 0.0;
             }
         } else if self.cooldown <= 0.0 {
             self.chase_left = CHASE_TIME;
@@ -196,6 +214,34 @@ mod tests {
         let mut pos = a + Vec3::Y * 0.5;
         ai.update(&mut pos, Vec3::new(0.0, 0.0, -2.0), 1.0 / 60.0);
         assert!(!ai.chasing, "chased onto the route past its post");
+    }
+
+    #[test]
+    fn an_alert_forces_one_lunge_even_without_an_alert_radius() {
+        let (a, b) = (Vec3::ZERO, Vec3::Z * 3.0);
+        let mut ai = EnemyAI::new(a, b, 4.0, 0.0, 6.0);
+        let mut pos = b + Vec3::Y * 0.5;
+        let player = Vec3::new(2.0, 0.0, 3.0);
+        ai.update(&mut pos, player, 1.0 / 60.0);
+        assert!(!ai.chasing, "never notices on its own");
+        ai.alert();
+        let mut chased = 0.0;
+        for _ in 0..(4.0 * 60.0) as usize {
+            ai.update(&mut pos, player, 1.0 / 60.0);
+            if ai.chasing {
+                chased += 1.0 / 60.0;
+            }
+        }
+        assert!(
+            chased > 0.5 && chased <= CHASE_TIME + 0.05,
+            "chased {chased}s"
+        );
+        // Out of the leash, an alert does nothing.
+        let mut far = EnemyAI::new(a, b, 4.0, 0.0, 1.0);
+        let mut p2 = b;
+        far.alert();
+        far.update(&mut p2, Vec3::new(0.0, 0.0, 50.0), 0.1);
+        assert!(!far.chasing);
     }
 
     #[test]

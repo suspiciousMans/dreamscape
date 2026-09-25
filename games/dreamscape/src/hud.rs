@@ -107,6 +107,8 @@ pub struct HudView {
     pub summary: crate::summary_ui::SummaryView,
     /// Nightmares: sigils gathered, or the portal is open.
     pub objective: Option<String>,
+    /// First-time hints for this dream's specials (under the title card).
+    pub hint: String,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -670,6 +672,15 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::proportional(24.0),
         rgba([200, 190, 230], a * 0.85),
     );
+    if !v.hint.is_empty() {
+        p.text(
+            Pos2::new(screen.center().x, y + 116.0),
+            Align2::CENTER_TOP,
+            &v.hint,
+            FontId::monospace(20.0),
+            rgba([255, 150, 190], a),
+        );
+    }
     if !v.twist.is_empty() {
         p.text(
             Pos2::new(screen.center().x, y + 86.0),

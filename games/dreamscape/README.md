@@ -6,7 +6,7 @@ A PS2-style dream-escape roguelike built on the Jame engine (Rust). You fall asl
 
 ```bash
 cargo run -p dreamscape          # from the repo root
-cargo test -p dreamscape         # 196 tests
+cargo test -p dreamscape         # 208 tests
 ```
 
 ## Controls
@@ -29,6 +29,14 @@ cargo test -p dreamscape         # 196 tests
 - **Fully procedural dreams.** There are no hand-built levels. Ten dream types (lobby, liminal office, void platforms, garden, nightmare factory, cursed forest, drowned library, sky stairs, mirror hall, awakening) each have their own layout rules (halls, mazes, platform chains, fields, spirals over the void, mirrored halls), props, palette and music. Levels grow with depth.
 - **A roguelike run.** Every dream you get through offers three random upgrades for the rest of the run: faster feet, higher jumps, wider sight, slower enemies, shard sense, dream anchors, more dust, and more. Rarer cards teach an ability: DASH, BLINK, STILLNESS, PHASE or SHARD CALL. You can hold two abilities at once.
 - **Rarity, curses and combos.** Cards come in common, rare and mythic tiers (rarer ones show up more the deeper you go). About one pick in five swaps a card for a cursed one: strong, with a price. Some pairs combine into combos, like DASH + PHASE = GHOST STEP. You get one reroll per run, or you can skip a pick for dust.
+- **Special enemies and hazards.** From depth 3, each dream type brings its own threats on top of the pacers:
+  - **stalkers** only move while you can't see them;
+  - **mimics** walk your own path 3 seconds behind you;
+  - **sentries** sweep a beam, and being seen calls the nearby pacers;
+  - **drifters** swing across the gaps you jump;
+  - **jesters** don't catch you, they throw you somewhere else.
+
+  In long runs some pacers are **elite**: FAST, BIG, SPLITTER (splits in two when it lunges) or SHADE (invisible until close). Open-air dreams have **crumbling tiles** (a different pattern) that fall a second after you step on them, and the forest, library and garden have **purple fog** that slows you down. Each new threat is explained the first time you meet it.
 - **Nightmares.** Every fifth dream is a walled arena with a hunter in it. It stalks, lunges, then has to rest (it shrinks while it rests). Gather three sigils to open the portal, and you get a pick of rare and mythic cards.
 - **Run summary.** On waking, see your depth, time, nightmares beaten, times caught, twists survived, upgrades, combos and how your dust multiplier was worked out.
 - **Short or long runs.** A short run needs 3 shards. A long run needs 6, and every dream is exponentially harder than the last (faster, more alert enemies, bigger dreams), with rewards scaled to match. At any wake door you can also refuse to wake and GO DEEPER: 3 more shards, the climb starts (or steepens), and the payout grows.
@@ -55,9 +63,10 @@ cargo test -p dreamscape         # 196 tests
 | `DREAMSCAPE_RUN=long` | default the title screen to a long run |
 | `DREAMSCAPE_THEME=SkyStairs` | start one dream deep in a given dream type |
 | `DREAMSCAPE_NIGHTMARE=1` | start in a nightmare arena |
+| `DREAMSCAPE_SPECIAL=Stalker` | put that special enemy (Stalker, Mimic, Sentry, Drifter, Jester) in every dream |
 | `DREAMSCAPE_SHOT=out.png` | save a screenshot after `DREAMSCAPE_SHOT_AT` seconds (default 6), then quit |
 
-`tools/screenshots.sh OUT_DIR` shoots every dream type (and a nightmare) under Xvfb and fails on a blank frame. CI runs it on Linux and uploads the images.
+`tools/screenshots.sh OUT_DIR` shoots every dream type, a nightmare and each special enemy under Xvfb and fails on a blank frame. CI runs it on Linux and uploads the images.
 
 ## Credits
 
