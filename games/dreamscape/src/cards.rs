@@ -114,7 +114,7 @@ impl Attribute {
 }
 
 /// What happened in one dream of the current run (collected while playing).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DreamRecord {
     pub theme: DreamTheme,
     pub seed: u64,
@@ -260,6 +260,9 @@ pub struct Booklet {
     /// Dream Dust and Lucid Store purchases.
     #[serde(default)]
     pub stash: crate::store::Stash,
+    /// Dreams and enemies met, ascension, daily bests.
+    #[serde(default)]
+    pub codex: crate::progress::Codex,
 }
 
 impl Booklet {

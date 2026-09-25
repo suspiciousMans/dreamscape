@@ -159,7 +159,13 @@ pub fn twist_chance(depth: u32) -> f64 {
 }
 
 /// Rolls the twists for one dream. Long (hard) runs past depth 8 may stack two.
+#[cfg(test)]
 pub fn roll(theme: DreamTheme, seed: u64, depth: u32, hard: bool) -> Twists {
+    roll_with(theme, seed, depth, hard, 0.0)
+}
+
+/// `roll`, with `bonus` added to the twist chance (ascension).
+pub fn roll_with(theme: DreamTheme, seed: u64, depth: u32, hard: bool, bonus: f64) -> Twists {
     if matches!(theme, DreamTheme::Lobby | DreamTheme::Awakening) {
         return Twists::default();
     }
@@ -167,7 +173,12 @@ pub fn roll(theme: DreamTheme, seed: u64, depth: u32, hard: bool) -> Twists {
     let mut out = Vec::new();
     let count = if hard && depth >= 8 { 2 } else { 1 };
     for _ in 0..count {
-        if !rng.gen_bool(twist_chance(depth)) {
+        let chance = if depth < 2 {
+            0.0
+        } else {
+            (twist_chance(depth) + bonus).min(0.9)
+        };
+        if !rng.gen_bool(chance) {
             continue;
         }
         let options: Vec<Variant> = ALL_VARIANTS

@@ -5,10 +5,6 @@
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Vec2};
 
-/// Menu entries, in order. `[key] label`. Entry `RUN_ROW` toggles the run
-/// length and shows the current one.
-pub const RUN_ROW: usize = 1;
-
 /// What the run-length row says under each setting.
 pub fn run_blurb(length: &str) -> &'static str {
     if length == "long" {
@@ -17,16 +13,6 @@ pub fn run_blurb(length: &str) -> &'static str {
         "three shards · the classic descent"
     }
 }
-
-/// Menu entries, in order. `[key] label`.
-pub const MENU: [(&str, &str); 6] = [
-    ("enter", "fall asleep"),
-    ("r", "run"),
-    ("l", "the lucid store"),
-    ("b", "dream booklet"),
-    ("o", "settings"),
-    ("q", "stay awake"),
-];
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
@@ -67,38 +53,34 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
     crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0), v.eye, v);
 
-    let menu_top = top + 260.0;
-    for (i, (key, label)) in MENU.iter().enumerate() {
-        let sel = i == v.shop_col.min(MENU.len() - 1);
-        let y = menu_top + i as f32 * 40.0;
+    let menu_top = top + 236.0;
+    let step = ((screen.bottom() - 80.0 - menu_top) / v.menu.len().max(1) as f32).min(36.0);
+    for (i, (key, label, note)) in v.menu.iter().enumerate() {
+        let sel = i == v.shop_col.min(v.menu.len().saturating_sub(1));
+        let y = menu_top + i as f32 * step;
         let col = if sel { hue(v.time * 0.2) } else { ink(v) };
         if sel {
             p.text(
-                Pos2::new(cx - 190.0, y),
+                Pos2::new(cx - 230.0, y),
                 Align2::LEFT_TOP,
                 ">",
-                FontId::monospace(28.0),
+                FontId::monospace(26.0),
                 rgba(col, 1.0),
             );
         }
-        let text = if i == RUN_ROW {
-            format!("[{key}]  {label}: {}", v.run_length)
-        } else {
-            format!("[{key}]  {label}")
-        };
         p.text(
-            Pos2::new(cx - 160.0, y),
+            Pos2::new(cx - 200.0, y),
             Align2::LEFT_TOP,
-            text,
-            FontId::monospace(28.0),
+            format!("[{key}]  {label}"),
+            FontId::monospace(26.0),
             rgba(col, if sel { 1.0 } else { 0.7 }),
         );
-        if i == RUN_ROW && sel {
+        if sel && !note.is_empty() {
             p.text(
-                Pos2::new(cx + 150.0, y + 8.0),
+                Pos2::new(cx + 170.0, y + 7.0),
                 Align2::LEFT_TOP,
-                run_blurb(v.run_length),
-                FontId::monospace(16.0),
+                note,
+                FontId::monospace(15.0),
                 rgba([255, 120, 150], 0.85),
             );
         }
@@ -121,17 +103,5 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             FontId::monospace(16.0),
             rgba([80, 230, 200], 0.8),
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn menu_keys_are_unique_and_labels_lowercase() {
-        let keys: std::collections::HashSet<_> = MENU.iter().map(|m| m.0).collect();
-        assert_eq!(keys.len(), MENU.len());
-        assert!(MENU.iter().all(|m| m.1 == m.1.to_lowercase()));
     }
 }

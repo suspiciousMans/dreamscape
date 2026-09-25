@@ -94,7 +94,7 @@ impl Mood {
 }
 
 /// Special enemies (on top of the pacers every dream has).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EnemyKind {
     /// Only moves while you can't see it.
     Stalker,
@@ -171,7 +171,6 @@ pub enum PropKind {
     Mushroom,
 }
 
-#[cfg(test)]
 pub const ALL_PROPS: [PropKind; 17] = [
     PropKind::Desk,
     PropKind::Partition,

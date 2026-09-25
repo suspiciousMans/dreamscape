@@ -6,7 +6,7 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// Active abilities. At most `ABILITY_SLOTS` are held at once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Ability {
     /// A short burst of speed you can't be caught during.
     Dash,
@@ -129,7 +129,7 @@ impl AbilityState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Upgrade {
     SwiftFeet,
     Spring,
@@ -155,7 +155,7 @@ pub enum Upgrade {
 }
 
 /// Cursed cards: a boon and a bane in one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Curse {
     /// +30% speed; enemies notice you from 40% further.
     GlassCannon,
@@ -515,6 +515,10 @@ pub struct RunUpgrades {
     pub anchors_used: u32,
     /// Rerolls spent this run.
     pub rerolls_used: u32,
+    /// Ascension: cards taken away from every pick.
+    pub penalty_cards: usize,
+    /// Ascension: no free reroll.
+    pub no_free_reroll: bool,
 }
 
 /// Free rerolls per run.
@@ -577,12 +581,18 @@ impl RunUpgrades {
     }
 
     pub fn rerolls_left(&self) -> u32 {
+        if self.no_free_reroll {
+            return 0;
+        }
         REROLLS_PER_RUN.saturating_sub(self.rerolls_used)
     }
 
     /// Cards offered at each pick.
     pub fn choice_count(&self) -> usize {
-        (3 + self.n(Upgrade::WideChoice) - self.cursed(Curse::Greed) as i32).max(1) as usize
+        (3 + self.n(Upgrade::WideChoice)
+            - self.cursed(Curse::Greed) as i32
+            - self.penalty_cards as i32)
+            .max(2) as usize
     }
 
     pub fn speed(&self) -> f32 {

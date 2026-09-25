@@ -23,6 +23,7 @@ pub enum Mode {
     /// On waking, before the pack.
     Summary,
     Settings,
+    Codex,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -102,8 +103,6 @@ pub struct HudView {
     pub timer: Option<f32>,
     /// Hard runs: current difficulty multiplier.
     pub difficulty: Option<f32>,
-    /// Title screen: "short" / "long".
-    pub run_length: &'static str,
     pub choice: crate::upgrade_ui::ChoiceView,
     pub summary: crate::summary_ui::SummaryView,
     /// Nightmares: sigils gathered, or the portal is open.
@@ -111,6 +110,9 @@ pub struct HudView {
     /// First-time hints for this dream's specials (under the title card).
     pub hint: String,
     pub settings: crate::settings_ui::SettingsView,
+    pub codex: crate::codex_ui::CodexView,
+    /// Title menu: (key, label, note shown when selected).
+    pub menu: Vec<(String, String, String)>,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -322,6 +324,7 @@ pub fn draw(
         Mode::Choice => return crate::upgrade_ui::draw(&p, screen, v, &v.choice),
         Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
+        Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);
