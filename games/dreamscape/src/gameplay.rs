@@ -11,7 +11,7 @@ pub const PLAYER_RADIUS: f32 = 0.5;
 pub const MOVE_SPEED: f32 = 6.0;
 pub const JUMP_SPEED: f32 = 6.0;
 pub const KILL_Y: f32 = -10.0;
-pub const ENEMY_TOUCH_RADIUS: f32 = 1.0;
+pub const ENEMY_TOUCH_RADIUS: f32 = 0.85;
 /// Behind (-Z) and well above the player, so 3-unit maze walls don't hide them.
 pub const CAMERA_OFFSET: Vec3 = Vec3::new(0.0, 12.0, -6.0);
 pub const CAMERA_LERP_PER_SEC: f32 = 5.0;
@@ -127,7 +127,7 @@ pub fn next_run_seed(seed: u64) -> u64 {
 
 /// Enemies speed up the deeper you go (capped well below MOVE_SPEED).
 pub fn enemy_speed(depth: u32) -> f32 {
-    (3.0 + 0.15 * depth.min(1000) as f32).min(4.4)
+    (2.6 + 0.12 * depth.min(1000) as f32).min(3.8)
 }
 
 /// How close you can get before an enemy notices you. Shallow dreams
@@ -136,12 +136,12 @@ pub fn chase_radius(depth: u32) -> f32 {
     if depth < 2 {
         0.0
     } else {
-        (3.0 + 0.25 * depth.min(1000) as f32).min(6.0)
+        (2.5 + 0.2 * depth.min(1000) as f32).min(4.5)
     }
 }
 
 /// How far from its patrol an enemy will follow you.
-pub const CHASE_LEASH: f32 = 2.0 * CELL;
+pub const CHASE_LEASH: f32 = 1.5 * CELL;
 
 #[cfg(test)]
 mod tests {

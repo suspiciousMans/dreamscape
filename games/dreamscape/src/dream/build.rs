@@ -246,7 +246,7 @@ pub fn generate(
         route: waypoints(&path),
         lucid_route: waypoints(&lucid_path),
         shard: shard_cell.map(|c| grid.world(c)),
-        patrols: patrols(grid, &path, &spec, depth, &mut rng),
+        patrols: patrols(grid, &path, &on_path, &spec, depth, &mut rng),
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
         strangeness: spec.strangeness,
@@ -412,11 +412,20 @@ fn decor(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) 
     }
 }
 
-/// Enemies patrol ON the route (so you have to dodge them), never within the
-/// first 3 route cells. Count grows by one every 2 dreams deep.
+/// Minimum route cells between two enemies' posts.
+pub const MIN_ENEMY_GAP: usize = 4;
+
+/// Each enemy guards one route cell by pacing between it and a side pocket
+/// next to it (a floor cell that is NOT on the route). So the corridor is
+/// open half of every patrol cycle: you time your dash, you never need luck.
+/// Posts are at least `MIN_ENEMY_GAP` route cells apart and never within the
+/// first 3 cells. If the route has no side pockets there are simply fewer
+/// enemies — being walled in is worse than an easy dream.
 fn patrols(
     grid: &Grid,
     path: &[(P, bool)],
+    // Every cell a player needs: the direct route AND the shard detour.
+    needed: &HashSet<P>,
     spec: &ThemeSpec,
     depth: u32,
     rng: &mut StdRng,
@@ -426,20 +435,48 @@ fn patrols(
     }
     let count = (rng.gen_range(spec.enemies.0..=spec.enemies.1) + depth / 2).min(spec.enemies.1 + 4)
         as usize;
-    let mut candidates: Vec<P> = path[3..path.len() - 1]
+    let on_route = needed;
+    // A walkable, off-route neighbour of each candidate post. The pocket must
+    // also stay clear of every OTHER route cell (so a corner pocket can't
+    // brush the corridor on its far side).
+    let mut candidates: Vec<(usize, P, P)> = path[3..path.len() - 1]
         .iter()
-        .filter(|(_, jump)| !jump)
-        .map(|&(p, _)| p)
+        .enumerate()
+        .filter(|(_, (_, jump))| !jump)
+        .filter_map(|(k, &(post, _))| {
+            let mut pockets: Vec<P> = grid
+                .moves(post)
+                .into_iter()
+                .filter(|&(c, jump)| !jump && !on_route.contains(&c))
+                .map(|(c, _)| c)
+                .filter(|&c| {
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(dx, dy)| {
+                        let n = (c.0 + dx, c.1 + dy);
+                        n == post || !on_route.contains(&n)
+                    })
+                })
+                .collect();
+            pockets.shuffle(rng);
+            pockets.first().map(|&pocket| (k + 3, post, pocket))
+        })
         .collect();
     candidates.shuffle(rng);
-    candidates
-        .into_iter()
-        .take(count)
-        .filter_map(|a| {
-            let (b, _) = grid.moves(a).into_iter().find(|&(_, jump)| !jump)?;
-            Some((grid.world(a) + Vec3::Y * 0.5, grid.world(b) + Vec3::Y * 0.5))
-        })
-        .collect()
+    let mut taken: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    for (idx, post, pocket) in candidates {
+        if out.len() >= count {
+            break;
+        }
+        if taken.iter().any(|&t| t.abs_diff(idx) < MIN_ENEMY_GAP) {
+            continue;
+        }
+        taken.push(idx);
+        out.push((
+            grid.world(post) + Vec3::Y * 0.5,
+            grid.world(pocket) + Vec3::Y * 0.5,
+        ));
+    }
+    out
 }
 
 fn jitter3(c: [f32; 3], rng: &mut StdRng) -> [f32; 3] {
@@ -602,6 +639,190 @@ mod tests {
                 assert!(i >= 3, "enemy only {i} steps from spawn");
             }
         }
+    }
+
+    /// Route cells within `r` world units of any point on a patrol segment.
+    fn cells_blocked_by(d: &Dream, a: Vec3, b: Vec3, r: f32) -> Vec<usize> {
+        let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+        let (a, b) = (flat(a), flat(b));
+        d.route
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| {
+                let p = flat(w.pos);
+                let ab = b - a;
+                let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                (a + ab * t).distance(p) < r
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn every_enemy_leaves_the_route_open_half_the_time() {
+        // Each patrol has exactly one end ON the route and the other in a
+        // side pocket off it, so the corridor is clear while it's away.
+        for theme in ALL_THEMES {
+            for seed in 0..60 {
+                for depth in [0, 4, 10] {
+                    let d = generate(theme, seed, depth, None, true);
+                    for &(a, b) in &d.patrols {
+                        let on = |p: Vec3| {
+                            d.route
+                                .iter()
+                                .any(|w| (w.pos + Vec3::Y * 0.5).distance(p) < 1e-3)
+                        };
+                        let on_lucid = |p: Vec3| {
+                            d.lucid_route
+                                .iter()
+                                .any(|w| (w.pos + Vec3::Y * 0.5).distance(p) < 1e-3)
+                        };
+                        assert!(
+                            on(a) && !on(b) && !on_lucid(b),
+                            "{theme:?}/{seed}/d{depth}: patrol {a} -> {b} doesn't step off the route"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enemies_are_spread_along_the_route() {
+        for theme in ALL_THEMES {
+            for seed in 0..60 {
+                let d = generate(theme, seed, 10, None, true);
+                let mut idx: Vec<usize> = d
+                    .patrols
+                    .iter()
+                    .map(|(a, _)| {
+                        d.route
+                            .iter()
+                            .position(|w| (w.pos + Vec3::Y * 0.5).distance(*a) < 1e-3)
+                            .expect("patrols start on the route")
+                    })
+                    .collect();
+                idx.sort();
+                for w in idx.windows(2) {
+                    assert!(
+                        w[1] - w[0] >= MIN_ENEMY_GAP,
+                        "{theme:?}/{seed}: enemies {} and {} are too close",
+                        w[0],
+                        w[1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_patrol_never_covers_more_than_one_route_cell() {
+        // Touch radius + half a cell: the widest an enemy can reach.
+        let reach = crate::gameplay::ENEMY_TOUCH_RADIUS + 0.5;
+        for theme in ALL_THEMES {
+            for seed in 0..60 {
+                let d = generate(theme, seed, 10, None, true);
+                for &(a, b) in &d.patrols {
+                    let hit = cells_blocked_by(&d, a, b, reach);
+                    assert!(
+                        hit.len() <= 1,
+                        "{theme:?}/{seed}: patrol {a}->{b} covers route cells {hit:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A patient player (no dodging, no chase) walks the whole route: before
+    /// stepping onto an enemy's post they wait until it is heading back into
+    /// its pocket, then walk straight through. Must never be touched and never
+    /// wait forever — i.e. no dream can wall you in.
+    fn patient_walk(d: &Dream, route: &[Waypoint]) -> Result<f32, String> {
+        use crate::enemy_ai::EnemyAI;
+        use crate::gameplay::{enemy_speed, ENEMY_TOUCH_RADIUS, MOVE_SPEED};
+        let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+        let dt = 1.0 / 60.0;
+        let mut enemies: Vec<(EnemyAI, Vec3, Vec3)> = d
+            .patrols
+            .iter()
+            .map(|&(a, b)| (EnemyAI::new(a, b, enemy_speed(d.depth), 0.0, 0.0), a, a))
+            .collect();
+        let mut pos = flat(route[0].pos);
+        let mut i = 1;
+        let mut t = 0.0;
+        let mut committed = false;
+        while i < route.len() {
+            t += dt;
+            if t > 240.0 {
+                return Err(format!("stuck before waypoint {i}/{}", route.len()));
+            }
+            for (ai, p, prev) in enemies.iter_mut() {
+                *prev = *p;
+                ai.update(p, pos, dt);
+            }
+            let target = flat(route[i].pos);
+            if !committed {
+                // About to leave a cell: is the next one some enemy's post?
+                let safe = enemies.iter().all(|(_, p, prev)| {
+                    let post = flat(route[i].pos);
+                    let guards = d
+                        .patrols
+                        .iter()
+                        .any(|&(a, _)| flat(a).distance(post) < 1e-3);
+                    if !guards {
+                        return true;
+                    }
+                    let (now, before) = (flat(*p).distance(post), flat(*prev).distance(post));
+                    now > 3.0 || (now >= 1.2 && now > before) || flat(*p).distance(post) > 4.0
+                });
+                if !safe {
+                    continue;
+                }
+                committed = true;
+            }
+            let to = target - pos;
+            let step = MOVE_SPEED * dt;
+            if to.length() <= step {
+                pos = target;
+                i += 1;
+                // Stay committed through a post; re-check before the next one.
+                committed = d
+                    .patrols
+                    .iter()
+                    .any(|&(a, _)| flat(a).distance(target) < 1e-3);
+            } else {
+                pos += to.normalize() * step;
+            }
+            for (_, p, _) in &enemies {
+                if flat(*p).distance(pos) < ENEMY_TOUCH_RADIUS {
+                    return Err(format!("touched near waypoint {i} at t={t:.1}"));
+                }
+            }
+        }
+        Ok(t)
+    }
+
+    #[test]
+    fn a_patient_player_is_never_walled_in() {
+        let mut fails = Vec::new();
+        for theme in ALL_THEMES {
+            for seed in 0..40 {
+                for depth in [0, 5, 12] {
+                    let d = generate(theme, seed, depth, None, true);
+                    for (name, r) in [("route", &d.route), ("lucid", &d.lucid_route)] {
+                        if let Err(e) = patient_walk(&d, r) {
+                            fails.push(format!("{theme:?}/{seed}/d{depth} {name}: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fails.is_empty(),
+            "{} fails:\n{}",
+            fails.len(),
+            fails.join("\n")
+        );
     }
 
     #[test]
