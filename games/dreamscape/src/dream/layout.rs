@@ -25,6 +25,8 @@ pub fn generate(kind: LayoutKind, size: (i32, i32), rng: &mut StdRng) -> Layout 
             LayoutKind::Maze => maze(side, rng),
             LayoutKind::PlatformChain => platform_chain(side, rng),
             LayoutKind::ScatterField => scatter_field(side, rng),
+            LayoutKind::Spiral => spiral(side, rng),
+            LayoutKind::Mirrored => mirrored(side, rng),
         };
         if layout
             .grid
@@ -190,16 +192,118 @@ fn scatter_field(side: i32, rng: &mut StdRng) -> Layout {
     }
 }
 
+/// A square spiral of walkways over the void, winding in from the corner
+/// to the portal in the middle. Arms are two void cells apart (too far to
+/// jump, so you really do walk the spiral), and a few steps along the arms
+/// are missing and must be jumped.
+fn spiral(side: i32, rng: &mut StdRng) -> Layout {
+    let mut g = Grid::new(side, side, Cell::Void);
+    let (mut x0, mut y0, mut x1, mut y1) = (1, 1, side - 2, side - 2);
+    let spawn = (1, 1);
+    let mut p = spawn;
+    let mut arms: Vec<Vec<P>> = Vec::new();
+    loop {
+        let arm: Vec<P> = (p.0..=x1).map(|x| (x, y0)).collect();
+        p = (x1, y0);
+        arms.push(arm);
+        y0 += 3;
+        if y0 > y1 {
+            break;
+        }
+        let arm: Vec<P> = (p.1..=y1).map(|y| (x1, y)).collect();
+        p = (x1, y1);
+        arms.push(arm);
+        x1 -= 3;
+        if x1 < x0 {
+            break;
+        }
+        let arm: Vec<P> = (x0..=p.0).rev().map(|x| (x, y1)).collect();
+        p = (x0, y1);
+        arms.push(arm);
+        y1 -= 3;
+        if y1 < y0 {
+            break;
+        }
+        let arm: Vec<P> = (y0..=p.1).rev().map(|y| (x0, y)).collect();
+        p = (x0, y0);
+        arms.push(arm);
+        x0 += 3;
+        if x0 > x1 {
+            break;
+        }
+    }
+    for arm in &arms {
+        for &c in arm {
+            g.set(c, Cell::Floor);
+        }
+    }
+    // Missing steps: never at an arm's ends (corners stay solid), never two
+    // in a row, never next to spawn or the portal.
+    for arm in &arms {
+        let mut last_gap = 0;
+        let inner = arm.len().saturating_sub(2);
+        for (k, &c) in arm.iter().enumerate().take(inner).skip(2) {
+            if k > last_gap + 2 && c != spawn && c != p && rng.gen_bool(0.14) {
+                g.set(c, Cell::Void);
+                last_gap = k;
+            }
+        }
+    }
+    Layout {
+        grid: g,
+        spawn,
+        portal: p,
+        fallback: false,
+    }
+}
+
+/// A hall of mirrors: walls on the left half are reflected onto the right.
+/// Crossing walls every few rows only open on the sides (never the middle),
+/// so the route zig-zags between reflections.
+fn mirrored(side: i32, rng: &mut StdRng) -> Layout {
+    let side = side | 1; // an odd side has a true middle column
+    let mut g = bordered(side);
+    let mid = side / 2;
+    let mirror = |x: i32| side - 1 - x;
+    for y in (3..side - 2).step_by(3) {
+        for x in 1..side - 1 {
+            g.set((x, y), Cell::Wall);
+        }
+        let door = rng.gen_range(1..mid);
+        g.set((door, y), Cell::Floor);
+        g.set((mirror(door), y), Cell::Floor);
+    }
+    // Reflected pillars between the crossing walls.
+    for _ in 0..side / 2 {
+        let (x, y) = (rng.gen_range(2..mid), rng.gen_range(2..side - 2));
+        if y % 3 != 0 && g.get((x, y - 1)) != Cell::Wall && g.get((x, y + 1)) != Cell::Wall {
+            g.set((x, y), Cell::Wall);
+            g.set((mirror(x), y), Cell::Wall);
+        }
+    }
+    let (spawn, portal) = ((mid, 1), (mid, side - 2));
+    g.set(spawn, Cell::Floor);
+    g.set(portal, Cell::Floor);
+    Layout {
+        grid: g,
+        spawn,
+        portal,
+        fallback: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::SeedableRng;
 
-    const KINDS: [LayoutKind; 4] = [
+    const KINDS: [LayoutKind; 6] = [
         LayoutKind::OpenHall,
         LayoutKind::Maze,
         LayoutKind::PlatformChain,
         LayoutKind::ScatterField,
+        LayoutKind::Spiral,
+        LayoutKind::Mirrored,
     ];
 
     fn gen(kind: LayoutKind, seed: u64) -> Layout {
@@ -233,6 +337,40 @@ mod tests {
                 "{kind:?} fell back {n}/300 times — the algorithm needs fixing, not the test"
             );
         }
+    }
+
+    #[test]
+    fn mirror_halls_are_symmetric() {
+        for seed in 0..50 {
+            let g = gen(LayoutKind::Mirrored, seed).grid;
+            for y in 0..g.h {
+                for x in 0..g.w {
+                    assert_eq!(g.get((x, y)), g.get((g.w - 1 - x, y)), "seed {seed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spirals_end_in_the_middle_and_have_gaps_to_jump() {
+        let mut jumps = 0;
+        for seed in 0..50 {
+            let l = gen(LayoutKind::Spiral, seed);
+            let c = (l.grid.w / 2, l.grid.h / 2);
+            assert!(
+                (l.portal.0 - c.0).abs() <= 3 && (l.portal.1 - c.1).abs() <= 3,
+                "seed {seed}: portal {:?} not near the middle {c:?}",
+                l.portal
+            );
+            jumps += l
+                .grid
+                .path(l.spawn, l.portal)
+                .unwrap()
+                .iter()
+                .filter(|s| s.1)
+                .count();
+        }
+        assert!(jumps > 20, "spirals barely need jumping ({jumps})");
     }
 
     #[test]
