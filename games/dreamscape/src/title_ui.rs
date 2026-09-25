@@ -33,7 +33,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     for k in 0..140u32 {
         let h1 = crate::hud::hash01(k, 1);
         let h2 = crate::hud::hash01(k, 2);
-        let pulse = 0.5 + 0.5 * (v.time * (0.5 + h1) + h2 * 6.28).sin();
+        let pulse = 0.5 + 0.5 * (v.time * (0.5 + h1) + h2 * std::f32::consts::TAU).sin();
         let at = Pos2::new(
             screen.left() + h1 * screen.width(),
             screen.top() + h2 * screen.height(),

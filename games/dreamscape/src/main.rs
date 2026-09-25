@@ -2236,7 +2236,48 @@ impl Game for DreamscapeGame {
             });
             ui.paint(drawable_size, output);
         }
+        self.maybe_screenshot(ctx);
         Ok(())
+    }
+}
+
+impl DreamscapeGame {
+    /// DREAMSCAPE_SHOT=out.png: after DREAMSCAPE_SHOT_AT seconds (default 6)
+    /// of the run, save the frame and quit. Used by tools/screenshots.sh.
+    fn maybe_screenshot(&mut self, ctx: &mut Context) {
+        let Ok(path) = std::env::var("DREAMSCAPE_SHOT") else {
+            return;
+        };
+        let at: f32 = std::env::var("DREAMSCAPE_SHOT_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6.0);
+        if self.time < at || ctx.should_quit {
+            return;
+        }
+        let (w, h) = ctx.drawable_size();
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            let gl = ctx.gl();
+            gl.bind_framebuffer(engine::glow::READ_FRAMEBUFFER, None);
+            gl.read_pixels(
+                0,
+                0,
+                w as i32,
+                h as i32,
+                engine::glow::RGBA,
+                engine::glow::UNSIGNED_BYTE,
+                engine::glow::PixelPackData::Slice(&mut rgba),
+            );
+        }
+        // GL rows run bottom-up.
+        let row = (w * 4) as usize;
+        let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
+        match image::RgbaImage::from_raw(w, h, flipped).map(|img| img.save(&path)) {
+            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
+            other => log::error!("Screenshot {path} failed: {other:?}"),
+        }
+        ctx.should_quit = true;
     }
 }
 
