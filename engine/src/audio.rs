@@ -68,6 +68,20 @@ impl AudioContext {
         }
     }
 
+    /// Plays raw mono samples (-1..=1) once, at the sfx volume — for sounds
+    /// a game synthesizes itself.
+    pub fn play_samples(&self, samples: &[f32], sample_rate: u32) {
+        if samples.is_empty() || self.sfx_volume <= 0.0 {
+            return;
+        }
+        let buffer = rodio::buffer::SamplesBuffer::new(1, sample_rate, samples.to_vec());
+        if let Ok(sink) = Sink::try_new(&self.handle) {
+            sink.set_volume(self.sfx_volume);
+            sink.append(buffer);
+            sink.detach();
+        }
+    }
+
     /// Plays (and replaces any currently-playing) background music from a
     /// file. Looping buffers the fully-decoded track in memory so it can be
     /// cheaply repeated — fine for typical music-track lengths.

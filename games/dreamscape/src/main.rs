@@ -38,6 +38,7 @@ mod reveal_ui;
 mod settings;
 mod settings_ui;
 mod shop_ui;
+mod sounds;
 mod specials;
 mod store;
 mod summary_ui;
@@ -53,6 +54,7 @@ use dream::{
 };
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
+use sounds::Sound;
 use specials::Elite;
 use upgrades::{Ability, RunUpgrades, Upgrade};
 
@@ -259,6 +261,10 @@ pub struct DreamscapeGame {
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
     dream_hint: String,
+    /// Every sound effect, synthesized at start-up.
+    sounds: HashMap<Sound, Vec<f32>>,
+    /// Booklet [p]: save this page's cards as images after the next frame.
+    export_requested: bool,
     settings: settings::Settings,
     settings_path: std::path::PathBuf,
     settings_sel: usize,
@@ -391,6 +397,11 @@ impl DreamscapeGame {
             shifters: Vec::new(),
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
+            export_requested: false,
+            sounds: sounds::ALL_SOUNDS
+                .iter()
+                .map(|&s| (s, sounds::synth(s)))
+                .collect(),
             settings: settings::load(&settings::settings_path()),
             settings_path: settings::settings_path(),
             settings_sel: 0,
@@ -583,7 +594,7 @@ impl DreamscapeGame {
         }
         self.run.rerolls_used += 1;
         log::info!("Rerolled the pick");
-        self.tone(330.0, 0.15);
+        self.sfx(Sound::Reroll);
         self.open_upgrade_choice();
     }
 
@@ -665,12 +676,12 @@ impl DreamscapeGame {
                 log::info!("Upgrade taken: {u:?} (run: {:?})", self.run.taken);
                 self.flash
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
-                self.tone(523.0, 0.25);
+                self.sfx(Sound::Pick);
             }
             ChoiceKind::WakeDoor if index == 0 => {
                 log::info!("Wake door taken at depth {}", self.director.depth);
                 self.flash.trigger([1.0, 1.0, 1.0], 1.0);
-                self.tone(660.0, 0.6);
+                self.sfx(Sound::WakeDoor);
                 self.begin_melt(transition::Pending::Wake);
             }
             ChoiceKind::WakeDoor => {
@@ -683,7 +694,7 @@ impl DreamscapeGame {
                 );
                 self.despawn_shard_slot();
                 self.flash.trigger([1.0, 0.2, 0.4], 0.8);
-                self.tone(98.0, 0.8);
+                self.sfx(Sound::Deeper);
                 self.begin_melt(transition::Pending::Descend);
             }
         }
@@ -1306,7 +1317,7 @@ impl DreamscapeGame {
         for at in calls {
             log::info!("A sentry saw you");
             self.flash.trigger([1.0, 0.9, 0.4], 0.35);
-            self.tone(1200.0, 0.12);
+            self.sfx(Sound::SentrySaw);
             for p in &mut self.enemies {
                 let near = self
                     .world
@@ -1325,7 +1336,7 @@ impl DreamscapeGame {
                         let d = t.position - player;
                         if Vec3::new(d.x, 0.0, d.z).length() < gameplay::ENEMY_TOUCH_RADIUS {
                             t.position = s.lair;
-                            self.tone(300.0, 0.1);
+                            self.sfx(Sound::StalkerShatter);
                         }
                     }
                 }
@@ -1371,7 +1382,7 @@ impl DreamscapeGame {
             }
             self.player_position = at;
             self.flash.trigger([1.0, 0.5, 1.0], 0.4);
-            self.tone(520.0, 0.15);
+            self.sfx(Sound::JesterThrow);
             log::info!("A jester threw you");
         }
     }
@@ -1388,12 +1399,14 @@ impl DreamscapeGame {
                 && (player.z - b.pos.z).abs() < b.size.z * 0.5
         };
         let mut respawn = Vec::new();
+        let mut fell = false;
         for (i, tile) in self.crumbles.iter_mut().enumerate() {
             tile.state = match tile.state {
                 Crumble::Solid if grounded && over(&tile.block) => Crumble::Shaking(CRUMBLE_SHAKE),
                 Crumble::Shaking(t) if t - dt <= 0.0 => {
                     if let Some(e) = tile.entity.take() {
                         let _ = self.world.despawn(e);
+                        fell = true;
                     }
                     Crumble::Gone(CRUMBLE_GONE)
                 }
@@ -1414,6 +1427,9 @@ impl DreamscapeGame {
                 Crumble::Gone(t) => Crumble::Gone((t - dt).max(0.0)),
                 s => s,
             };
+        }
+        if fell {
+            self.sfx(Sound::Crumble);
         }
         for i in respawn {
             let (block, texture) = (
@@ -1496,7 +1512,7 @@ impl DreamscapeGame {
         ));
         log::info!("The nightmare's portal opens");
         self.flash.trigger([0.3, 1.0, 1.0], 0.8);
-        self.tone(990.0, 0.5);
+        self.sfx(Sound::PortalOpen);
         Ok(())
     }
 
@@ -1508,7 +1524,7 @@ impl DreamscapeGame {
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
         if state.cooldown > 0.0 {
-            self.tone(140.0, 0.05);
+            self.sfx(Sound::Denied);
             return;
         }
         if state.ability == Ability::Blink {
@@ -1521,7 +1537,7 @@ impl DreamscapeGame {
                 )
             }) else {
                 // Nowhere safe to land: don't spend the charge.
-                self.tone(140.0, 0.05);
+                self.sfx(Sound::Denied);
                 return;
             };
             if let Some(p) = self.player {
@@ -1555,7 +1571,13 @@ impl DreamscapeGame {
                 Ability::ShardCall => [0.3, 1.0, 1.0],
             };
             self.flash.trigger(color, 0.3);
-            self.tone(880.0, 0.1);
+            self.sfx(match state.ability {
+                Ability::Dash => Sound::Dash,
+                Ability::Blink => Sound::Blink,
+                Ability::Stillness => Sound::Stillness,
+                Ability::Phase => Sound::Phase,
+                Ability::ShardCall => Sound::ShardCall,
+            });
         }
     }
 
@@ -1651,7 +1673,7 @@ impl DreamscapeGame {
                 settings::adjust(&mut self.settings, row, dir);
                 self.apply_settings(ctx);
                 self.save_settings();
-                self.tone(440.0 + 220.0 * self.settings.sfx, 0.05);
+                self.sfx(Sound::Menu);
             }
             Keycode::Return | Keycode::Space => match row {
                 settings::Row::Key(_) => self.settings_capture = true,
@@ -2102,7 +2124,10 @@ impl DreamscapeGame {
             self.pack.age = f32::MAX;
             self.save_journal();
             match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
-                Ok("booklet") => self.open_booklet(),
+                Ok("booklet") => {
+                    self.open_booklet();
+                    self.export_requested = std::env::var("DREAMSCAPE_CARDS").is_ok();
+                }
                 Ok("store") => {
                     self.open_store();
                     self.shop_shelf = 2;
@@ -2203,7 +2228,7 @@ impl DreamscapeGame {
         };
         if self.transition.start(pending, fog) {
             log::info!("Melt: {pending:?} begins at depth {}", self.director.depth);
-            self.tone(196.0, 0.9);
+            self.sfx(Sound::MeltStart);
             self.input = PlayerInputState::default();
         }
     }
@@ -2232,9 +2257,10 @@ impl DreamscapeGame {
         }
     }
 
-    fn tone(&self, hz: f32, secs: f32) {
-        if let Some(audio) = &self.audio {
-            audio.play_tone(hz, secs);
+    /// A synthesized sound effect (built once, at start-up).
+    fn sfx(&self, sound: Sound) {
+        if let (Some(audio), Some(samples)) = (&self.audio, self.sounds.get(&sound)) {
+            audio.play_samples(samples, sounds::RATE);
         }
     }
 
@@ -3023,6 +3049,10 @@ impl Game for DreamscapeGame {
                     self.mode = self.booklet_return;
                     return;
                 }
+                (hud::Mode::Booklet, Keycode::P) => {
+                    self.export_requested = true;
+                    return;
+                }
                 (hud::Mode::Booklet, Keycode::A | Keycode::Left) => {
                     self.booklet_page = self.booklet_page.saturating_sub(1);
                     return;
@@ -3290,10 +3320,13 @@ impl Game for DreamscapeGame {
             }
             if wants_jump && body.grounded {
                 body.velocity.y = jump_speed;
+                if jump_pressed {
+                    self.sfx(Sound::Jump);
+                }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
                 body.velocity.y = jump_speed;
-                self.tone(740.0, 0.08);
+                self.sfx(Sound::AirJump);
             }
         }
 
@@ -3351,6 +3384,7 @@ impl Game for DreamscapeGame {
                 Spin(-0.9),
             ));
             log::info!("A splitter split");
+            self.sfx(Sound::Split);
             self.enemies.push(Pacer {
                 entity,
                 ai: EnemyAI::new(a, b, speed, 0.0, gameplay::CHASE_LEASH),
@@ -3391,7 +3425,7 @@ impl Game for DreamscapeGame {
         let caught = !self.autopilot && self.grace <= 0.0 && !untouchable && self.touching_threat();
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
-            self.tone(110.0, 0.35);
+            self.sfx(Sound::Caught);
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
                 && self.director.shard_this_dream;
@@ -3407,6 +3441,7 @@ impl Game for DreamscapeGame {
             }
             let forgiven = forgiven || anchored;
             if !forgiven && self.director.caught() {
+                self.sfx(Sound::ShardLost);
                 self.shards_this_run = self.shards_this_run.saturating_sub(1);
                 if let Some(r) = self.run_log.last_mut() {
                     r.shard_taken = false;
@@ -3467,7 +3502,7 @@ impl Game for DreamscapeGame {
             if self.world.get::<&ShardMarker>(e).is_ok() {
                 self.despawn_shard_slot();
                 self.flash.trigger([0.3, 1.0, 1.0], 0.6);
-                self.tone(880.0, 0.2);
+                self.sfx(Sound::Shard);
                 self.director.collect_shard();
                 self.shards_this_run += 1;
                 if let Some(r) = self.run_log.last_mut() {
@@ -3492,10 +3527,7 @@ impl Game for DreamscapeGame {
             let _ = self.world.despawn(e);
             self.sigils_left = self.sigils_left.saturating_sub(1);
             self.flash.trigger([1.0, 0.4, 1.0], 0.5);
-            self.tone(
-                660.0 + 110.0 * (dream::SIGILS - self.sigils_left) as f32,
-                0.2,
-            );
+            self.sfx(Sound::Sigil);
             log::info!("Sigil taken ({} left)", self.sigils_left);
             if self.sigils_left == 0 {
                 self.open_portal()?;
@@ -3875,6 +3907,9 @@ impl Game for DreamscapeGame {
             });
             ui.paint(drawable_size, output);
         }
+        if std::mem::take(&mut self.export_requested) && self.mode == hud::Mode::Booklet {
+            self.export_cards(ctx);
+        }
         self.maybe_screenshot(ctx);
         Ok(())
     }
@@ -3894,6 +3929,69 @@ impl DreamscapeGame {
         if self.time < at || ctx.should_quit {
             return;
         }
+        match Self::read_frame(ctx).map(|img| img.save(&path)) {
+            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
+            other => log::error!("Screenshot {path} failed: {other:?}"),
+        }
+        ctx.should_quit = true;
+    }
+
+    /// Booklet [p]: each card on the page, cropped out of the frame, as a PNG.
+    fn export_cards(&mut self, ctx: &mut Context) {
+        let Some(frame) = Self::read_frame(ctx) else {
+            return;
+        };
+        let dir = std::env::var_os("DREAMSCAPE_CARDS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("games/dreamscape/cards"));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            log::error!("could not create {dir:?}: {e}");
+            return;
+        }
+        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        let page = &all[cards::page_range(all.len(), self.booklet_page)];
+        let screen = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(frame.width() as f32, frame.height() as f32),
+        );
+        let mut saved = 0;
+        for (card, r) in page.iter().zip(booklet_ui::card_rects(screen, page.len())) {
+            let x = r.left().max(0.0) as u32;
+            let y = r.top().max(0.0) as u32;
+            let w = (r.width() as u32).min(frame.width().saturating_sub(x));
+            let h = (r.height() as u32).min(frame.height().saturating_sub(y));
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let crop = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
+            let slug: String = card
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let path = dir.join(format!("card_{:03}_{slug}.png", card.number));
+            match crop.save(&path) {
+                Ok(()) => {
+                    saved += 1;
+                    log::info!("Card saved to {path:?}");
+                }
+                Err(e) => log::error!("could not save {path:?}: {e}"),
+            }
+        }
+        if saved > 0 {
+            self.flash.trigger([1.0, 1.0, 0.8], 0.4);
+            self.sfx(Sound::Pick);
+        }
+    }
+
+    /// The finished frame, top row first.
+    fn read_frame(ctx: &mut Context) -> Option<image::RgbaImage> {
         let (w, h) = ctx.drawable_size();
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         unsafe {
@@ -3912,11 +4010,7 @@ impl DreamscapeGame {
         // GL rows run bottom-up.
         let row = (w * 4) as usize;
         let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
-        match image::RgbaImage::from_raw(w, h, flipped).map(|img| img.save(&path)) {
-            Some(Ok(())) => log::info!("Screenshot saved to {path}"),
-            other => log::error!("Screenshot {path} failed: {other:?}"),
-        }
-        ctx.should_quit = true;
+        image::RgbaImage::from_raw(w, h, flipped)
     }
 }
 

@@ -6,7 +6,7 @@ A PS2-style dream-escape roguelike built on the Jame engine (Rust). You fall asl
 
 ```bash
 cargo run -p dreamscape          # from the repo root
-cargo test -p dreamscape         # 208 tests
+cargo test -p dreamscape         # 228 tests
 ```
 
 ## Controls
@@ -18,6 +18,12 @@ cargo test -p dreamscape         # 208 tests
 | Shift / E | use ability slot 1 / 2 |
 | 1 / 2 / 3 or A/D + Enter | pick an upgrade (or WAKE / GO DEEPER at the wake door) |
 | R / X (on a pick) | reroll the cards (once a run) / skip for dust |
+| C / T / X / O (title) | continue a saved run / today's dream / codex / settings |
+| A / D (title, on ascension) | pick an ascension level |
+| P (booklet) | save the cards on this page as PNG images (`games/dreamscape/cards/`) |
+| controller | left stick moves, A jumps, shoulders / X / Y use abilities, Start pauses, d-pad drives menus |
+
+Every movement and ability key can be rebound in **settings**, which also has music and sound volume, grain and vignette strength, reduced motion and fullscreen.
 | R | title screen: toggle run length (short / long) |
 | Esc | pause (Q to quit from pause) |
 | L / B | Lucid Store / dream booklet (title screen, pause, after waking) |
@@ -26,7 +32,13 @@ cargo test -p dreamscape         # 208 tests
 
 ## What's in it
 
-- **Fully procedural dreams.** There are no hand-built levels. Ten dream types (lobby, liminal office, void platforms, garden, nightmare factory, cursed forest, drowned library, sky stairs, mirror hall, awakening) each have their own layout rules (halls, mazes, platform chains, fields, spirals over the void, mirrored halls), props, palette and music. Levels grow with depth.
+- **Fully procedural dreams.** There are no hand-built levels. Fourteen dream types each have their own layout rules, props, palette, music and "mood" (breathing walls, glow, beat pulse, motion trails). Levels grow with depth. Four are built from things people describe in psychedelic trip reports:
+  - **Mycelium Grove**: clearings over the void joined by root bridges; glowing veins lead to the shard, and you run faster on them.
+  - **The Tunnel**: one long corridor toward a white light; gates across it open and close in a travelling wave.
+  - **Fractal Cathedral**: square rooms nested inside each other, a door on a different side of each.
+  - **Elfworks**: a jewelled toy workshop full of jesters, where floor tiles sink and rise.
+- **Meta-progression.** Quitting saves your run (continue it from the title). **Today's dream** is the same seed for everyone that day, with its own best. Beating a long run unlocks the next of ten **ascension** levels, each adding one more rule. The **codex** records every dream type and strange thing you've met.
+- **Synthesized sound.** Every sound effect is generated in code (no audio files), one per action, enemy and event.
 - **A roguelike run.** Every dream you get through offers three random upgrades for the rest of the run: faster feet, higher jumps, wider sight, slower enemies, shard sense, dream anchors, more dust, and more. Rarer cards teach an ability: DASH, BLINK, STILLNESS, PHASE or SHARD CALL. You can hold two abilities at once.
 - **Rarity, curses and combos.** Cards come in common, rare and mythic tiers (rarer ones show up more the deeper you go). About one pick in five swaps a card for a cursed one: strong, with a price. Some pairs combine into combos, like DASH + PHASE = GHOST STEP. You get one reroll per run, or you can skip a pick for dust.
 - **Special enemies and hazards.** From depth 3, each dream type brings its own threats on top of the pacers:
@@ -63,6 +75,9 @@ cargo test -p dreamscape         # 208 tests
 | `DREAMSCAPE_RUN=long` | default the title screen to a long run |
 | `DREAMSCAPE_THEME=SkyStairs` | start one dream deep in a given dream type |
 | `DREAMSCAPE_NIGHTMARE=1` | start in a nightmare arena |
+| `DREAMSCAPE_SCREEN=codex` | open the codex (or `settings`) on start |
+| `DREAMSCAPE_CONTINUE=1` | continue the saved run on start (`DREAMSCAPE_SAVE` picks the file) |
+| `DREAMSCAPE_SETTINGS=path` / `DREAMSCAPE_CARDS=dir` | a different settings file / card export folder |
 | `DREAMSCAPE_SPECIAL=Stalker` | put that special enemy (Stalker, Mimic, Sentry, Drifter, Jester) in every dream |
 | `DREAMSCAPE_SHOT=out.png` | save a screenshot after `DREAMSCAPE_SHOT_AT` seconds (default 6), then quit |
 
