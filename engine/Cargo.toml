@@ -18,7 +18,9 @@ anyhow.workspace = true
 log.workspace = true
 egui.workspace = true
 egui_glow.workspace = true
-rodio.workspace = true
-notify.workspace = true
 gltf.workspace = true
 bincode.workspace = true
+
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+rodio.workspace = true
+notify.workspace = true

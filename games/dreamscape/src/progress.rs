@@ -268,7 +268,11 @@ impl SavedRun {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 pub const SAVE_PATH: &str = "games/dreamscape/saved_run.ron";
+/// Browser build: an IndexedDB-backed folder the page mounts and syncs.
+#[cfg(target_os = "emscripten")]
+pub const SAVE_PATH: &str = "/persist/saved_run.ron";
 
 pub fn save_path() -> PathBuf {
     std::env::var_os("DREAMSCAPE_SAVE")

@@ -6,6 +6,7 @@ pub mod behavior;
 pub mod camera;
 pub mod class;
 pub mod ecs;
+#[cfg(not(target_os = "emscripten"))]
 pub mod hotreload;
 pub mod hud;
 pub mod input;

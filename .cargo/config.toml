@@ -5,3 +5,11 @@
 # now-reserved bool/true/false keywords.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 CFLAGS = "-std=gnu11"
+
+[target.wasm32-unknown-emscripten]
+rustflags = [
+  "-C", "link-arg=-sUSE_SDL=2",
+  "-C", "link-arg=-sMAX_WEBGL_VERSION=2",
+  "-C", "link-arg=-sMIN_WEBGL_VERSION=2",
+  "-C", "link-arg=-sALLOW_MEMORY_GROWTH=1",
+]
