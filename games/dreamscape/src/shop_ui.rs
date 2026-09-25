@@ -269,8 +269,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
     // Drifting dust motes in the shop air.
     for k in 0..60u32 {
-        let h1 = (k.wrapping_mul(2_654_435_761)) as f32 / u32::MAX as f32;
-        let h2 = (k.wrapping_mul(40_503).wrapping_add(7)) as f32 / u32::MAX as f32;
+        let h1 = crate::hud::hash01(k, 3);
+        let h2 = crate::hud::hash01(k, 4);
         let x = screen.left() + h1 * screen.width();
         let y = screen.bottom()
             - ((h2 * screen.height() + v.time * (8.0 + 10.0 * h1)) % screen.height());

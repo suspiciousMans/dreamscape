@@ -637,6 +637,18 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
 }
 
+/// A well-mixed 0..1 hash of (k, salt), for scattering particles. (A plain
+/// `k * big` over u32::MAX is tiny for small k — everything bunches at 0.)
+pub(crate) fn hash01(k: u32, salt: u32) -> f32 {
+    let mut x = k.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7FEB_352D);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846C_A68B);
+    x ^= x >> 16;
+    x as f32 / u32::MAX as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +704,18 @@ mod tests {
     fn dream_font_is_a_real_truetype_file() {
         assert!(DREAM_FONT.len() > 50_000);
         assert_eq!(&DREAM_FONT[0..4], &[0, 1, 0, 0], "TrueType magic");
+    }
+
+    #[test]
+    fn hash01_spreads_small_inputs_over_the_whole_range() {
+        for salt in [1, 2, 3] {
+            let v: Vec<f32> = (0..200).map(|k| hash01(k, salt)).collect();
+            assert!(v.iter().all(|x| (0.0..=1.0).contains(x)));
+            for bucket in 0..4 {
+                let lo = bucket as f32 / 4.0;
+                let n = v.iter().filter(|&&x| x >= lo && x < lo + 0.25).count();
+                assert!(n > 25, "salt {salt} bucket {bucket}: {n}/200");
+            }
+        }
     }
 }

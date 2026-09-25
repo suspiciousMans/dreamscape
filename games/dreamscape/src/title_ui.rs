@@ -17,8 +17,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
     // Star field that breathes.
     for k in 0..140u32 {
-        let h1 = (k.wrapping_mul(2_654_435_761)) as f32 / u32::MAX as f32;
-        let h2 = (k.wrapping_mul(97_531).wrapping_add(13)) as f32 / u32::MAX as f32;
+        let h1 = crate::hud::hash01(k, 1);
+        let h2 = crate::hud::hash01(k, 2);
         let pulse = 0.5 + 0.5 * (v.time * (0.5 + h1) + h2 * 6.28).sin();
         let at = Pos2::new(
             screen.left() + h1 * screen.width(),

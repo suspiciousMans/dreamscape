@@ -179,8 +179,8 @@ fn faded(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView) {
     p.rect_stroke(r.shrink(3.0), 0.0, Stroke::new(1.0_f32, rgba(ink(v), 0.15)));
     // Dissolving pixel dust.
     for k in 0..40u32 {
-        let h = (k.wrapping_mul(2_654_435_761) ^ rec.card.seed as u32) as f32 / u32::MAX as f32;
-        let h2 = (k.wrapping_mul(40_503) ^ (rec.card.seed >> 7) as u32) as f32 / u32::MAX as f32;
+        let h = crate::hud::hash01(k, rec.card.seed as u32);
+        let h2 = crate::hud::hash01(k, (rec.card.seed >> 32) as u32 ^ 0xA5A5);
         let drift = (v.time * 8.0 + k as f32 * 3.0) % r.height();
         let at = Pos2::new(
             r.left() + h * r.width(),
