@@ -182,7 +182,7 @@ pub fn memory_chance(r: Rarity, depth: u32, boost: MemoryBoost) -> f32 {
         p += 0.10;
     }
     if boost.deep_memory {
-        p += 0.25;
+        p += crate::store::DEEP_MEMORY_BONUS;
     }
     p.min(1.0)
 }
@@ -196,11 +196,6 @@ pub fn fade_dust(r: Rarity) -> u32 {
         Rarity::Lucid => 12,
         Rarity::Prophetic => 20,
     }
-}
-
-/// Dust for the run itself: depth reached and shards gathered.
-pub fn run_dust(deepest: u32, shards: u32) -> u32 {
-    2 * deepest.min(50) + 5 * shards.min(50)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -255,9 +250,20 @@ impl Booklet {
 
     /// Presses the remembered dreams of a finished run into the booklet and
     /// banks the dust. Returns (cards added, dust earned).
-    pub fn press(&mut self, run_seed: u64, pack: &[Recalled], shards: u32) -> (usize, u32) {
+    pub fn press(
+        &mut self,
+        run_seed: u64,
+        pack: &[Recalled],
+        shards: u32,
+        magnet: bool,
+    ) -> (usize, u32) {
         let deepest = pack.iter().map(|r| r.card.depth).max().unwrap_or(0);
-        let dust = run_dust(deepest, shards)
+        let known: HashSet<&str> = self.cards().map(|c| c.name.as_str()).collect();
+        let new_names = pack
+            .iter()
+            .filter(|r| r.remembered && !known.contains(r.card.name.as_str()))
+            .count() as u32;
+        let dust = crate::store::run_dust(deepest, shards, new_names, magnet)
             + pack
                 .iter()
                 .filter(|r| !r.remembered)
@@ -269,7 +275,7 @@ impl Booklet {
             .map(|r| r.card.clone())
             .collect();
         let added = self.push_cards(run_seed, deepest, cards);
-        self.stash.dust += dust;
+        self.stash.earn(dust);
         (added, dust)
     }
 
@@ -611,9 +617,12 @@ mod tests {
         pack[0].remembered = false;
         pack[1].remembered = true;
         let mut b = Booklet::default();
-        let (added, dust) = b.press(7, &pack, 1);
+        let (added, dust) = b.press(7, &pack, 1, false);
         assert_eq!(added, 2);
-        assert_eq!(dust, run_dust(2, 1) + fade_dust(pack[0].card.rarity));
+        assert_eq!(
+            dust,
+            crate::store::run_dust(2, 1, 2, false) + fade_dust(pack[0].card.rarity)
+        );
         assert_eq!(b.stash.dust, dust);
         assert_eq!(b.cards().map(|c| c.number).collect::<Vec<_>>(), vec![1, 2]);
         assert!(b.has_run(7));

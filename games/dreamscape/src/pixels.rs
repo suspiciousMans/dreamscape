@@ -192,6 +192,77 @@ pub fn arrow_cells(dir: [f32; 2]) -> Vec<(i32, i32)> {
     out
 }
 
+/// 9x9 pixel icons for the shop. '#' = main ink, '+' = accent, '.' = empty.
+#[rustfmt::skip]
+pub mod icons {
+    pub const SIZE: usize = 9;
+
+    pub const SHARD: [&str; SIZE] = [
+        "....#....", "...#+#...", "..#+++#..", ".#+++++#.", "#+++#+++#",
+        ".#+++++#.", "..#+++#..", "...#+#...", "....#....",
+    ];
+    pub const HEART: [&str; SIZE] = [
+        ".........", ".##...##.", "#++#.#++#", "#+++#+++#", "#+++++++#",
+        ".#+++++#.", "..#+++#..", "...#+#...", "....#....",
+    ];
+    pub const BRAIN: [&str; SIZE] = [
+        "..#####..", ".#++#++#.", "#+#+#+#+#", "#++#+#++#", "#+#+++#+#",
+        "#++#+#++#", ".#++#++#.", "..##.##..", "...#.#...",
+    ];
+    pub const LID: [&str; SIZE] = [
+        ".........", ".........", ".........", "#.......#", ".#######.",
+        "..#.#.#..", ".#..#..#.", ".........", ".........",
+    ];
+    pub const WIND: [&str; SIZE] = [
+        ".........", "####+....", "......#..", "######+..", ".........",
+        "..######.", "#.......#", "..###+#..", ".........",
+    ];
+    pub const MAGNET: [&str; SIZE] = [
+        ".#######.", "#+++++++#", "#+#####+#", "#+#...#+#", "#+#...#+#",
+        "##.....##", "##.....##", ".........", ".+..+..+.",
+    ];
+    pub const BOOT: [&str; SIZE] = [
+        "...###...", "...#+#...", "...#+#...", "...#+#...", "...#+##..",
+        "..#++++#.", ".#+++++##", "#########", ".........",
+    ];
+    pub const EYE: [&str; SIZE] = [
+        ".........", ".........", "..#####..", ".#++#++#.", "#++###++#",
+        ".#++#++#.", "..#####..", ".........", ".........",
+    ];
+    pub const GEM: [&str; SIZE] = [
+        ".........", "..#####..", ".#+#+#+#.", "#########", "#+++++++#",
+        ".#+++++#.", "..#+++#..", "...#+#...", "....#....",
+    ];
+    pub const CARD: [&str; SIZE] = [
+        ".#######.", ".#+++++#.", ".#+#+#+#.", ".#+++++#.", ".#+###+#.",
+        ".#+++++#.", ".#+++++#.", ".#+++++#.", ".#######.",
+    ];
+    pub const INK: [&str; SIZE] = [
+        "....#....", "...#+#...", "...#+#...", "..#+++#..", ".#+++++#.",
+        "#+++++++#", "#+++++++#", ".#+++++#.", "..#####..",
+    ];
+
+    /// (x, y, accent?) for every filled pixel, centred on (0, 0).
+    pub fn cells(icon: &[&str; SIZE]) -> Vec<(i32, i32, bool)> {
+        let h = (SIZE / 2) as i32;
+        icon.iter()
+            .enumerate()
+            .flat_map(|(y, row)| {
+                row.chars().enumerate().filter_map(move |(x, ch)| match ch {
+                    '#' => Some((x as i32 - h, y as i32 - h, false)),
+                    '+' => Some((x as i32 - h, y as i32 - h, true)),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub const ALL: [&[&str; SIZE]; 11] = [
+        &SHARD, &HEART, &BRAIN, &LID, &WIND, &MAGNET, &BOOT, &EYE, &GEM, &CARD, &INK,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +415,18 @@ mod tests {
             a > 15.0 && (a - b).abs() / a < 0.3,
             "up {a} vs diagonal {b}"
         );
+    }
+
+    #[test]
+    fn icons_are_square_and_use_only_known_pixels() {
+        for (n, icon) in icons::ALL.iter().enumerate() {
+            for row in icon.iter() {
+                assert_eq!(row.len(), icons::SIZE, "icon {n}: {row:?}");
+                assert!(row.chars().all(|c| "#+.".contains(c)), "icon {n}: {row:?}");
+            }
+            let cells = icons::cells(icon);
+            assert!(cells.len() >= 12, "icon {n} is nearly empty");
+            assert!(cells.iter().all(|&(x, y, _)| x.abs() <= 4 && y.abs() <= 4));
+        }
     }
 }

@@ -11,6 +11,7 @@ use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
+    Title,
     Playing,
     Paused,
     Journal,
@@ -76,7 +77,11 @@ pub struct HudView {
     pub eye: crate::store::EyeStyle,
     pub hud: crate::store::HudPalette,
     pub card_style: crate::store::CardStyle,
-    pub store_cursor: usize,
+    pub shop_shelf: usize,
+    pub shop_col: usize,
+    pub dust_earned: u32,
+    pub best_depth: u32,
+    pub cards_owned: usize,
     pub store_states: Vec<crate::store::State>,
     pub store_status: Option<String>,
     /// Perks active this run (shown small under the depth counter).
@@ -147,8 +152,12 @@ const GHOST_CYAN: [u8; 3] = [40, 230, 255];
 
 /// The text colour for the equipped HUD palette.
 pub(crate) fn ink(v: &HudView) -> [u8; 3] {
+    palette_ink(v.hud)
+}
+
+pub(crate) fn palette_ink(h: crate::store::HudPalette) -> [u8; 3] {
     use crate::store::HudPalette::*;
-    match v.hud {
+    match h {
         Dream => INK,
         Amber => [255, 190, 90],
         Phosphor => [140, 255, 150],
@@ -158,8 +167,12 @@ pub(crate) fn ink(v: &HudView) -> [u8; 3] {
 
 /// (left ghost, right ghost) for the equipped HUD palette.
 fn ghosts(v: &HudView) -> ([u8; 3], [u8; 3]) {
+    palette_ghosts(v.hud)
+}
+
+pub(crate) fn palette_ghosts(h: crate::store::HudPalette) -> ([u8; 3], [u8; 3]) {
     use crate::store::HudPalette::*;
-    match v.hud {
+    match h {
         Dream => (GHOST_RED, GHOST_CYAN),
         Amber => ([255, 80, 20], [255, 230, 120]),
         Phosphor => ([20, 120, 60], [200, 255, 120]),
@@ -169,11 +182,19 @@ fn ghosts(v: &HudView) -> ([u8; 3], [u8; 3]) {
 
 /// Iris colour for the equipped eye.
 fn iris_color(v: &HudView, lucid: bool) -> [u8; 3] {
-    use crate::store::EyeStyle::*;
     match v.eye {
-        Dream if lucid => hue(v.time * 0.15),
-        Dream => hue(0.75 + 0.1 * v.strangeness),
-        Ember => [255, (90.0 + 60.0 * (v.time * 3.0).sin()) as u8, 20],
+        crate::store::EyeStyle::Dream if lucid => hue(v.time * 0.15),
+        crate::store::EyeStyle::Dream => hue(0.75 + 0.1 * v.strangeness),
+        e => eye_iris(e, v.time),
+    }
+}
+
+/// Iris colour for an eye style (the default eye's dreaming hue).
+pub(crate) fn eye_iris(e: crate::store::EyeStyle, time: f32) -> [u8; 3] {
+    use crate::store::EyeStyle::*;
+    match e {
+        Dream => hue(0.75),
+        Ember => [255, (90.0 + 60.0 * (time * 3.0).sin()) as u8, 20],
         Toxic => [120, 255, 40],
         Frost => [150, 230, 255],
         Gold => [255, 205, 60],
@@ -270,7 +291,8 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
-        Mode::Store => return crate::reveal_ui::draw_store(&p, screen, v),
+        Mode::Store => return crate::shop_ui::draw(&p, screen, v),
+        Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
         Mode::Playing | Mode::Paused => {}
     }
@@ -316,7 +338,7 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
 }
 
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
-    use crate::pixels::{self, EyePx};
+    use crate::pixels;
     let c = Pos2::new(screen.center().x, screen.bottom() - 96.0);
     let lucid = v.lucidity >= v.lucid_target;
     let open = (eye_openness(v.lucidity, v.lucid_target) * (1.0 + 0.05 * (v.time * 1.7).sin()))
@@ -324,6 +346,25 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
         * pixels::blink(v.time);
     let cells = pixels::eye_pixels(open, v.shard_dir, lucid);
     let iris = iris_color(v, lucid);
+    paint_eye(p, c, &cells, iris, v);
+    lucid_rays_and_pips(p, c, lucid, v);
+}
+
+/// The shop's preview: the HUD eye, wide open and glancing about, in style `e`.
+pub(crate) fn draw_eye_preview(p: &egui::Painter, c: Pos2, e: crate::store::EyeStyle, v: &HudView) {
+    let gaze = [(v.time * 0.9).sin(), 0.3 * (v.time * 1.3).cos()];
+    let cells = crate::pixels::eye_pixels(0.9 * crate::pixels::blink(v.time), Some(gaze), false);
+    paint_eye(p, c, &cells, eye_iris(e, v.time), v);
+}
+
+fn paint_eye(
+    p: &egui::Painter,
+    c: Pos2,
+    cells: &[(i32, i32, crate::pixels::EyePx)],
+    iris: [u8; 3],
+    v: &HudView,
+) {
+    use crate::pixels::EyePx;
     let rim = [iris[0] / 2, iris[1] / 2, iris[2] / 2];
     // Pixel drop shadow, one cell down.
     px_cells(
@@ -336,7 +377,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
             .map(|q| (q.0, q.1)),
         rgba([0, 0, 0], 0.45),
     );
-    for &(x, y, kind) in &cells {
+    for &(x, y, kind) in cells {
         let color = match kind {
             EyePx::Lid => rgba(ink(v), 0.95),
             EyePx::Lash => rgba(ink(v), 0.75),
@@ -348,6 +389,10 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
         };
         px_cells(p, c, EYE_PX, [(x, y)], color);
     }
+}
+
+fn lucid_rays_and_pips(p: &egui::Painter, c: Pos2, lucid: bool, v: &HudView) {
+    use crate::pixels;
     if lucid {
         // Pixel sunburst: 8 flickering rays.
         for i in 0..8 {

@@ -4,7 +4,6 @@
 use crate::booklet_ui::{card, rarity_color, CardArt, CARD_SIZE};
 use crate::cards::Recalled;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
-use crate::store::{Item, State, CATALOG};
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
 
 /// Seconds per card in the reveal.
@@ -213,114 +212,6 @@ fn faded(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView) {
         format!("+{} dust", crate::cards::fade_dust(rec.card.rarity)),
         FontId::monospace(16.0),
         rgba([255, 210, 80], 0.7),
-    );
-}
-
-pub fn draw_store(p: &egui::Painter, screen: Rect, v: &HudView) {
-    p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.95));
-    let cx = screen.center().x;
-    glitch_text(
-        p,
-        Pos2::new(cx, screen.top() + 22.0),
-        true,
-        "THE LUCID STORE",
-        44.0,
-        hue(0.12 + 0.03 * (v.time * 0.7).sin()),
-        1.0,
-        v,
-    );
-    p.text(
-        Pos2::new(cx, screen.top() + 76.0),
-        Align2::CENTER_TOP,
-        format!("{} dream dust", v.dust),
-        FontId::monospace(26.0),
-        rgba([255, 210, 80], 1.0),
-    );
-    let top = screen.top() + 118.0;
-    let row_h = 26.0;
-    let left = cx - 330.0;
-    let mut section = "";
-    let mut y = top;
-    for (i, item) in CATALOG.iter().enumerate() {
-        let sec = match item {
-            Item::Perk(_) => "RUN PERKS · used up next run",
-            Item::Eye(_) => "EYES",
-            Item::Card(_) => "CARD FRAMES",
-            Item::Hud(_) => "HUD PALETTES",
-        };
-        if sec != section {
-            section = sec;
-            y += 6.0;
-            p.text(
-                Pos2::new(left, y),
-                Align2::LEFT_TOP,
-                sec,
-                FontId::monospace(18.0),
-                rgba(ink(v), 0.45),
-            );
-            y += 22.0;
-        }
-        let info = item.info();
-        let selected = i == v.store_cursor;
-        if selected {
-            p.rect_filled(
-                Rect::from_min_size(Pos2::new(left - 10.0, y - 2.0), Vec2::new(680.0, row_h)),
-                0.0,
-                rgba(hue(v.time * 0.2), 0.18),
-            );
-            p.text(
-                Pos2::new(left - 8.0, y),
-                Align2::RIGHT_TOP,
-                ">",
-                FontId::monospace(22.0),
-                rgba(ink(v), 1.0),
-            );
-        }
-        let (tag, tag_col) = match v.store_states[i] {
-            State::Buy(price) if price <= v.dust => (format!("{price} dust"), [255, 210, 80]),
-            State::Buy(price) => (format!("{price} dust"), [120, 100, 90]),
-            State::Armed => ("ARMED".to_string(), [80, 230, 200]),
-            State::Owned => ("owned".to_string(), [170, 160, 200]),
-            State::Equipped => ("EQUIPPED".to_string(), [120, 255, 140]),
-        };
-        p.text(
-            Pos2::new(left + 6.0, y),
-            Align2::LEFT_TOP,
-            info.name,
-            FontId::monospace(21.0),
-            rgba(ink(v), if selected { 1.0 } else { 0.8 }),
-        );
-        p.text(
-            Pos2::new(left + 200.0, y + 2.0),
-            Align2::LEFT_TOP,
-            info.blurb,
-            FontId::proportional(18.0),
-            rgba([200, 190, 230], 0.75),
-        );
-        p.text(
-            Pos2::new(left + 670.0, y),
-            Align2::RIGHT_TOP,
-            tag,
-            FontId::monospace(20.0),
-            rgba(tag_col, 1.0),
-        );
-        y += row_h;
-    }
-    if let Some(msg) = &v.store_status {
-        p.text(
-            Pos2::new(cx, screen.bottom() - 84.0),
-            Align2::CENTER_TOP,
-            msg,
-            FontId::monospace(22.0),
-            rgba([255, 210, 80], 0.95),
-        );
-    }
-    p.text(
-        Pos2::new(cx, screen.bottom() - 48.0),
-        Align2::CENTER_TOP,
-        "[w/s] browse   [enter] buy / equip   [esc] back",
-        FontId::monospace(22.0),
-        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );
 }
 
