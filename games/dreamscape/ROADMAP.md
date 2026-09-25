@@ -15,7 +15,7 @@ The run is now a roguelike: an upgrade after every dream, short and long runs, g
 | 1.5 | **Synergies** | Dash + Phase lets you dash through walls. Wide Eyes + Shard Sense makes the beacon visible anywhere. Stillness + Heavy Air makes the freeze last longer. Blink + Double Jump lets you blink in mid-air. Owning both halves of a pair shows the combo name on the HUD. |
 | 1.6 | **Rarity tiers on cards** | Common, rare and mythic, with the frame colour and odds shifting as depth increases. |
 
-## Phase 2: Enemies and threats
+## Phase 2: Enemies and threats ✅ done (beat-synced tiles move to Synesthesia Hall in Phase 3)
 
 | # | Enemy / hazard | Behaviour |
 |---|---|---|

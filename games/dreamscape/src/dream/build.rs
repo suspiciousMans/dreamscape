@@ -4,7 +4,7 @@ use super::grid::{Cell, Grid, P};
 use super::layout;
 use super::meshes::Shape;
 use super::texture::{self as tex, Pattern};
-use super::theme::{DreamTheme, PropKind, ThemeSpec};
+use super::theme::{DreamTheme, EnemyKind, LayoutKind, PropKind, ThemeSpec};
 use crate::gameplay::{CELL, SLAB};
 use engine::glam::{EulerRot, Quat, Vec3};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
@@ -81,7 +81,30 @@ pub struct Dream {
     pub sigils: Vec<Vec3>,
     /// Nightmare arenas: where the hunter starts.
     pub hunter: Option<Vec3>,
+    /// Special enemies (stalkers, mimics, sentries, drifters, jesters).
+    pub specials: Vec<Special>,
+    /// Route cells whose floor crumbles a moment after you step on it
+    /// (each is its own one-cell slab).
+    pub crumbles: Vec<Vec3>,
+    /// Slow fog: (centre on the floor, radius).
+    pub fog_pockets: Vec<(Vec3, f32)>,
 }
+
+/// One special enemy. `at` is where it starts; `a`/`b` are its two ends
+/// for kinds that pace (drifters, jesters), both `at` otherwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Special {
+    pub kind: EnemyKind,
+    pub at: Vec3,
+    pub a: Vec3,
+    pub b: Vec3,
+}
+
+/// Drifters float at this height (in the way of a jump).
+pub const DRIFTER_HEIGHT: f32 = 0.8;
+/// How far to each side of a jump line a drifter swings.
+pub const DRIFTER_SWING: f32 = CELL;
+pub const FOG_RADIUS: f32 = 1.2 * CELL;
 
 /// Everything needed to (re)build one procedural texture.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -114,6 +137,8 @@ pub struct Pressure {
     pub enemies: f32,
     /// Depth past which dreams stop growing (12 = +6 cells per side).
     pub growth_cap: u32,
+    /// Dev switch: put this special in the dream whatever the depth/theme.
+    pub force_special: Option<EnemyKind>,
 }
 
 impl Default for Pressure {
@@ -121,6 +146,7 @@ impl Default for Pressure {
         Self {
             enemies: 1.0,
             growth_cap: 12,
+            force_special: None,
         }
     }
 }
@@ -233,8 +259,9 @@ pub fn generate_with(
     };
     on_path.extend(lucid_path.iter().map(|&(p, _)| p));
 
+    let crumbles = crumble_cells(&spec, &path, depth, &mut rng);
     let mut blocks = Vec::new();
-    floor_slabs(grid, &spec, &mut rng, &mut blocks);
+    floor_slabs(grid, &spec, &crumbles, &mut rng, &mut blocks);
     walls(grid, &spec, &mut rng, &mut blocks);
     let motif_at = props(
         grid,
@@ -283,6 +310,32 @@ pub fn generate_with(
         surfaces,
         sigils: Vec::new(),
         hunter: None,
+        specials: specials(
+            grid,
+            &path,
+            &on_path,
+            layout.spawn,
+            &spec,
+            depth,
+            pressure,
+            &mut rng,
+        ),
+        crumbles: {
+            let mut c: Vec<Vec3> = crumbles.iter().map(|&p| grid.world(p)).collect();
+            c.sort_by(|a, b| (a.x, a.z).partial_cmp(&(b.x, b.z)).expect("finite"));
+            c
+        },
+        fog_pockets: fog_pockets(
+            grid,
+            &spec,
+            depth,
+            &[
+                layout.spawn,
+                layout.portal,
+                shard_cell.unwrap_or(layout.spawn),
+            ],
+            &mut rng,
+        ),
     }
 }
 
@@ -361,7 +414,7 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         })
         .collect();
     let mut blocks = Vec::new();
-    floor_slabs(&g, &spec, &mut rng, &mut blocks);
+    floor_slabs(&g, &spec, &HashSet::new(), &mut rng, &mut blocks);
     walls(&g, &spec, &mut rng, &mut blocks);
     decor(&g, &spec, &mut rng, &mut blocks);
     let surfaces = surfaces(&spec, &mut rng);
@@ -402,6 +455,9 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         shard: None,
         sigils: sigil_cells.iter().map(|&c| g.world(c)).collect(),
         hunter: Some(g.world(hunter) + Vec3::Y * 0.9),
+        specials: Vec::new(),
+        crumbles: Vec::new(),
+        fog_pockets: Vec::new(),
     }
 }
 
@@ -440,8 +496,15 @@ fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
     out
 }
 
-/// One slab per horizontal run of floor cells (fewer entities than one per cell).
-fn floor_slabs(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Block>) {
+/// One slab per horizontal run of floor cells (fewer entities than one per
+/// cell); cells in `single` (crumbling tiles) always get a slab of their own.
+fn floor_slabs(
+    grid: &Grid,
+    spec: &ThemeSpec,
+    single: &HashSet<P>,
+    rng: &mut StdRng,
+    out: &mut Vec<Block>,
+) {
     for y in 0..grid.h {
         let mut x = 0;
         while x < grid.w {
@@ -450,8 +513,11 @@ fn floor_slabs(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Bl
                 continue;
             }
             let start = x;
-            while x < grid.w && grid.get((x, y)) == Cell::Floor {
-                x += 1;
+            x += 1;
+            if !single.contains(&(start, y)) {
+                while x < grid.w && grid.get((x, y)) == Cell::Floor && !single.contains(&(x, y)) {
+                    x += 1;
+                }
             }
             let centre = (grid.world((start, y)) + grid.world((x - 1, y))) * 0.5;
             out.push(Block {
@@ -658,6 +724,203 @@ fn undersides(grid: &Grid, spec: &ThemeSpec, rng: &mut StdRng, out: &mut Vec<Blo
             color: tint(pick(spec.prop_colors, rng), spec.strangeness, rng),
         });
     }
+}
+
+/// Crumbling tiles: route cells in open-air layouts that give way a second
+/// after you step on them. Never the first or last two route cells, never a
+/// jump's take-off or landing, never two in a row.
+fn crumble_cells(spec: &ThemeSpec, path: &[(P, bool)], depth: u32, rng: &mut StdRng) -> HashSet<P> {
+    let mut out = HashSet::new();
+    let crumbly = matches!(
+        spec.layout,
+        LayoutKind::PlatformChain | LayoutKind::Spiral | LayoutKind::Mirrored
+    );
+    if !crumbly || depth < 3 || path.len() < 6 {
+        return out;
+    }
+    let chance = (0.12 + 0.02 * depth as f64).min(0.3);
+    let mut last = 0;
+    for k in 2..path.len() - 2 {
+        let near_jump = path[k].1 || path[k + 1].1;
+        if !near_jump && k > last + 1 && rng.gen_bool(chance) {
+            out.insert(path[k].0);
+            last = k;
+        }
+    }
+    out
+}
+
+/// Slow fog pockets, kept clear of the spawn, the portal and the shard.
+fn fog_pockets(
+    grid: &Grid,
+    spec: &ThemeSpec,
+    depth: u32,
+    keep_clear: &[P],
+    rng: &mut StdRng,
+) -> Vec<(Vec3, f32)> {
+    if !spec.fog_pockets || depth < 2 {
+        return Vec::new();
+    }
+    let mut cells: Vec<P> = grid
+        .cells_of(Cell::Floor)
+        .into_iter()
+        .filter(|&c| {
+            keep_clear
+                .iter()
+                .all(|&k| grid.world(c).distance(grid.world(k)) > FOG_RADIUS + CELL)
+        })
+        .collect();
+    cells.shuffle(rng);
+    let n = (1 + depth as usize / 4).min(3);
+    let mut out: Vec<(Vec3, f32)> = Vec::new();
+    for c in cells {
+        if out.len() >= n {
+            break;
+        }
+        let at = grid.world(c);
+        if out.iter().all(|(o, _)| o.distance(at) > 3.0 * FOG_RADIUS) {
+            out.push((at, FOG_RADIUS));
+        }
+    }
+    out
+}
+
+/// Special enemies, drawn from the dream's own list. None before depth 3.
+#[allow(clippy::too_many_arguments)]
+fn specials(
+    grid: &Grid,
+    path: &[(P, bool)],
+    needed: &HashSet<P>,
+    spawn: P,
+    spec: &ThemeSpec,
+    depth: u32,
+    pressure: Pressure,
+    rng: &mut StdRng,
+) -> Vec<Special> {
+    let weighted: Vec<(EnemyKind, u32)> = match pressure.force_special {
+        Some(k) => vec![(k, 1)],
+        None if depth < 3 => return Vec::new(),
+        None => spec.specials.to_vec(),
+    };
+    if weighted.is_empty() {
+        return Vec::new();
+    }
+    let base = if pressure.force_special.is_some() {
+        2
+    } else {
+        (1 + depth / 6).min(3)
+    };
+    let count = ((base as f32) * pressure.enemies.max(1.0)).round().min(5.0) as usize;
+    let total: u32 = weighted.iter().map(|w| w.1).sum();
+    let spawn_at = grid.world(spawn);
+    let off_route: Vec<P> = grid
+        .cells_of(Cell::Floor)
+        .into_iter()
+        .filter(|c| !needed.contains(c))
+        .collect();
+    let mut out: Vec<Special> = Vec::new();
+    let mut used: HashSet<P> = HashSet::new();
+    for _ in 0..count * 4 {
+        if out.len() >= count {
+            break;
+        }
+        let mut pick = rng.gen_range(0..total);
+        let kind = weighted
+            .iter()
+            .find(|(_, w)| {
+                if pick < *w {
+                    true
+                } else {
+                    pick -= w;
+                    false
+                }
+            })
+            .expect("pick < total")
+            .0;
+        let still = |p: Vec3| Special {
+            kind,
+            at: p,
+            a: p,
+            b: p,
+        };
+        let far_cell = |rng: &mut StdRng, used: &HashSet<P>| {
+            let far: Vec<P> = off_route
+                .iter()
+                .copied()
+                .filter(|c| !used.contains(c) && grid.world(*c).distance(spawn_at) > 4.0 * CELL)
+                .collect();
+            far.choose(rng).copied()
+        };
+        let special = match kind {
+            EnemyKind::Stalker => far_cell(rng, &used).map(|c| {
+                used.insert(c);
+                still(grid.world(c) + Vec3::Y * 0.9)
+            }),
+            // One mimic is plenty: it's always right behind you.
+            EnemyKind::Mimic if out.iter().any(|s| s.kind == EnemyKind::Mimic) => None,
+            EnemyKind::Mimic => Some(still(spawn_at + Vec3::Y * 0.6)),
+            // Sentries stand beside the route, sweeping it.
+            EnemyKind::Sentry => {
+                let beside: Vec<P> = off_route
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        !used.contains(c)
+                            && grid.world(*c).distance(spawn_at) > 3.0 * CELL
+                            && grid.moves(*c).iter().any(|(n, _)| needed.contains(n))
+                    })
+                    .collect();
+                beside.choose(rng).copied().map(|c| {
+                    used.insert(c);
+                    still(grid.world(c))
+                })
+            }
+            // Drifters swing across the gap of a jump, perpendicular to it.
+            EnemyKind::Drifter => {
+                let hops: Vec<(P, P)> = path
+                    .windows(2)
+                    .skip(2)
+                    .filter(|w| w[1].1)
+                    .map(|w| (w[0].0, w[1].0))
+                    .filter(|(from, _)| !used.contains(from))
+                    .collect();
+                hops.choose(rng).copied().map(|(from, to)| {
+                    used.insert(from);
+                    let (a, b) = (grid.world(from), grid.world(to));
+                    let mid = (a + b) * 0.5 + Vec3::Y * DRIFTER_HEIGHT;
+                    let dir = (b - a).normalize_or_zero();
+                    let side = Vec3::new(-dir.z, 0.0, dir.x) * DRIFTER_SWING;
+                    Special {
+                        kind,
+                        at: mid,
+                        a: mid + side,
+                        b: mid - side,
+                    }
+                })
+            }
+            // Jesters pace between two floor cells anywhere; they're harmless.
+            EnemyKind::Jester => far_cell(rng, &used).and_then(|c| {
+                let next = grid
+                    .moves(c)
+                    .into_iter()
+                    .filter(|(_, jump)| !jump)
+                    .map(|(n, _)| n)
+                    .collect::<Vec<_>>();
+                next.choose(rng).map(|&n| {
+                    used.insert(c);
+                    let (a, b) = (grid.world(c), grid.world(n));
+                    Special {
+                        kind,
+                        at: a + Vec3::Y * 0.7,
+                        a: a + Vec3::Y * 0.7,
+                        b: b + Vec3::Y * 0.7,
+                    }
+                })
+            }),
+        };
+        out.extend(special);
+    }
+    out
 }
 
 /// Minimum route cells between two enemies' posts.
@@ -1347,6 +1610,183 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn with_special(theme: DreamTheme, seed: u64, depth: u32, k: Option<EnemyKind>) -> Dream {
+        generate_with(
+            theme,
+            seed,
+            depth,
+            None,
+            true,
+            Pressure {
+                force_special: k,
+                ..Pressure::default()
+            },
+        )
+    }
+
+    #[test]
+    fn specials_come_from_the_dreams_own_list_and_not_too_early() {
+        for theme in ALL_THEMES {
+            let allowed: Vec<EnemyKind> = theme.spec().specials.iter().map(|s| s.0).collect();
+            for seed in 0..15 {
+                assert!(
+                    with_special(theme, seed, 2, None).specials.is_empty(),
+                    "{theme:?} too early"
+                );
+                let d = with_special(theme, seed, 12, None);
+                assert!(d.specials.len() <= 3);
+                for sp in &d.specials {
+                    assert!(allowed.contains(&sp.kind), "{theme:?} got {:?}", sp.kind);
+                }
+                assert!(
+                    d.specials
+                        .iter()
+                        .filter(|s| s.kind == EnemyKind::Mimic)
+                        .count()
+                        <= 1
+                );
+            }
+        }
+        let seen: HashSet<EnemyKind> = ALL_THEMES
+            .iter()
+            .flat_map(|&t| (0..20).flat_map(move |s| with_special(t, s, 12, None).specials))
+            .map(|s| s.kind)
+            .collect();
+        assert_eq!(seen.len(), crate::dream::ALL_ENEMY_KINDS.len(), "{seen:?}");
+    }
+
+    #[test]
+    fn stalkers_lurk_off_route_far_from_spawn() {
+        for seed in 0..30 {
+            let d = with_special(DreamTheme::LiminalOffice, seed, 1, Some(EnemyKind::Stalker));
+            assert!(
+                !d.specials.is_empty(),
+                "seed {seed}: forced stalker missing"
+            );
+            for sp in &d.specials {
+                assert!(flat_dist(sp.at, d.spawn) > 4.0 * CELL);
+                assert!(
+                    d.route.iter().all(|w| flat_dist(w.pos, sp.at) > 1e-3),
+                    "lair on the route"
+                );
+            }
+        }
+    }
+
+    fn flat_dist(a: Vec3, b: Vec3) -> f32 {
+        Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
+    }
+
+    #[test]
+    fn drifters_swing_across_a_jump_and_clear_it_half_the_time() {
+        let mut found = 0;
+        for seed in 0..30 {
+            let d = with_special(DreamTheme::VoidPlatforms, seed, 6, Some(EnemyKind::Drifter));
+            for sp in &d.specials {
+                found += 1;
+                // Its swing is perpendicular to the jump and centred on it...
+                let mid = (sp.a + sp.b) * 0.5;
+                assert!(flat_dist(mid, sp.at) < 1e-3);
+                assert!((flat_dist(sp.a, sp.b) - 2.0 * DRIFTER_SWING).abs() < 1e-3);
+                // ...and the jump line is only blocked while it's within touch
+                // range of the middle: well under half of each swing.
+                let blocked = 2.0 * crate::gameplay::ENEMY_TOUCH_RADIUS / (2.0 * DRIFTER_SWING);
+                assert!(blocked < 0.5, "{blocked}");
+                let jump = d
+                    .route
+                    .windows(2)
+                    .any(|w| w[1].jump && flat_dist((w[0].pos + w[1].pos) * 0.5, mid) < 1e-3);
+                assert!(jump, "seed {seed}: drifter not on a route jump");
+            }
+        }
+        assert!(found > 10);
+    }
+
+    #[test]
+    fn crumbling_tiles_follow_the_rules() {
+        for theme in [
+            DreamTheme::VoidPlatforms,
+            DreamTheme::SkyStairs,
+            DreamTheme::MirrorHall,
+        ] {
+            for seed in 0..30 {
+                let d = with_special(theme, seed, 8, None);
+                let route: Vec<Vec3> = d.route.iter().map(|w| w.pos).collect();
+                for c in &d.crumbles {
+                    let k = route
+                        .iter()
+                        .position(|p| flat_dist(*p, *c) < 1e-3)
+                        .expect("crumbles are on the route");
+                    assert!(
+                        k >= 2 && k + 2 < route.len(),
+                        "{theme:?}: crumble by spawn/portal"
+                    );
+                    assert!(
+                        !d.route[k].jump && !d.route[k + 1].jump,
+                        "crumble next to a jump"
+                    );
+                    // Its own one-cell slab.
+                    assert!(d.blocks.iter().any(|b| b.kind == BlockKind::Floor
+                        && flat_dist(b.pos, *c) < 1e-3
+                        && (b.size.x - CELL).abs() < 1e-3));
+                }
+                for pair in d.crumbles.iter().enumerate() {
+                    for other in &d.crumbles[pair.0 + 1..] {
+                        let (i, j) = (
+                            route
+                                .iter()
+                                .position(|p| flat_dist(*p, *pair.1) < 1e-3)
+                                .unwrap(),
+                            route
+                                .iter()
+                                .position(|p| flat_dist(*p, *other) < 1e-3)
+                                .unwrap(),
+                        );
+                        assert!(i.abs_diff(j) > 1, "two crumbles in a row");
+                    }
+                }
+            }
+            let any = (0..30).any(|s| !with_special(theme, s, 8, None).crumbles.is_empty());
+            assert!(any, "{theme:?} never crumbles");
+        }
+        assert!(with_special(DreamTheme::VoidPlatforms, 1, 1, None)
+            .crumbles
+            .is_empty());
+        assert!(with_special(DreamTheme::LiminalOffice, 1, 9, None)
+            .crumbles
+            .is_empty());
+    }
+
+    #[test]
+    fn fog_keeps_clear_of_spawn_portal_and_shard() {
+        for theme in [
+            DreamTheme::CursedForest,
+            DreamTheme::DrownedLibrary,
+            DreamTheme::Garden,
+        ] {
+            let mut any = false;
+            for seed in 0..30 {
+                let d = with_special(theme, seed, 6, None);
+                any |= !d.fog_pockets.is_empty();
+                for &(at, r) in &d.fog_pockets {
+                    for keep in [Some(d.spawn), Some(d.portal), d.shard]
+                        .into_iter()
+                        .flatten()
+                    {
+                        assert!(
+                            flat_dist(at, keep) > r,
+                            "{theme:?}/{seed}: fog over a key spot"
+                        );
+                    }
+                }
+            }
+            assert!(any, "{theme:?} never gets fog");
+        }
+        assert!(with_special(DreamTheme::LiminalOffice, 1, 9, None)
+            .fog_pockets
+            .is_empty());
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod pixels;
 mod records;
 mod reveal_ui;
 mod shop_ui;
+mod specials;
 mod store;
 mod summary_ui;
 mod title_ui;
@@ -43,11 +44,12 @@ mod upgrade_ui;
 mod upgrades;
 
 use dream::{
-    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, Pressure, PropKind, RunLength, Shape,
-    TexSpec, Twists, Variant, TEX_SIZE,
+    Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, EnemyKind, Pressure, PropKind,
+    RunLength, Shape, TexSpec, Twists, Variant, TEX_SIZE,
 };
 use enemy_ai::EnemyAI;
 use gameplay::{PlayerInputState, PortalMarker};
+use specials::Elite;
 use upgrades::{Ability, RunUpgrades, Upgrade};
 
 const PROFILES_DIR: &str = "games/dreamscape/profiles";
@@ -90,9 +92,9 @@ struct Hero;
 #[derive(Clone, Copy)]
 struct Halo;
 
-/// Drawn in the translucent pass (FLOODED water).
+/// Drawn in the translucent pass (FLOODED water, fog, sentry beams, mimics).
 #[derive(Clone, Copy)]
-struct Water;
+struct Translucent;
 
 /// Floats up and down around `base` y.
 #[derive(Clone, Copy)]
@@ -101,6 +103,53 @@ struct Bob {
     amp: f32,
     speed: f32,
     phase: f32,
+}
+
+/// A pacing enemy, maybe an elite.
+struct Pacer {
+    entity: Entity,
+    ai: EnemyAI,
+    elite: Option<Elite>,
+    /// Patrol ends (a splitter's child walks them the other way round).
+    a: Vec3,
+    b: Vec3,
+    /// A splitter that has already split.
+    split: bool,
+}
+
+enum SpecialAI {
+    Stalker(specials::Stalker),
+    Mimic,
+    /// The sentry and its beam entity.
+    Sentry(specials::Sentry, Entity),
+    Drifter(EnemyAI),
+    Jester(EnemyAI),
+}
+
+struct SpecialEnemy {
+    entity: Entity,
+    kind: EnemyKind,
+    ai: SpecialAI,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Crumble {
+    Solid,
+    /// Seconds until it falls.
+    Shaking(f32),
+    /// Seconds until it comes back.
+    Gone(f32),
+}
+
+/// Seconds a crumble tile shakes before falling, and stays gone.
+const CRUMBLE_SHAKE: f32 = 1.0;
+const CRUMBLE_GONE: f32 = 4.0;
+
+struct CrumbleTile {
+    entity: Option<Entity>,
+    block: dream::Block,
+    texture: Arc<GpuTexture>,
+    state: Crumble,
 }
 
 /// Tallies for the end-of-run summary.
@@ -159,7 +208,18 @@ pub struct DreamscapeGame {
     dream: Option<Dream>,
     /// Prop kind carried from the previous dream into the next one.
     motif: Option<PropKind>,
-    enemies: Vec<(Entity, EnemyAI)>,
+    enemies: Vec<Pacer>,
+    specials: Vec<SpecialEnemy>,
+    /// Where the dreamer has been (the mimic walks it).
+    trail: specials::Trail,
+    mimic_awake_at: f32,
+    jester_cooldown: f32,
+    crumbles: Vec<CrumbleTile>,
+    fog: Vec<(Vec3, f32)>,
+    /// Special kinds met so far this run (each gets a hint the first time).
+    seen_kinds: Vec<EnemyKind>,
+    /// Shown under the title card.
+    dream_hint: String,
 
     input: PlayerInputState,
     player: Option<Entity>,
@@ -261,6 +321,14 @@ impl DreamscapeGame {
             dream: None,
             motif: None,
             enemies: Vec::new(),
+            specials: Vec::new(),
+            trail: specials::Trail::default(),
+            mimic_awake_at: 0.0,
+            jester_cooldown: 0.0,
+            crumbles: Vec::new(),
+            fog: Vec::new(),
+            seen_kinds: Vec::new(),
+            dream_hint: String::new(),
             input: PlayerInputState::default(),
             player: None,
             player_position: Vec3::ZERO,
@@ -346,6 +414,13 @@ impl DreamscapeGame {
         Pressure {
             enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
             growth_cap: if hard { 24 } else { 12 },
+            // Dev switch: DREAMSCAPE_SPECIAL=Stalker puts that kind in every dream.
+            force_special: std::env::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
+                dream::ALL_ENEMY_KINDS
+                    .iter()
+                    .copied()
+                    .find(|k| format!("{k:?}") == name)
+            }),
         }
     }
 
@@ -760,6 +835,7 @@ impl DreamscapeGame {
             } else {
                 summary_ui::SummaryView::default()
             },
+            hint: self.dream_hint.clone(),
             objective: self.hunter.as_ref().map(|_| {
                 if self.sigils_left > 0 {
                     format!(
@@ -777,6 +853,373 @@ impl DreamscapeGame {
                 upgrade_ui::ChoiceView::default()
             },
         }
+    }
+
+    /// A crumbling floor tile (solid, with its collider).
+    fn spawn_tile(&mut self, b: &dream::Block, texture: Arc<GpuTexture>) -> anyhow::Result<Entity> {
+        let mesh = self.mesh(b.shape)?;
+        Ok(self.world.spawn((
+            Transform {
+                position: b.pos,
+                rotation: b.rotation,
+                scale: b.size,
+            },
+            MeshRenderer {
+                mesh,
+                texture: Some(texture),
+            },
+            SurfaceUv(0.5 / gameplay::CELL),
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: b.size * 0.5,
+                },
+                is_trigger: false,
+            },
+        )))
+    }
+
+    /// Stalkers, mimics, sentries, drifters and jesters, plus fog pockets.
+    fn spawn_specials(
+        &mut self,
+        gl: &engine::glow::Context,
+        dream: &Dream,
+        pacer_speed: f32,
+        player_speed: f32,
+        enemy_texture: &Arc<GpuTexture>,
+    ) -> anyhow::Result<()> {
+        let mut hints = Vec::new();
+        for (k, sp) in dream.specials.iter().enumerate() {
+            if !self.seen_kinds.contains(&sp.kind) {
+                self.seen_kinds.push(sp.kind);
+                hints.push(sp.kind.hint());
+            }
+            let (shape, scale, color) = match sp.kind {
+                EnemyKind::Stalker => (
+                    Shape::Octahedron,
+                    Vec3::new(0.6, 2.2, 0.6),
+                    [40, 25, 55, 255],
+                ),
+                EnemyKind::Mimic => (
+                    Shape::Octahedron,
+                    Vec3::new(0.9, 1.25, 0.9),
+                    [255, 40, 70, 255],
+                ),
+                EnemyKind::Sentry => (Shape::Cone, Vec3::new(0.9, 1.6, 0.9), [255, 220, 120, 255]),
+                EnemyKind::Drifter => (Shape::Orb, Vec3::new(1.0, 0.7, 1.0), [90, 230, 255, 255]),
+                EnemyKind::Jester => (
+                    Shape::Crescent,
+                    Vec3::new(0.9, 0.9, 0.3),
+                    [255, 120, 255, 255],
+                ),
+            };
+            let mesh = self.mesh(shape)?;
+            let texture = match sp.kind {
+                EnemyKind::Drifter => enemy_texture.clone(),
+                _ => self.texture(gl, color),
+            };
+            let position = match sp.kind {
+                EnemyKind::Sentry => sp.at + Vec3::Y * scale.y * 0.5,
+                _ => sp.at,
+            };
+            let entity = self.world.spawn((
+                Transform {
+                    position,
+                    rotation: Quat::IDENTITY,
+                    scale: if sp.kind == EnemyKind::Mimic {
+                        Vec3::ZERO
+                    } else {
+                        scale
+                    },
+                },
+                MeshRenderer {
+                    mesh,
+                    texture: Some(texture),
+                },
+            ));
+            match sp.kind {
+                EnemyKind::Stalker => {}
+                EnemyKind::Mimic => self
+                    .world
+                    .insert(entity, (Translucent, Lit, Spin(1.2)))
+                    .expect("just spawned"),
+                EnemyKind::Jester => self
+                    .world
+                    .insert(entity, (Lit, Spin(4.0)))
+                    .expect("just spawned"),
+                _ => self.world.insert_one(entity, Lit).expect("just spawned"),
+            }
+            let ai = match sp.kind {
+                EnemyKind::Stalker => {
+                    SpecialAI::Stalker(specials::Stalker::new(sp.at, player_speed))
+                }
+                EnemyKind::Mimic => SpecialAI::Mimic,
+                EnemyKind::Sentry => {
+                    let beam_tex = self.texture(gl, [255, 240, 150, 255]);
+                    let cone = self.mesh(Shape::Cone)?;
+                    let beam = self.world.spawn((
+                        Transform {
+                            position: sp.at,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        },
+                        MeshRenderer {
+                            mesh: cone,
+                            texture: Some(beam_tex),
+                        },
+                        Translucent,
+                        Lit,
+                    ));
+                    SpecialAI::Sentry(specials::Sentry::new(k as f32 * 2.3), beam)
+                }
+                EnemyKind::Drifter => {
+                    SpecialAI::Drifter(EnemyAI::new(sp.a, sp.b, pacer_speed * 0.8, 0.0, 0.0))
+                }
+                EnemyKind::Jester => {
+                    SpecialAI::Jester(EnemyAI::new(sp.a, sp.b, pacer_speed * 0.6, 0.0, 0.0))
+                }
+            };
+            log::info!("Special enemy: {:?} at {:?}", sp.kind, sp.at);
+            self.specials.push(SpecialEnemy {
+                entity,
+                kind: sp.kind,
+                ai,
+            });
+        }
+        // Fog pockets: low purple puffs you wade through slowly.
+        if !dream.fog_pockets.is_empty() {
+            let fog_tex = self.texture(gl, [150, 90, 220, 255]);
+            let disc = self.mesh(Shape::Cylinder)?;
+            for &(at, r) in &dream.fog_pockets {
+                self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 0.3,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(2.0 * r, 0.6, 2.0 * r),
+                    },
+                    MeshRenderer {
+                        mesh: disc.clone(),
+                        texture: Some(fog_tex.clone()),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+            }
+            hints.push("purple fog slows you down");
+        }
+        self.dream_hint = hints.join(" · ");
+        Ok(())
+    }
+
+    /// Specials, crumbling floor and the jester, once per frame.
+    fn update_specials(&mut self, dt: f32, held: bool) -> anyhow::Result<()> {
+        let player = self.player_position;
+        self.trail.push(self.dream_age, player);
+        self.jester_cooldown = (self.jester_cooldown - dt).max(0.0);
+        let strangeness = self.visual_strangeness();
+        let clear = (tunnel::sight_radius(strangeness) * self.twists.sight() * self.run.sight()
+            + self.run.sight_bonus())
+            * (1.0 - tunnel::SIGHT_FADE);
+        let mut calls = Vec::new();
+        for sp in &mut self.specials {
+            let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
+                continue;
+            };
+            match &mut sp.ai {
+                SpecialAI::Stalker(s) => {
+                    if !held {
+                        s.update(&mut t.position, player, clear, dt);
+                    } else {
+                        s.moving = false;
+                    }
+                }
+                SpecialAI::Mimic => {
+                    match specials::mimic_pos(&self.trail, self.dream_age, self.mimic_awake_at) {
+                        Some(p) if !held => {
+                            t.position = p;
+                            t.scale = Vec3::new(0.9, 1.25, 0.9);
+                        }
+                        Some(_) => {}
+                        None => t.scale = Vec3::ZERO,
+                    }
+                }
+                SpecialAI::Sentry(s, beam) => {
+                    let at = Vec3::new(t.position.x, 0.0, t.position.z);
+                    if !held && s.update(at, player, dt) {
+                        calls.push(at);
+                    }
+                    let facing = s.facing();
+                    let beam = *beam;
+                    drop(t);
+                    if let Ok(mut bt) = self.world.get::<&mut Transform>(beam) {
+                        let half_w = specials::SENTRY_RANGE * specials::SENTRY_HALF_ANGLE.tan();
+                        // The cone's tip (+Y) sits on the sentry, its base out along the beam.
+                        bt.rotation = Quat::from_rotation_arc(-Vec3::Y, facing);
+                        bt.scale = Vec3::new(2.0 * half_w, specials::SENTRY_RANGE, 0.08);
+                        bt.position = at + facing * specials::SENTRY_RANGE * 0.5 + Vec3::Y * 0.15;
+                    }
+                }
+                SpecialAI::Drifter(ai) | SpecialAI::Jester(ai) => {
+                    if !held {
+                        ai.update(&mut t.position, player, dt);
+                    }
+                }
+            }
+        }
+        for at in calls {
+            log::info!("A sentry saw you");
+            self.flash.trigger([1.0, 0.9, 0.4], 0.35);
+            self.tone(1200.0, 0.12);
+            for p in &mut self.enemies {
+                let near = self
+                    .world
+                    .get::<&Transform>(p.entity)
+                    .is_ok_and(|t| (t.position - at).length() < specials::SENTRY_CALL);
+                if near {
+                    p.ai.alert();
+                }
+            }
+        }
+        // Frozen stalkers you walk into shatter back to their lairs.
+        for sp in &self.specials {
+            if let SpecialAI::Stalker(s) = &sp.ai {
+                if !s.moving {
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        let d = t.position - player;
+                        if Vec3::new(d.x, 0.0, d.z).length() < gameplay::ENEMY_TOUCH_RADIUS {
+                            t.position = s.lair;
+                            self.tone(300.0, 0.1);
+                        }
+                    }
+                }
+            }
+        }
+        if !self.autopilot {
+            self.jester_touch();
+            self.update_crumbles(dt)?;
+        }
+        Ok(())
+    }
+
+    /// A jester's touch throws you onto safe floor a couple of cells away.
+    fn jester_touch(&mut self) {
+        if self.jester_cooldown > 0.0 {
+            return;
+        }
+        let player = self.player_position;
+        let touched = self.specials.iter().any(|sp| {
+            sp.kind == EnemyKind::Jester
+                && self.world.get::<&Transform>(sp.entity).is_ok_and(|t| {
+                    gameplay::touches(t.position, player, gameplay::ENEMY_TOUCH_RADIUS)
+                })
+        });
+        if !touched {
+            return;
+        }
+        let seed = (self.dream_age * 1000.0) as u32;
+        let landing = self.dream.as_ref().and_then(|d| {
+            specials::throw_directions(seed)
+                .into_iter()
+                .find_map(|dir| {
+                    gameplay::blink_target(&d.blocks, player, dir, specials::JESTER_THROW)
+                })
+        });
+        self.jester_cooldown = specials::JESTER_COOLDOWN;
+        if let (Some(at), Some(p)) = (landing, self.player) {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
+                t.position = at;
+            }
+            if let Ok(mut b) = self.world.get::<&mut RigidBody>(p) {
+                b.velocity = Vec3::ZERO;
+            }
+            self.player_position = at;
+            self.flash.trigger([1.0, 0.5, 1.0], 0.4);
+            self.tone(520.0, 0.15);
+            log::info!("A jester threw you");
+        }
+    }
+
+    /// Crumbling tiles: shake when stood on, fall, come back.
+    fn update_crumbles(&mut self, dt: f32) -> anyhow::Result<()> {
+        let player = self.player_position;
+        let grounded = self
+            .player
+            .and_then(|p| self.world.get::<&RigidBody>(p).ok().map(|b| b.grounded))
+            .unwrap_or(false);
+        let over = |b: &dream::Block| {
+            (player.x - b.pos.x).abs() < b.size.x * 0.5
+                && (player.z - b.pos.z).abs() < b.size.z * 0.5
+        };
+        let mut respawn = Vec::new();
+        for (i, tile) in self.crumbles.iter_mut().enumerate() {
+            tile.state = match tile.state {
+                Crumble::Solid if grounded && over(&tile.block) => Crumble::Shaking(CRUMBLE_SHAKE),
+                Crumble::Shaking(t) if t - dt <= 0.0 => {
+                    if let Some(e) = tile.entity.take() {
+                        let _ = self.world.despawn(e);
+                    }
+                    Crumble::Gone(CRUMBLE_GONE)
+                }
+                Crumble::Shaking(t) => {
+                    if let Some(e) = tile.entity {
+                        if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                            let wobble = 0.06 * (self.time * 40.0).sin();
+                            tr.position =
+                                tile.block.pos + Vec3::new(wobble, -0.05 * (1.0 - t), 0.0);
+                        }
+                    }
+                    Crumble::Shaking(t - dt)
+                }
+                Crumble::Gone(t) if t - dt <= 0.0 && !over(&tile.block) => {
+                    respawn.push(i);
+                    Crumble::Solid
+                }
+                Crumble::Gone(t) => Crumble::Gone((t - dt).max(0.0)),
+                s => s,
+            };
+        }
+        for i in respawn {
+            let (block, texture) = (
+                self.crumbles[i].block.clone(),
+                self.crumbles[i].texture.clone(),
+            );
+            let e = self.spawn_tile(&block, texture)?;
+            self.crumbles[i].entity = Some(e);
+        }
+        Ok(())
+    }
+
+    /// Is anything that catches you touching you right now?
+    fn touching_threat(&self) -> bool {
+        let player = self.player_position;
+        let at = |e: Entity| self.world.get::<&Transform>(e).ok().map(|t| t.position);
+        let pacers = self.enemies.iter().any(|p| {
+            let reach = gameplay::ENEMY_TOUCH_RADIUS
+                * if p.elite == Some(Elite::Big) {
+                    specials::ELITE_BIG_REACH
+                } else {
+                    1.0
+                };
+            at(p.entity).is_some_and(|pos| gameplay::touches(pos, player, reach))
+        });
+        let hunter = self.hunter.iter().any(|(e, _, _)| {
+            at(*e).is_some_and(|pos| {
+                // Flat distance: it's too big to jump over.
+                let d = pos - player;
+                Vec3::new(d.x, 0.0, d.z).length() < hunter::HUNTER_TOUCH
+            })
+        });
+        let special = self.specials.iter().any(|sp| {
+            let armed = match &sp.ai {
+                SpecialAI::Stalker(s) => s.moving,
+                SpecialAI::Mimic => self.dream_age >= self.mimic_awake_at,
+                SpecialAI::Drifter(_) => true,
+                SpecialAI::Sentry(..) | SpecialAI::Jester(_) => false,
+            };
+            armed
+                && at(sp.entity)
+                    .is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
+        });
+        pacers || hunter || special
     }
 
     /// Every sigil taken: the nightmare's portal opens.
@@ -1062,6 +1505,7 @@ impl DreamscapeGame {
         self.shards_this_run = 0;
         self.run = RunUpgrades::default();
         self.stats = RunStats::default();
+        self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
         self.peak_difficulty = 1.0;
@@ -1393,6 +1837,12 @@ impl DreamscapeGame {
             }
         }
         self.enemies.clear();
+        self.specials.clear();
+        self.crumbles.clear();
+        self.trail.clear();
+        self.mimic_awake_at = specials::MIMIC_DELAY;
+        self.jester_cooldown = 0.0;
+        self.fog = dream.fog_pockets.clone();
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
@@ -1422,6 +1872,23 @@ impl DreamscapeGame {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
                 self.sealed_portal = Some((block.clone(), portal_tex.clone()));
+                continue;
+            }
+            let crumbly = block.kind == BlockKind::Floor
+                && dream
+                    .crumbles
+                    .iter()
+                    .any(|c| (c.x - block.pos.x).abs() < 1e-3 && (c.z - block.pos.z).abs() < 1e-3);
+            if crumbly {
+                // Crumbling tiles wear the prop pattern: the tell.
+                let mut tile = CrumbleTile {
+                    entity: None,
+                    block: block.clone(),
+                    texture: prop_tex.clone(),
+                    state: Crumble::Solid,
+                };
+                tile.entity = Some(self.spawn_tile(block, prop_tex.clone())?);
+                self.crumbles.push(tile);
                 continue;
             }
             let (texture, uv) = match block.kind {
@@ -1528,7 +1995,7 @@ impl DreamscapeGame {
                         mesh: cube,
                         texture: Some(water_tex),
                     },
-                    Water,
+                    Translucent,
                 ));
             }
         }
@@ -1591,7 +2058,33 @@ impl DreamscapeGame {
                 1.0
             })
         .min(0.92 * player_speed / enemy_ai::CHASE_BOOST);
-        for &(a, b) in &dream.patrols {
+        let alert = if eyelids {
+            0.0
+        } else {
+            gameplay::pressured_chase_radius(dream.depth, difficulty) * self.run.alert()
+        };
+        let cap = 0.92 * player_speed / enemy_ai::CHASE_BOOST;
+        let mut elite_tex: HashMap<Elite, Arc<GpuTexture>> = HashMap::new();
+        for (k, &(a, b)) in dream.patrols.iter().enumerate() {
+            let elite = specials::roll_elite(dream.seed, k, difficulty);
+            let texture = match elite {
+                None => enemy_texture.clone(),
+                Some(e) => match elite_tex.get(&e) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let mut spec = dream.surfaces.enemy.clone();
+                        spec.palette[0] = e.color();
+                        let t = self.upload_surface(gl, &spec)?;
+                        elite_tex.insert(e, t.clone());
+                        t
+                    }
+                },
+            };
+            let pace = if elite == Some(Elite::Fast) {
+                (speed * specials::ELITE_FAST).min(cap)
+            } else {
+                speed
+            };
             let entity = self.world.spawn((
                 Transform {
                     position: a,
@@ -1600,25 +2093,23 @@ impl DreamscapeGame {
                 },
                 MeshRenderer {
                     mesh: enemy_mesh.clone(),
-                    texture: Some(enemy_texture.clone()),
+                    texture: Some(texture),
                 },
                 Spin(0.9),
             ));
-            self.enemies.push((
+            if let Some(e) = elite {
+                log::info!("Elite pacer: {}", e.label());
+            }
+            self.enemies.push(Pacer {
                 entity,
-                EnemyAI::new(
-                    a,
-                    b,
-                    speed,
-                    if eyelids {
-                        0.0
-                    } else {
-                        gameplay::pressured_chase_radius(dream.depth, difficulty) * self.run.alert()
-                    },
-                    gameplay::CHASE_LEASH,
-                ),
-            ));
+                ai: EnemyAI::new(a, b, pace, alert, gameplay::CHASE_LEASH),
+                elite,
+                a,
+                b,
+                split: false,
+            });
         }
+        self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
 
         // Nightmare: sigils round the edge, and the hunter in the middle.
         let sigil_tex = self
@@ -2129,20 +2620,66 @@ impl Game for DreamscapeGame {
         let target = self.player_position;
         let held =
             self.run.active(Ability::Stillness) || self.twists.enemies_frozen(self.dream_age);
-        for (entity, ai) in self.enemies.iter_mut() {
+        let mut splits = Vec::new();
+        for (k, p) in self.enemies.iter_mut().enumerate() {
             if held {
                 continue;
             }
-            if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
-                let was = ai.chasing;
-                ai.update(&mut t.position, target, dt);
+            if let Ok(mut t) = self.world.get::<&mut Transform>(p.entity) {
+                let was = p.ai.chasing;
+                p.ai.update(&mut t.position, target, dt);
                 // Swell when they notice you: the tell that you've been seen.
-                t.scale = Vec3::splat(if ai.chasing { 1.25 } else { 0.9 });
-                if ai.chasing && !was && !self.autopilot {
+                let size = if p.ai.chasing { 1.25 } else { 0.9 }
+                    * match p.elite {
+                        Some(Elite::Big) => 1.35,
+                        Some(Elite::Splitter) if p.split => 0.75,
+                        _ => 1.0,
+                    };
+                let hidden = p.elite == Some(Elite::Shade)
+                    && (t.position - target).length() > specials::SHADE_SHOWS_WITHIN;
+                t.scale = Vec3::splat(if hidden { 0.0 } else { size });
+                if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
+                    if p.elite == Some(Elite::Splitter) && !p.split {
+                        p.split = true;
+                        splits.push((k, t.position));
+                    }
                 }
             }
         }
+        for (k, at) in splits {
+            let (a, b, speed) = (
+                self.enemies[k].b,
+                self.enemies[k].a,
+                self.enemies[k].ai.speed(),
+            );
+            let (mesh, texture) = {
+                let r = self
+                    .world
+                    .get::<&MeshRenderer>(self.enemies[k].entity)
+                    .expect("pacer has a mesh");
+                (r.mesh.clone(), r.texture.clone())
+            };
+            let entity = self.world.spawn((
+                Transform {
+                    position: at,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::splat(0.7),
+                },
+                MeshRenderer { mesh, texture },
+                Spin(-0.9),
+            ));
+            log::info!("A splitter split");
+            self.enemies.push(Pacer {
+                entity,
+                ai: EnemyAI::new(a, b, speed, 0.0, gameplay::CHASE_LEASH),
+                elite: Some(Elite::Splitter),
+                a,
+                b,
+                split: true,
+            });
+        }
+        self.update_specials(dt, held)?;
         if let Some((entity, h, _)) = self.hunter.as_mut() {
             if !held {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
@@ -2169,32 +2706,7 @@ impl Game for DreamscapeGame {
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
         let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
-        let caught = !self.autopilot
-            && self.grace <= 0.0
-            && !untouchable
-            && self
-                .enemies
-                .iter()
-                .map(|(e, _)| (*e, false))
-                .chain(self.hunter.iter().map(|(e, _, _)| (*e, true)))
-                .any(|(e, is_hunter)| {
-                    self.world
-                        .get::<&Transform>(e)
-                        .map(|t| {
-                            if is_hunter {
-                                // Flat distance: it's too big to jump over.
-                                let d = t.position - self.player_position;
-                                Vec3::new(d.x, 0.0, d.z).length() < hunter::HUNTER_TOUCH
-                            } else {
-                                gameplay::touches(
-                                    t.position,
-                                    self.player_position,
-                                    gameplay::ENEMY_TOUCH_RADIUS,
-                                )
-                            }
-                        })
-                        .unwrap_or(false)
-                });
+        let caught = !self.autopilot && self.grace <= 0.0 && !untouchable && self.touching_threat();
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.tone(110.0, 0.35);
@@ -2241,6 +2753,16 @@ impl Game for DreamscapeGame {
                 self.stats.caught += 1;
             } else {
                 self.stats.fell += 1;
+            }
+            // The mimic loses your trail; stalkers slink back to their lairs.
+            self.trail.clear();
+            self.mimic_awake_at = self.dream_age + specials::MIMIC_DELAY;
+            for sp in &self.specials {
+                if let SpecialAI::Stalker(st) = &sp.ai {
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = st.lair;
+                    }
+                }
             }
             // The hunter goes back to its corner to catch its breath.
             if let Some((entity, h, home)) = self.hunter.as_mut() {
@@ -2526,7 +3048,7 @@ impl Game for DreamscapeGame {
                     Option<&NoMelt>,
                     Option<&Lit>,
                     Option<&Hero>,
-                    Option<&Water>,
+                    Option<&Translucent>,
                 )>()
                 .iter()
             {
