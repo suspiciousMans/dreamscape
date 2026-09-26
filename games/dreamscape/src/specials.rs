@@ -253,6 +253,45 @@ pub fn roll_elite(seed: u64, k: usize, difficulty: f32) -> Option<Elite> {
     (roll < elite_chance(difficulty)).then(|| ALL_ELITES[(h % 4) as usize])
 }
 
+/// Synesthesia Hall: route tiles burn on the first beat of every two.
+#[allow(dead_code)]
+pub const BEAT_HOT: f32 = 0.3;
+#[allow(dead_code)]
+pub fn beat_hot(t: f32, bpm: f32) -> bool {
+    if bpm <= 0.0 {
+        return false;
+    }
+    let bar = 120.0 / bpm;
+    t.rem_euclid(bar) / bar < BEAT_HOT
+}
+
+/// Melting Clockworks: the dream rewinds every LOOP_SECS.
+#[allow(dead_code)]
+pub const LOOP_SECS: f32 = 20.0;
+#[allow(dead_code)]
+pub fn loop_index(age: f32) -> u32 {
+    (age.max(0.0) / LOOP_SECS) as u32
+}
+
+/// Afterimage Fields: a ghost of you every ECHO_EVERY seconds, fading over ECHO_LIFE.
+#[allow(dead_code)]
+pub const ECHO_EVERY: f32 = 0.18;
+#[allow(dead_code)]
+pub const ECHO_LIFE: f32 = 1.4;
+#[allow(dead_code)]
+pub const MAX_ECHOES: usize = 10;
+#[allow(dead_code)]
+pub fn echo_scale(age: f32) -> f32 {
+    (1.0 - age / ECHO_LIFE).clamp(0.0, 1.0)
+}
+
+/// Watching Wallpaper: the yaw that turns an eye at `at` toward `target`.
+#[allow(dead_code)]
+pub fn watcher_yaw(at: Vec3, target: Vec3) -> f32 {
+    let d = target - at;
+    d.x.atan2(d.z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +432,42 @@ mod tests {
         let kinds: std::collections::HashSet<_> =
             (0..4000).filter_map(|k| roll_elite(9, k, 1e6)).collect();
         assert_eq!(kinds.len(), ALL_ELITES.len());
+    }
+
+    #[test]
+    fn beat_tiles_always_leave_time_to_cross() {
+        for bpm in [90.0_f32, 100.0, 110.0, 120.0, 130.0] {
+            let bar = 120.0 / bpm;
+            assert!(
+                bar * (1.0 - BEAT_HOT) >= CELL / MOVE_SPEED + 0.05,
+                "{bpm} bpm"
+            );
+            let hot = (0..1000)
+                .filter(|&k| beat_hot(k as f32 * bar / 1000.0, bpm))
+                .count();
+            assert!((250..=350).contains(&hot), "{bpm}: {hot}/1000 hot");
+        }
+        assert!(!beat_hot(0.0, 0.0));
+    }
+
+    #[test]
+    fn loops_count_up_and_echoes_fade() {
+        assert_eq!(
+            (loop_index(19.9), loop_index(20.0), loop_index(45.0)),
+            (0, 1, 2)
+        );
+        assert_eq!((echo_scale(0.0), echo_scale(ECHO_LIFE)), (1.0, 0.0));
+        assert!(echo_scale(0.3) > echo_scale(0.9));
+    }
+
+    #[test]
+    fn watchers_look_at_their_target() {
+        for t in [Vec3::new(5.0, 0.0, 1.0), Vec3::new(-3.0, 2.0, -8.0)] {
+            let at = Vec3::new(1.0, 1.7, 1.0);
+            let dir = Vec3::new(t.x - at.x, 0.0, t.z - at.z).normalize();
+            let y = watcher_yaw(at, t);
+            let fwd = Vec3::new(y.sin(), 0.0, y.cos());
+            assert!(fwd.dot(dir) > 0.9999);
+        }
     }
 }

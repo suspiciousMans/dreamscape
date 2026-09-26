@@ -27,6 +27,7 @@ mod booklet_ui;
 mod cards;
 mod codex_ui;
 mod dream;
+mod dissolve;
 mod enemy_ai;
 mod gameplay;
 mod hud;
