@@ -34,6 +34,14 @@ pub fn in_view(pos: Vec3, player: Vec3, clear: f32) -> bool {
     flat(pos - player).length() < clear && pos.z >= player.z - BEHIND
 }
 
+/// Seen by the dreamer: the view cone in first person, `in_view` otherwise.
+pub fn seen(pos: Vec3, player: Vec3, clear: f32, yaw: Option<f32>) -> bool {
+    match yaw {
+        Some(yaw) => crate::fpv::sees(player, yaw, pos, clear),
+        None => in_view(pos, player, clear),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Stalker {
     pub lair: Vec3,
@@ -51,8 +59,9 @@ impl Stalker {
         }
     }
 
-    pub fn update(&mut self, pos: &mut Vec3, player: Vec3, clear: f32, dt: f32) {
-        self.moving = !in_view(*pos, player, clear);
+    /// `yaw`: the dreamer's look direction in a first-person dream.
+    pub fn update(&mut self, pos: &mut Vec3, player: Vec3, clear: f32, yaw: Option<f32>, dt: f32) {
+        self.moving = !seen(*pos, player, clear, yaw);
         if self.moving {
             step_toward(pos, player, self.speed, dt);
         }
@@ -254,9 +263,7 @@ pub fn roll_elite(seed: u64, k: usize, difficulty: f32) -> Option<Elite> {
 }
 
 /// Synesthesia Hall: route tiles burn on the first beat of every two.
-#[allow(dead_code)]
 pub const BEAT_HOT: f32 = 0.3;
-#[allow(dead_code)]
 pub fn beat_hot(t: f32, bpm: f32) -> bool {
     if bpm <= 0.0 {
         return false;
@@ -266,27 +273,20 @@ pub fn beat_hot(t: f32, bpm: f32) -> bool {
 }
 
 /// Melting Clockworks: the dream rewinds every LOOP_SECS.
-#[allow(dead_code)]
 pub const LOOP_SECS: f32 = 20.0;
-#[allow(dead_code)]
 pub fn loop_index(age: f32) -> u32 {
     (age.max(0.0) / LOOP_SECS) as u32
 }
 
 /// Afterimage Fields: a ghost of you every ECHO_EVERY seconds, fading over ECHO_LIFE.
-#[allow(dead_code)]
 pub const ECHO_EVERY: f32 = 0.18;
-#[allow(dead_code)]
 pub const ECHO_LIFE: f32 = 1.4;
-#[allow(dead_code)]
 pub const MAX_ECHOES: usize = 10;
-#[allow(dead_code)]
 pub fn echo_scale(age: f32) -> f32 {
     (1.0 - age / ECHO_LIFE).clamp(0.0, 1.0)
 }
 
 /// Watching Wallpaper: the yaw that turns an eye at `at` toward `target`.
-#[allow(dead_code)]
 pub fn watcher_yaw(at: Vec3, target: Vec3) -> f32 {
     let d = target - at;
     d.x.atan2(d.z)
@@ -298,6 +298,22 @@ mod tests {
     use crate::gameplay::MOVE_SPEED;
 
     #[test]
+    fn in_first_person_a_stalker_moves_only_behind_your_back() {
+        let mut s = Stalker::new(Vec3::ZERO, MOVE_SPEED);
+        let mut pos = Vec3::new(0.0, 0.9, 5.0);
+        s.update(&mut pos, Vec3::ZERO, 20.0, Some(0.0), 1.0 / 60.0); // looking straight at it
+        assert!(!s.moving);
+        s.update(
+            &mut pos,
+            Vec3::ZERO,
+            20.0,
+            Some(std::f32::consts::PI),
+            1.0 / 60.0,
+        ); // turned away
+        assert!(s.moving);
+    }
+
+    #[test]
     fn a_stalker_never_moves_while_you_can_see_it() {
         let clear = 6.0;
         let player = Vec3::ZERO;
@@ -306,7 +322,7 @@ mod tests {
         // Far ahead: out of view, so it creeps in...
         for _ in 0..600 {
             let before = pos;
-            s.update(&mut pos, player, clear, 1.0 / 60.0);
+            s.update(&mut pos, player, clear, None, 1.0 / 60.0);
             if in_view(before, player, clear) {
                 assert_eq!(pos, before, "moved while watched");
                 assert!(!s.moving);
@@ -316,7 +332,7 @@ mod tests {
         assert!(flat(pos - player).length() >= clear - STALKER_SPEED * MOVE_SPEED / 60.0 - 1e-3);
         // From behind (toward the camera) it keeps coming.
         let mut behind = Vec3::new(0.0, 0.9, -4.0);
-        s.update(&mut behind, player, clear, 0.1);
+        s.update(&mut behind, player, clear, None, 0.1);
         assert!(s.moving && behind.z > -4.0);
         assert!(STALKER_SPEED < 1.0);
     }

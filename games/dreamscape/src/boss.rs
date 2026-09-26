@@ -5,8 +5,6 @@
 //! - one attack at a time, at least `attack_gap(tier)` apart,
 //! - every attack can be beaten: jump the ring, outwalk the wisps, wait out the dark.
 
-#![allow(dead_code)] // wired into main.rs in a later task
-
 use crate::gameplay::PLAYER_RADIUS;
 use crate::hunter::{Hunter, Phase};
 use engine::glam::Vec3;
@@ -139,23 +137,33 @@ impl Boss {
                     let kind = list[self.next % list.len()];
                     self.next += 1;
                     events.push(Event::Telegraph(kind));
-                    Some(Attack::Telegraph { kind, left: TELEGRAPH })
+                    Some(Attack::Telegraph {
+                        kind,
+                        left: TELEGRAPH,
+                    })
                 } else {
                     None
                 }
             }
-            Some(Attack::Telegraph { kind, left }) if left - dt > 0.0 => {
-                Some(Attack::Telegraph { kind, left: left - dt })
-            }
+            Some(Attack::Telegraph { kind, left }) if left - dt > 0.0 => Some(Attack::Telegraph {
+                kind,
+                left: left - dt,
+            }),
             Some(Attack::Telegraph { kind, .. }) => match kind {
                 AttackKind::Shockwave => {
                     events.push(Event::Ring);
-                    Some(Attack::Ring { centre: flat(*pos), radius: 0.0 })
+                    Some(Attack::Ring {
+                        centre: flat(*pos),
+                        radius: 0.0,
+                    })
                 }
                 AttackKind::Summon => {
                     for side in [-1.0_f32, 1.0] {
                         if self.wisps.len() < MAX_WISPS {
-                            self.wisps.push(Wisp { pos: flat(*pos) + Vec3::X * 2.0 * side, life: WISP_LIFE });
+                            self.wisps.push(Wisp {
+                                pos: flat(*pos) + Vec3::X * 2.0 * side,
+                                life: WISP_LIFE,
+                            });
                         }
                     }
                     events.push(Event::Summon);
@@ -190,11 +198,18 @@ impl Boss {
 
     pub fn hits(&self, player: Vec3) -> bool {
         let ring = matches!(self.attack, Some(Attack::Ring { centre, radius }) if ring_hits(centre, radius, player));
-        ring || self.wisps.iter().any(|w| flat(w.pos - player).length() < WISP_TOUCH + PLAYER_RADIUS * 0.5)
+        ring || self
+            .wisps
+            .iter()
+            .any(|w| flat(w.pos - player).length() < WISP_TOUCH + PLAYER_RADIUS * 0.5)
     }
 
     pub fn sight_scale(&self) -> f32 {
-        if matches!(self.attack, Some(Attack::Eclipse { .. })) { ECLIPSE_SIGHT } else { 1.0 }
+        if matches!(self.attack, Some(Attack::Eclipse { .. })) {
+            ECLIPSE_SIGHT
+        } else {
+            1.0
+        }
     }
 
     pub fn warning(&self) -> Option<&'static str> {
@@ -254,7 +269,10 @@ mod tests {
     fn every_attack_is_announced_and_spaced_out() {
         for depth in [10, 15, 20, 40] {
             let ev = run(depth, 120.0);
-            assert!(ev.iter().any(|(_, e)| *e == Event::Ring), "depth {depth}: never attacked");
+            assert!(
+                ev.iter().any(|(_, e)| *e == Event::Ring),
+                "depth {depth}: never attacked"
+            );
             let mut pending: Option<(f32, AttackKind)> = None;
             let mut last_telegraph: Option<f32> = None;
             for (t, e) in ev {
@@ -262,14 +280,21 @@ mod tests {
                     Event::Telegraph(k) => {
                         assert!(pending.is_none(), "two attacks at once");
                         if let Some(l) = last_telegraph {
-                            assert!(t - l >= attack_gap(tier(depth)), "depth {depth}: attacks bunched");
+                            assert!(
+                                t - l >= attack_gap(tier(depth)),
+                                "depth {depth}: attacks bunched"
+                            );
                         }
                         last_telegraph = Some(t);
                         pending = Some((t, k));
                     }
                     effect => {
                         let (t0, k) = pending.take().expect("unannounced attack");
-                        assert!(t - t0 >= TELEGRAPH - 2.0 * DT, "announced only {}s ahead", t - t0);
+                        assert!(
+                            t - t0 >= TELEGRAPH - 2.0 * DT,
+                            "announced only {}s ahead",
+                            t - t0
+                        );
                         let want = match k {
                             AttackKind::Shockwave => Event::Ring,
                             AttackKind::Summon => Event::Summon,
@@ -306,7 +331,10 @@ mod tests {
                     y = PLAYER_RADIUS;
                     vy = 0.0;
                 }
-                assert!(!ring_hits(Vec3::ZERO, r, Vec3::new(0.0, y, dist)), "jumped at {dist}: hit at r={r:.2} y={y:.2}");
+                assert!(
+                    !ring_hits(Vec3::ZERO, r, Vec3::new(0.0, y, dist)),
+                    "jumped at {dist}: hit at r={r:.2} y={y:.2}"
+                );
                 r += RING_SPEED * DT;
             }
         }
@@ -334,8 +362,14 @@ mod tests {
     #[test]
     fn a_catch_clears_the_air_and_the_eclipse_never_blinds() {
         let mut b = Boss::new(40, MOVE_SPEED);
-        b.attack = Some(Attack::Ring { centre: Vec3::ZERO, radius: 3.0 });
-        b.wisps.push(Wisp { pos: Vec3::ZERO, life: 3.0 });
+        b.attack = Some(Attack::Ring {
+            centre: Vec3::ZERO,
+            radius: 3.0,
+        });
+        b.wisps.push(Wisp {
+            pos: Vec3::ZERO,
+            life: 3.0,
+        });
         b.after_catch();
         assert!(b.attack.is_none() && b.wisps.is_empty() && b.hunter.speed() == 0.0);
         assert!(ECLIPSE_SIGHT >= 0.5);

@@ -27,8 +27,8 @@ mod booklet_ui;
 mod boss;
 mod cards;
 mod codex_ui;
-mod dream;
 mod dissolve;
+mod dream;
 mod enemy_ai;
 mod fpv;
 mod gameplay;
@@ -96,6 +96,10 @@ struct Lit;
 /// silhouette wherever something hides it.
 #[derive(Clone, Copy)]
 struct Hero;
+
+/// The dreamer's own body (hidden in first-person dreams).
+#[derive(Clone, Copy)]
+struct PlayerBody;
 
 /// The glowing ring on the floor under the dreamer.
 #[derive(Clone, Copy)]
@@ -260,6 +264,19 @@ pub struct DreamscapeGame {
     gates: Vec<(Entity, Vec3, Vec3, f32)>,
     /// Elfworks shifting tiles: (entity, level position, phase).
     shifters: Vec<(Entity, Vec3, f32)>,
+    /// Synesthesia Hall: (plate, cell centre) and the dream's tempo.
+    beat_tiles: Vec<(Entity, Vec3)>,
+    bpm: f32,
+    /// Melting Clockworks: loops completed in this dream.
+    loops: u32,
+    /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
+    echoes: Vec<(Entity, f32)>,
+    echo_timer: f32,
+    player_tex: Option<Arc<GpuTexture>>,
+    /// Watching Wallpaper: eyes in the walls.
+    watchers: Vec<Entity>,
+    /// White Dissolve: the path state and its tiles (entity, full size).
+    dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
     /// Special kinds met so far this run (each gets a hint the first time).
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
@@ -295,6 +312,13 @@ pub struct DreamscapeGame {
     camera_pos: Vec3,
     /// DREAMSCAPE_FPS=1: (accumulated ms, frames) for the average frame-time log.
     frame_ms: (f32, u32),
+    /// First-person look (radians); only used when `first_person_active()`.
+    yaw: f32,
+    pitch: f32,
+    mouse_captured: bool,
+    /// Dev switch: DREAMSCAPE_FP=1 forces first person in every dream.
+    force_fp: bool,
+    player_grounded: bool,
     /// F1: fixed overview camera.
     debug_camera: bool,
     /// DREAMSCAPE_AUTOPILOT=1: follow the generated route (end-to-end test).
@@ -361,8 +385,15 @@ pub struct DreamscapeGame {
     boss_reward: bool,
     /// Nightmare arenas: the hunter, its start, sigils left, and the
     /// portal waiting to open.
-    hunter: Option<(Entity, hunter::Hunter, Vec3)>,
+    hunter: Option<(Entity, boss::Boss, Vec3)>,
     sigils_left: usize,
+    /// Sigils in this nightmare (3, or 4 from the fourth tier).
+    sigils_total: usize,
+    /// Where taken sigils stood, newest last (a tier-3 catch puts one back).
+    sigils_taken: Vec<Vec3>,
+    /// The shockwave ring and the wisp bodies, mirrored from the boss.
+    boss_fx: Option<(Entity, [Entity; boss::MAX_WISPS])>,
+    sigil_tex: Option<Arc<GpuTexture>>,
     sealed_portal: Option<(dream::Block, Arc<GpuTexture>)>,
     stats: RunStats,
     /// Mid-air jumps used since last touching the ground.
@@ -400,6 +431,14 @@ impl DreamscapeGame {
             veins: Vec::new(),
             gates: Vec::new(),
             shifters: Vec::new(),
+            beat_tiles: Vec::new(),
+            bpm: 0.0,
+            loops: 0,
+            echoes: Vec::new(),
+            echo_timer: 0.0,
+            player_tex: None,
+            watchers: Vec::new(),
+            dissolve: None,
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
             export_requested: false,
@@ -423,6 +462,11 @@ impl DreamscapeGame {
             player: None,
             player_position: Vec3::ZERO,
             frame_ms: (0.0, 0),
+            yaw: 0.0,
+            pitch: 0.0,
+            mouse_captured: false,
+            force_fp: std::env::var_os("DREAMSCAPE_FP").is_some(),
+            player_grounded: false,
             camera_pos: gameplay::CAMERA_OFFSET,
             debug_camera: false,
             autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
@@ -487,6 +531,10 @@ impl DreamscapeGame {
             boss_reward: false,
             hunter: None,
             sigils_left: 0,
+            sigils_total: 0,
+            sigils_taken: Vec::new(),
+            boss_fx: None,
+            sigil_tex: None,
             sealed_portal: None,
             stats: RunStats::default(),
             air_jumps_used: 0,
@@ -519,6 +567,20 @@ impl DreamscapeGame {
     /// rolled 180 degrees, so the world directions flip with it.
     fn inverted(&self) -> bool {
         self.twists.has(Variant::Inverted)
+    }
+
+    /// First-person dreams (or DREAMSCAPE_FP=1); the F1 overview camera wins.
+    fn first_person_active(&self) -> bool {
+        !self.debug_camera
+            && self
+                .dream
+                .as_ref()
+                .is_some_and(|d| d.theme.first_person() || self.force_fp)
+    }
+
+    /// The look direction, when seeing through the dreamer's eyes.
+    fn fp_yaw(&self) -> Option<f32> {
+        self.first_person_active().then_some(self.yaw)
     }
 
     fn open_upgrade_choice(&mut self) {
@@ -816,9 +878,28 @@ impl DreamscapeGame {
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
             title_age: self.title_age,
-            shard_dir: target
-                .and_then(|t| hud::compass(self.player_position.to_array(), t.to_array(), 7.0))
-                .map(|d| if self.inverted() { [-d[0], -d[1]] } else { d }),
+            shard_dir: target.and_then(|t| {
+                if self.first_person_active() {
+                    fpv::compass(self.player_position, self.yaw, t, 4.0)
+                } else {
+                    hud::compass(self.player_position.to_array(), t.to_array(), 7.0).map(|d| {
+                        if self.inverted() {
+                            [-d[0], -d[1]]
+                        } else {
+                            d
+                        }
+                    })
+                }
+            }),
+            first_person: self.first_person_active(),
+            boss: self.hunter.as_ref().map(|(_, b, _)| {
+                (
+                    boss::title(b.tier).to_string(),
+                    self.sigils_total - self.sigils_left,
+                    self.sigils_total,
+                    b.warning(),
+                )
+            }),
             shard_dist: target.map(|t| {
                 Vec3::new(
                     t.x - self.player_position.x,
@@ -976,17 +1057,30 @@ impl DreamscapeGame {
             } else {
                 settings_ui::SettingsView::default()
             },
-            objective: self.hunter.as_ref().map(|_| {
-                if self.sigils_left > 0 {
-                    format!(
-                        "SIGILS {}/{}",
-                        dream::SIGILS - self.sigils_left,
-                        dream::SIGILS
-                    )
-                } else {
-                    "THE PORTAL IS OPEN".into()
-                }
-            }),
+            objective: self
+                .hunter
+                .as_ref()
+                .map(|_| {
+                    if self.sigils_left > 0 {
+                        format!(
+                            "SIGILS {}/{}",
+                            self.sigils_total - self.sigils_left,
+                            self.sigils_total
+                        )
+                    } else {
+                        "THE PORTAL IS OPEN".into()
+                    }
+                })
+                .or_else(|| {
+                    let looping = self
+                        .dream
+                        .as_ref()
+                        .is_some_and(|d| d.theme.spec().feature == dream::Feature::TimeLoop);
+                    looping.then(|| {
+                        let left = specials::LOOP_SECS - self.dream_age % specials::LOOP_SECS;
+                        format!("LOOP {}  ·  {:>2}s", self.loops + 1, left.ceil() as i32)
+                    })
+                }),
             choice: if self.mode == hud::Mode::Choice {
                 self.choice_view.clone()
             } else {
@@ -996,6 +1090,126 @@ impl DreamscapeGame {
     }
 
     /// A crumbling floor tile (solid, with its collider).
+    /// Afterimage Fields: leave a fading ghost of yourself every ECHO_EVERY.
+    fn update_echoes(&mut self, player: Entity, dt: f32) -> anyhow::Result<()> {
+        let echoing = self
+            .dream
+            .as_ref()
+            .is_some_and(|d| d.theme.spec().feature == dream::Feature::Echoes);
+        if !echoing {
+            return Ok(());
+        }
+        let now = self.dream_age;
+        let moving = self
+            .world
+            .get::<&RigidBody>(player)
+            .is_ok_and(|b| Vec3::new(b.velocity.x, 0.0, b.velocity.z).length() > 0.5);
+        self.echo_timer -= dt;
+        if moving && self.echo_timer <= 0.0 {
+            self.echo_timer = specials::ECHO_EVERY;
+            if let Some(tex) = self.player_tex.clone() {
+                let e = self.world.spawn((
+                    Transform {
+                        position: self.player_position,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.9, 1.25, 0.9),
+                    },
+                    MeshRenderer {
+                        mesh: self.mesh(Shape::Octahedron)?,
+                        texture: Some(tex),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+                self.echoes.push((e, now));
+            }
+        }
+        while self.echoes.len() > specials::MAX_ECHOES {
+            let (e, _) = self.echoes.remove(0);
+            let _ = self.world.despawn(e);
+        }
+        let mut gone = Vec::new();
+        for (k, &(e, born)) in self.echoes.iter().enumerate() {
+            let s = specials::echo_scale(now - born);
+            if s <= 0.0 {
+                gone.push(k);
+            } else if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                t.scale = Vec3::new(0.9, 1.25, 0.9) * s;
+            }
+        }
+        for k in gone.into_iter().rev() {
+            let (e, _) = self.echoes.remove(k);
+            let _ = self.world.despawn(e);
+        }
+        Ok(())
+    }
+
+    /// Mirrors the boss's ring and wisps onto their entities.
+    fn sync_boss_fx(&mut self) {
+        let (Some((_, b, _)), Some((ring, wisps))) = (self.hunter.as_ref(), self.boss_fx) else {
+            return;
+        };
+        if let Ok(mut t) = self.world.get::<&mut Transform>(ring) {
+            match b.attack {
+                Some(boss::Attack::Ring { centre, radius }) => {
+                    let d = 2.0 * radius + boss::RING_T;
+                    t.position = centre + Vec3::Y * boss::RING_H * 0.5;
+                    t.scale = Vec3::new(d, d, boss::RING_H);
+                }
+                _ => t.scale = Vec3::ZERO,
+            }
+        }
+        for (k, e) in wisps.iter().enumerate() {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                match b.wisps.get(k) {
+                    Some(w) => {
+                        t.position = w.pos + Vec3::Y * 0.7;
+                        t.scale = Vec3::splat(0.6);
+                    }
+                    None => t.scale = Vec3::ZERO,
+                }
+            }
+        }
+    }
+
+    /// A nightmare sigil (also used to put one back after a tier-3 catch).
+    fn spawn_sigil(&mut self, at: Vec3, k: usize) {
+        let (Some(sigil_tex), Ok(sigil_mesh)) =
+            (self.sigil_tex.clone(), self.mesh(Shape::Octahedron))
+        else {
+            return;
+        };
+        let size = Vec3::new(0.7, 1.3, 0.7);
+        self.world.spawn((
+            Transform {
+                position: at + Vec3::Y * 1.0,
+                rotation: Quat::IDENTITY,
+                scale: size,
+            },
+            MeshRenderer {
+                mesh: sigil_mesh.clone(),
+                texture: Some(sigil_tex.clone()),
+            },
+            SurfaceUv(0.8),
+            Spin(2.5),
+            Bob {
+                base: 1.0,
+                amp: 0.25,
+                speed: 2.0,
+                phase: k as f32 * 2.1,
+            },
+            Lit,
+            Hero,
+            SigilMarker,
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: size * 0.5,
+                },
+                is_trigger: true,
+            },
+        ));
+    }
+
     fn spawn_tile(&mut self, b: &dream::Block, texture: Arc<GpuTexture>) -> anyhow::Result<Entity> {
         let mesh = self.mesh(b.shape)?;
         Ok(self.world.spawn((
@@ -1105,6 +1319,54 @@ impl DreamscapeGame {
                     Vec3::ZERO
                 };
                 tr.scale = tr.scale.lerp(target, 0.25);
+            }
+        }
+        // Beat tiles: full and burning on the downbeat, a small tell otherwise.
+        let hot = specials::beat_hot(t, self.bpm);
+        for &(e, _) in &self.beat_tiles {
+            if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                let (xz, y) = if hot { (0.9, 0.04) } else { (0.5, 0.005) };
+                tr.scale = Vec3::new(gameplay::CELL * xz, y, gameplay::CELL * xz);
+            }
+        }
+        // Watchers look at the shard (or the portal once it's gone).
+        let target = self
+            .shard_entities
+            .first()
+            .and_then(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position))
+            .or(self.dream.as_ref().map(|d| d.portal));
+        if let Some(target) = target {
+            for &e in &self.watchers {
+                if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                    tr.rotation = Quat::from_rotation_y(specials::watcher_yaw(tr.position, target));
+                }
+            }
+        }
+        // Melting Clockworks: every LOOP_SECS the dream rewinds.
+        let looping = self
+            .dream
+            .as_ref()
+            .is_some_and(|d| d.theme.spec().feature == dream::Feature::TimeLoop);
+        if looping {
+            let n = specials::loop_index(t);
+            if n != self.loops {
+                self.loops = n;
+                for p in &mut self.enemies {
+                    p.ai.reset();
+                    if let Ok(mut tr) = self.world.get::<&mut Transform>(p.entity) {
+                        tr.position = p.a;
+                    }
+                }
+                for sp in &self.specials {
+                    if let SpecialAI::Stalker(st) = &sp.ai {
+                        if let Ok(mut tr) = self.world.get::<&mut Transform>(sp.entity) {
+                            tr.position = st.lair;
+                        }
+                    }
+                }
+                self.flash.trigger([1.0, 0.8, 0.4], 0.4);
+                self.sfx(Sound::Deeper);
+                log::info!("Time loop {n}");
             }
         }
         if self.autopilot {
@@ -1271,9 +1533,15 @@ impl DreamscapeGame {
         self.trail.push(self.dream_age, player);
         self.jester_cooldown = (self.jester_cooldown - dt).max(0.0);
         let strangeness = self.visual_strangeness();
-        let clear = (tunnel::sight_radius(strangeness) * self.twists.sight() * self.run.sight()
-            + self.run.sight_bonus())
-            * (1.0 - tunnel::SIGHT_FADE);
+        let eclipse = self
+            .hunter
+            .as_ref()
+            .map_or(1.0, |(_, b, _)| b.sight_scale());
+        let clear =
+            (tunnel::sight_radius(strangeness) * self.twists.sight() * self.run.sight() * eclipse
+                + self.run.sight_bonus())
+                * (1.0 - tunnel::SIGHT_FADE);
+        let yaw = self.fp_yaw();
         let mut calls = Vec::new();
         for sp in &mut self.specials {
             let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
@@ -1282,7 +1550,7 @@ impl DreamscapeGame {
             match &mut sp.ai {
                 SpecialAI::Stalker(s) => {
                     if !held {
-                        s.update(&mut t.position, player, clear, dt);
+                        s.update(&mut t.position, player, clear, yaw, dt);
                     } else {
                         s.moving = false;
                     }
@@ -1479,13 +1747,20 @@ impl DreamscapeGame {
                 && at(sp.entity)
                     .is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
         });
+        let beat = self.player_grounded
+            && specials::beat_hot(self.dream_age, self.bpm)
+            && self.beat_tiles.iter().any(|&(_, at)| {
+                (at.x - player.x).abs() < gameplay::CELL * 0.5
+                    && (at.z - player.z).abs() < gameplay::CELL * 0.5
+            });
         let gate = self.gates.iter().any(|&(_, at, _, phase)| {
             specials::gate_closed(self.dream_age, phase) && {
                 let d = at - player;
                 Vec3::new(d.x, 0.0, d.z).length() < 0.9
             }
         });
-        pacers || hunter || special || gate
+        let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
+        pacers || hunter || boss_fx || special || gate || beat
     }
 
     /// Every sigil taken: the nightmare's portal opens.
@@ -2389,10 +2664,19 @@ impl DreamscapeGame {
         self.hunter = None;
         self.sealed_portal = None;
         self.sigils_left = dream.sigils.len();
+        self.sigils_total = dream.sigils.len();
+        self.sigils_taken.clear();
+        self.boss_fx = None;
         if !self.twists.0.is_empty() {
             log::info!("Dream twist: {}", self.twists.label());
         }
         let wake_door = self.director.lucid() && dream.shard.is_some();
+        self.yaw = dream
+            .route
+            .get(1)
+            .and_then(|w| fpv::yaw_toward(w.pos - dream.spawn))
+            .unwrap_or(0.0);
+        self.pitch = 0.0;
         self.dream_name = dream::dream_name(theme, dream.seed);
         self.dream_whisper = dream::whisper(theme, dream.seed);
         self.title_age = 0.0;
@@ -2448,6 +2732,13 @@ impl DreamscapeGame {
         self.veins = dream.veins.clone();
         self.gates.clear();
         self.shifters.clear();
+        self.beat_tiles.clear();
+        self.bpm = spec.mood.bpm;
+        self.loops = 0;
+        self.echoes.clear();
+        self.echo_timer = 0.0;
+        self.watchers.clear();
+        self.dissolve = None;
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
@@ -2473,6 +2764,7 @@ impl DreamscapeGame {
         )?);
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
+        let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
@@ -2489,6 +2781,17 @@ impl DreamscapeGame {
             if let Some(&(_, phase)) = shifter {
                 let e = self.spawn_tile(block, floor_tex.clone())?;
                 self.shifters.push((e, block.pos, phase));
+                continue;
+            }
+            // White Dissolve: each walkable cell is its own tile so it can fade.
+            let dissolving = block.kind == BlockKind::Floor
+                && dream
+                    .dissolve
+                    .iter()
+                    .any(|c| (c.x - block.pos.x).abs() < 1e-3 && (c.z - block.pos.z).abs() < 1e-3);
+            if dissolving {
+                let e = self.spawn_tile(block, floor_tex.clone())?;
+                dissolve_tiles.push((block.pos, e, block.size));
                 continue;
             }
             let crumbly = block.kind == BlockKind::Floor
@@ -2626,6 +2929,7 @@ impl DreamscapeGame {
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
         let crystal = self.booklet.stash.crystal.rgba();
         let player_texture = self.texture(gl, crystal);
+        self.player_tex = Some(player_texture.clone());
         let halo_mesh = self.mesh(Shape::Torus)?;
         self.world.spawn((
             Transform {
@@ -2656,6 +2960,7 @@ impl DreamscapeGame {
             NoMelt,
             Lit,
             Hero,
+            PlayerBody,
             RigidBody::default(),
             Collider {
                 shape: ColliderShape::Sphere {
@@ -2735,51 +3040,86 @@ impl DreamscapeGame {
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
         self.spawn_features(gl, &dream)?;
+        if !dream.dissolve.is_empty() {
+            // Tiles in the same order as the dissolve state's cells.
+            let tiles = dream
+                .dissolve
+                .iter()
+                .filter_map(|c| {
+                    dissolve_tiles
+                        .iter()
+                        .find(|(p, _, _)| (p.x - c.x).abs() < 1e-3 && (p.z - c.z).abs() < 1e-3)
+                        .map(|&(_, e, size)| (e, size))
+                })
+                .collect::<Vec<_>>();
+            if tiles.len() == dream.dissolve.len() {
+                self.dissolve = Some((dissolve::Dissolve::new(dream.dissolve.clone()), tiles));
+            } else {
+                log::warn!(
+                    "dissolve: {} cells but {} tiles",
+                    dream.dissolve.len(),
+                    tiles.len()
+                );
+            }
+        }
+        if !dream.beat_tiles.is_empty() {
+            let beat_tex = self.texture(gl, [255, 80, 200, 255]);
+            let plate = self.mesh(Shape::Cube)?;
+            for &at in &dream.beat_tiles {
+                let e = self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 0.03,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(gameplay::CELL * 0.9, 0.04, gameplay::CELL * 0.9),
+                    },
+                    MeshRenderer {
+                        mesh: plate.clone(),
+                        texture: Some(beat_tex.clone()),
+                    },
+                    Lit,
+                ));
+                self.beat_tiles.push((e, at));
+            }
+        }
+        if !dream.watchers.is_empty() {
+            let eye = self.mesh(Shape::Orb)?;
+            let mut spec = dream.surfaces.prop.clone();
+            spec.pattern = dream::Pattern::Eyes;
+            let eye_tex = self.upload_surface(gl, &spec)?;
+            for &(at, _) in &dream.watchers {
+                let e = self.world.spawn((
+                    Transform {
+                        position: at,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.8, 0.8, 0.25),
+                    },
+                    MeshRenderer {
+                        mesh: eye.clone(),
+                        texture: Some(eye_tex.clone()),
+                    },
+                    Lit,
+                    NoMelt,
+                ));
+                self.watchers.push(e);
+            }
+        }
 
         // Nightmare: sigils round the edge, and the hunter in the middle.
         let sigil_tex = self
             .shard_tex
             .clone()
             .context("shard textures not uploaded")?;
-        let sigil_mesh = self.mesh(Shape::Octahedron)?;
+        self.sigil_tex = Some(sigil_tex);
         for (k, &at) in dream.sigils.iter().enumerate() {
-            let size = Vec3::new(0.7, 1.3, 0.7);
-            self.world.spawn((
-                Transform {
-                    position: at + Vec3::Y * 1.0,
-                    rotation: Quat::IDENTITY,
-                    scale: size,
-                },
-                MeshRenderer {
-                    mesh: sigil_mesh.clone(),
-                    texture: Some(sigil_tex.clone()),
-                },
-                SurfaceUv(0.8),
-                Spin(2.5),
-                Bob {
-                    base: 1.0,
-                    amp: 0.25,
-                    speed: 2.0,
-                    phase: k as f32 * 2.1,
-                },
-                Lit,
-                Hero,
-                SigilMarker,
-                Collider {
-                    shape: ColliderShape::Aabb {
-                        half_extents: size * 0.5,
-                    },
-                    is_trigger: true,
-                },
-            ));
+            self.spawn_sigil(at, k);
         }
         if let Some(at) = dream.hunter {
-            let h = hunter::Hunter::new(dream.depth, self.player_speed());
+            let h = boss::Boss::new(dream.depth, self.player_speed());
             let entity = self.world.spawn((
                 Transform {
                     position: at,
                     rotation: Quat::IDENTITY,
-                    scale: Vec3::splat(h.size()),
+                    scale: Vec3::splat(h.hunter.size()),
                 },
                 MeshRenderer {
                     mesh: enemy_mesh.clone(),
@@ -2788,9 +3128,42 @@ impl DreamscapeGame {
                 Spin(0.6),
                 Lit,
             ));
+            // The shockwave (a flat hoop) and the wisps, hidden until used.
+            let ring_mesh = self.mesh(Shape::Torus)?;
+            let ring_tex = self.texture(gl, [255, 90, 160, 255]);
+            let ring = self.world.spawn((
+                Transform {
+                    position: at,
+                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    scale: Vec3::ZERO,
+                },
+                MeshRenderer {
+                    mesh: ring_mesh,
+                    texture: Some(ring_tex),
+                },
+                Lit,
+                NoMelt,
+            ));
+            let wisp_mesh = self.mesh(Shape::Orb)?;
+            let wisps = [(); boss::MAX_WISPS].map(|_| {
+                self.world.spawn((
+                    Transform {
+                        position: at,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::ZERO,
+                    },
+                    MeshRenderer {
+                        mesh: wisp_mesh.clone(),
+                        texture: Some(enemy_texture.clone()),
+                    },
+                    Lit,
+                    Spin(3.0),
+                ))
+            });
+            self.boss_fx = Some((ring, wisps));
+            self.dream_name = format!("{}: {}", boss::title(h.tier), self.dream_name);
             self.hunter = Some((entity, h, at));
             self.dream_whisper = "gather the sigils. it is hunting you.".into();
-            self.dream_name = format!("NIGHTMARE: {}", self.dream_name);
             log::info!(
                 "Nightmare at depth {}: {} sigils",
                 dream.depth,
@@ -2838,6 +3211,9 @@ impl DreamscapeGame {
         }
         self.player_position = spawn;
         self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
+        if let Some((d, _)) = self.dissolve.as_mut() {
+            d.reset();
+        }
         self.route_index = 0;
         self.grace = gameplay::RESPAWN_GRACE
             * self.run.grace()
@@ -2927,7 +3303,13 @@ impl Game for DreamscapeGame {
             if self.director.theme == DreamTheme::Lobby {
                 self.director.theme = DreamTheme::NightmareFactory;
             }
-            self.director.depth = dream::NIGHTMARE_EVERY;
+            // DREAMSCAPE_NIGHTMARE=3 starts in the third tier's arena.
+            let tier: u32 = std::env::var("DREAMSCAPE_NIGHTMARE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            self.director.depth = dream::NIGHTMARE_EVERY * tier;
             self.director.nightmare = true;
             self.director.has_shard = false;
         }
@@ -3013,6 +3395,8 @@ impl Game for DreamscapeGame {
             }
             match (self.mode, key) {
                 (hud::Mode::Playing, Keycode::Escape) => {
+                    ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
+                    self.mouse_captured = false;
                     self.mode = hud::Mode::Paused;
                     self.input = PlayerInputState::default();
                     return;
@@ -3206,6 +3590,13 @@ impl Game for DreamscapeGame {
             }
         }
         let dt = dt.min(gameplay::MAX_DT);
+        // Mouse look owns the cursor only while actually dreaming in first person.
+        let want_mouse =
+            self.first_person_active() && self.mode == hud::Mode::Playing && !self.autopilot;
+        if want_mouse != self.mouse_captured {
+            ctx.platform.sdl.mouse().set_relative_mouse_mode(want_mouse);
+            self.mouse_captured = want_mouse;
+        }
         self.time += dt;
         self.flash.tick(dt);
         self.grace = (self.grace - dt).max(0.0);
@@ -3281,6 +3672,25 @@ impl Game for DreamscapeGame {
         let Some(player) = self.player else {
             return Ok(());
         };
+        let fp = self.first_person_active();
+        if fp && !self.autopilot {
+            let (dx, dy) = ctx.input.mouse_delta();
+            (self.yaw, self.pitch) = fpv::turn(
+                self.yaw,
+                self.pitch,
+                dx as f32,
+                dy as f32,
+                self.settings.mouse_sens,
+                self.settings.invert_y,
+            );
+            let (rx, ry) = ctx.input.right_stick();
+            let keys = ctx.input.is_key_down(Keycode::Right) as i32 as f32
+                - ctx.input.is_key_down(Keycode::Left) as i32 as f32;
+            self.yaw = (self.yaw - (rx * fpv::STICK_TURN + keys * fpv::KEY_TURN) * dt)
+                .rem_euclid(std::f32::consts::TAU);
+            self.pitch = (self.pitch - ry * fpv::STICK_TURN * 0.6 * dt)
+                .clamp(-fpv::PITCH_LIMIT, fpv::PITCH_LIMIT);
+        }
         self.dream_age += dt;
         self.stats.time += dt;
         self.run.tick(dt);
@@ -3308,10 +3718,19 @@ impl Game for DreamscapeGame {
                 1.0
             };
             let speed = self.player_speed() * ground;
-            let mut v = gameplay::horizontal_velocity(&self.input) * (speed / gameplay::MOVE_SPEED);
+            let walk = if fp {
+                fpv::velocity(&self.input, self.yaw)
+            } else {
+                gameplay::horizontal_velocity(&self.input)
+            };
+            let mut v = walk * (speed / gameplay::MOVE_SPEED);
             // The left stick, if it's pushed, wins (analogue: half-push walks).
             if let Some((x, z)) = settings::stick_dir(ctx.input.left_stick()) {
-                v = Vec3::new(x, 0.0, z) * speed;
+                v = if fp {
+                    fpv::from_world_stick(x, z, self.yaw)
+                } else {
+                    Vec3::new(x, 0.0, z)
+                } * speed;
             }
             if self.inverted() {
                 v = Vec3::new(-v.x, v.y, -v.z);
@@ -3321,9 +3740,24 @@ impl Game for DreamscapeGame {
         if desired.length_squared() > 1e-4 {
             self.facing = desired.normalize();
         }
+        if fp {
+            if self.autopilot {
+                if let Some(y) = fpv::yaw_toward(desired) {
+                    self.yaw = y;
+                    self.pitch = -0.12;
+                }
+            } else if desired.length_squared() <= 1e-4 {
+                self.facing = fpv::forward(self.yaw); // a dash goes where you look
+            }
+        }
         let jump_pressed = wants_jump && !self.jump_was_down;
         self.jump_was_down = wants_jump;
-        let jump_speed = gameplay::JUMP_SPEED * self.run.jump() * self.twists.jump();
+        let feature = self
+            .dream
+            .as_ref()
+            .map_or(dream::Feature::None, |d| d.theme.spec().feature);
+        let jump_speed =
+            gameplay::JUMP_SPEED * self.run.jump() * self.twists.jump() * feature.jump();
         let dashing = self.run.active(Ability::Dash);
         if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
             let v = if dashing {
@@ -3333,6 +3767,7 @@ impl Game for DreamscapeGame {
             };
             body.velocity.x = v.x;
             body.velocity.z = v.z;
+            self.player_grounded = body.grounded;
             if body.grounded {
                 self.air_jumps_used = 0;
             }
@@ -3414,18 +3849,43 @@ impl Game for DreamscapeGame {
         }
         self.update_specials(dt, held)?;
         self.update_features();
-        if let Some((entity, h, _)) = self.hunter.as_mut() {
+        let mut boss_events = Vec::new();
+        if let Some((entity, b, _)) = self.hunter.as_mut() {
             if !held {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
-                    h.update(&mut t.position, target, dt);
-                    t.scale = Vec3::splat(h.size());
+                    boss_events = b.update(&mut t.position, target, dt);
+                    // It swells and throbs while it winds up an attack: the tell.
+                    let pulse = if b.warning().is_some() {
+                        1.0 + 0.15 * (self.time * 20.0).sin()
+                    } else {
+                        1.0
+                    };
+                    t.scale = Vec3::splat(b.hunter.size() * pulse);
                 }
             }
         }
+        for e in boss_events {
+            match e {
+                boss::Event::Telegraph(_) => {
+                    self.sfx(Sound::MeltStart);
+                    self.flash.trigger([1.0, 0.3, 0.5], 0.25);
+                }
+                boss::Event::Ring => self.sfx(Sound::Crumble),
+                boss::Event::Summon => self.sfx(Sound::Split),
+                boss::Event::Eclipse => self.sfx(Sound::Stillness),
+            }
+            log::info!("Boss: {e:?}");
+        }
+        self.sync_boss_fx();
 
         // 3. Physics: gravity, collision, trigger overlaps
         let physics = PhysicsParams {
-            gravity: PhysicsParams::default().gravity * self.twists.gravity(),
+            gravity: PhysicsParams::default().gravity
+                * self.twists.gravity()
+                * self
+                    .dream
+                    .as_ref()
+                    .map_or(1.0, |d| d.theme.spec().feature.gravity()),
             ..PhysicsParams::default()
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
@@ -3437,6 +3897,36 @@ impl Game for DreamscapeGame {
             t.position = Vec3::new(under.x, 0.04, under.z);
         }
         self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+        self.update_echoes(player, dt)?;
+        if !self.autopilot {
+            // White Dissolve: the way behind you goes while you move.
+            let speed = self
+                .world
+                .get::<&RigidBody>(player)
+                .map(|b| Vec3::new(b.velocity.x, 0.0, b.velocity.z).length())
+                .unwrap_or(0.0);
+            if let Some((d, tiles)) = self.dissolve.as_mut() {
+                d.update(self.player_position, speed, dt);
+                for (i, &(e, size)) in tiles.iter().enumerate() {
+                    let o = d.opacity(i);
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                        t.scale = Vec3::new(size.x * o, size.y, size.z * o);
+                    }
+                    let has = self.world.get::<&Collider>(e).is_ok();
+                    if d.solid(i) && !has {
+                        let collider = Collider {
+                            shape: ColliderShape::Aabb {
+                                half_extents: size * 0.5,
+                            },
+                            is_trigger: false,
+                        };
+                        let _ = self.world.insert_one(e, collider);
+                    } else if !d.solid(i) && has {
+                        let _ = self.world.remove_one::<Collider>(e);
+                    }
+                }
+            }
+        }
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
         let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
@@ -3500,10 +3990,19 @@ impl Game for DreamscapeGame {
                 }
             }
             // The hunter goes back to its corner to catch its breath.
-            if let Some((entity, h, home)) = self.hunter.as_mut() {
-                h.rest();
+            if let Some((entity, b, home)) = self.hunter.as_mut() {
+                b.after_catch();
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
                     t.position = *home;
+                }
+            }
+            // From the Swarm Mother on, a catch puts your newest sigil back.
+            let drops = self.hunter.as_ref().is_some_and(|(_, b, _)| b.tier >= 3);
+            if drops && self.sigils_left > 0 {
+                if let Some(at) = self.sigils_taken.pop() {
+                    self.spawn_sigil(at, self.sigils_left);
+                    self.sigils_left += 1;
+                    log::info!("Sigil dropped ({} left)", self.sigils_left);
                 }
             }
             self.respawn_player();
@@ -3542,6 +4041,13 @@ impl Game for DreamscapeGame {
             .filter(|&e| self.world.get::<&SigilMarker>(e).is_ok())
             .collect();
         for e in sigils {
+            if let Ok(t) = self.world.get::<&Transform>(e) {
+                let at = Vec3::new(t.position.x, 0.0, t.position.z);
+                self.sigils_taken.push(at);
+            }
+            if let Some((_, b, _)) = self.hunter.as_mut() {
+                b.hunter.enrage();
+            }
             let _ = self.world.despawn(e);
             self.sigils_left = self.sigils_left.saturating_sub(1);
             self.flash.trigger([1.0, 0.4, 1.0], 0.5);
@@ -3567,6 +4073,7 @@ impl Game for DreamscapeGame {
             self.stats.twists.extend(self.twists.0.iter().copied());
             if self.director.nightmare {
                 self.stats.nightmares += 1;
+                self.bonus_dust += 10 * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier);
                 self.boss_reward = true;
                 if self.run_active {
                     self.booklet.codex.nightmares_beaten += 1;
@@ -3602,7 +4109,12 @@ impl Game for DreamscapeGame {
         } else {
             Vec3::Y
         };
-        let sight_scale = self.twists.sight() * self.run.sight();
+        let sight_scale = self.twists.sight()
+            * self.run.sight()
+            * self
+                .hunter
+                .as_ref()
+                .map_or(1.0, |(_, b, _)| b.sight_scale());
         // Nightmares: you get to see the whole fight coming.
         let sight_bonus = self.run.sight_bonus()
             + if self.hunter.is_some() {
@@ -3617,8 +4129,12 @@ impl Game for DreamscapeGame {
         } else {
             0.0
         };
+        let fp = self.first_person_active();
+        let fov = if fp { fpv::FOV_DEG } else { 60.0_f32 };
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
+        } else if fp {
+            fpv::camera(self.player_position, self.yaw, self.pitch)
         } else {
             (self.camera_pos, self.player_position)
         };
@@ -3631,7 +4147,16 @@ impl Game for DreamscapeGame {
         };
         let gl = ctx.gl();
         let fog = transition.fog(params.fog_color);
-        let dark = tunnel::darkness(fog);
+        let white = self
+            .dream
+            .as_ref()
+            .is_some_and(|d| d.theme == DreamTheme::WhiteDissolve);
+        // The white dream fades out to more white, not to black.
+        let dark = if white {
+            [0.93, 0.93, 0.96]
+        } else {
+            tunnel::darkness(fog)
+        };
         let clear = if tunnel { dark } else { fog };
         renderer.resize_if_needed(gl, drawable_size)?;
         renderer.set_trails(if self.mode == hud::Mode::Title {
@@ -3653,7 +4178,7 @@ impl Game for DreamscapeGame {
 
         let aspect = drawable_size.0 as f32 / drawable_size.1.max(1) as f32;
         let aspect_for_overlay = aspect;
-        let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 1000.0);
+        let proj = Mat4::perspective_rh(fov.to_radians(), aspect, 0.1, 1000.0);
         let view = Mat4::look_at_rh(eye, target, up);
 
         let flags = if params.affine_texture_mapping {
@@ -3794,19 +4319,25 @@ impl Game for DreamscapeGame {
                     }
                 }
             }
-            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water)) in self
-                .world
-                .query::<(
-                    &Transform,
-                    &MeshRenderer,
-                    Option<&SurfaceUv>,
-                    Option<&NoMelt>,
-                    Option<&Lit>,
-                    Option<&Hero>,
-                    Option<&Translucent>,
-                )>()
-                .iter()
+            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo)) in
+                self.world
+                    .query::<(
+                        &Transform,
+                        &MeshRenderer,
+                        Option<&SurfaceUv>,
+                        Option<&NoMelt>,
+                        Option<&Lit>,
+                        Option<&Hero>,
+                        Option<&Translucent>,
+                        Option<&PlayerBody>,
+                        Option<&Halo>,
+                    )>()
+                    .iter()
             {
+                // Through your own eyes you don't see your own body.
+                if fp && (body.is_some() || halo.is_some()) {
+                    continue;
+                }
                 let wanted = match pass {
                     0 => water.is_none(),
                     2 => water.is_some(),
@@ -3876,10 +4407,12 @@ impl Game for DreamscapeGame {
         let pack = &self.pack;
         let grain = &mut self.grain;
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
-        let clip = Mat4::perspective_rh(60.0_f32.to_radians(), aspect_for_overlay, 0.1, 1000.0)
+        let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
             * Mat4::look_at_rh(eye, target, up)
             * player.extend(1.0);
-        let player_uv = if clip.w > 0.0 {
+        let player_uv = if fp {
+            [0.5, 0.5]
+        } else if clip.w > 0.0 {
             [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w]
         } else {
             [0.5, 0.5]

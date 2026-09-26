@@ -113,6 +113,10 @@ pub struct HudView {
     pub codex: crate::codex_ui::CodexView,
     /// Title menu: (key, label, note shown when selected).
     pub menu: Vec<(String, String, String)>,
+    /// Seeing through the dreamer's eyes: draw a crosshair.
+    pub first_person: bool,
+    /// Nightmares: (boss title, sigils taken, sigils total, attack warning).
+    pub boss: Option<(String, usize, usize, Option<&'static str>)>,
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -331,11 +335,54 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
+    boss_bar(&p, screen, v);
+    if v.first_person {
+        // A tiny pixel cross: where you're looking.
+        let cross = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)];
+        px_cells(&p, screen.center(), 2.0, cross, rgba([255, 255, 255], 0.7));
+    }
     if let Some(dir) = v.shard_dir {
         shard_compass(&p, screen, dir, v);
     }
     if v.mode == Mode::Paused {
         pause_veil(&p, screen, v);
+    }
+}
+
+/// Nightmares: the boss's name, a bar of sigils, and the attack warning.
+fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let Some((name, taken, total, warning)) = &v.boss else {
+        return;
+    };
+    let top = screen.center_top() + Vec2::new(0.0, 22.0);
+    p.text(
+        top,
+        Align2::CENTER_TOP,
+        name,
+        FontId::monospace(30.0),
+        rgba([255, 90, 160], 0.95),
+    );
+    let w = 46.0;
+    for k in 0..*total {
+        let x = top.x + (k as f32 - (*total as f32 - 1.0) * 0.5) * (w + 8.0);
+        let r = Rect::from_center_size(Pos2::new(x, top.y + 46.0), Vec2::new(w, 10.0));
+        let rgb = if k < *taken {
+            [120, 255, 240]
+        } else {
+            [60, 20, 40]
+        };
+        p.rect_filled(r, 0.0, rgba(rgb, 0.9));
+    }
+    if let Some(msg) = warning {
+        if (v.time * 6.0) as i32 % 2 == 0 {
+            p.text(
+                top + Vec2::new(0.0, 64.0),
+                Align2::CENTER_TOP,
+                *msg,
+                FontId::monospace(28.0),
+                rgba([255, 240, 120], 1.0),
+            );
+        }
     }
 }
 

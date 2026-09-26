@@ -59,6 +59,12 @@ fn attribute_color(a: Attribute) -> [u8; 3] {
         Attribute::Abyss => [150, 110, 255],
         Attribute::Halo => [255, 215, 110],
         Attribute::Jest => [255, 110, 230],
+        Attribute::Trace => [255, 170, 220],
+        Attribute::Chord => [120, 255, 200],
+        Attribute::Hour => [255, 190, 90],
+        Attribute::Lumen => [120, 200, 255],
+        Attribute::Gaze => [220, 200, 150],
+        Attribute::Blank => [240, 240, 255],
     }
 }
 

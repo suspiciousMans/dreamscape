@@ -16,6 +16,8 @@ pub const NIGHTMARE_EVERY: u32 = 5;
 
 /// Chance a (non-lucid) descent dream hides a lucidity shard.
 pub const SHARD_CHANCE: f64 = 0.6;
+/// Hard runs: chance each dream that the next is the White Dissolve.
+pub const WHITE_CHANCE: f64 = 0.08;
 
 /// Chosen on the title screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -150,6 +152,13 @@ impl DreamDirector {
         self.shard_this_dream = false;
         self.theme = self.next;
         self.next = roll(self.theme, &mut self.rng);
+        // The white is only reachable by refusing to wake (GO DEEPER).
+        if self.hard_from.is_some()
+            && self.theme != DreamTheme::WhiteDissolve
+            && self.rng.gen_bool(WHITE_CHANCE)
+        {
+            self.next = DreamTheme::WhiteDissolve;
+        }
         // Always roll, so the shard sequence doesn't depend on lucidity.
         let roll: f64 = self.rng.gen();
         let lucky = roll < (SHARD_CHANCE + self.shard_bonus).clamp(0.05, 0.95);
@@ -220,6 +229,24 @@ mod tests {
             let promised = d.next;
             assert_eq!(d.descend(), Some(promised));
         }
+    }
+
+    #[test]
+    fn white_dissolve_only_comes_after_going_deeper() {
+        for seed in 0..30 {
+            assert!(
+                !descent(seed, 300).contains(&DreamTheme::WhiteDissolve),
+                "seed {seed}: reached without going deeper"
+            );
+        }
+        let hits = (0..30)
+            .filter(|&seed| {
+                let mut d = DreamDirector::new(seed);
+                d.go_deeper();
+                (0..200).any(|_| d.descend() == Some(DreamTheme::WhiteDissolve))
+            })
+            .count();
+        assert!(hits >= 25, "only {hits}/30 deep runs found the white");
     }
 
     #[test]

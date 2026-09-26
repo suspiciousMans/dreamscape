@@ -1,7 +1,5 @@
 //! White Dissolve: the way behind you dissolves while you move and comes back
 //! when you stand still. Pure state; main.rs mirrors it onto floor tiles.
-//! wired into main.rs in a later task
-#![allow(dead_code)]
 
 use crate::gameplay::CELL;
 use engine::glam::Vec3;

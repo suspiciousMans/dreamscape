@@ -3,7 +3,7 @@
 //! down. Deeper dreams twist more often; long runs stack two twists.
 //! Everything here is a pure multiplier the game reads; nothing is drawn.
 
-use super::theme::{DreamTheme, LayoutKind};
+use super::theme::{DreamTheme, Feature, LayoutKind};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +80,9 @@ impl Variant {
             // Water would hide the gaps you need to jump.
             Variant::Flooded => !has_void,
             Variant::Swarm | Variant::Frozen => has_enemies,
+            // Upside down + mouse look is nausea, not a twist.
+            Variant::Inverted => !theme.first_person(),
+            Variant::LowGravity => theme.spec().feature != Feature::Weightless,
             _ => true,
         }
     }
@@ -198,6 +201,24 @@ mod tests {
     use super::*;
     use crate::dream::theme::ALL_THEMES;
     use std::collections::HashSet;
+
+    #[test]
+    fn first_person_dreams_are_never_upside_down() {
+        for t in ALL_THEMES.into_iter().filter(|t| t.first_person()) {
+            for seed in 0..500 {
+                assert!(!roll_with(t, seed, 20, true, 0.9).has(Variant::Inverted));
+            }
+        }
+    }
+
+    #[test]
+    fn weightless_dreams_never_roll_low_gravity() {
+        for seed in 0..500 {
+            assert!(
+                !roll_with(DreamTheme::JellyfishSky, seed, 20, true, 0.9).has(Variant::LowGravity)
+            );
+        }
+    }
 
     #[test]
     fn calm_dreams_never_twist() {

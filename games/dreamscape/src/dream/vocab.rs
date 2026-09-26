@@ -767,8 +767,328 @@ pub fn vocab(theme: DreamTheme) -> Vocab {
                 "they only want to play", "you were expected",
             ],
         },
+        AfterimageFields => AFTERIMAGE_FIELDS,
+        SynesthesiaHall => SYNESTHESIA_HALL,
+        MeltingClockworks => MELTING_CLOCKWORKS,
+        JellyfishSky => JELLYFISH_SKY,
+        WatchingWallpaper => WATCHING_WALLPAPER,
+        WhiteDissolve => WHITE_DISSOLVE,
     }
 }
+
+// ── Six new dreams — word lists only; match arms wired in a later task ──
+
+/// Afterimage dream: light that lags, smears, and lingers after you pass.
+#[rustfmt::skip]
+pub const AFTERIMAGE_FIELDS: Vocab = Vocab {
+    adjectives: &[
+        "SMEARED", "TRAILING", "PASTEL", "LINGERING", "DOUBLED", "OVEREXPOSED",
+        "SLOW", "ECHOING", "STREAKED", "GHOSTED", "LAGGING", "SOFT-FOCUS",
+        "BLURRED", "SHIMMERING", "REPEATING", "FADING", "TRACED", "LUMINOUS",
+        "TWICE-SEEN", "WAVERING",
+    ],
+    nouns: &[
+        "AFTERIMAGE", "SMEAR", "TRACER", "LONG EXPOSURE", "STREAK", "POLAROID",
+        "CONTRAIL", "MOTION BLUR", "SHUTTER", "SPARKLER", "COMET TAIL",
+        "PINWHEEL", "WINDSOCK", "DANDELION", "KITE STRING", "PASTEL FIELD",
+        "SLOW WAVE", "LIGHT TRAIL", "RIBBON DANCER", "OPEN SHUTTER",
+    ],
+    relatives: &[
+        "FOLLOWS YOU A LITTLE LATE", "IS STILL WHERE YOU LEFT IT", "LEAVES A TRAIL",
+        "MOVES TWICE", "WON'T FINISH FADING", "REMEMBERS YOUR SHAPE",
+        "SMEARS WHEN YOU BLINK", "ARRIVES BEFORE IT LEAVES", "IS MOSTLY TRAIL",
+        "GLOWS WHERE YOU WERE", "REPEATS ITSELF", "DRAGS THE LIGHT BEHIND IT",
+        "IS A SECOND LATE", "NEVER QUITE CATCHES UP", "OUTLINES EVERYTHING",
+        "KEEPS YOUR LAST STEP", "LEAVES COLOUR ON THE AIR", "HANGS IN THE AIR",
+    ],
+    abstracts: &[
+        "AFTERGLOW", "LATENESS", "TRAILS", "SOFT LIGHT", "THE LAST SECOND",
+        "DOUBLE VISION", "SLOW MOTION", "LINGERING",
+    ],
+    subjects: &[
+        "the afterimage", "a smear of light", "the tracer", "the long exposure",
+        "a streak", "the polaroid", "the contrail", "the motion blur",
+        "the shutter", "a sparkler", "the comet tail", "the pinwheel",
+        "the windsock", "a dandelion", "the kite string", "the pastel field",
+        "the slow wave", "the light trail", "the ribbon dancer",
+    ],
+    predicates: &[
+        "is running late", "follows a second behind", "left a trail",
+        "is still fading", "moved twice", "repeats itself",
+        "smears when you blink", "glows where you were", "remembers your shape",
+        "hangs in the air", "drags the light behind it", "is mostly trail",
+        "never quite catches up", "outlines everything", "keeps your last step",
+        "arrived before it left", "is overexposed", "won't finish fading",
+    ],
+    whispers: &[
+        "you were just here", "the light is late", "everything leaves a mark",
+        "look where you've been", "slow down and it catches up",
+        "you are the brightest trail", "it's only an echo",
+        "don't chase your shadow",
+    ],
+};
+
+/// Synesthesia dream: a hall where senses cross — sound has a colour, colour has a beat.
+#[rustfmt::skip]
+pub const SYNESTHESIA_HALL: Vocab = Vocab {
+    adjectives: &[
+        "LOUD", "HUMMING", "CHROMATIC", "SUSTAINED", "AMPLIFIED", "RESONANT",
+        "TUNED", "FEEDBACK", "BASS-HEAVY", "STROBING", "ELECTRIC", "RINGING",
+        "HARMONIC", "OFF-KEY", "THROBBING", "VIVID", "SINGING", "PERCUSSIVE",
+        "TREMBLING", "WIDESCREEN",
+    ],
+    nouns: &[
+        "STAGE", "SPEAKER STACK", "SPECTRUM", "CHORD", "OSCILLOSCOPE",
+        "AMPLIFIER", "TUNING FORK", "BASSLINE", "METRONOME", "XYLOPHONE",
+        "TAMBOURINE", "SOUNDWAVE", "EQUALIZER", "DRUM KIT",
+        "COLOUR ORGAN", "SUBWOOFER", "KEYBOARD", "TONE ROW", "WAVEFORM",
+        "MIXING DESK",
+    ],
+    relatives: &[
+        "TASTES LIKE BLUE", "SOUNDS LIKE YELLOW", "PLAYS YOUR HEARTBEAT",
+        "HUMS IN COLOUR", "DROPS ON THE ONE", "SEES THE MUSIC",
+        "CAN HEAR YOUR FOOTSTEPS", "COUNTS YOU IN", "NEVER MISSES A BEAT",
+        "PAINTS THE FLOOR", "IS TUNED TO YOU", "FEEDS BACK",
+        "PULSES IN TIME", "TURNS SOUND INTO LIGHT", "IS PLAYING TOO LOUD",
+        "SMELLS LIKE A CHORD", "SHAKES THE WALLS", "SINGS IN RED",
+    ],
+    abstracts: &[
+        "THE DOWNBEAT", "LOUD COLOURS", "THE BASS", "FEEDBACK",
+        "THE CHORUS", "HARMONY", "THE ENCORE", "PERFECT PITCH",
+    ],
+    subjects: &[
+        "the stage", "the speaker stack", "the spectrum", "the chord",
+        "the oscilloscope", "the amplifier", "the tuning fork", "the bassline",
+        "the metronome", "the xylophone", "the tambourine", "the soundwave",
+        "the equalizer", "the drum kit", "the colour organ", "the subwoofer",
+        "the keyboard", "the tone row", "the waveform", "the mixing desk",
+    ],
+    predicates: &[
+        "tastes like blue", "sounds like yellow", "is playing your heartbeat",
+        "hums in colour", "drops on the one", "can hear your footsteps",
+        "is counting you in", "never misses a beat", "paints the floor",
+        "is tuned to you", "feeds back", "pulses in time",
+        "turns sound into light", "is playing too loud",
+        "smells like a chord", "shakes the walls", "sings in red",
+        "is louder in the dark",
+    ],
+    whispers: &[
+        "cross on the off-beat", "listen to the floor",
+        "it's too loud to think", "the colours have a rhythm",
+        "wait for the quiet part", "count to two",
+        "feel it in your teeth", "don't step on the one",
+    ],
+};
+
+/// Melting clockworks dream: a workshop where clockwork softens, drips, and loops a single minute forever.
+#[rustfmt::skip]
+pub const MELTING_CLOCKWORKS: Vocab = Vocab {
+    adjectives: &[
+        "MELTING", "DRIPPING", "BRASS", "TICKING", "SLOW", "LOOPING",
+        "UNWOUND", "OVERWOUND", "STOPPED", "ANTIQUE", "AMBER", "SAGGING",
+        "RUNNING-LATE", "CYCLIC", "SOFT", "GILDED", "RECURRING",
+        "CLOCKWISE", "GRANDFATHERLY", "RUSTED",
+    ],
+    nouns: &[
+        "POCKET WATCH", "HOURGLASS", "PENDULUM", "CUCKOO CLOCK", "MAINSPRING",
+        "CLOCK FACE", "ESCAPEMENT", "MINUTE HAND", "WATCHMAKER", "TIME LOOP",
+        "WALL CLOCK", "CHRONOMETER", "BRASS KEY", "SOFT CLOCK", "CARILLON",
+        "ALARM CLOCK", "GRANDFATHER CLOCK", "COGWHEEL", "SECOND HAND", "CALENDAR",
+    ],
+    relatives: &[
+        "RUNS FIVE MINUTES FAST", "HAS DONE THIS BEFORE", "MELTS AT NOON",
+        "IS ALWAYS NOW", "WINDS ITSELF BACK", "TICKS OUT OF ORDER",
+        "FORGOT WHAT DAY IT IS", "DRIPS OFF THE SHELF", "STARTS AGAIN",
+        "KEEPS THE WRONG TIME", "WAS HERE TOMORROW",
+        "REPEATS EVERY TWENTY SECONDS", "SAGS OVER THE EDGE", "COUNTS BACKWARDS",
+        "STOPPED AT THREE", "CHIMES FOR NO ONE", "NEVER RUNS OUT", "LOOPS FOREVER",
+    ],
+    abstracts: &[
+        "LOST TIME", "THE SAME MINUTE", "NOON", "YESTERDAY", "THE LOOP",
+        "BORROWED TIME", "THE HOUR", "DEJA VU",
+    ],
+    subjects: &[
+        "the pocket watch", "the pendulum", "the cuckoo clock", "the mainspring",
+        "the clock face", "the escapement", "the minute hand", "the watchmaker",
+        "the time loop", "the wall clock", "the chronometer", "the brass key",
+        "the soft clock", "the carillon", "the alarm clock",
+        "the grandfather clock", "the cogwheel", "the second hand", "the calendar",
+    ],
+    predicates: &[
+        "runs five minutes fast", "has done this before", "melts at noon",
+        "is always now", "winds itself back", "ticks out of order",
+        "forgot what day it is", "is dripping off the shelf",
+        "is starting again", "keeps the wrong time", "was here tomorrow",
+        "repeats every twenty seconds", "sags over the edge", "counts backwards",
+        "stopped at three", "chimes for no one", "never runs out", "loops forever",
+    ],
+    whispers: &[
+        "you've been here before", "twenty seconds", "the clock is lying",
+        "it resets but you don't", "again. again.", "hurry, slowly",
+        "time is soft here", "listen for the chime",
+    ],
+};
+
+/// Jellyfish sky dream: a sky full of drifting gelatinous bodies that glow and pulse in the dark.
+#[rustfmt::skip]
+pub const JELLYFISH_SKY: Vocab = Vocab {
+    adjectives: &[
+        "DRIFTING", "BIOLUMINESCENT", "TRANSLUCENT", "WEIGHTLESS", "PULSING",
+        "TENDRILLED", "GLOWING", "BLUE", "FLOATING", "SLOW-BLOOMING", "STINGING",
+        "TIDAL", "DEEP", "SILENT", "HOVERING", "BOBBING", "LUMINOUS",
+        "GLASSY", "ETHEREAL", "BUOYANT",
+    ],
+    nouns: &[
+        "MEDUSA", "MAN O' WAR", "SEA NETTLE", "COMB JELLY", "SKY CURRENT",
+        "PLANKTON CLOUD", "SIPHONOPHORE", "TENDRIL", "SWIM BELL", "GLOW DOME",
+        "SEA ANGEL", "SALP", "NIGHT TIDE", "UPDRAFT", "AIR REEF",
+        "DRIFTING ISLE", "LIGHT STING", "JELLY LANTERN", "PHOSPHOR SEA",
+        "MOON JELLY",
+    ],
+    relatives: &[
+        "DRIFTS WHERE IT LIKES", "GLOWS WHEN IT BREATHES", "HAS NO BONES",
+        "STINGS SOFTLY", "SWIMS THROUGH AIR", "PULSES LIKE A HEART",
+        "FLOATS ABOVE THE VOID", "IS MOSTLY WATER", "TRAILS ITS LIGHTS",
+        "NEVER TOUCHES DOWN", "HUMS IN THE DARK", "CARRIES YOU UP",
+        "IS OLDER THAN THE SKY", "LIGHTS THE WAY DOWN",
+        "OPENS AND CLOSES", "SINGS IN BLUE", "HOLDS ITS BREATH",
+        "SLEEPS MID-AIR",
+    ],
+    abstracts: &[
+        "THE DEEP SKY", "WEIGHTLESSNESS", "SOFT LIGHT", "THE CURRENT",
+        "BLUE HOURS", "BIOLUMINESCENCE", "DRIFTING", "THE UPPER DARK",
+    ],
+    subjects: &[
+        "the medusa", "the man o' war", "the sea nettle", "the comb jelly",
+        "the sky current", "the plankton cloud", "the siphonophore", "the tendril",
+        "the swim bell", "the glow dome", "the sea angel", "the salp",
+        "the night tide", "the updraft", "the air reef",
+        "the drifting isle", "the light sting", "the jelly lantern",
+        "the phosphor sea", "the moon jelly",
+    ],
+    predicates: &[
+        "drifts where it likes", "glows when it breathes", "has no bones",
+        "stings softly", "swims through air", "pulses like a heart",
+        "floats above the void", "is mostly water", "trails its lights",
+        "never touches down", "hums in the dark", "carries you up",
+        "lights the way down", "opens and closes", "sings in blue",
+        "is holding its breath", "sleeps mid-air", "is older than the sky",
+    ],
+    whispers: &[
+        "you weigh almost nothing", "jump and let it carry you",
+        "don't touch the tendrils", "the sky is an ocean",
+        "float, don't fall", "follow the glow", "breathe slowly",
+        "everything here is drifting",
+    ],
+};
+
+/// Watching wallpaper dream: floral patterns, faces, and a room that watches.
+#[rustfmt::skip]
+pub const WATCHING_WALLPAPER: Vocab = Vocab {
+    adjectives: &[
+        "PEELING", "FLORAL", "FADED", "PATTERNED", "STARING", "YELLOWED",
+        "DAMASK", "WATCHFUL", "REPEATING", "SMILING", "PAISLEY",
+        "NURSERY-PINK", "SEAMLESS", "CURLING", "WHISPERING", "STAINED",
+        "PRINTED", "VICTORIAN", "MUSTY", "KNOWING",
+    ],
+    nouns: &[
+        "WALLPAPER", "DAMASK ROSE", "FACE IN THE PATTERN", "PAISLEY EYE",
+        "PICTURE RAIL", "SKIRTING BOARD", "SEAM", "NURSERY", "RORSCHACH",
+        "TOILE", "FLORAL BORDER", "SMILING FLOWER", "WATCHER IN THE WALL",
+        "TRELLIS PRINT", "PEELING CORNER", "MOULDING", "PASTE BUCKET",
+        "REPEAT", "SAMPLE BOOK", "CEILING ROSE",
+    ],
+    relatives: &[
+        "IS WATCHING YOU", "HAS A FACE IN IT", "BLINKS WHEN YOU DO",
+        "SMILES AT THE CORNERS", "NEVER LOOKS AWAY", "MOVES WHEN YOU TURN",
+        "KNOWS WHERE THE SHARD IS", "REPEATS YOUR NAME",
+        "GREW ANOTHER EYE", "IS PEELING TOWARD YOU", "HIDES IN THE PATTERN",
+        "FOLLOWS YOU ROOM TO ROOM", "WAS NEVER HUNG STRAIGHT",
+        "COUNTS YOUR STEPS", "LEANS IN", "IS ONLY PAPER",
+        "WAITS BEHIND YOU", "SEES ROUND CORNERS",
+    ],
+    abstracts: &[
+        "BEING WATCHED", "THE PATTERN", "FACES", "OLD PASTE", "THE NURSERY",
+        "PAREIDOLIA", "SOMEONE BEHIND YOU", "YELLOW ROOMS",
+    ],
+    subjects: &[
+        "the wallpaper", "the damask rose",
+        "the face in the pattern", "the paisley eye", "the picture rail",
+        "the skirting board", "the seam", "the nursery", "the rorschach",
+        "the toile", "the floral border", "the smiling flower",
+        "the watcher in the wall", "the trellis print",
+        "the peeling corner", "the moulding", "the paste bucket",
+        "the repeat", "the sample book", "the ceiling rose",
+    ],
+    predicates: &[
+        "is watching you", "has a face in it", "blinks when you do",
+        "smiles at the corners", "never looks away", "moves when you turn",
+        "knows where the shard is", "is repeating your name",
+        "grew another eye", "is peeling toward you", "hides in the pattern",
+        "follows you room to room", "counts your steps", "leans in",
+        "is only paper", "waits behind you", "sees round corners",
+        "was never hung straight",
+    ],
+    whispers: &[
+        "don't turn around", "it only moves when you look away",
+        "keep it in front of you", "the pattern has a face",
+        "it's just paper. it's just paper.", "you're being watched",
+        "look back", "the eyes know where the shard is",
+    ],
+};
+
+/// White dissolve dream: a white, edge-less dissolving where self, name, and outline soften toward nothing.
+#[rustfmt::skip]
+pub const WHITE_DISSOLVE: Vocab = Vocab {
+    adjectives: &[
+        "WHITE", "BLANK", "DISSOLVING", "WEIGHTLESS", "PALE", "EMPTY",
+        "BRIGHT", "SELFLESS", "BOUNDLESS", "QUIET", "EDGELESS", "FADING",
+        "CLEAN", "SNOWBLIND", "NAMELESS", "STILL", "VAST", "UNWRITTEN",
+        "UNMADE", "OPEN",
+    ],
+    nouns: &[
+        "WHITEOUT", "BLANK PAGE", "VANISHING POINT", "SNOWFIELD", "FOG BANK",
+        "CLEAN SLATE", "PALE HORIZON", "OUTLINE", "EMPTY FRAME",
+        "LAST THOUGHT", "SILHOUETTE", "WHITE NOISE", "SOFT EDGE", "UNDERTOW",
+        "FADE", "EGO", "MELTWATER", "SELF", "OPEN SKY", "STILL POINT",
+    ],
+    relatives: &[
+        "FORGETS YOUR NAME", "HAS NO EDGES", "IS ALMOST NOTHING",
+        "DISSOLVES WHEN YOU MOVE", "COMES BACK WHEN YOU STOP",
+        "WAS YOU ALL ALONG", "UNWRITES ITSELF", "HOLDS NOTHING",
+        "IS BRIGHTER THAN WAKING", "LETS GO", "CAN'T REMEMBER ITSELF",
+        "GOES ON FOREVER", "IS WAITING FOR YOU TO STOP",
+        "MELTS INTO WHITE", "FEELS LIKE MORNING", "ASKS NOTHING",
+        "IS THE LAST ROOM", "SOFTENS AT THE EDGES",
+    ],
+    abstracts: &[
+        "NOTHING", "LETTING GO", "THE SELF", "STILLNESS", "THE WHITE",
+        "BEFORE WAKING", "NO ONE", "SILENCE",
+    ],
+    subjects: &[
+        "the whiteout", "the blank page", "the vanishing point", "the snowfield",
+        "the fog bank", "the clean slate", "the pale horizon", "the outline",
+        "the empty frame", "the last thought", "the silhouette",
+        "the white noise", "the soft edge", "the undertow", "the fade",
+        "the ego", "the meltwater", "the self", "the open sky",
+        "the still point",
+    ],
+    predicates: &[
+        "forgets your name", "has no edges", "is almost nothing",
+        "dissolves when you move", "comes back when you stop",
+        "was you all along", "unwrites itself", "holds nothing",
+        "is brighter than waking", "lets go", "can't remember itself",
+        "goes on forever", "is waiting for you to stop",
+        "melts into white", "feels like morning", "asks nothing",
+        "softens at the edges", "is the last room",
+    ],
+    whispers: &[
+        "stop, and it comes back", "don't look behind you", "let go",
+        "you are almost awake", "stand still",
+        "there's nothing here, not even you",
+        "move and it forgets you", "breathe",
+    ],
+};
 
 #[cfg(test)]
 mod tests {

@@ -3,8 +3,6 @@
 //! Convention: yaw 0 looks along +Z (same way the third-person camera faces);
 //! screen-right is `forward × Y` (right-handed, so -X at yaw 0).
 
-#![allow(dead_code)] // wired into main.rs in a later task
-
 use crate::gameplay::{PlayerInputState, MOVE_SPEED};
 use engine::glam::Vec3;
 use std::f32::consts::{PI, TAU};
@@ -34,10 +32,18 @@ pub fn right(yaw: f32) -> Vec3 {
 pub fn velocity(input: &PlayerInputState, yaw: f32) -> Vec3 {
     let (f, r) = (forward(yaw), right(yaw));
     let mut v = Vec3::ZERO;
-    if input.forward { v += f; }
-    if input.backward { v -= f; }
-    if input.right { v += r; }
-    if input.left { v -= r; }
+    if input.forward {
+        v += f;
+    }
+    if input.backward {
+        v -= f;
+    }
+    if input.right {
+        v += r;
+    }
+    if input.left {
+        v -= r;
+    }
     v.normalize_or_zero() * MOVE_SPEED
 }
 
@@ -51,13 +57,20 @@ pub fn from_world_stick(wx: f32, wz: f32, yaw: f32) -> Vec3 {
 pub fn turn(yaw: f32, pitch: f32, dx: f32, dy: f32, sens: f32, invert_y: bool) -> (f32, f32) {
     let k = MOUSE_BASE + MOUSE_RANGE * sens.clamp(0.0, 1.0);
     let dy = if invert_y { -dy } else { dy };
-    ((yaw - dx * k).rem_euclid(TAU), (pitch - dy * k).clamp(-PITCH_LIMIT, PITCH_LIMIT))
+    (
+        (yaw - dx * k).rem_euclid(TAU),
+        (pitch - dy * k).clamp(-PITCH_LIMIT, PITCH_LIMIT),
+    )
 }
 
 /// (eye, target) for `Mat4::look_at_rh`.
 pub fn camera(body: Vec3, yaw: f32, pitch: f32) -> (Vec3, Vec3) {
     let eye = body + Vec3::Y * EYE_HEIGHT;
-    let dir = Vec3::new(pitch.cos() * yaw.sin(), pitch.sin(), pitch.cos() * yaw.cos());
+    let dir = Vec3::new(
+        pitch.cos() * yaw.sin(),
+        pitch.sin(),
+        pitch.cos() * yaw.cos(),
+    );
     (eye, eye + dir)
 }
 
@@ -101,11 +114,29 @@ mod tests {
     #[test]
     fn forward_moves_where_you_look_and_right_moves_right_on_screen() {
         for yaw in YAWS {
-            let f = velocity(&PlayerInputState { forward: true, ..Default::default() }, yaw);
+            let f = velocity(
+                &PlayerInputState {
+                    forward: true,
+                    ..Default::default()
+                },
+                yaw,
+            );
             assert!(f.normalize().dot(forward(yaw)) > 0.999);
-            assert!(in_view_space(yaw, f).z < 0.0, "forward goes into the screen");
-            let r = velocity(&PlayerInputState { right: true, ..Default::default() }, yaw);
-            assert!(in_view_space(yaw, r).x > 0.0, "yaw {yaw}: right key went left");
+            assert!(
+                in_view_space(yaw, f).z < 0.0,
+                "forward goes into the screen"
+            );
+            let r = velocity(
+                &PlayerInputState {
+                    right: true,
+                    ..Default::default()
+                },
+                yaw,
+            );
+            assert!(
+                in_view_space(yaw, r).x > 0.0,
+                "yaw {yaw}: right key went left"
+            );
         }
     }
 
@@ -138,7 +169,9 @@ mod tests {
             assert!(side[0] > 0.99, "right is right");
             // And it agrees with where the target actually lands on screen.
             let t = forward(yaw) * 10.0 + right(yaw) * 4.0;
-            assert!(in_view_space(yaw, t).x > 0.0 && compass(Vec3::ZERO, yaw, t, 5.0).unwrap()[0] > 0.0);
+            assert!(
+                in_view_space(yaw, t).x > 0.0 && compass(Vec3::ZERO, yaw, t, 5.0).unwrap()[0] > 0.0
+            );
         }
         assert!(compass(Vec3::ZERO, 0.0, Vec3::Z * 2.0, 5.0).is_none());
     }
@@ -149,7 +182,10 @@ mod tests {
             assert!(sees(Vec3::ZERO, yaw, forward(yaw) * 5.0, 10.0));
             assert!(!sees(Vec3::ZERO, yaw, -forward(yaw) * 5.0, 10.0), "behind");
             assert!(!sees(Vec3::ZERO, yaw, right(yaw) * 5.0, 10.0), "90° off");
-            assert!(!sees(Vec3::ZERO, yaw, forward(yaw) * 15.0, 10.0), "past clear sight");
+            assert!(
+                !sees(Vec3::ZERO, yaw, forward(yaw) * 15.0, 10.0),
+                "past clear sight"
+            );
         }
     }
 

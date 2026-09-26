@@ -80,6 +80,10 @@ pub struct Settings {
     /// Tones down breathing, pulses and tracers.
     pub reduced_motion: bool,
     pub fullscreen: bool,
+    /// First-person look speed, 0..=1.
+    pub mouse_sens: f32,
+    /// First-person: pushing the mouse up looks down.
+    pub invert_y: bool,
     /// (action, SDL key name).
     pub keys: Vec<(Action, String)>,
 }
@@ -93,6 +97,8 @@ impl Default for Settings {
             vignette: 1.0,
             reduced_motion: false,
             fullscreen: false,
+            mouse_sens: 0.5,
+            invert_y: false,
             keys: ALL_ACTIONS
                 .iter()
                 .map(|&a| (a, a.default_key().to_string()))
@@ -169,6 +175,8 @@ pub enum Row {
     Vignette,
     ReducedMotion,
     Fullscreen,
+    MouseSens,
+    InvertY,
     Key(Action),
     Defaults,
 }
@@ -181,6 +189,8 @@ pub fn rows() -> Vec<Row> {
         Row::Vignette,
         Row::ReducedMotion,
         Row::Fullscreen,
+        Row::MouseSens,
+        Row::InvertY,
     ];
     r.extend(ALL_ACTIONS.iter().map(|&a| Row::Key(a)));
     r.push(Row::Defaults);
@@ -196,6 +206,8 @@ impl Row {
             Row::Vignette => "vignette".into(),
             Row::ReducedMotion => "reduced motion".into(),
             Row::Fullscreen => "fullscreen".into(),
+            Row::MouseSens => "mouse sensitivity".into(),
+            Row::InvertY => "invert mouse y".into(),
             Row::Key(a) => format!("key: {}", a.label()),
             Row::Defaults => "reset to defaults".into(),
         }
@@ -212,6 +224,8 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::Vignette => step(&mut s.vignette),
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
+        Row::MouseSens => step(&mut s.mouse_sens),
+        Row::InvertY => s.invert_y = !s.invert_y,
         Row::Key(_) | Row::Defaults => {}
     }
 }
@@ -227,6 +241,8 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::Vignette => pct(s.vignette),
         Row::ReducedMotion => onoff(s.reduced_motion),
         Row::Fullscreen => onoff(s.fullscreen),
+        Row::MouseSens => pct(s.mouse_sens),
+        Row::InvertY => onoff(s.invert_y),
         Row::Key(a) => s.key_for(a).map(|k| k.name()).unwrap_or("?".into()),
         Row::Defaults => String::new(),
     }
@@ -306,7 +322,15 @@ mod tests {
         assert!(s.reduced_motion && s.motion() < 1.0);
         assert_eq!(value(&s, Row::Music), "100%");
         assert_eq!(value(&s, Row::Key(Action::Jump)), "Space");
-        assert_eq!(rows().len(), 6 + ALL_ACTIONS.len() + 1);
+        assert_eq!(rows().len(), 8 + ALL_ACTIONS.len() + 1);
+    }
+
+    #[test]
+    fn old_settings_files_get_mouse_defaults() {
+        let s: Settings = ron::from_str("(music: 0.3)").unwrap();
+        assert_eq!(s.music, 0.3);
+        assert_eq!(s.mouse_sens, 0.5);
+        assert_eq!(s.invert_y, false);
     }
 
     #[test]
