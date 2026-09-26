@@ -25,8 +25,17 @@ impl Platform {
 
         // GL attributes must be set before window/context creation.
         let gl_attr = video.gl_attr();
-        gl_attr.set_context_profile(GLProfile::Core);
-        gl_attr.set_context_version(3, 3);
+        // The browser build runs on WebGL2, which SDL exposes as GLES 3.0.
+        #[cfg(target_os = "emscripten")]
+        {
+            gl_attr.set_context_profile(GLProfile::GLES);
+            gl_attr.set_context_version(3, 0);
+        }
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            gl_attr.set_context_profile(GLProfile::Core);
+            gl_attr.set_context_version(3, 3);
+        }
         gl_attr.set_double_buffer(true);
         gl_attr.set_depth_size(24);
 

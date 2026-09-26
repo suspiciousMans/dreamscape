@@ -43,6 +43,65 @@ impl Context {
 
 pub struct App;
 
+/// The browser owns the event loop, so the Emscripten build hands one frame
+/// at a time to `emscripten_set_main_loop_arg` instead of looping forever.
+#[cfg(target_os = "emscripten")]
+mod web_loop {
+    use super::*;
+
+    extern "C" {
+        fn emscripten_set_main_loop_arg(
+            func: unsafe extern "C" fn(*mut std::ffi::c_void),
+            arg: *mut std::ffi::c_void,
+            fps: i32,
+            simulate_infinite_loop: i32,
+        );
+        fn emscripten_cancel_main_loop();
+        fn emscripten_run_script(script: *const std::ffi::c_char);
+    }
+
+    struct State<G: Game> {
+        ctx: Context,
+        game: G,
+    }
+
+    unsafe extern "C" fn frame<G: Game>(arg: *mut std::ffi::c_void) {
+        let state = &mut *(arg as *mut State<G>);
+        let (ctx, game) = (&mut state.ctx, &mut state.game);
+        ctx.input.begin_frame();
+        let events: Vec<Event> = ctx.platform.event_pump.poll_iter().collect();
+        for event in events {
+            ctx.input.handle_event(&event, &ctx.platform.game_controller);
+            game.handle_event(ctx, &event);
+        }
+        ctx.time.tick();
+        let dt = ctx.time.delta;
+        let result = game.update(ctx, dt).and_then(|_| game.render(ctx));
+        if let Err(e) = result {
+            log::error!("frame failed: {e:?}");
+            emscripten_cancel_main_loop();
+            return;
+        }
+        ctx.platform.swap_window();
+        // A page can't close itself: "quit" flushes any persisted files
+        // (a no-op if the page mounted none) and restarts the game instead.
+        if ctx.should_quit {
+            emscripten_cancel_main_loop();
+            emscripten_run_script(
+                c"typeof FS !== 'undefined' && FS.syncfs ? FS.syncfs(false, function () { location.reload(); }) : location.reload();"
+                    .as_ptr(),
+            );
+        }
+    }
+
+    pub fn run<G: Game>(ctx: Context, game: G) {
+        let state = Box::into_raw(Box::new(State { ctx, game }));
+        // Never returns (simulate_infinite_loop = 1): the state lives for
+        // the rest of the page.
+        unsafe { emscripten_set_main_loop_arg(frame::<G>, state as *mut _, 0, 1) };
+    }
+}
+
 impl App {
     pub fn run<G: Game>(title: &str, width: u32, height: u32, mut game: G) -> anyhow::Result<()> {
         let platform = Platform::new(title, width, height)?;
@@ -55,6 +114,12 @@ impl App {
 
         game.init(&mut ctx)?;
 
+        #[cfg(target_os = "emscripten")]
+        {
+            web_loop::run(ctx, game);
+        }
+
+        #[cfg(not(target_os = "emscripten"))]
         'running: loop {
             ctx.input.begin_frame();
 

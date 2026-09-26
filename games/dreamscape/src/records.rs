@@ -3,7 +3,11 @@
 use std::path::Path;
 
 /// Relative to the repo root, which is where `cargo run -p dreamscape` runs.
+#[cfg(not(target_os = "emscripten"))]
 pub const RECORD_PATH: &str = "games/dreamscape/best_depth.txt";
+/// Browser build: an IndexedDB-backed folder the page mounts and syncs.
+#[cfg(target_os = "emscripten")]
+pub const RECORD_PATH: &str = "/persist/best_depth.txt";
 
 pub fn parse(text: &str) -> u32 {
     text.trim().parse().unwrap_or(0)

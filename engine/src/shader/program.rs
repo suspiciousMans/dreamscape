@@ -1,6 +1,19 @@
 use glow::HasContext;
 
+/// WebGL2 only speaks GLSL ES 3.00: swap the desktop `#version 330 core`
+/// header for the ES one plus default precisions, and drop `noperspective`
+/// (not in ES 3.00, so affine texture wobble falls back to perspective UVs).
+#[cfg(target_os = "emscripten")]
+fn to_gles(src: &str) -> String {
+    let body = src.replacen("#version 330 core", "", 1).replace("noperspective ", "");
+    format!(
+        "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n{body}"
+    )
+}
+
 pub fn compile_shader(gl: &glow::Context, kind: u32, src: &str) -> anyhow::Result<glow::Shader> {
+    #[cfg(target_os = "emscripten")]
+    let src = &to_gles(src);
     unsafe {
         let shader = gl.create_shader(kind).map_err(anyhow::Error::msg)?;
         gl.shader_source(shader, src);

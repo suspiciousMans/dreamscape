@@ -8,7 +8,11 @@ use engine::sdl2::keyboard::Keycode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_os = "emscripten"))]
 pub const SETTINGS_PATH: &str = "games/dreamscape/settings.ron";
+/// Browser build: an IndexedDB-backed folder the page mounts and syncs.
+#[cfg(target_os = "emscripten")]
+pub const SETTINGS_PATH: &str = "/persist/settings.ron";
 
 pub fn settings_path() -> PathBuf {
     std::env::var_os("DREAMSCAPE_SETTINGS")

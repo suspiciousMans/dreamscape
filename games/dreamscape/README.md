@@ -9,6 +9,18 @@ cargo run -p dreamscape          # from the repo root
 cargo test -p dreamscape         # 228 tests
 ```
 
+## Play it in a browser
+
+The game also builds for the web (WebAssembly + WebGL2) through Emscripten:
+
+```bash
+rustup target add wasm32-unknown-emscripten
+source /path/to/emsdk/emsdk_env.sh
+games/dreamscape/web/build.sh      # -> games/dreamscape/web/dist/
+```
+
+Serve `dist/` over HTTP. Saves, settings and the booklet persist in the browser (IndexedDB). Differences from native: sound is mixed through SDL instead of rodio, affine texture wobble falls back to perspective-correct UVs (GLSL ES has no `noperspective`), and quitting restarts the page.
+
 ## Controls
 
 | Key | Action |
