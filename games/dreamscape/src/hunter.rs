@@ -68,6 +68,12 @@ impl Hunter {
         self.left = REST_TIME;
     }
 
+    /// A sigil was taken: it hunts a little harder (still never as fast as you).
+    pub fn enrage(&mut self) {
+        self.stalk = (self.stalk + 0.03).min(0.6);
+        self.lunge = (self.lunge + 0.03).min(0.92);
+    }
+
     pub fn update(&mut self, pos: &mut Vec3, player: Vec3, dt: f32) {
         self.left -= dt;
         if self.left <= 0.0 {
@@ -92,6 +98,9 @@ mod tests {
     fn it_is_never_as_fast_as_you() {
         for depth in [5, 10, 50, 1000] {
             let mut h = Hunter::new(depth, MOVE_SPEED);
+            for _ in 0..20 {
+                h.enrage();
+            }
             for _ in 0..500 {
                 let mut pos = Vec3::ZERO;
                 h.update(&mut pos, Vec3::X * 100.0, 0.05);
