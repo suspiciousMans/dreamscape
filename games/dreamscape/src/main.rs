@@ -290,6 +290,8 @@ pub struct DreamscapeGame {
     player: Option<Entity>,
     player_position: Vec3,
     camera_pos: Vec3,
+    /// DREAMSCAPE_FPS=1: (accumulated ms, frames) for the average frame-time log.
+    frame_ms: (f32, u32),
     /// F1: fixed overview camera.
     debug_camera: bool,
     /// DREAMSCAPE_AUTOPILOT=1: follow the generated route (end-to-end test).
@@ -417,6 +419,7 @@ impl DreamscapeGame {
             input: PlayerInputState::default(),
             player: None,
             player_position: Vec3::ZERO,
+            frame_ms: (0.0, 0),
             camera_pos: gameplay::CAMERA_OFFSET,
             debug_camera: false,
             autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
@@ -2507,6 +2510,7 @@ impl DreamscapeGame {
                 BlockKind::Wall => (wall_tex.clone(), per_cell),
                 BlockKind::Prop | BlockKind::Decor | BlockKind::Sky => (prop_tex.clone(), 0.5),
                 BlockKind::Portal => (portal_tex.clone(), 0.5),
+                BlockKind::Trim => (wall_tex.clone(), per_cell),
             };
             let mesh = self.mesh(block.shape)?;
             let entity = self.world.spawn((
@@ -2566,6 +2570,8 @@ impl DreamscapeGame {
                         )
                         .expect("entity was just spawned");
                 }
+                // Dressing: static and never solid.
+                BlockKind::Trim => {}
                 BlockKind::Floor | BlockKind::Wall | BlockKind::Prop => {
                     self.world
                         .insert_one(
@@ -2580,6 +2586,7 @@ impl DreamscapeGame {
             }
         }
 
+        log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
         if let Some(at) = dream.shard {
@@ -3187,6 +3194,14 @@ impl Game for DreamscapeGame {
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
+        if std::env::var_os("DREAMSCAPE_FPS").is_some() {
+            self.frame_ms.0 += dt * 1000.0;
+            self.frame_ms.1 += 1;
+            if self.frame_ms.1 == 300 {
+                log::info!("avg frame {:.1} ms", self.frame_ms.0 / 300.0);
+                self.frame_ms = (0.0, 0);
+            }
+        }
         let dt = dt.min(gameplay::MAX_DT);
         self.time += dt;
         self.flash.tick(dt);

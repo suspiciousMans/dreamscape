@@ -1,5 +1,6 @@
 //! Turns a layout + theme into concrete blocks (every block is a coloured cube).
 
+use super::detail;
 use super::grid::{Cell, Grid, P};
 use super::layout;
 use super::meshes::Shape;
@@ -24,6 +25,9 @@ pub enum BlockKind {
     Decor,
     /// Non-solid set dressing that glows through the dark (moons, motes).
     Sky,
+    /// Static, non-solid set dressing (caps, skirting, inlays, ceilings, vistas).
+    /// Never spins or bobs, never collides.
+    Trim,
 }
 
 #[derive(Clone, Debug)]
@@ -290,6 +294,9 @@ pub fn generate_with(
     );
     decor(grid, &spec, &mut rng, &mut blocks);
     undersides(grid, &spec, &mut rng, &mut blocks);
+    // Dressing draws from its own stream, so it never changes the rest of a dream.
+    let mut drng = StdRng::seed_from_u64(seed ^ 0xDE7A_11ED);
+    detail::details(grid, &spec, &single, false, &mut drng, &mut blocks);
     let surfaces = surfaces(&spec, &mut rng);
     let portal = grid.world(layout.portal);
     let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
@@ -491,6 +498,8 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
     floor_slabs(&g, &spec, &HashSet::new(), &mut rng, &mut blocks);
     walls(&g, &spec, &mut rng, &mut blocks);
     decor(&g, &spec, &mut rng, &mut blocks);
+    let mut drng = StdRng::seed_from_u64(seed ^ 0xDE7A_11ED);
+    detail::details(&g, &spec, &HashSet::new(), false, &mut drng, &mut blocks);
     let surfaces = surfaces(&spec, &mut rng);
     blocks.push(Block {
         kind: BlockKind::Portal,
@@ -555,14 +564,14 @@ fn pick_shard(grid: &Grid, on_path: &HashSet<P>, spawn: P, rng: &mut StdRng) -> 
     far_half.choose(rng).map(|&(_, c)| c)
 }
 
-fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
+pub(super) fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
     *palette
         .choose(rng)
         .expect("theme palettes are non-empty (theme tests)")
 }
 
 /// Palette colour ± up to 40 per channel, more spread the stranger the dream.
-fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
+pub(super) fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
     let spread = 12.0 + 28.0 * strangeness;
     let mut out = [0, 0, 0, 255];
     for i in 0..3 {
@@ -1181,7 +1190,7 @@ mod tests {
             for b in d
                 .blocks
                 .iter()
-                .filter(|b| !matches!(b.kind, BlockKind::Decor | BlockKind::Sky))
+                .filter(|b| !matches!(b.kind, BlockKind::Decor | BlockKind::Sky | BlockKind::Trim))
             {
                 assert_eq!(
                     b.rotation,
@@ -1206,6 +1215,18 @@ mod tests {
                             near_palette(b.color, s.prop_colors)
                         }
                         BlockKind::Portal => b.color == PORTAL_COLOR,
+                        // Dressing: a theme colour (wall/prop/accent), possibly shaded.
+                        BlockKind::Trim => [0.55_f32, 0.7, 0.8, 1.0, 1.15, 1.3].iter().any(|&k| {
+                            [s.wall_colors, s.prop_colors, s.accents].iter().any(|pal| {
+                                pal.iter().any(|p| {
+                                    (0..3).all(|i| {
+                                        let lo = ((p[i] as f32 - 40.0) * k).clamp(0.0, 255.0);
+                                        let hi = ((p[i] as f32 + 40.0) * k).clamp(0.0, 255.0);
+                                        (lo - 1.0..=hi + 1.0).contains(&(b.color[i] as f32))
+                                    })
+                                })
+                            })
+                        }),
                     };
                     assert!(
                         ok,
@@ -1969,7 +1990,7 @@ mod tests {
                     BlockKind::Decor | BlockKind::Sky => {
                         decor.insert(b.shape);
                     }
-                    BlockKind::Prop => {}
+                    BlockKind::Prop | BlockKind::Trim => {}
                 }
             }
         }

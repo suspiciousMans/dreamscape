@@ -1,5 +1,6 @@
 //! Procedural dream generation. Pure data — no GL calls.
 mod build;
+mod detail;
 mod director;
 mod grid;
 mod layout;
