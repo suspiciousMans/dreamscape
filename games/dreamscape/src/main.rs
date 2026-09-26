@@ -24,6 +24,7 @@ use engine::ui::EguiState;
 use engine::ui::egui;
 
 mod booklet_ui;
+mod boss;
 mod cards;
 mod codex_ui;
 mod dream;
