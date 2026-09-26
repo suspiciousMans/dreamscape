@@ -183,6 +183,19 @@ pub fn gate_closed(t: f32, phase: f32) -> bool {
     (t + phase).rem_euclid(GATE_PERIOD) < GATE_CLOSED
 }
 
+/// How thick a shut gate is along the corridor (plus the player's radius).
+pub const GATE_DEPTH: f32 = 0.35;
+
+/// Does a shut gate at `at`, across a corridor running along `dir`, touch
+/// `player`? It spans the full cell, wall to wall, so you can't sidestep it.
+pub fn gate_blocks(at: Vec3, dir: Vec3, player: Vec3) -> bool {
+    let d = flat(player - at);
+    let along = flat(dir).normalize_or_zero();
+    let across = Vec3::Y.cross(along);
+    d.dot(along).abs() < GATE_DEPTH + crate::gameplay::PLAYER_RADIUS
+        && d.dot(across).abs() <= CELL * 0.5
+}
+
 /// How far a shifting tile has sunk at time `t` (0 = level, 1 = lowest).
 pub fn shift_depth(t: f32, phase: f32) -> f32 {
     0.5 - 0.5 * (t * std::f32::consts::TAU / 4.0 + phase).cos()
@@ -296,6 +309,46 @@ pub fn watcher_yaw(at: Vec3, target: Vec3) -> f32 {
 mod tests {
     use super::*;
     use crate::gameplay::MOVE_SPEED;
+
+    /// A shut gate fills the whole corridor: walking through anywhere
+    /// across its width touches it, only being clear of its plane doesn't.
+    #[test]
+    fn the_drawn_gate_is_the_gate_that_hits() {
+        // main.rs draws a shut gate as a cube scaled (CELL, 2.6, 2*GATE_DEPTH)
+        // and rotated local Z -> corridor direction. Its footprint must equal
+        // the hit area (bar the player's radius along the corridor).
+        for dir in [Vec3::X, Vec3::Z, Vec3::new(1.0, 0.0, -1.0).normalize()] {
+            let rot = engine::glam::Quat::from_rotation_arc(Vec3::Z, dir);
+            let half = rot * Vec3::new(CELL, 0.0, GATE_DEPTH * 2.0) * 0.5;
+            let across = Vec3::Y.cross(dir);
+            assert!(
+                (half.dot(across).abs() - CELL * 0.5).abs() < 1e-4,
+                "{dir:?}"
+            );
+            assert!((half.dot(dir).abs() - GATE_DEPTH).abs() < 1e-4, "{dir:?}");
+        }
+    }
+
+    #[test]
+    fn a_shut_gate_spans_the_whole_corridor() {
+        for dir in [Vec3::X, -Vec3::Z, Vec3::new(1.0, 0.0, 1.0).normalize()] {
+            let at = Vec3::new(3.0, 0.0, -6.0);
+            let side = Vec3::Y.cross(dir);
+            // Every lateral offset a player (radius 0.5) can reach in a 3-wide corridor.
+            for k in -10..=10 {
+                let lateral = side * (k as f32 / 10.0) * (CELL * 0.5 - 0.5);
+                assert!(
+                    gate_blocks(at, dir, at + lateral),
+                    "walked round at lateral {k}/10"
+                );
+            }
+            assert!(
+                !gate_blocks(at, dir, at + dir * 1.5),
+                "caught well in front"
+            );
+            assert!(!gate_blocks(at, dir, at - dir * 1.5), "caught well behind");
+        }
+    }
 
     #[test]
     fn in_first_person_a_stalker_moves_only_behind_your_back() {

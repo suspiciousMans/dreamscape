@@ -101,7 +101,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
     p.text(
         Pos2::new(cx, screen.bottom() - 40.0),
         Align2::CENTER_TOP,
-        "[esc] back",
+        v.k("[esc] back"),
         FontId::monospace(18.0),
         rgba(ink(v), 0.7),
     );

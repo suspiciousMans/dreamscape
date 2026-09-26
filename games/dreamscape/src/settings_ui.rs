@@ -64,7 +64,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
     p.text(
         Pos2::new(cx, screen.bottom() - 44.0),
         Align2::CENTER_TOP,
-        "[w/s] choose   [a/d] change   [enter] rebind / reset   [esc] back",
+        v.k("[w/s] choose   [a/d] change   [enter] rebind / reset   [esc] back"),
         FontId::monospace(18.0),
         rgba(ink(v), 0.7),
     );

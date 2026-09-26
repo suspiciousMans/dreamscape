@@ -108,7 +108,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
         p.text(
             r.left_top() + Vec2::new(10.0, 6.0),
             Align2::LEFT_TOP,
-            format!("[{}]", i + 1),
+            if v.pad {
+                String::new()
+            } else {
+                format!("[{}]", i + 1)
+            },
             FontId::monospace(20.0),
             rgba(ink(v), 0.7 * t),
         );
@@ -155,7 +159,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
     p.text(
         Pos2::new(screen.center().x, screen.bottom() - 48.0),
         Align2::CENTER_TOP,
-        &c.hint,
+        &v.k(&c.hint),
         FontId::monospace(20.0),
         rgba(ink(v), 0.75),
     );

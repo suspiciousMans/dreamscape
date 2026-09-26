@@ -110,7 +110,7 @@ pub fn draw_reveal(
     let done = reveal_done(pk.pack.len(), pk.age);
     let kept = pk.pack.iter().filter(|r| r.remembered).count();
     let msg = if !done {
-        "remembering...    [space] skip".to_string()
+        v.k("remembering...    [space] skip")
     } else if pk.pressed {
         format!(
             "pressed {} cards · +{} dust · you hold {} dust",
@@ -132,6 +132,7 @@ pub fn draw_reveal(
         } else {
             "[s] press into booklet   [r] dream again   [esc] wake"
         };
+        let keys = v.k(keys);
         p.text(
             Pos2::new(cx, screen.bottom() - 54.0),
             Align2::CENTER_TOP,

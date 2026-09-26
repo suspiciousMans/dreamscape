@@ -34,6 +34,7 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod pad;
 mod pixels;
 mod progress;
 mod records;
@@ -322,6 +323,10 @@ pub struct DreamscapeGame {
     /// Dev switch: DREAMSCAPE_FP=1 forces first person in every dream.
     force_fp: bool,
     player_grounded: bool,
+    /// Last input came from a controller: show button prompts, not keys.
+    using_pad: bool,
+    /// Controller button -> the key its press sent (released as the same key).
+    pad_held: HashMap<i32, Keycode>,
     /// F1: fixed overview camera.
     debug_camera: bool,
     /// DREAMSCAPE_AUTOPILOT=1: follow the generated route (end-to-end test).
@@ -470,6 +475,9 @@ impl DreamscapeGame {
             mouse_captured: false,
             force_fp: std::env::var_os("DREAMSCAPE_FP").is_some(),
             player_grounded: false,
+            // Dev switch: DREAMSCAPE_PAD=1 starts with controller prompts.
+            using_pad: std::env::var_os("DREAMSCAPE_PAD").is_some(),
+            pad_held: HashMap::new(),
             camera_pos: gameplay::CAMERA_OFFSET,
             debug_camera: false,
             autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
@@ -895,6 +903,9 @@ impl DreamscapeGame {
                 }
             }),
             first_person: self.first_person_active(),
+            pad: self.using_pad,
+            settings_snapshot: self.settings.clone(),
+            dream_age: self.dream_age,
             boss: self.hunter.as_ref().map(|(_, b, _)| {
                 (
                     boss::title(b.tier).to_string(),
@@ -1282,7 +1293,7 @@ impl DreamscapeGame {
         if !dream.gates.is_empty() {
             let skin = self.texture(gl, [200, 150, 255, 255]);
             let frame_tex = self.texture(gl, [255, 245, 210, 255]);
-            let orb = self.mesh(Shape::Orb)?;
+            let slab = self.mesh(Shape::Cube)?;
             let ring = self.mesh(Shape::Torus)?;
             for &(at, dir, phase) in &dream.gates {
                 let facing = Quat::from_rotation_arc(Vec3::Z, dir);
@@ -1305,7 +1316,7 @@ impl DreamscapeGame {
                         scale: Vec3::ZERO,
                     },
                     MeshRenderer {
-                        mesh: orb.clone(),
+                        mesh: slab.clone(),
                         texture: Some(skin.clone()),
                     },
                     Translucent,
@@ -1323,8 +1334,9 @@ impl DreamscapeGame {
         for &(e, _, _, phase) in &self.gates {
             if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
                 let shut = specials::gate_closed(t, phase);
+                // Shut, it fills the corridor wall to wall: exactly what hits you.
                 let target = if shut {
-                    Vec3::new(2.3, 2.2, 0.25)
+                    Vec3::new(gameplay::CELL, 2.6, specials::GATE_DEPTH * 2.0)
                 } else {
                     Vec3::ZERO
                 };
@@ -1763,11 +1775,8 @@ impl DreamscapeGame {
                 (at.x - player.x).abs() < gameplay::CELL * 0.5
                     && (at.z - player.z).abs() < gameplay::CELL * 0.5
             });
-        let gate = self.gates.iter().any(|&(_, at, _, phase)| {
-            specials::gate_closed(self.dream_age, phase) && {
-                let d = at - player;
-                Vec3::new(d.x, 0.0, d.z).length() < 0.9
-            }
+        let gate = self.gates.iter().any(|&(_, at, dir, phase)| {
+            specials::gate_closed(self.dream_age, phase) && specials::gate_blocks(at, dir, player)
         });
         let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
         pacers || hunter || boss_fx || special || gate || beat
@@ -3354,20 +3363,44 @@ impl Game for DreamscapeGame {
                 keycode: Some(k), ..
             } => (*k, false, false),
             // Controller buttons stand in for the keys they map to.
+            // Controller buttons stand in for keys, per screen (see pad.rs).
             Event::ControllerButtonDown { button, .. } => {
-                match settings::pad_key(*button, &self.settings) {
-                    Some(k) => (k, true, false),
+                self.using_pad = true;
+                match pad::key_for(*button, self.mode, &self.settings) {
+                    Some(k) => {
+                        // Remember what this press did, so the release matches
+                        // even if the screen changed in between.
+                        self.pad_held.insert(*button as i32, k);
+                        (k, true, false)
+                    }
                     None => return,
                 }
             }
             Event::ControllerButtonUp { button, .. } => {
-                match settings::pad_key(*button, &self.settings) {
+                match self.pad_held.remove(&(*button as i32)) {
                     Some(k) => (k, false, false),
                     None => return,
                 }
             }
+            Event::ControllerAxisMotion { value, .. } => {
+                if value.unsigned_abs() > 12_000 {
+                    self.using_pad = true;
+                }
+                return;
+            }
+            // A real nudge of the mouse (not the synthetic event a window
+            // gets when it opens under the cursor) switches back to keys.
+            Event::MouseMotion { xrel, yrel, .. } => {
+                if !self.mouse_captured && xrel.abs() + yrel.abs() > 6 {
+                    self.using_pad = false;
+                }
+                return;
+            }
             _ => return,
         };
+        if matches!(event, Event::KeyDown { .. }) {
+            self.using_pad = false;
+        }
         if down && !repeat && self.mode == hud::Mode::Settings {
             self.settings_key(ctx, key);
             return;

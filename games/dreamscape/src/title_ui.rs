@@ -71,7 +71,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         p.text(
             Pos2::new(cx - 200.0, y),
             Align2::LEFT_TOP,
-            format!("[{key}]  {label}"),
+            v.k(&format!("[{key}]  {label}")),
             FontId::monospace(26.0),
             rgba(col, if sel { 1.0 } else { 0.7 }),
         );
