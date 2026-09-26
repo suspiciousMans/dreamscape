@@ -97,6 +97,9 @@ struct Lit;
 #[derive(Clone, Copy)]
 struct Hero;
 
+/// Segments the boss's shockwave ring is drawn with.
+const RING_SEGMENTS: usize = 40;
+
 /// The dreamer's own body (hidden in first-person dreams).
 #[derive(Clone, Copy)]
 struct PlayerBody;
@@ -392,7 +395,7 @@ pub struct DreamscapeGame {
     /// Where taken sigils stood, newest last (a tier-3 catch puts one back).
     sigils_taken: Vec<Vec3>,
     /// The shockwave ring and the wisp bodies, mirrored from the boss.
-    boss_fx: Option<(Entity, [Entity; boss::MAX_WISPS])>,
+    boss_fx: Option<(Vec<Entity>, [Entity; boss::MAX_WISPS])>,
     sigil_tex: Option<Arc<GpuTexture>>,
     sealed_portal: Option<(dream::Block, Arc<GpuTexture>)>,
     stats: RunStats,
@@ -1146,17 +1149,24 @@ impl DreamscapeGame {
 
     /// Mirrors the boss's ring and wisps onto their entities.
     fn sync_boss_fx(&mut self) {
-        let (Some((_, b, _)), Some((ring, wisps))) = (self.hunter.as_ref(), self.boss_fx) else {
+        let (Some((_, b, _)), Some((ring, wisps))) = (self.hunter.as_ref(), self.boss_fx.as_ref())
+        else {
             return;
         };
-        if let Ok(mut t) = self.world.get::<&mut Transform>(ring) {
-            match b.attack {
-                Some(boss::Attack::Ring { centre, radius }) => {
-                    let d = 2.0 * radius + boss::RING_T;
-                    t.position = centre + Vec3::Y * boss::RING_H * 0.5;
-                    t.scale = Vec3::new(d, d, boss::RING_H);
+        for (k, e) in ring.iter().enumerate() {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                match b.attack {
+                    Some(boss::Attack::Ring { centre, radius }) => {
+                        let a = std::f32::consts::TAU * k as f32 / RING_SEGMENTS as f32;
+                        let out = Vec3::new(a.cos(), 0.0, a.sin());
+                        let arc = std::f32::consts::TAU * radius / RING_SEGMENTS as f32;
+                        t.position = centre + out * radius + Vec3::Y * boss::RING_H * 0.5;
+                        // Local X runs along the ring, local Z across the band.
+                        t.rotation = Quat::from_rotation_y(-a + std::f32::consts::FRAC_PI_2);
+                        t.scale = Vec3::new(arc * 1.05, boss::RING_H, boss::RING_T);
+                    }
+                    _ => t.scale = Vec3::ZERO,
                 }
-                _ => t.scale = Vec3::ZERO,
             }
         }
         for (k, e) in wisps.iter().enumerate() {
@@ -3129,21 +3139,27 @@ impl DreamscapeGame {
                 Lit,
             ));
             // The shockwave (a flat hoop) and the wisps, hidden until used.
-            let ring_mesh = self.mesh(Shape::Torus)?;
+            // The ring is drawn as segments exactly as wide as the band that
+            // hits you (a scaled torus would look far fatter than it is).
+            let seg_mesh = self.mesh(Shape::Cube)?;
             let ring_tex = self.texture(gl, [255, 90, 160, 255]);
-            let ring = self.world.spawn((
-                Transform {
-                    position: at,
-                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                    scale: Vec3::ZERO,
-                },
-                MeshRenderer {
-                    mesh: ring_mesh,
-                    texture: Some(ring_tex),
-                },
-                Lit,
-                NoMelt,
-            ));
+            let ring: Vec<Entity> = (0..RING_SEGMENTS)
+                .map(|_| {
+                    self.world.spawn((
+                        Transform {
+                            position: at,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        },
+                        MeshRenderer {
+                            mesh: seg_mesh.clone(),
+                            texture: Some(ring_tex.clone()),
+                        },
+                        Lit,
+                        NoMelt,
+                    ))
+                })
+                .collect();
             let wisp_mesh = self.mesh(Shape::Orb)?;
             let wisps = [(); boss::MAX_WISPS].map(|_| {
                 self.world.spawn((
