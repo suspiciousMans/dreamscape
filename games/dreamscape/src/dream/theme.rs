@@ -732,7 +732,8 @@ impl DreamTheme {
             },
             TheTunnel => ThemeSpec {
                 layout: LayoutKind::Corridor,
-                grid_size: (13, 17),
+                // Short-ish: a snaking corridor's route grows with the square of its side.
+                grid_size: (11, 13),
                 wall_height: 3.0,
                 floor_colors: &[[62, 42, 92], [72, 52, 102]],
                 wall_colors: &[[122, 82, 182], [92, 62, 162]],

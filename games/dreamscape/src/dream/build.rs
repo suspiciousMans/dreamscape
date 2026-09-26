@@ -178,6 +178,8 @@ fn grid_size_capped(theme: DreamTheme, depth: u32, cap: u32) -> (i32, i32) {
     let (lo, hi) = theme.spec().grid_size;
     let grow = match theme {
         DreamTheme::Lobby | DreamTheme::Awakening => 0,
+        // One snaking corridor: grows at half the pace, or it becomes a slog.
+        DreamTheme::TheTunnel => (depth.min(cap) / 4) as i32,
         _ => (depth.min(cap) / 2) as i32,
     };
     (lo + grow, hi + grow)
@@ -1656,6 +1658,27 @@ mod tests {
                 .beat_tiles
                 .is_empty())
         );
+    }
+
+    /// The Tunnel is one first-person corridor: it must stay a sprint, not a slog.
+    #[test]
+    fn tunnels_stay_short() {
+        for depth in [0, 6, 12, 30] {
+            let lens: Vec<usize> = (0..20)
+                .map(|s| {
+                    generate(DreamTheme::TheTunnel, s, depth, None, true)
+                        .route
+                        .len()
+                })
+                .collect();
+            let avg = lens.iter().sum::<usize>() / lens.len();
+            let longest = *lens.iter().max().unwrap();
+            assert!(
+                avg <= 110 && longest <= 140,
+                "depth {depth}: avg {avg}, longest {longest}"
+            );
+            assert!(avg >= 30, "depth {depth}: tunnel too short ({avg})");
+        }
     }
 
     #[test]
