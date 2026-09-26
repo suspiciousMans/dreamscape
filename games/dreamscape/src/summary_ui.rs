@@ -110,7 +110,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SummaryView) {
         p.text(
             Pos2::new(cx, screen.bottom() - 52.0),
             Align2::CENTER_TOP,
-            "[enter] see what you remember",
+            v.k("[enter] see what you remember"),
             FontId::monospace(22.0),
             rgba(hue(v.time * 0.2), 0.9),
         );

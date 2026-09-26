@@ -1,9 +1,8 @@
 //! Player settings: volumes, grain/vignette strength, reduced motion,
 //! fullscreen and key bindings. Saved as RON next to the booklet. Controller
-//! buttons map onto the same actions (`pad_key`). Pure and unit-tested; the
+//! buttons map onto keys per screen in `pad.rs`. Pure and unit-tested; the
 //! menu is drawn by `settings_ui`.
 
-use engine::sdl2::controller::Button;
 use engine::sdl2::keyboard::Keycode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -248,24 +247,6 @@ pub fn value(s: &Settings, row: Row) -> String {
     }
 }
 
-/// Controller buttons, as the keys they stand in for. Movement comes from
-/// the left stick (see `stick_velocity`); the d-pad drives menus.
-pub fn pad_key(button: Button, s: &Settings) -> Option<Keycode> {
-    match button {
-        Button::A => s.key_for(Action::Jump),
-        Button::B => Some(Keycode::Escape),
-        Button::Start => Some(Keycode::Escape),
-        Button::LeftShoulder | Button::RightShoulder => s.key_for(Action::Ability1),
-        Button::X | Button::Y => s.key_for(Action::Ability2),
-        Button::Back => Some(Keycode::B),
-        Button::DPadUp => Some(Keycode::Up),
-        Button::DPadDown => Some(Keycode::Down),
-        Button::DPadLeft => Some(Keycode::Left),
-        Button::DPadRight => Some(Keycode::Right),
-        _ => None,
-    }
-}
-
 /// Stick deflection below this is ignored.
 pub const STICK_DEADZONE: f32 = 0.25;
 
@@ -352,8 +333,6 @@ mod tests {
     #[test]
     fn controller_maps_onto_the_same_actions() {
         let s = Settings::default();
-        assert_eq!(pad_key(Button::A, &s), s.key_for(Action::Jump));
-        assert_eq!(pad_key(Button::Start, &s), Some(Keycode::Escape));
         assert_eq!(stick_dir((0.1, 0.1)), None, "deadzone");
         let (x, z) = stick_dir((1.0, 0.0)).unwrap();
         assert!(x < -0.99 && z.abs() < 1e-6, "right on the stick = world -X");

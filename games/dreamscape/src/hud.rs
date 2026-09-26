@@ -115,8 +115,20 @@ pub struct HudView {
     pub menu: Vec<(String, String, String)>,
     /// Seeing through the dreamer's eyes: draw a crosshair.
     pub first_person: bool,
+    /// Last input was a controller: prompts name buttons instead of keys.
+    pub pad: bool,
+    pub settings_snapshot: crate::settings::Settings,
+    /// Seconds into this dream (the controls legend shows for the first few).
+    pub dream_age: f32,
     /// Nightmares: (boss title, sigils taken, sigils total, attack warning).
     pub boss: Option<(String, usize, usize, Option<&'static str>)>,
+}
+
+impl HudView {
+    /// A key prompt ("[r] reroll") as the player's device would say it.
+    pub fn k(&self, text: &str) -> String {
+        crate::pad::prompt(text, self.mode, &self.settings_snapshot, self.pad)
+    }
 }
 
 /// 0.08 = a sleepy slit; 1.0 = wide awake (lucid).
@@ -336,6 +348,7 @@ pub fn draw(
     title_card(&p, screen, v);
     run_status(&p, screen, v);
     boss_bar(&p, screen, v);
+    controls_legend(&p, screen, v);
     if v.first_person {
         // A tiny pixel cross: where you're looking.
         let cross = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)];
@@ -383,6 +396,43 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
                 rgba([255, 240, 120], 1.0),
             );
         }
+    }
+}
+
+/// How long the controls legend stays up at the start of a dream.
+pub const LEGEND_SECS: f32 = 6.0;
+
+/// Controls for the device you're using: bottom-left, in the first seconds
+/// of every dream and on the pause screen.
+fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let paused = v.mode == Mode::Paused;
+    let fade = if paused {
+        1.0
+    } else {
+        ((LEGEND_SECS - v.dream_age) / 1.5).clamp(0.0, 1.0)
+    };
+    if fade <= 0.0 {
+        return;
+    }
+    let rows = crate::pad::controls(v.pad, v.first_person);
+    let mut at = Pos2::new(
+        screen.left() + 28.0,
+        screen.bottom() - 36.0 - 26.0 * rows.len() as f32,
+    );
+    for (key, what) in rows {
+        let line = if key.is_empty() {
+            what.to_string()
+        } else {
+            format!("[{key}] {what}")
+        };
+        p.text(
+            at,
+            Align2::LEFT_TOP,
+            line,
+            FontId::monospace(20.0),
+            rgba(ink(v), 0.75 * fade),
+        );
+        at.y += 26.0;
     }
 }
 
@@ -512,7 +562,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
         p.text(
             r.left_top() + Vec2::new(8.0, 5.0),
             Align2::LEFT_TOP,
-            format!("[{key}]"),
+            v.k(&format!("[{key}]")),
             FontId::monospace(16.0),
             rgba(ink(v), 0.7),
         );
@@ -761,21 +811,21 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         c + Vec2::new(0.0, 24.0),
         Align2::CENTER_TOP,
-        "[esc] keep dreaming",
+        v.k("[esc] keep dreaming"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.8),
     );
     p.text(
         c + Vec2::new(0.0, 52.0),
         Align2::CENTER_TOP,
-        "[q] wake up for real",
+        v.k("[q] wake up for real"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.5),
     );
     p.text(
         c + Vec2::new(0.0, 80.0),
         Align2::CENTER_TOP,
-        "[b] dream booklet",
+        v.k("[b] dream booklet   [l] lucid store   [o] settings   [x] codex"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.5),
     );
@@ -835,6 +885,7 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
     } else {
         "[s] press into booklet   [b] booklet   [r] dream again   [esc] wake"
     };
+    let keys = v.k(keys);
     p.text(
         Pos2::new(cx, screen.bottom() - 54.0),
         Align2::CENTER_TOP,

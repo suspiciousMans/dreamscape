@@ -309,13 +309,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let keeper_at = Pos2::new(screen.left() + 150.0, screen.top() + 150.0);
     let look = (v.shop_col as f32 - 2.0) / 3.0;
     shopkeeper(p, keeper_at, v, look);
-    let say = patter(selected, sel_state, v.dust);
-    let bubble = p.layout(
-        say.to_string(),
-        FontId::monospace(18.0),
-        rgba(ink(v), 0.9),
-        220.0,
-    );
+    let say = v.k(patter(selected, sel_state, v.dust));
+    let bubble = p.layout(say, FontId::monospace(18.0), rgba(ink(v), 0.9), 220.0);
     p.galley(
         Pos2::new(screen.left() + 40.0, screen.top() + 290.0),
         bubble,
@@ -405,6 +400,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         State::Owned => "[enter] equip".into(),
         State::Equipped => "equipped".into(),
     };
+    let action = v.k(&action);
     p.text(
         panel.left_bottom() + Vec2::new(0.0, 76.0),
         Align2::LEFT_TOP,
@@ -434,7 +430,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         Pos2::new(cx, screen.bottom() - 44.0),
         Align2::CENTER_TOP,
-        "[w/s] shelf   [a/d] item   [enter] buy / equip   [esc] back",
+        v.k("[w/s] shelf   [a/d] item   [enter] buy / equip   [esc] back"),
         FontId::monospace(20.0),
         rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );

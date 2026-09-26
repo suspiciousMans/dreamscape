@@ -128,7 +128,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     p.text(
         Pos2::new(cx, screen.bottom() - 40.0),
         Align2::CENTER_TOP,
-        "[a/d] turn page      [p] save these cards as images      [esc] back",
+        v.k("[a/d] turn page      [p] save these cards as images      [esc] back"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );
