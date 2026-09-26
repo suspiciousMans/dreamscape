@@ -102,7 +102,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
         p.rect_stroke(
             r,
             6.0,
-            Stroke::new(if sel { 4.0 } else { 2.0 }, rgba(frame, t)),
+            Stroke::new(if sel { 4.0_f32 } else { 2.0 }, rgba(frame, t)),
         );
         // Key hint in the corner.
         p.text(

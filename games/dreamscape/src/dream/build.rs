@@ -1398,6 +1398,44 @@ mod tests {
     }
 
     #[test]
+    fn a_patient_player_is_never_walled_in_under_pressure() {
+        let mut fails = Vec::new();
+        for theme in ALL_THEMES {
+            for seed in 0..12 {
+                for depth in [5, 12, 30] {
+                    for enemies in [2.0_f32, 4.0] {
+                        let d = generate_with(
+                            theme,
+                            seed,
+                            depth,
+                            None,
+                            true,
+                            Pressure {
+                                enemies,
+                                growth_cap: 24,
+                                ..Pressure::default()
+                            },
+                        );
+                        for (name, r) in [("route", &d.route), ("lucid", &d.lucid_route)] {
+                            if let Err(e) = patient_walk(&d, r) {
+                                fails.push(format!(
+                                    "{theme:?}/{seed}/d{depth}/x{enemies} {name}: {e}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fails.is_empty(),
+            "{} walled in:\n{}",
+            fails.len(),
+            fails[..fails.len().min(10)].join("\n")
+        );
+    }
+
+    #[test]
     fn a_patient_player_is_never_walled_in() {
         let mut fails = Vec::new();
         for theme in ALL_THEMES {

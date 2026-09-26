@@ -461,7 +461,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             r.right_bottom(),
         );
         p.rect_filled(fill, 4.0, rgba(rgb, if ready { 0.25 } else { 0.15 }));
-        p.rect_stroke(r, 4.0, egui::Stroke::new(2.0, rgba(rgb, 0.9)));
+        p.rect_stroke(r, 4.0, egui::Stroke::new(2.0_f32, rgba(rgb, 0.9)));
         p.text(
             r.left_top() + Vec2::new(8.0, 5.0),
             Align2::LEFT_TOP,
