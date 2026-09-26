@@ -22,9 +22,15 @@ pub enum DreamTheme {
     TheTunnel,
     FractalCathedral,
     Elfworks,
+    AfterimageFields,
+    SynesthesiaHall,
+    MeltingClockworks,
+    JellyfishSky,
+    WatchingWallpaper,
+    WhiteDissolve,
 }
 
-pub const ALL_THEMES: [DreamTheme; 14] = [
+pub const ALL_THEMES: [DreamTheme; 20] = [
     DreamTheme::Lobby,
     DreamTheme::LiminalOffice,
     DreamTheme::VoidPlatforms,
@@ -39,6 +45,12 @@ pub const ALL_THEMES: [DreamTheme; 14] = [
     DreamTheme::TheTunnel,
     DreamTheme::FractalCathedral,
     DreamTheme::Elfworks,
+    DreamTheme::AfterimageFields,
+    DreamTheme::SynesthesiaHall,
+    DreamTheme::MeltingClockworks,
+    DreamTheme::JellyfishSky,
+    DreamTheme::WatchingWallpaper,
+    DreamTheme::WhiteDissolve,
 ];
 
 /// A dream's signature mechanic.
@@ -51,6 +63,36 @@ pub enum Feature {
     Gates,
     /// Floor tiles on the way that sink and rise.
     Shifters,
+    /// Ghosts of you trail behind as you move (Afterimage Fields).
+    Echoes,
+    /// Route tiles burn on the downbeat; cross on the off-beat (Synesthesia Hall).
+    BeatTiles,
+    /// Every `LOOP_SECS` the dream rewinds: enemies back to their posts (Melting Clockworks).
+    TimeLoop,
+    /// Half gravity, higher jumps, always (Jellyfish Sky).
+    Weightless,
+    /// Eyes set in the walls turn to look at the shard (The Watching Wallpaper).
+    Watchers,
+    /// The way behind you dissolves while you move and returns when you stand still (White Dissolve).
+    Dissolve,
+}
+
+impl Feature {
+    pub fn gravity(self) -> f32 {
+        if self == Feature::Weightless {
+            0.5
+        } else {
+            1.0
+        }
+    }
+
+    pub fn jump(self) -> f32 {
+        if self == Feature::Weightless {
+            1.15
+        } else {
+            1.0
+        }
+    }
 }
 
 /// How a dream *feels* beyond its colours: shader and post-effect levels.
@@ -282,6 +324,17 @@ pub struct ThemeSpec {
 }
 
 impl DreamTheme {
+    /// Dreams you see through your own eyes, never from above. Only walled,
+    /// jump-free layouts qualify (tested in build.rs).
+    pub fn first_person(self) -> bool {
+        matches!(
+            self,
+            DreamTheme::TheTunnel | DreamTheme::MeltingClockworks | DreamTheme::WatchingWallpaper
+        )
+    }
+}
+
+impl DreamTheme {
     pub fn spec(self) -> ThemeSpec {
         use DreamTheme::*;
         match self {
@@ -354,6 +407,8 @@ impl DreamTheme {
                     (DrownedLibrary, 2),
                     (MirrorHall, 1),
                     (TheTunnel, 1),
+                    (WatchingWallpaper, 1),
+                    (MeltingClockworks, 1),
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Checker],
                 accents: &[[210, 255, 60], [255, 220, 40]],
@@ -391,6 +446,7 @@ impl DreamTheme {
                     (LiminalOffice, 1),
                     (SkyStairs, 2),
                     (TheTunnel, 1),
+                    (JellyfishSky, 1),
                 ],
                 patterns: &[Pattern::Swirl, Pattern::Plasma, Pattern::Kaleido],
                 accents: &[[255, 40, 220], [40, 240, 255]],
@@ -429,6 +485,7 @@ impl DreamTheme {
                     (CursedForest, 2),
                     (SkyStairs, 1),
                     (MyceliumGrove, 1),
+                    (AfterimageFields, 1),
                 ],
                 patterns: &[
                     Pattern::Cells,
@@ -563,6 +620,7 @@ impl DreamTheme {
                     (CursedForest, 1),
                     (SkyStairs, 1),
                     (FractalCathedral, 1),
+                    (MeltingClockworks, 1),
                 ],
                 patterns: &[Pattern::Stripes, Pattern::Rings, Pattern::Plasma],
                 accents: &[[80, 220, 255], [180, 120, 255]],
@@ -592,7 +650,12 @@ impl DreamTheme {
                 base_profile: "sky_stairs",
                 music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (0, 2),
-                next: &[(VoidPlatforms, 1), (MirrorHall, 2), (Garden, 1)],
+                next: &[
+                    (VoidPlatforms, 1),
+                    (MirrorHall, 2),
+                    (Garden, 1),
+                    (JellyfishSky, 1),
+                ],
                 patterns: &[Pattern::Plasma, Pattern::Swirl, Pattern::Rings],
                 accents: &[[255, 200, 120], [140, 220, 255]],
                 specials: &[(EnemyKind::Drifter, 1)],
@@ -628,6 +691,7 @@ impl DreamTheme {
                     (LiminalOffice, 1),
                     (NightmareFactory, 1),
                     (FractalCathedral, 1),
+                    (WatchingWallpaper, 1),
                 ],
                 patterns: &[Pattern::Kaleido, Pattern::Checker, Pattern::Rings],
                 accents: &[[255, 160, 255], [120, 255, 240]],
@@ -668,7 +732,8 @@ impl DreamTheme {
             },
             TheTunnel => ThemeSpec {
                 layout: LayoutKind::Corridor,
-                grid_size: (13, 17),
+                // Short-ish: a snaking corridor's route grows with the square of its side.
+                grid_size: (11, 13),
                 wall_height: 3.0,
                 floor_colors: &[[62, 42, 92], [72, 52, 102]],
                 wall_colors: &[[122, 82, 182], [92, 62, 162]],
@@ -753,6 +818,7 @@ impl DreamTheme {
                     (MyceliumGrove, 1),
                     (Garden, 1),
                     (NightmareFactory, 1),
+                    (SynesthesiaHall, 1),
                 ],
                 patterns: &[
                     Pattern::Kaleido,
@@ -765,6 +831,190 @@ impl DreamTheme {
                 fog_pockets: false,
                 mood: Mood::new(0.35, 0.25, 0.3, 128.0),
                 feature: Feature::Shifters,
+            },
+            AfterimageFields => ThemeSpec {
+                layout: LayoutKind::ScatterField,
+                grid_size: (13, 17),
+                wall_height: 0.8,
+                floor_colors: &[[235, 215, 245], [215, 240, 235]],
+                wall_colors: &[[250, 200, 220]],
+                prop_colors: &[[255, 190, 210], [190, 230, 255], [255, 245, 190]],
+                props: &[PropKind::CloudPuff, PropKind::Tree, PropKind::Lamp],
+                prop_density: 0.18,
+                strangeness: 0.45,
+                fog_color: [0.85, 0.8, 0.9],
+                ambient: [0.75, 0.72, 0.8],
+                fog_start: 10.0,
+                fog_end: 40.0,
+                base_profile: "afterimage_fields",
+                music: "games/dreamscape/assets/music/dream_lobby.wav",
+                enemies: (1, 2),
+                next: &[
+                    (Garden, 2),
+                    (SynesthesiaHall, 1),
+                    (MirrorHall, 1),
+                    (JellyfishSky, 1),
+                ],
+                patterns: &[Pattern::Plasma, Pattern::Swirl, Pattern::Stripes],
+                accents: &[[255, 150, 200], [150, 220, 255], [255, 240, 150]],
+                specials: &[(EnemyKind::Mimic, 3)],
+                fog_pockets: false,
+                mood: Mood::new(0.3, 0.9, 0.2, 0.0),
+                feature: Feature::Echoes,
+            },
+            SynesthesiaHall => ThemeSpec {
+                layout: LayoutKind::OpenHall,
+                grid_size: (13, 17),
+                wall_height: 2.2,
+                floor_colors: &[[30, 20, 60], [20, 30, 70]],
+                wall_colors: &[[60, 30, 120], [30, 60, 140]],
+                prop_colors: &[[255, 80, 160], [80, 255, 200], [255, 220, 60]],
+                props: &[PropKind::Pillar, PropKind::Lamp, PropKind::Machine],
+                prop_density: 0.12,
+                strangeness: 0.5,
+                fog_color: [0.1, 0.05, 0.2],
+                ambient: [0.45, 0.4, 0.6],
+                fog_start: 8.0,
+                fog_end: 34.0,
+                base_profile: "synesthesia_hall",
+                music: "games/dreamscape/assets/music/void_platform.wav",
+                enemies: (1, 3),
+                next: &[
+                    (AfterimageFields, 1),
+                    (Elfworks, 1),
+                    (LiminalOffice, 1),
+                    (MeltingClockworks, 1),
+                ],
+                patterns: &[Pattern::Stripes, Pattern::Rings, Pattern::Lattice],
+                accents: &[[255, 60, 120], [60, 255, 160], [255, 230, 60]],
+                specials: &[(EnemyKind::Sentry, 2), (EnemyKind::Jester, 1)],
+                fog_pockets: false,
+                mood: Mood::new(0.2, 0.3, 0.6, 110.0),
+                feature: Feature::BeatTiles,
+            },
+            MeltingClockworks => ThemeSpec {
+                layout: LayoutKind::Maze,
+                grid_size: (13, 17),
+                wall_height: 3.0,
+                floor_colors: &[[70, 50, 30], [90, 65, 35]],
+                wall_colors: &[[150, 110, 50], [120, 85, 40]],
+                prop_colors: &[[220, 170, 80], [180, 130, 60], [240, 220, 160]],
+                props: &[PropKind::Pillar, PropKind::Machine, PropKind::Bookshelf],
+                prop_density: 0.15,
+                strangeness: 0.4,
+                fog_color: [0.25, 0.17, 0.08],
+                ambient: [0.55, 0.46, 0.34],
+                fog_start: 8.0,
+                fog_end: 30.0,
+                base_profile: "melting_clockworks",
+                music: "games/dreamscape/assets/music/liminal_office.wav",
+                enemies: (1, 3),
+                next: &[
+                    (DrownedLibrary, 1),
+                    (WatchingWallpaper, 1),
+                    (NightmareFactory, 1),
+                    (SynesthesiaHall, 1),
+                ],
+                patterns: &[Pattern::Rings, Pattern::Swirl, Pattern::Checker],
+                accents: &[[255, 200, 80], [255, 120, 40]],
+                specials: &[(EnemyKind::Stalker, 1), (EnemyKind::Sentry, 1)],
+                fog_pockets: false,
+                mood: Mood::new(0.4, 0.2, 0.2, 60.0),
+                feature: Feature::TimeLoop,
+            },
+            JellyfishSky => ThemeSpec {
+                layout: LayoutKind::PlatformChain,
+                grid_size: (13, 17),
+                wall_height: 0.0,
+                floor_colors: &[[20, 40, 90], [30, 60, 120]],
+                wall_colors: &[[20, 30, 60]],
+                prop_colors: &[[120, 200, 255], [200, 140, 255], [120, 255, 230]],
+                props: &[PropKind::CloudPuff, PropKind::Crystal, PropKind::Moon],
+                prop_density: 0.1,
+                strangeness: 0.5,
+                fog_color: [0.02, 0.06, 0.16],
+                ambient: [0.35, 0.42, 0.6],
+                fog_start: 8.0,
+                fog_end: 36.0,
+                base_profile: "jellyfish_sky",
+                music: "games/dreamscape/assets/music/void_platform.wav",
+                enemies: (1, 2),
+                next: &[
+                    (SkyStairs, 2),
+                    (VoidPlatforms, 1),
+                    (AfterimageFields, 1),
+                    (MyceliumGrove, 1),
+                ],
+                patterns: &[Pattern::Veins, Pattern::Plasma, Pattern::Cells],
+                accents: &[[120, 220, 255], [220, 120, 255]],
+                specials: &[(EnemyKind::Drifter, 3)],
+                fog_pockets: false,
+                mood: Mood::new(0.5, 0.4, 0.9, 0.0),
+                feature: Feature::Weightless,
+            },
+            WatchingWallpaper => ThemeSpec {
+                layout: LayoutKind::Maze,
+                grid_size: (11, 15),
+                wall_height: 3.0,
+                floor_colors: &[[80, 60, 50], [70, 55, 45]],
+                wall_colors: &[[170, 150, 110], [150, 160, 120], [180, 140, 130]],
+                prop_colors: &[[200, 180, 140], [160, 120, 100]],
+                props: &[
+                    PropKind::Desk,
+                    PropKind::Lamp,
+                    PropKind::Bookshelf,
+                    PropKind::Doorway,
+                ],
+                prop_density: 0.12,
+                strangeness: 0.35,
+                fog_color: [0.2, 0.17, 0.12],
+                ambient: [0.55, 0.5, 0.42],
+                fog_start: 8.0,
+                fog_end: 30.0,
+                base_profile: "watching_wallpaper",
+                music: "games/dreamscape/assets/music/liminal_office.wav",
+                enemies: (1, 2),
+                next: &[
+                    (LiminalOffice, 1),
+                    (MirrorHall, 1),
+                    (MeltingClockworks, 1),
+                    (CursedForest, 1),
+                ],
+                patterns: &[Pattern::Faces, Pattern::Eyes, Pattern::Stripes],
+                accents: &[[255, 230, 200], [120, 255, 120]],
+                specials: &[(EnemyKind::Stalker, 3)],
+                fog_pockets: false,
+                mood: Mood::new(0.5, 0.1, 0.1, 0.0),
+                feature: Feature::Watchers,
+            },
+            WhiteDissolve => ThemeSpec {
+                layout: LayoutKind::Spiral,
+                grid_size: (13, 17),
+                wall_height: 0.0,
+                floor_colors: &[[240, 240, 245], [230, 232, 240]],
+                wall_colors: &[[250, 250, 255]],
+                prop_colors: &[[255, 255, 255], [220, 225, 240]],
+                props: &[
+                    PropKind::Doorway,
+                    PropKind::FloatingStairs,
+                    PropKind::CloudPuff,
+                ],
+                prop_density: 0.08,
+                strangeness: 0.7,
+                fog_color: [0.95, 0.95, 0.97],
+                ambient: [0.9, 0.9, 0.92],
+                fog_start: 8.0,
+                fog_end: 30.0,
+                base_profile: "white_dissolve",
+                music: "games/dreamscape/assets/music/awakening.wav",
+                enemies: (0, 1),
+                next: &[(MirrorHall, 1), (FractalCathedral, 1), (TheTunnel, 1)],
+                patterns: &[Pattern::Cobweb, Pattern::Tunnel, Pattern::Kaleido],
+                accents: &[[200, 210, 255], [255, 230, 240]],
+                specials: &[],
+                fog_pockets: false,
+                mood: Mood::new(0.6, 0.5, 0.0, 0.0),
+                feature: Feature::Dissolve,
             },
         }
     }
@@ -793,6 +1043,34 @@ mod tests {
         assert!(m.pulse(0.25) < 0.1);
         assert!((m.pulse(0.5) - 1.0).abs() < 1e-4, "on the next beat");
         assert_eq!(Mood::PLAIN.pulse(3.3), 0.0);
+    }
+
+    #[test]
+    fn every_dream_is_reachable_from_the_lobby() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::from([DreamTheme::Lobby]);
+        let mut todo = vec![DreamTheme::Lobby];
+        while let Some(t) = todo.pop() {
+            for &(n, _) in t.spec().next {
+                if seen.insert(n) {
+                    todo.push(n);
+                }
+            }
+        }
+        for t in ALL_THEMES {
+            let special = matches!(t, DreamTheme::Awakening | DreamTheme::WhiteDissolve);
+            assert_eq!(seen.contains(&t), !special, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn beat_dreams_keep_a_crossable_tempo() {
+        for t in ALL_THEMES
+            .into_iter()
+            .filter(|t| t.spec().feature == Feature::BeatTiles)
+        {
+            assert!((90.0..=130.0).contains(&t.spec().mood.bpm), "{t:?}");
+        }
     }
 
     #[test]

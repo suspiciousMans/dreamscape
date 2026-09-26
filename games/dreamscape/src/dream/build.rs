@@ -1,5 +1,6 @@
 //! Turns a layout + theme into concrete blocks (every block is a coloured cube).
 
+use super::detail;
 use super::grid::{Cell, Grid, P};
 use super::layout;
 use super::meshes::Shape;
@@ -24,6 +25,9 @@ pub enum BlockKind {
     Decor,
     /// Non-solid set dressing that glows through the dark (moons, motes).
     Sky,
+    /// Static, non-solid set dressing (caps, skirting, inlays, ceilings, vistas).
+    /// Never spins or bobs, never collides.
+    Trim,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +98,12 @@ pub struct Dream {
     pub gates: Vec<(Vec3, Vec3, f32)>,
     /// Elfworks: route tiles that sink and rise (each its own slab), with phase.
     pub shifters: Vec<(Vec3, f32)>,
+    /// Synesthesia Hall: route cells that burn on the downbeat.
+    pub beat_tiles: Vec<Vec3>,
+    /// Watching Wallpaper: (eye position, direction out of the wall).
+    pub watchers: Vec<(Vec3, Vec3)>,
+    /// White Dissolve: route cells (each its own slab) that dissolve behind you.
+    pub dissolve: Vec<Vec3>,
 }
 
 /// One special enemy. `at` is where it starts; `a`/`b` are its two ends
@@ -168,6 +178,8 @@ fn grid_size_capped(theme: DreamTheme, depth: u32, cap: u32) -> (i32, i32) {
     let (lo, hi) = theme.spec().grid_size;
     let grow = match theme {
         DreamTheme::Lobby | DreamTheme::Awakening => 0,
+        // One snaking corridor: grows at half the pace, or it becomes a slog.
+        DreamTheme::TheTunnel => (depth.min(cap) / 4) as i32,
         _ => (depth.min(cap) / 2) as i32,
     };
     (lo + grow, hi + grow)
@@ -264,6 +276,21 @@ pub fn generate_with(
         None => path.clone(),
     };
     on_path.extend(lucid_path.iter().map(|&(p, _)| p));
+    // White Dissolve: every cell you walk through (bar the ends) can dissolve.
+    let dissolve_cells: Vec<P> = if spec.feature == Feature::Dissolve {
+        let n = lucid_path.len();
+        let mut v: Vec<P> = lucid_path
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| k >= 1 && k + 1 < n)
+            .map(|(_, &(c, _))| c)
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    } else {
+        Vec::new()
+    };
 
     let crumbles = crumble_cells(&spec, &path, depth, &mut rng);
     let shifter_cells = if spec.feature == Feature::Shifters {
@@ -275,6 +302,7 @@ pub fn generate_with(
         .iter()
         .copied()
         .chain(shifter_cells.iter().map(|s| s.0))
+        .chain(dissolve_cells.iter().copied())
         .collect();
     let mut blocks = Vec::new();
     floor_slabs(grid, &spec, &single, &mut rng, &mut blocks);
@@ -290,6 +318,16 @@ pub fn generate_with(
     );
     decor(grid, &spec, &mut rng, &mut blocks);
     undersides(grid, &spec, &mut rng, &mut blocks);
+    // Dressing draws from its own stream, so it never changes the rest of a dream.
+    let mut drng = StdRng::seed_from_u64(seed ^ 0xDE7A_11ED);
+    detail::details(
+        grid,
+        &spec,
+        &single,
+        theme.first_person(),
+        &mut drng,
+        &mut blocks,
+    );
     let surfaces = surfaces(&spec, &mut rng);
     let portal = grid.world(layout.portal);
     let waypoints = |p: &[(P, bool)]| -> Vec<Waypoint> {
@@ -309,6 +347,8 @@ pub fn generate_with(
         color: PORTAL_COLOR,
     });
 
+    // Same place in the RNG order as before (first thing the literal drew).
+    let patrols = patrols(grid, &path, &on_path, &spec, depth, pressure, &mut rng);
     Dream {
         theme,
         seed,
@@ -319,7 +359,7 @@ pub fn generate_with(
         route: waypoints(&path),
         lucid_route: waypoints(&lucid_path),
         shard: shard_cell.map(|c| grid.world(c)),
-        patrols: patrols(grid, &path, &on_path, &spec, depth, pressure, &mut rng),
+        patrols: patrols.clone(),
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
         strangeness: spec.strangeness,
@@ -370,6 +410,17 @@ pub fn generate_with(
             .iter()
             .map(|&(c, phase)| (grid.world(c), phase))
             .collect(),
+        beat_tiles: if spec.feature == Feature::BeatTiles {
+            beat_tiles(grid, &path, &patrols)
+        } else {
+            Vec::new()
+        },
+        watchers: if spec.feature == Feature::Watchers {
+            watchers(grid, &mut StdRng::seed_from_u64(seed ^ 0x3A7C_4E55))
+        } else {
+            Vec::new()
+        },
+        dissolve: dissolve_cells.iter().map(|&c| grid.world(c)).collect(),
     }
 }
 
@@ -455,29 +506,71 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
             g.set(p, Cell::Wall);
         }
     }
-    // Four pillars round the middle, one cell off the centre lines.
-    let q = side / 4;
-    for p in [
-        (q, q),
-        (side - 1 - q, q),
-        (q, side - 1 - q),
-        (side - 1 - q, side - 1 - q),
-    ] {
-        g.set(p, Cell::Wall);
+    let tier = crate::boss::tier(depth);
+    // From the second tier, every other arena is an island cut off by a
+    // one-cell moat of void (never in first person: that would need a jump).
+    let moat = tier >= 2 && !theme.first_person() && seed % 2 == 0;
+    if moat {
+        for y in 1..side - 1 {
+            for x in 1..side - 1 {
+                if (x - mid).abs().max((y - mid).abs()) == 3 {
+                    g.set((x, y), Cell::Void);
+                }
+            }
+        }
+    } else {
+        // Four pillars round the middle, one cell off the centre lines.
+        let q = side / 4;
+        for p in [
+            (q, q),
+            (side - 1 - q, q),
+            (q, side - 1 - q),
+            (side - 1 - q, side - 1 - q),
+        ] {
+            g.set(p, Cell::Wall);
+        }
     }
     let spawn = (mid, 1);
     let portal = (mid, side - 2);
-    // Sigils: left, right and back walls, jittered along them.
+    // Sigils: left, right and back walls, jittered along them (the island's
+    // heart instead of the back wall when there's a moat).
     let j = |rng: &mut StdRng| rng.gen_range(-1..=1);
-    let sigil_cells = [
-        (1, mid + j(&mut rng)),
-        (side - 2, mid + j(&mut rng)),
-        (mid + j(&mut rng), side - 3),
+    let (ja, jb, jc) = (j(&mut rng), j(&mut rng), j(&mut rng));
+    let mut sigil_cells = vec![
+        (1, mid + ja),
+        (side - 2, mid + jb),
+        if moat {
+            (mid, mid)
+        } else {
+            (mid + jc, side - 3)
+        },
     ];
     let hunter = (mid, mid + 1);
+    if crate::boss::sigil_count(tier) > sigil_cells.len() {
+        // The floor cell farthest from everything already placed.
+        let taken: Vec<P> = sigil_cells
+            .iter()
+            .copied()
+            .chain([spawn, portal, hunter])
+            .collect();
+        let far = |c: P| {
+            taken
+                .iter()
+                .map(|t| (t.0 - c.0).pow(2) + (t.1 - c.1).pow(2))
+                .min()
+                .unwrap_or(0)
+        };
+        let pick = g
+            .cells_of(Cell::Floor)
+            .into_iter()
+            .filter(|&c| !taken.contains(&c) && g.path(spawn, c).is_some())
+            .max_by_key(|&c| (far(c), c))
+            .expect("an arena has spare floor");
+        sigil_cells.push(pick);
+    }
     let path = g.path(spawn, portal).expect("an open arena is connected");
     let mut stops = vec![spawn];
-    stops.extend(sigil_cells);
+    stops.extend(sigil_cells.iter().copied());
     stops.push(portal);
     let lucid: Vec<(P, bool)> = stops
         .windows(2)
@@ -491,6 +584,18 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
     floor_slabs(&g, &spec, &HashSet::new(), &mut rng, &mut blocks);
     walls(&g, &spec, &mut rng, &mut blocks);
     decor(&g, &spec, &mut rng, &mut blocks);
+    if moat {
+        undersides(&g, &spec, &mut rng, &mut blocks);
+    }
+    let mut drng = StdRng::seed_from_u64(seed ^ 0xDE7A_11ED);
+    detail::details(
+        &g,
+        &spec,
+        &HashSet::new(),
+        theme.first_person(),
+        &mut drng,
+        &mut blocks,
+    );
     let surfaces = surfaces(&spec, &mut rng);
     blocks.push(Block {
         kind: BlockKind::Portal,
@@ -535,7 +640,45 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         veins: Vec::new(),
         gates: Vec::new(),
         shifters: Vec::new(),
+        beat_tiles: Vec::new(),
+        watchers: Vec::new(),
+        dissolve: Vec::new(),
     }
+}
+
+/// Every fourth route cell, never near the ends, a jump, or a guard post.
+fn beat_tiles(grid: &Grid, path: &[(P, bool)], posts: &[(Vec3, Vec3)]) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    for k in (3..path.len().saturating_sub(3)).step_by(4) {
+        let near_jump = path[k].1 || path.get(k + 1).is_some_and(|s| s.1);
+        let at = grid.world(path[k].0);
+        let guarded = posts
+            .iter()
+            .any(|(a, _)| Vec3::new(a.x, 0.0, a.z).distance(at) < CELL * 1.5);
+        if !near_jump && !guarded {
+            out.push(at);
+        }
+    }
+    out
+}
+
+pub const MAX_WATCHERS: usize = 24;
+
+/// Eyes set into walls that face a floor cell, at head height.
+fn watchers(grid: &Grid, rng: &mut StdRng) -> Vec<(Vec3, Vec3)> {
+    let mut out = Vec::new();
+    for c in grid.cells_of(Cell::Floor) {
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            if out.len() < MAX_WATCHERS
+                && grid.get((c.0 + dx, c.1 + dy)) == Cell::Wall
+                && rng.gen_bool(0.12)
+            {
+                let n = Vec3::new(dx as f32, 0.0, dy as f32);
+                out.push((grid.world(c) + n * (CELL * 0.5 - 0.1) + Vec3::Y * 1.7, -n));
+            }
+        }
+    }
+    out
 }
 
 /// A reachable floor cell off the direct route, biased toward far-away ones
@@ -555,14 +698,14 @@ fn pick_shard(grid: &Grid, on_path: &HashSet<P>, spawn: P, rng: &mut StdRng) -> 
     far_half.choose(rng).map(|&(_, c)| c)
 }
 
-fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
+pub(super) fn pick(palette: &[[u8; 3]], rng: &mut StdRng) -> [u8; 3] {
     *palette
         .choose(rng)
         .expect("theme palettes are non-empty (theme tests)")
 }
 
 /// Palette colour ± up to 40 per channel, more spread the stranger the dream.
-fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
+pub(super) fn tint(c: [u8; 3], strangeness: f32, rng: &mut StdRng) -> [u8; 4] {
     let spread = 12.0 + 28.0 * strangeness;
     let mut out = [0, 0, 0, 255];
     for i in 0..3 {
@@ -1181,7 +1324,7 @@ mod tests {
             for b in d
                 .blocks
                 .iter()
-                .filter(|b| !matches!(b.kind, BlockKind::Decor | BlockKind::Sky))
+                .filter(|b| !matches!(b.kind, BlockKind::Decor | BlockKind::Sky | BlockKind::Trim))
             {
                 assert_eq!(
                     b.rotation,
@@ -1206,6 +1349,18 @@ mod tests {
                             near_palette(b.color, s.prop_colors)
                         }
                         BlockKind::Portal => b.color == PORTAL_COLOR,
+                        // Dressing: a theme colour (wall/prop/accent), possibly shaded.
+                        BlockKind::Trim => [0.55_f32, 0.7, 0.8, 1.0, 1.15, 1.3].iter().any(|&k| {
+                            [s.wall_colors, s.prop_colors, s.accents].iter().any(|pal| {
+                                pal.iter().any(|p| {
+                                    (0..3).all(|i| {
+                                        let lo = ((p[i] as f32 - 40.0) * k).clamp(0.0, 255.0);
+                                        let hi = ((p[i] as f32 + 40.0) * k).clamp(0.0, 255.0);
+                                        (lo - 1.0..=hi + 1.0).contains(&(b.color[i] as f32))
+                                    })
+                                })
+                            })
+                        }),
                     };
                     assert!(
                         ok,
@@ -1398,6 +1553,135 @@ mod tests {
     }
 
     #[test]
+    fn a_patient_player_is_never_walled_in_under_pressure() {
+        let mut fails = Vec::new();
+        for theme in ALL_THEMES {
+            for seed in 0..12 {
+                for depth in [5, 12, 30] {
+                    for enemies in [2.0_f32, 4.0] {
+                        let d = generate_with(
+                            theme,
+                            seed,
+                            depth,
+                            None,
+                            true,
+                            Pressure {
+                                enemies,
+                                growth_cap: 24,
+                                ..Pressure::default()
+                            },
+                        );
+                        for (name, r) in [("route", &d.route), ("lucid", &d.lucid_route)] {
+                            if let Err(e) = patient_walk(&d, r) {
+                                fails.push(format!(
+                                    "{theme:?}/{seed}/d{depth}/x{enemies} {name}: {e}"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fails.is_empty(),
+            "{} walled in:\n{}",
+            fails.len(),
+            fails[..fails.len().min(10)].join("\n")
+        );
+    }
+
+    #[test]
+    fn first_person_dreams_never_need_a_jump_and_are_walled() {
+        for theme in ALL_THEMES.into_iter().filter(|t| t.first_person()) {
+            assert!(
+                theme.spec().wall_height >= 2.5,
+                "{theme:?}: low walls in first person"
+            );
+            for seed in 0..40 {
+                for depth in [0, 5, 12, 30] {
+                    let d = generate(theme, seed, depth, None, true);
+                    for r in [&d.route, &d.lucid_route] {
+                        assert!(
+                            r.iter().all(|w| !w.jump),
+                            "{theme:?}/{seed}/d{depth}: jump in first person"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_signature_mechanics_turn_up_where_they_should() {
+        for seed in 0..20 {
+            let s = generate(DreamTheme::SynesthesiaHall, seed, 3, None, true);
+            let route: Vec<Vec3> = s.route.iter().map(|w| w.pos).collect();
+            for b in &s.beat_tiles {
+                assert!(
+                    route.iter().any(|p| p.distance(*b) < 1e-3),
+                    "beat tile off route"
+                );
+                let k = route.iter().position(|p| p.distance(*b) < 1e-3).unwrap();
+                assert!(k >= 3 && k + 3 < route.len(), "beat tile at the ends");
+                for (a, _) in &s.patrols {
+                    assert!(
+                        Vec3::new(a.x, 0.0, a.z).distance(*b) >= CELL * 1.5,
+                        "beat tile on a guard post"
+                    );
+                }
+            }
+            let w = generate(DreamTheme::WatchingWallpaper, seed, 3, None, true);
+            assert!(!w.watchers.is_empty(), "seed {seed}: no watchers");
+            for (at, out) in &w.watchers {
+                assert!((out.length() - 1.0).abs() < 1e-4 && at.y > 1.0);
+            }
+            let x = generate(DreamTheme::WhiteDissolve, seed, 3, None, true);
+            assert!(!x.dissolve.is_empty());
+            for c in &x.dissolve {
+                assert!(
+                    x.blocks.iter().any(|b| b.kind == BlockKind::Floor
+                        && (b.pos.x - c.x).abs() < 1e-3
+                        && (b.pos.z - c.z).abs() < 1e-3
+                        && (b.size.x - CELL).abs() < 1e-3),
+                    "dissolving tile isn't its own slab"
+                );
+            }
+            let plain = generate(DreamTheme::Garden, seed, 3, None, true);
+            assert!(
+                plain.beat_tiles.is_empty()
+                    && plain.watchers.is_empty()
+                    && plain.dissolve.is_empty()
+            );
+        }
+        assert!(
+            (0..20).any(|s| !generate(DreamTheme::SynesthesiaHall, s, 3, None, true)
+                .beat_tiles
+                .is_empty())
+        );
+    }
+
+    /// The Tunnel is one first-person corridor: it must stay a sprint, not a slog.
+    #[test]
+    fn tunnels_stay_short() {
+        for depth in [0, 6, 12, 30] {
+            let lens: Vec<usize> = (0..20)
+                .map(|s| {
+                    generate(DreamTheme::TheTunnel, s, depth, None, true)
+                        .route
+                        .len()
+                })
+                .collect();
+            let avg = lens.iter().sum::<usize>() / lens.len();
+            let longest = *lens.iter().max().unwrap();
+            assert!(
+                avg <= 110 && longest <= 140,
+                "depth {depth}: avg {avg}, longest {longest}"
+            );
+            assert!(avg >= 30, "depth {depth}: tunnel too short ({avg})");
+        }
+    }
+
+    #[test]
     fn a_patient_player_is_never_walled_in() {
         let mut fails = Vec::new();
         for theme in ALL_THEMES {
@@ -1468,7 +1752,12 @@ mod tests {
                 is_trigger: false,
             },
         ));
-        let params = PhysicsParams::default();
+        // The dream's own physics (Jellyfish Sky is weightless).
+        let feature = d.theme.spec().feature;
+        let params = PhysicsParams {
+            gravity: PhysicsParams::default().gravity * feature.gravity(),
+            ..PhysicsParams::default()
+        };
         let route = &d.lucid_route;
         let mut i = 0;
         for frame in 0..60 * 120 {
@@ -1484,7 +1773,7 @@ mod tests {
                 body.velocity.x = v.x;
                 body.velocity.z = v.z;
                 if wp.jump && body.grounded {
-                    body.velocity.y = JUMP_SPEED;
+                    body.velocity.y = JUMP_SPEED * feature.jump();
                 }
             }
             step(&mut world, 1.0 / 60.0, &params);
@@ -1656,9 +1945,11 @@ mod tests {
     fn nightmares_are_walled_arenas_with_spread_out_sigils() {
         for theme in ALL_THEMES {
             for seed in 0..10 {
-                for depth in [5, 10, 40] {
+                for depth in [5, 10, 20, 40] {
                     let d = generate_nightmare(theme, seed, depth);
-                    assert_eq!(d.sigils.len(), SIGILS);
+                    let tier = crate::boss::tier(depth);
+                    assert_eq!(d.sigils.len(), crate::boss::sigil_count(tier));
+                    assert!(d.sigils.len() >= SIGILS);
                     assert!(d.shard.is_none() && d.patrols.is_empty());
                     let hunter = d.hunter.expect("a nightmare has a hunter");
                     assert!(
@@ -1667,8 +1958,10 @@ mod tests {
                     );
                     for (i, a) in d.sigils.iter().enumerate() {
                         assert!(a.distance(d.spawn) > 2.0 * CELL);
-                        for b in &d.sigils[i + 1..] {
-                            assert!(a.distance(*b) > 3.0 * CELL, "sigils bunched up");
+                        for (j, b) in d.sigils.iter().enumerate().skip(i + 1) {
+                            // The first three are spread wide; the fourth fills the biggest gap.
+                            let gap = if j < 3 { 3.0 } else { 2.0 };
+                            assert!(a.distance(*b) > gap * CELL, "sigils bunched up");
                         }
                         // The autopilot's route visits every sigil.
                         assert!(d.lucid_route.iter().any(|w| w.pos.distance(*a) < 1e-3));
@@ -1680,13 +1973,40 @@ mod tests {
                     let first = d.lucid_route.first().unwrap().pos;
                     let last = d.lucid_route.last().unwrap().pos;
                     assert!(first.distance(d.spawn) < 1e-3 && last.distance(d.portal) < 1e-3);
-                    assert!(d
-                        .lucid_route
-                        .windows(2)
-                        .all(|w| w[0].pos.distance(w[1].pos) <= CELL + 1e-3));
+                    // Steps are one cell, or two when jumping the moat.
+                    assert!(d.lucid_route.windows(2).all(|w| {
+                        let step = w[0].pos.distance(w[1].pos);
+                        step <= CELL + 1e-3 || (w[1].jump && step <= 2.0 * CELL + 1e-3)
+                    }));
                 }
             }
         }
+    }
+
+    #[test]
+    fn nightmares_are_physically_traversable() {
+        let mut failures = Vec::new();
+        for theme in ALL_THEMES {
+            for seed in 0..6 {
+                for depth in [5, 10, 20] {
+                    let d = generate_nightmare(theme, seed, depth);
+                    if let Err(e) = traverse(&d) {
+                        failures.push(format!("{theme:?}/{seed}/d{depth}: {e}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn some_deep_nightmares_have_a_moat() {
+        let jumps = |d: &Dream| d.lucid_route.iter().any(|w| w.jump);
+        let moats = (0..20)
+            .filter(|&s| jumps(&generate_nightmare(DreamTheme::Garden, s, 10)))
+            .count();
+        assert!(moats >= 5, "only {moats}/20 moats");
+        assert!((0..20).all(|s| !jumps(&generate_nightmare(DreamTheme::Garden, s, 5))));
     }
 
     fn with_special(theme: DreamTheme, seed: u64, depth: u32, k: Option<EnemyKind>) -> Dream {
@@ -1931,7 +2251,7 @@ mod tests {
                     BlockKind::Decor | BlockKind::Sky => {
                         decor.insert(b.shape);
                     }
-                    BlockKind::Prop => {}
+                    BlockKind::Prop | BlockKind::Trim => {}
                 }
             }
         }

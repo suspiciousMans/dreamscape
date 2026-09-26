@@ -51,6 +51,15 @@ impl EnemyAI {
         }
     }
 
+    /// Back to the start of its patrol, calm (a time loop rewound the dream).
+    pub fn reset(&mut self) {
+        self.toward_b = true;
+        self.chasing = false;
+        self.chase_left = CHASE_TIME;
+        self.cooldown = 0.0;
+        self.alerted = 0.0;
+    }
+
     /// A sentry saw you: lunge now, whatever the alert radius (still on the
     /// leash, still tiring and cooling down as usual).
     pub fn alert(&mut self) {
@@ -120,6 +129,19 @@ mod tests {
         for _ in 0..(secs * 60.0) as usize {
             ai.update(pos, player, 1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn a_reset_calms_a_chasing_enemy() {
+        let (a, b) = (Vec3::ZERO, Vec3::X * 6.0);
+        let mut ai = EnemyAI::new(a, b, 3.0, 10.0, 20.0);
+        let mut pos = a;
+        for _ in 0..30 {
+            ai.update(&mut pos, Vec3::new(1.0, 0.0, 1.0), 1.0 / 60.0);
+        }
+        assert!(ai.chasing, "never started chasing");
+        ai.reset();
+        assert!(!ai.chasing);
     }
 
     #[test]

@@ -71,6 +71,12 @@ pub enum Attribute {
     Abyss,
     Halo,
     Jest,
+    Trace,
+    Chord,
+    Hour,
+    Lumen,
+    Gaze,
+    Blank,
 }
 
 impl Attribute {
@@ -90,6 +96,12 @@ impl Attribute {
             DreamTheme::TheTunnel => Attribute::Abyss,
             DreamTheme::FractalCathedral => Attribute::Halo,
             DreamTheme::Elfworks => Attribute::Jest,
+            DreamTheme::AfterimageFields => Attribute::Trace,
+            DreamTheme::SynesthesiaHall => Attribute::Chord,
+            DreamTheme::MeltingClockworks => Attribute::Hour,
+            DreamTheme::JellyfishSky => Attribute::Lumen,
+            DreamTheme::WatchingWallpaper => Attribute::Gaze,
+            DreamTheme::WhiteDissolve => Attribute::Blank,
         }
     }
 
@@ -109,6 +121,12 @@ impl Attribute {
             Attribute::Abyss => "ABYSS",
             Attribute::Halo => "HALO",
             Attribute::Jest => "JEST",
+            Attribute::Trace => "TRACE",
+            Attribute::Chord => "CHORD",
+            Attribute::Hour => "HOUR",
+            Attribute::Lumen => "LUMEN",
+            Attribute::Gaze => "GAZE",
+            Attribute::Blank => "BLANK",
         }
     }
 }

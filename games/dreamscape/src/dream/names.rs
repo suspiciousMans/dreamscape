@@ -16,7 +16,7 @@ pub const MAX_WHISPER: usize = 56;
 /// Chance a (non-Awakening) dream borrows one word from another dream.
 pub const MASHUP_CHANCE: f64 = 0.25;
 
-const DONORS: [DreamTheme; 13] = [
+const DONORS: [DreamTheme; 19] = [
     DreamTheme::Lobby,
     DreamTheme::LiminalOffice,
     DreamTheme::VoidPlatforms,
@@ -30,6 +30,12 @@ const DONORS: [DreamTheme; 13] = [
     DreamTheme::TheTunnel,
     DreamTheme::FractalCathedral,
     DreamTheme::Elfworks,
+    DreamTheme::AfterimageFields,
+    DreamTheme::SynesthesiaHall,
+    DreamTheme::MeltingClockworks,
+    DreamTheme::JellyfishSky,
+    DreamTheme::WatchingWallpaper,
+    DreamTheme::WhiteDissolve,
 ];
 
 fn pick(list: &'static [&'static str], rng: &mut StdRng) -> &'static str {
@@ -208,7 +214,8 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        let garden_names: Vec<String> = (0..2000)
+        // 19 donors now, so a bigger sample for the same confidence.
+        let garden_names: Vec<String> = (0..6000)
             .map(|s| dream_name(DreamTheme::Garden, s))
             .collect();
         let borrowed = garden_names
@@ -219,7 +226,7 @@ mod tests {
             borrowed > 15,
             "garden never dreamed of the office ({borrowed})"
         );
-        assert!(borrowed < 600, "garden is mostly office ({borrowed})");
+        assert!(borrowed < 1800, "garden is mostly office ({borrowed})");
     }
 
     #[test]

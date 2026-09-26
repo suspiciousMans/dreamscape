@@ -34,6 +34,14 @@ pub fn in_view(pos: Vec3, player: Vec3, clear: f32) -> bool {
     flat(pos - player).length() < clear && pos.z >= player.z - BEHIND
 }
 
+/// Seen by the dreamer: the view cone in first person, `in_view` otherwise.
+pub fn seen(pos: Vec3, player: Vec3, clear: f32, yaw: Option<f32>) -> bool {
+    match yaw {
+        Some(yaw) => crate::fpv::sees(player, yaw, pos, clear),
+        None => in_view(pos, player, clear),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Stalker {
     pub lair: Vec3,
@@ -51,8 +59,9 @@ impl Stalker {
         }
     }
 
-    pub fn update(&mut self, pos: &mut Vec3, player: Vec3, clear: f32, dt: f32) {
-        self.moving = !in_view(*pos, player, clear);
+    /// `yaw`: the dreamer's look direction in a first-person dream.
+    pub fn update(&mut self, pos: &mut Vec3, player: Vec3, clear: f32, yaw: Option<f32>, dt: f32) {
+        self.moving = !seen(*pos, player, clear, yaw);
         if self.moving {
             step_toward(pos, player, self.speed, dt);
         }
@@ -253,10 +262,56 @@ pub fn roll_elite(seed: u64, k: usize, difficulty: f32) -> Option<Elite> {
     (roll < elite_chance(difficulty)).then(|| ALL_ELITES[(h % 4) as usize])
 }
 
+/// Synesthesia Hall: route tiles burn on the first beat of every two.
+pub const BEAT_HOT: f32 = 0.3;
+pub fn beat_hot(t: f32, bpm: f32) -> bool {
+    if bpm <= 0.0 {
+        return false;
+    }
+    let bar = 120.0 / bpm;
+    t.rem_euclid(bar) / bar < BEAT_HOT
+}
+
+/// Melting Clockworks: the dream rewinds every LOOP_SECS.
+pub const LOOP_SECS: f32 = 20.0;
+pub fn loop_index(age: f32) -> u32 {
+    (age.max(0.0) / LOOP_SECS) as u32
+}
+
+/// Afterimage Fields: a ghost of you every ECHO_EVERY seconds, fading over ECHO_LIFE.
+pub const ECHO_EVERY: f32 = 0.18;
+pub const ECHO_LIFE: f32 = 1.4;
+pub const MAX_ECHOES: usize = 10;
+pub fn echo_scale(age: f32) -> f32 {
+    (1.0 - age / ECHO_LIFE).clamp(0.0, 1.0)
+}
+
+/// Watching Wallpaper: the yaw that turns an eye at `at` toward `target`.
+pub fn watcher_yaw(at: Vec3, target: Vec3) -> f32 {
+    let d = target - at;
+    d.x.atan2(d.z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gameplay::MOVE_SPEED;
+
+    #[test]
+    fn in_first_person_a_stalker_moves_only_behind_your_back() {
+        let mut s = Stalker::new(Vec3::ZERO, MOVE_SPEED);
+        let mut pos = Vec3::new(0.0, 0.9, 5.0);
+        s.update(&mut pos, Vec3::ZERO, 20.0, Some(0.0), 1.0 / 60.0); // looking straight at it
+        assert!(!s.moving);
+        s.update(
+            &mut pos,
+            Vec3::ZERO,
+            20.0,
+            Some(std::f32::consts::PI),
+            1.0 / 60.0,
+        ); // turned away
+        assert!(s.moving);
+    }
 
     #[test]
     fn a_stalker_never_moves_while_you_can_see_it() {
@@ -267,7 +322,7 @@ mod tests {
         // Far ahead: out of view, so it creeps in...
         for _ in 0..600 {
             let before = pos;
-            s.update(&mut pos, player, clear, 1.0 / 60.0);
+            s.update(&mut pos, player, clear, None, 1.0 / 60.0);
             if in_view(before, player, clear) {
                 assert_eq!(pos, before, "moved while watched");
                 assert!(!s.moving);
@@ -277,7 +332,7 @@ mod tests {
         assert!(flat(pos - player).length() >= clear - STALKER_SPEED * MOVE_SPEED / 60.0 - 1e-3);
         // From behind (toward the camera) it keeps coming.
         let mut behind = Vec3::new(0.0, 0.9, -4.0);
-        s.update(&mut behind, player, clear, 0.1);
+        s.update(&mut behind, player, clear, None, 0.1);
         assert!(s.moving && behind.z > -4.0);
         assert!(STALKER_SPEED < 1.0);
     }
@@ -393,5 +448,42 @@ mod tests {
         let kinds: std::collections::HashSet<_> =
             (0..4000).filter_map(|k| roll_elite(9, k, 1e6)).collect();
         assert_eq!(kinds.len(), ALL_ELITES.len());
+    }
+
+    #[test]
+    fn beat_tiles_always_leave_time_to_cross() {
+        for bpm in [90.0_f32, 100.0, 110.0, 120.0, 130.0] {
+            let bar = 120.0 / bpm;
+            assert!(
+                bar * (1.0 - BEAT_HOT) >= CELL / MOVE_SPEED + 0.05,
+                "{bpm} bpm"
+            );
+            let hot = (0..1000)
+                .filter(|&k| beat_hot(k as f32 * bar / 1000.0, bpm))
+                .count();
+            assert!((250..=350).contains(&hot), "{bpm}: {hot}/1000 hot");
+        }
+        assert!(!beat_hot(0.0, 0.0));
+    }
+
+    #[test]
+    fn loops_count_up_and_echoes_fade() {
+        assert_eq!(
+            (loop_index(19.9), loop_index(20.0), loop_index(45.0)),
+            (0, 1, 2)
+        );
+        assert_eq!((echo_scale(0.0), echo_scale(ECHO_LIFE)), (1.0, 0.0));
+        assert!(echo_scale(0.3) > echo_scale(0.9));
+    }
+
+    #[test]
+    fn watchers_look_at_their_target() {
+        for t in [Vec3::new(5.0, 0.0, 1.0), Vec3::new(-3.0, 2.0, -8.0)] {
+            let at = Vec3::new(1.0, 1.7, 1.0);
+            let dir = Vec3::new(t.x - at.x, 0.0, t.z - at.z).normalize();
+            let y = watcher_yaw(at, t);
+            let fwd = Vec3::new(y.sin(), 0.0, y.cos());
+            assert!(fwd.dot(dir) > 0.9999);
+        }
     }
 }
