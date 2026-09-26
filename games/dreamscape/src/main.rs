@@ -28,6 +28,7 @@ mod cards;
 mod codex_ui;
 mod dream;
 mod enemy_ai;
+mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
