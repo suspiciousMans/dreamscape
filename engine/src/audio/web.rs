@@ -174,6 +174,24 @@ impl AudioContext {
         Ok(())
     }
 
+    /// See the native version. The web mixer runs at `RATE`, so resample once.
+    pub fn play_music_samples(&mut self, samples: Vec<f32>, sample_rate: u32, offset_secs: f32) {
+        let samples = to_mono_rate(&samples, 1, sample_rate);
+        let pos = if samples.is_empty() {
+            0
+        } else {
+            (offset_secs.max(0.0) * RATE as f32) as usize % samples.len()
+        };
+        if let Ok(mut m) = MIXER.lock() {
+            m.music = (!samples.is_empty()).then(|| Voice {
+                samples: std::sync::Arc::new(samples),
+                pos,
+                volume: self.music_volume,
+                looped: true,
+            });
+        }
+    }
+
     pub fn stop_music(&mut self) {
         if let Ok(mut m) = MIXER.lock() {
             m.music = None;

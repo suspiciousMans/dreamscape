@@ -46,6 +46,7 @@ impl Scale {
         root + 12 * d.div_euclid(n) + s[d.rem_euclid(n) as usize]
     }
 
+    #[cfg(test)]
     pub fn contains(self, root: i32, midi: i32) -> bool {
         self.steps().contains(&(midi - root).rem_euclid(12))
     }

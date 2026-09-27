@@ -276,6 +276,10 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// This dream's music, being composed on a worker thread.
+    music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    /// Length of the current music loop, seconds.
+    music_loop: f32,
     /// DECOY: where it stands and its marker.
     decoy: Option<(Vec3, Entity)>,
     /// REWIND: where you've stood lately.
@@ -448,6 +452,8 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            music_job: None,
+            music_loop: 1.0,
             decoy: None,
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -864,13 +870,43 @@ impl DreamscapeGame {
         Ok(())
     }
 
-    fn play_music(&mut self, path: &str) {
-        let Some(audio) = self.audio.as_mut() else {
+    /// Composes this dream's loop off the main thread (inline on the web,
+    /// which has no threads). `poll_music` starts it in time with the
+    /// dream's clock, so beat tiles burn on the beat.
+    fn start_music(&mut self, theme: DreamTheme, strangeness: f32, seed: u64) {
+        let st = music::style(theme);
+        self.music_loop = music::loop_secs(&st, music::BARS);
+        log::info!("Music: {theme:?} in {:?} at {} bpm", st.scale, st.bpm);
+        let compose = move || {
+            let notes = music::score(&st, strangeness, seed, music::BARS);
+            music::render(&st, &notes, strangeness, music::BARS)
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_os = "emscripten"))]
+        std::thread::spawn(move || {
+            let _ = tx.send(compose());
+        });
+        #[cfg(target_os = "emscripten")]
+        let _ = tx.send(compose());
+        // A newer dream replaces the job; the old thread's send just fails.
+        self.music_job = Some(rx);
+    }
+
+    fn poll_music(&mut self) {
+        let Some(rx) = &self.music_job else {
             return;
         };
-        match audio.play_music_file(Path::new(path), true) {
-            Ok(()) => log::info!("Music: {path}"),
-            Err(e) => log::error!("Could not play music {path}: {e}"),
+        let Ok(samples) = rx.try_recv() else {
+            return;
+        };
+        self.music_job = None;
+        let offset = self.dream_age.rem_euclid(self.music_loop.max(0.01));
+        if let Some(audio) = self.audio.as_mut() {
+            log::info!(
+                "Music playing: {:.1}s loop, joined {offset:.2}s in",
+                samples.len() as f32 / sounds::RATE as f32
+            );
+            audio.play_music_samples(samples, sounds::RATE, offset);
         }
     }
 
@@ -2851,7 +2887,7 @@ impl DreamscapeGame {
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
-        self.play_music(spec.music);
+        self.start_music(theme, dream.strangeness, self.director.dream_seed());
 
         let gl = ctx.gl();
         let player_mesh = self.mesh(Shape::Octahedron)?;
@@ -3720,6 +3756,7 @@ impl Game for DreamscapeGame {
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
+        self.poll_music();
         if std::env::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
             self.frame_ms.1 += 1;
