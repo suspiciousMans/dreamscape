@@ -3,6 +3,7 @@
 //! sight, calmer enemies); the rarer ones teach an *ability* bound to a key.
 //! Everything is pure and unit-tested; `main.rs` reads the multipliers.
 
+use engine::glam::Vec3;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 /// Active abilities. At most `ABILITY_SLOTS` are held at once.
@@ -18,14 +19,26 @@ pub enum Ability {
     Phase,
     /// The shard drifts toward you.
     ShardCall,
+    /// A glowing double; enemies chase it instead of you.
+    Decoy,
+    /// Gravity drops to a third for a moment.
+    Float,
+    /// The dark pulls back: sight doubled.
+    Flare,
+    /// Snap back to where you stood a few seconds ago.
+    Rewind,
 }
 
-pub const ALL_ABILITIES: [Ability; 5] = [
+pub const ALL_ABILITIES: [Ability; 9] = [
     Ability::Dash,
     Ability::Blink,
     Ability::Stillness,
     Ability::Phase,
     Ability::ShardCall,
+    Ability::Decoy,
+    Ability::Float,
+    Ability::Flare,
+    Ability::Rewind,
 ];
 
 /// Shift and E.
@@ -37,6 +50,51 @@ pub const DASH_SPEED_MULT: f32 = 3.0;
 pub const BLINK_CELLS: f32 = 1.5;
 /// ShardCall pull speed (world units / second).
 pub const SHARD_CALL_SPEED: f32 = 2.5;
+/// FLOAT: gravity multiplier while it lasts.
+pub const FLOAT_GRAVITY: f32 = 0.33;
+/// FLARE: sight multiplier while it lasts.
+pub const FLARE_SIGHT: f32 = 2.0;
+/// REWIND: how far back it takes you.
+pub const REWIND_SECONDS: f32 = 3.0;
+
+/// Where enemies are heading: the decoy while it's up, otherwise you.
+pub fn lure_target(player: Vec3, decoy: Option<Vec3>, active: bool) -> Vec3 {
+    match decoy {
+        Some(d) if active => d,
+        _ => player,
+    }
+}
+
+/// Where you've stood lately (grounded only), for REWIND.
+#[derive(Clone, Debug, Default)]
+pub struct Trail {
+    samples: std::collections::VecDeque<(f32, Vec3)>,
+}
+
+impl Trail {
+    pub fn push(&mut self, t: f32, at: Vec3) {
+        self.samples.push_back((t, at));
+        while self
+            .samples
+            .front()
+            .is_some_and(|&(s, _)| t - s > REWIND_SECONDS + 0.5)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Where you stood `REWIND_SECONDS` ago, or the start of a shorter
+    /// trail; `None` if there's under a second of past to go back to.
+    pub fn rewind(&self, now: f32) -> Option<Vec3> {
+        let want = now - REWIND_SECONDS;
+        let &(t, at) = self.samples.iter().find(|&&(s, _)| s >= want)?;
+        (now - t >= 1.0).then_some(at)
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
 
 impl Ability {
     pub fn name(self) -> &'static str {
@@ -46,6 +104,10 @@ impl Ability {
             Ability::Stillness => "STILLNESS",
             Ability::Phase => "PHASE",
             Ability::ShardCall => "SHARD CALL",
+            Ability::Decoy => "DECOY",
+            Ability::Float => "FLOAT",
+            Ability::Flare => "FLARE",
+            Ability::Rewind => "REWIND",
         }
     }
 
@@ -56,6 +118,10 @@ impl Ability {
             Ability::Stillness => "freeze every enemy for a moment",
             Ability::Phase => "enemies pass through you for 3s",
             Ability::ShardCall => "the shard drifts toward you",
+            Ability::Decoy => "a glowing double; enemies chase it instead",
+            Ability::Float => "fall slowly for 3s; drift over gaps",
+            Ability::Flare => "the dark pulls back for 5s",
+            Ability::Rewind => "snap back to where you stood 3s ago",
         }
     }
 
@@ -67,6 +133,10 @@ impl Ability {
             Ability::Stillness => 12.0,
             Ability::Phase => 10.0,
             Ability::ShardCall => 20.0,
+            Ability::Decoy => 14.0,
+            Ability::Float => 10.0,
+            Ability::Flare => 16.0,
+            Ability::Rewind => 12.0,
         }
     }
 
@@ -78,6 +148,10 @@ impl Ability {
             Ability::Stillness => 2.5,
             Ability::Phase => 3.0,
             Ability::ShardCall => 3.0,
+            Ability::Decoy => 4.0,
+            Ability::Float => 3.0,
+            Ability::Flare => 5.0,
+            Ability::Rewind => 0.0,
         }
     }
 }
@@ -90,6 +164,12 @@ pub struct AbilityState {
     pub cooldown: f32,
     /// Seconds of effect left.
     pub active: f32,
+}
+
+/// Seconds between uses, as actually applied: however fast it recharges,
+/// an effect can never be kept on forever.
+pub fn effective_cooldown(a: Ability, cooldown_mult: f32, duration_mult: f32) -> f32 {
+    (a.cooldown() * cooldown_mult).max(a.duration() * duration_mult + 1.0)
 }
 
 impl AbilityState {
@@ -113,8 +193,7 @@ impl AbilityState {
             return false;
         }
         self.active = self.ability.duration() * duration_mult;
-        // However fast it recharges, an effect can never be kept on forever.
-        self.cooldown = (self.ability.cooldown() * cooldown_mult).max(self.active + 1.0);
+        self.cooldown = effective_cooldown(self.ability, cooldown_mult, duration_mult);
         true
     }
 
@@ -534,6 +613,33 @@ pub struct Roll {
     pub boss: bool,
 }
 
+/// Everything an upgrade can change, as the game applies it (caps
+/// included). A card is offered only if taking it would change this.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stats {
+    speed: f32,
+    jump: f32,
+    sight_bonus: f32,
+    sight: f32,
+    alert: f32,
+    enemy_speed: f32,
+    grace: f32,
+    /// Per-dream shard chance after the director's clamp.
+    shard_chance: f64,
+    anchors: u32,
+    dust: f32,
+    memory_bonus: f32,
+    calm: f32,
+    air_jumps: u32,
+    choices: usize,
+    /// LUCID HEART banks a shard when taken: that's its whole effect.
+    hearts: u32,
+    /// Held abilities with their effective cooldown and duration.
+    abilities: Vec<(Ability, f32, f32)>,
+    synergies: Vec<Synergy>,
+    curses: Vec<Curse>,
+}
+
 impl RunUpgrades {
     pub fn count(&self, u: Upgrade) -> u32 {
         self.taken.iter().filter(|&&t| t == u).count() as u32
@@ -560,12 +666,67 @@ impl RunUpgrades {
         self.taken.push(u);
     }
 
-    /// Can this still be offered?
-    pub fn available(&self, u: Upgrade) -> bool {
-        match u {
-            Upgrade::Quicken if self.abilities.is_empty() => false,
-            _ => self.count(u) < u.info().max,
+    pub fn stats(&self) -> Stats {
+        use crate::dream::SHARD_CHANCE;
+        Stats {
+            speed: self.speed(),
+            jump: self.jump(),
+            sight_bonus: self.sight_bonus(),
+            sight: self.sight(),
+            alert: self.alert(),
+            enemy_speed: self.enemy_speed(),
+            grace: self.grace(),
+            shard_chance: (SHARD_CHANCE + self.shard_bonus()).clamp(0.05, 0.95),
+            anchors: self.anchors_left(),
+            dust: self.dust(),
+            memory_bonus: self.memory_bonus(),
+            calm: self.calm(),
+            air_jumps: self.air_jumps(),
+            choices: self.choice_count(),
+            hearts: self.count(Upgrade::LucidHeart),
+            abilities: self
+                .abilities
+                .iter()
+                .map(|s| {
+                    let a = s.ability;
+                    let d = self.duration_for(a);
+                    (
+                        a,
+                        effective_cooldown(a, self.cooldown_for(a), d),
+                        a.duration() * d,
+                    )
+                })
+                .collect(),
+            synergies: self.synergies(),
+            curses: ALL_CURSES
+                .iter()
+                .copied()
+                .filter(|&c| self.cursed(c))
+                .collect(),
         }
+    }
+
+    /// Can this still be offered? Not past its count, and not if taking it
+    /// would change nothing (a stat already at its cap). This is also why
+    /// QUICKEN never shows up with no ability to quicken.
+    pub fn available(&self, u: Upgrade) -> bool {
+        if self.count(u) >= u.info().max {
+            return false;
+        }
+        let mut after = self.clone();
+        after.take(u);
+        after.stats() != self.stats()
+    }
+
+    /// Taking `u` would be the last time it's offered (count or cap).
+    /// Abilities and curses are one-offs anyway, so they never say so.
+    pub fn would_max(&self, u: Upgrade) -> bool {
+        if u.is_ability() || matches!(u, Upgrade::Cursed(_)) {
+            return false;
+        }
+        let mut after = self.clone();
+        after.take(u);
+        !after.available(u)
     }
 
     pub fn has(&self, s: Synergy) -> bool {
@@ -622,8 +783,20 @@ impl RunUpgrades {
     }
     /// Multiplies the sight radius.
     pub fn sight(&self) -> f32 {
-        if self.cursed(Curse::Insomnia) {
+        (if self.cursed(Curse::Insomnia) {
             0.75
+        } else {
+            1.0
+        }) * if self.active(Ability::Flare) {
+            FLARE_SIGHT
+        } else {
+            1.0
+        }
+    }
+    /// Multiplies gravity (FLOAT).
+    pub fn gravity(&self) -> f32 {
+        if self.active(Ability::Float) {
+            FLOAT_GRAVITY
         } else {
             1.0
         }
@@ -724,9 +897,15 @@ impl RunUpgrades {
             }
         }
         seen.iter()
-            .map(|&u| match self.count(u) {
-                1 => u.info().name.to_string(),
-                n => format!("{} x{n}", u.info().name),
+            .map(|&u| {
+                let name = u.info().name;
+                let n = self.count(u);
+                let maxed = !matches!(u, Upgrade::Cursed(_)) && !self.available(u);
+                match (n, maxed) {
+                    (_, true) => format!("{name} MAX"),
+                    (1, false) => name.to_string(),
+                    (n, false) => format!("{name} x{n}"),
+                }
             })
             .collect()
     }
@@ -929,6 +1108,66 @@ mod tests {
     }
 
     #[test]
+    fn a_stat_already_at_its_cap_is_not_offered() {
+        // GREED + one SHARD SENSE already hits the 95% shard-chance ceiling.
+        let mut r = RunUpgrades::default();
+        r.take(Upgrade::Cursed(Curse::Greed));
+        r.take(Upgrade::ShardSense);
+        assert!(r.count(Upgrade::ShardSense) < Upgrade::ShardSense.info().max);
+        for seed in 0..500 {
+            assert!(
+                !roll(seed, &r).contains(&Upgrade::ShardSense),
+                "seed {seed}"
+            );
+        }
+        // DASH on INSOMNIA + SLIPSTREAM already recharges at the floor.
+        let mut r = RunUpgrades::default();
+        r.take(Upgrade::Learn(Ability::Dash));
+        r.take(Upgrade::SwiftFeet);
+        r.take(Upgrade::SwiftFeet);
+        r.take(Upgrade::Cursed(Curse::Insomnia));
+        assert!(r.has(Synergy::Slipstream));
+        for seed in 0..500 {
+            assert!(!roll(seed, &r).contains(&Upgrade::Quicken), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn every_offered_card_changes_something() {
+        let mut r = RunUpgrades::default();
+        for seed in 0..400u64 {
+            for u in roll(seed, &r) {
+                let mut after = r.clone();
+                after.take(u);
+                assert_ne!(after.stats(), r.stats(), "{u:?} would do nothing");
+            }
+            // Walk a random build forward so later picks see bigger runs.
+            if let Some(&u) = roll(seed ^ 77, &r).first() {
+                r.take(u);
+            }
+        }
+    }
+
+    #[test]
+    fn maxing_a_card_is_announced() {
+        let mut r = RunUpgrades::default();
+        assert!(!r.would_max(Upgrade::SwiftFeet));
+        r.take(Upgrade::SwiftFeet);
+        r.take(Upgrade::SwiftFeet);
+        assert!(r.would_max(Upgrade::SwiftFeet), "the third is the last");
+        r.take(Upgrade::SwiftFeet);
+        assert!(
+            r.summary().contains(&"SWIFT FEET MAX".to_string()),
+            "{:?}",
+            r.summary()
+        );
+        assert!(
+            !r.would_max(Upgrade::Learn(Ability::Blink)),
+            "abilities just get learned"
+        );
+    }
+
+    #[test]
     fn synergies_need_both_halves() {
         let mut r = RunUpgrades::default();
         assert!(r.synergies().is_empty());
@@ -1024,6 +1263,99 @@ mod tests {
         assert!(a.try_use(0.5, 2.0));
         assert!((a.cooldown - Ability::Stillness.cooldown() * 0.5).abs() < 1e-5);
         assert!((a.active - Ability::Stillness.duration() * 2.0).abs() < 1e-5);
+    }
+
+    use engine::glam::Vec3;
+
+    fn fired(a: Ability) -> RunUpgrades {
+        let mut r = RunUpgrades::default();
+        r.take(Upgrade::Learn(a));
+        assert!(r.abilities[0].try_use(1.0, 1.0));
+        r
+    }
+
+    #[test]
+    fn float_and_flare_last_their_duration() {
+        let mut r = fired(Ability::Float);
+        assert!(r.gravity() < 0.5);
+        r.tick(Ability::Float.duration() + 0.01);
+        assert_eq!(r.gravity(), 1.0);
+        let base = RunUpgrades::default().sight();
+        let mut r = fired(Ability::Flare);
+        assert!(r.sight() >= base * 1.9);
+        r.tick(Ability::Flare.duration() + 0.01);
+        assert_eq!(r.sight(), base);
+    }
+
+    #[test]
+    fn enemies_really_go_for_the_decoy() {
+        // Through the real patrol AI: an enemy that has noticed the decoy
+        // walks toward it, away from you.
+        use crate::enemy_ai::EnemyAI;
+        let me = Vec3::new(-6.0, 0.0, 0.0);
+        let decoy = Vec3::new(3.0, 0.0, 0.0);
+        let mut ai = EnemyAI::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), 3.0, 5.0, 20.0);
+        let mut pos = Vec3::ZERO;
+        for _ in 0..20 {
+            ai.update(&mut pos, lure_target(me, Some(decoy), true), 0.05);
+        }
+        assert!(pos.x > 0.3, "moved toward the decoy: {pos:?}");
+        assert!((pos - me).length() > 6.0, "not toward you: {pos:?}");
+    }
+
+    #[test]
+    fn a_decoy_draws_enemies_only_while_it_lasts() {
+        let (me, decoy) = (Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(lure_target(me, Some(decoy), true), decoy);
+        assert_eq!(lure_target(me, Some(decoy), false), me);
+        assert_eq!(lure_target(me, None, true), me);
+    }
+
+    #[test]
+    fn rewind_goes_back_three_seconds_and_needs_a_past() {
+        let mut t = Trail::default();
+        assert_eq!(t.rewind(0.0), None, "nothing to go back to");
+        for i in 0..=100 {
+            let s = i as f32 * 0.05; // 5 s of walking along x
+            t.push(s, Vec3::new(s, 0.0, 0.0));
+        }
+        let at = t.rewind(5.0).expect("has a past");
+        assert!((at.x - (5.0 - REWIND_SECONDS)).abs() < 0.06, "{at:?}");
+        let mut young = Trail::default();
+        young.push(0.0, Vec3::ZERO);
+        assert_eq!(
+            young.rewind(0.5),
+            None,
+            "under a second of past: not worth a charge"
+        );
+        assert_eq!(
+            young.rewind(1.5),
+            Some(Vec3::ZERO),
+            "short trail: its start"
+        );
+        // Old samples are dropped.
+        assert!(
+            t.samples.len() < 100,
+            "trail keeps only what rewind can use"
+        );
+        t.clear();
+        assert_eq!(t.rewind(5.0), None);
+    }
+
+    #[test]
+    fn nine_abilities_all_learnable() {
+        assert_eq!(ALL_ABILITIES.len(), 9);
+        let seen: HashSet<Upgrade> = (0..5000)
+            .flat_map(|s| roll(s, &RunUpgrades::default()))
+            .collect();
+        for a in [
+            Ability::Decoy,
+            Ability::Float,
+            Ability::Flare,
+            Ability::Rewind,
+        ] {
+            assert!(seen.contains(&Upgrade::Learn(a)), "{a:?} never offered");
+        }
     }
 
     #[test]
