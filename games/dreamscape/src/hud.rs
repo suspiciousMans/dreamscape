@@ -651,12 +651,27 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     if let Some((text, age)) = &v.eye_line {
         let a = crate::eye::alpha(*age);
         if a > 0.0 {
+            let text = v.k(&if v.pad {
+                text.replace("[WASD]", "[L-STICK]")
+            } else {
+                text.clone()
+            });
+            let shown = crate::eye::shown(&text, *age);
+            // Measure the whole line so the plate doesn't grow as it types.
+            let font = FontId::proportional(24.0);
+            let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
+            let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
+            let plate = Rect::from_center_size(
+                at - Vec2::new(0.0, full.size().y * 0.5),
+                full.size() + Vec2::new(28.0, 12.0),
+            );
+            p.rect_filled(plate, 4.0, rgba([8, 4, 18], 0.72 * a));
             p.text(
-                c + Vec2::new(0.0, -8.0 * EYE_PX),
-                Align2::CENTER_BOTTOM,
-                crate::eye::shown(text, *age),
-                FontId::proportional(22.0),
-                rgba([210, 200, 235], 0.9 * a),
+                Pos2::new(plate.left() + 14.0, plate.center().y),
+                Align2::LEFT_CENTER,
+                shown,
+                font,
+                rgba([226, 214, 250], a),
             );
         }
     }
