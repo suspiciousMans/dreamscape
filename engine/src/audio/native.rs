@@ -105,6 +105,26 @@ impl AudioContext {
         Ok(())
     }
 
+    /// Loops raw mono samples as the background music, replacing any track.
+    /// Starts `offset_secs` into the loop (so a game can keep the music in
+    /// time with its own clock) and fades in, so a swap never clicks.
+    pub fn play_music_samples(&mut self, samples: Vec<f32>, sample_rate: u32, offset_secs: f32) {
+        if samples.is_empty() {
+            self.stop_music();
+            return;
+        }
+        let Ok(sink) = Sink::try_new(&self.handle) else {
+            return;
+        };
+        let source = rodio::buffer::SamplesBuffer::new(1, sample_rate, samples)
+            .repeat_infinite()
+            .skip_duration(Duration::from_secs_f32(offset_secs.max(0.0)))
+            .fade_in(Duration::from_millis(600));
+        sink.append(source);
+        sink.set_volume(self.music_volume);
+        self.music = Some(sink);
+    }
+
     pub fn stop_music(&mut self) {
         if let Some(sink) = self.music.take() {
             sink.stop();

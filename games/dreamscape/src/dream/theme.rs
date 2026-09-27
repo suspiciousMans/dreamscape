@@ -306,7 +306,6 @@ pub struct ThemeSpec {
     pub fog_end: f32,
     /// `name` of a profile in games/dreamscape/profiles/ (resolution/snap/affine feel).
     pub base_profile: &'static str,
-    pub music: &'static str,
     /// Enemy count range at depth 0 (grows by 1 every 3 dreams).
     pub enemies: (u32, u32),
     /// Weighted exits. Lobby and Awakening are never listed — the director owns them.
@@ -359,7 +358,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 50.0,
                 base_profile: "dream_lobby",
-                music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (0, 0),
                 next: &[
                     (LiminalOffice, 3),
@@ -398,7 +396,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "dreamscape_liminal",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 2),
                 next: &[
                     (VoidPlatforms, 2),
@@ -438,7 +435,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "shattered_realm",
-                music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (0, 1),
                 next: &[
                     (Garden, 2),
@@ -476,7 +472,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 42.0,
                 base_profile: "ethereal_sanctuary",
-                music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (1, 2),
                 next: &[
                     (LiminalOffice, 2),
@@ -514,7 +509,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "nightmare_factory",
-                music: "games/dreamscape/assets/music/nightmare_factory.wav",
                 enemies: (3, 4),
                 next: &[
                     (VoidPlatforms, 1),
@@ -551,7 +545,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 50.0,
                 base_profile: "desert_mirage",
-                music: "games/dreamscape/assets/music/awakening.wav",
                 enemies: (0, 0),
                 next: &[],
                 patterns: &[Pattern::Plasma],
@@ -581,7 +574,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "cursed_forest",
-                music: "games/dreamscape/assets/music/nightmare_factory.wav",
                 enemies: (2, 3),
                 next: &[
                     (Garden, 2),
@@ -612,7 +604,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 32.0,
                 base_profile: "ocean_depths",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 3),
                 next: &[
                     (LiminalOffice, 2),
@@ -648,7 +639,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 45.0,
                 base_profile: "sky_stairs",
-                music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (0, 2),
                 next: &[
                     (VoidPlatforms, 1),
@@ -683,7 +673,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 45.0,
                 base_profile: "mirror_hall",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 3),
                 next: &[
                     (DrownedLibrary, 1),
@@ -715,7 +704,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 32.0,
                 base_profile: "mycelium_grove",
-                music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (1, 2),
                 next: &[
                     (Garden, 2),
@@ -746,7 +734,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "the_tunnel",
-                music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (1, 3),
                 next: &[(FractalCathedral, 2), (MirrorHall, 1), (VoidPlatforms, 1)],
                 patterns: &[Pattern::Tunnel, Pattern::Rings, Pattern::Swirl],
@@ -771,7 +758,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 45.0,
                 base_profile: "fractal_cathedral",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 3),
                 next: &[
                     (Elfworks, 2),
@@ -811,7 +797,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 40.0,
                 base_profile: "elfworks",
-                music: "games/dreamscape/assets/music/nightmare_factory.wav",
                 enemies: (1, 2),
                 next: &[
                     (FractalCathedral, 1),
@@ -847,7 +832,6 @@ impl DreamTheme {
                 fog_start: 10.0,
                 fog_end: 40.0,
                 base_profile: "afterimage_fields",
-                music: "games/dreamscape/assets/music/dream_lobby.wav",
                 enemies: (1, 2),
                 next: &[
                     (Garden, 2),
@@ -877,7 +861,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 34.0,
                 base_profile: "synesthesia_hall",
-                music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (1, 3),
                 next: &[
                     (AfterimageFields, 1),
@@ -907,7 +890,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "melting_clockworks",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 3),
                 next: &[
                     (DrownedLibrary, 1),
@@ -937,7 +919,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 36.0,
                 base_profile: "jellyfish_sky",
-                music: "games/dreamscape/assets/music/void_platform.wav",
                 enemies: (1, 2),
                 next: &[
                     (SkyStairs, 2),
@@ -972,7 +953,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "watching_wallpaper",
-                music: "games/dreamscape/assets/music/liminal_office.wav",
                 enemies: (1, 2),
                 next: &[
                     (LiminalOffice, 1),
@@ -1006,7 +986,6 @@ impl DreamTheme {
                 fog_start: 8.0,
                 fog_end: 30.0,
                 base_profile: "white_dissolve",
-                music: "games/dreamscape/assets/music/awakening.wav",
                 enemies: (0, 1),
                 next: &[(MirrorHall, 1), (FractalCathedral, 1), (TheTunnel, 1)],
                 patterns: &[Pattern::Cobweb, Pattern::Tunnel, Pattern::Kaleido],
@@ -1160,17 +1139,6 @@ mod tests {
             assert!(
                 crate::gameplay::profile_index(&profiles, name).is_some(),
                 "{t:?}: no profile '{name}'"
-            );
-        }
-    }
-
-    #[test]
-    fn every_music_file_exists() {
-        for t in ALL_THEMES {
-            assert!(
-                repo_path(t.spec().music).exists(),
-                "{t:?}: missing {}",
-                t.spec().music
             );
         }
     }

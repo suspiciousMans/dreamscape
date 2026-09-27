@@ -2,6 +2,17 @@
 // virtual filesystem at the same relative paths the native build reads from
 // (cwd is "/"), and mount a persistent save folder (see web/pre.js).
 fn main() {
+    // Short git hash for the title screen and crash reports.
+    let hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=DREAMSCAPE_GIT_HASH={hash}");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/refs/heads");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=web/pre.js");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("emscripten") {

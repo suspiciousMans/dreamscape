@@ -101,6 +101,17 @@ pub fn profile_index(profiles: &[ShaderProfile], name: &str) -> Option<usize> {
 pub const RESPAWN_GRACE: f32 = 1.5;
 pub const FLASH_FADE_PER_SEC: f32 = 2.5;
 
+/// With "reduce flashing" on, full-screen flashes are capped this low.
+pub const GENTLE_FLASH: f32 = 0.2;
+
+pub fn flash_tint(strength: f32, reduce: bool) -> f32 {
+    if reduce {
+        strength.min(GENTLE_FLASH)
+    } else {
+        strength
+    }
+}
+
 /// A full-screen colour flash that fades out (fed to the post-process tint).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Flash {
@@ -233,6 +244,13 @@ pub fn difficulty_reward(difficulty: f32) -> f32 {
 mod tests {
     use super::*;
     use engine::ecs::Transform;
+
+    #[test]
+    fn reduce_flashing_caps_full_screen_flashes() {
+        assert_eq!(flash_tint(0.9, false), 0.9);
+        assert!(flash_tint(0.9, true) <= GENTLE_FLASH);
+        assert_eq!(flash_tint(0.1, true), 0.1, "small flashes are left alone");
+    }
     use engine::glam::Mat4;
     use engine::physics::{step, Collider, ColliderShape, PhysicsParams, RigidBody};
 

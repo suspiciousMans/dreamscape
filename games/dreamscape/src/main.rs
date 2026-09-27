@@ -27,6 +27,8 @@ mod booklet_ui;
 mod boss;
 mod cards;
 mod codex_ui;
+mod crash;
+mod dev;
 mod dissolve;
 mod dream;
 mod enemy_ai;
@@ -34,7 +36,9 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod music;
 mod pad;
+mod paths;
 mod pixels;
 mod progress;
 mod records;
@@ -219,15 +223,23 @@ enum ChoiceKind {
 }
 
 fn init_logging() {
-    let _ = env_logger::builder()
-        .is_test(false)
-        .format_timestamp_millis()
-        .try_init();
+    let mut b = env_logger::Builder::from_default_env();
+    b.format_timestamp_millis();
+    // Release: no console, so log to a file players can send us.
+    if !cfg!(debug_assertions) {
+        if let Some(file) = crash::open_log() {
+            b.target(env_logger::Target::Pipe(Box::new(file)));
+            if std::env::var_os("RUST_LOG").is_none() {
+                b.filter_level(log::LevelFilter::Info);
+            }
+        }
+    }
+    let _ = b.try_init();
 }
 
 /// DREAMSCAPE_SEED=<u64> replays a run exactly; otherwise seed from the clock.
 fn run_seed() -> u64 {
-    std::env::var("DREAMSCAPE_SEED")
+    crate::dev::var("DREAMSCAPE_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
@@ -275,6 +287,10 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// This dream's music, being composed on a worker thread.
+    music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    /// Length of the current music loop, seconds.
+    music_loop: f32,
     /// DECOY: where it stands and its marker.
     decoy: Option<(Vec3, Entity)>,
     /// REWIND: where you've stood lately.
@@ -348,6 +364,8 @@ pub struct DreamscapeGame {
     mode: hud::Mode,
     /// Seconds since the current dream (or the journal) began.
     title_age: f32,
+    /// Seconds the photosensitivity warning has been up.
+    warning_age: f32,
     dream_name: String,
     dream_whisper: String,
     run_log: Vec<cards::DreamRecord>,
@@ -447,6 +465,8 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            music_job: None,
+            music_loop: 1.0,
             decoy: None,
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -479,28 +499,31 @@ impl DreamscapeGame {
             yaw: 0.0,
             pitch: 0.0,
             mouse_captured: false,
-            force_fp: std::env::var_os("DREAMSCAPE_FP").is_some(),
+            force_fp: crate::dev::var_os("DREAMSCAPE_FP").is_some(),
             player_grounded: false,
             // Dev switch: DREAMSCAPE_PAD=1 starts with controller prompts.
-            using_pad: std::env::var_os("DREAMSCAPE_PAD").is_some(),
+            using_pad: crate::dev::var_os("DREAMSCAPE_PAD").is_some(),
             pad_held: HashMap::new(),
             camera_pos: gameplay::CAMERA_OFFSET,
             debug_camera: false,
-            autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
+            autopilot: crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok(),
             route_index: 0,
             flash: gameplay::Flash::default(),
             grace: 0.0,
             shard_entities: Vec::new(),
             shard_tex: None,
             wake_tex: None,
-            best_depth: records::load(Path::new(records::RECORD_PATH)),
+            best_depth: records::load(&records::record_path()),
             ui: None,
-            mode: if std::env::var("DREAMSCAPE_AUTOPILOT").is_ok() {
+            mode: if crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok() {
                 hud::Mode::Playing
-            } else {
+            } else if crate::dev::var("DREAMSCAPE_SKIP_WARNING").is_ok() {
                 hud::Mode::Title
+            } else {
+                hud::Mode::Warning
             },
             title_age: 0.0,
+            warning_age: 0.0,
             dream_name: String::new(),
             dream_whisper: String::new(),
             run_log: Vec::new(),
@@ -523,7 +546,7 @@ impl DreamscapeGame {
             shards_this_run: 0,
             second_wind_used: false,
             transition: transition::Transition::new(
-                std::env::var("DREAMSCAPE_MELT_SCALE")
+                crate::dev::var("DREAMSCAPE_MELT_SCALE")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1.0),
@@ -532,8 +555,8 @@ impl DreamscapeGame {
             restart_requested: false,
             fonts_installed: false,
             grain: None,
-            tunnel_on: std::env::var("DREAMSCAPE_NO_TUNNEL").is_err(),
-            run_length: match std::env::var("DREAMSCAPE_RUN").as_deref() {
+            tunnel_on: crate::dev::var("DREAMSCAPE_NO_TUNNEL").is_err(),
+            run_length: match crate::dev::var("DREAMSCAPE_RUN").as_deref() {
                 Ok("long") => RunLength::Long,
                 _ => RunLength::Short,
             },
@@ -571,7 +594,7 @@ impl DreamscapeGame {
             enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
             growth_cap: if hard { 24 } else { 12 },
             // Dev switch: DREAMSCAPE_SPECIAL=Stalker puts that kind in every dream.
-            force_special: std::env::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
+            force_special: crate::dev::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
                 dream::ALL_ENEMY_KINDS
                     .iter()
                     .copied()
@@ -863,13 +886,43 @@ impl DreamscapeGame {
         Ok(())
     }
 
-    fn play_music(&mut self, path: &str) {
-        let Some(audio) = self.audio.as_mut() else {
+    /// Composes this dream's loop off the main thread (inline on the web,
+    /// which has no threads). `poll_music` starts it in time with the
+    /// dream's clock, so beat tiles burn on the beat.
+    fn start_music(&mut self, theme: DreamTheme, strangeness: f32, seed: u64) {
+        let st = music::style(theme);
+        self.music_loop = music::loop_secs(&st, music::BARS);
+        log::info!("Music: {theme:?} in {:?} at {} bpm", st.scale, st.bpm);
+        let compose = move || {
+            let notes = music::score(&st, strangeness, seed, music::BARS);
+            music::render(&st, &notes, strangeness, music::BARS)
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_os = "emscripten"))]
+        std::thread::spawn(move || {
+            let _ = tx.send(compose());
+        });
+        #[cfg(target_os = "emscripten")]
+        let _ = tx.send(compose());
+        // A newer dream replaces the job; the old thread's send just fails.
+        self.music_job = Some(rx);
+    }
+
+    fn poll_music(&mut self) {
+        let Some(rx) = &self.music_job else {
             return;
         };
-        match audio.play_music_file(Path::new(path), true) {
-            Ok(()) => log::info!("Music: {path}"),
-            Err(e) => log::error!("Could not play music {path}: {e}"),
+        let Ok(samples) = rx.try_recv() else {
+            return;
+        };
+        self.music_job = None;
+        let offset = self.dream_age.rem_euclid(self.music_loop.max(0.01));
+        if let Some(audio) = self.audio.as_mut() {
+            log::info!(
+                "Music playing: {:.1}s loop, joined {offset:.2}s in",
+                samples.len() as f32 / sounds::RATE as f32
+            );
+            audio.play_music_samples(samples, sounds::RATE, offset);
         }
     }
 
@@ -897,6 +950,7 @@ impl DreamscapeGame {
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
             title_age: self.title_age,
+            warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
                 if self.first_person_active() {
                     fpv::compass(self.player_position, self.yaw, t, 4.0)
@@ -2279,7 +2333,7 @@ impl DreamscapeGame {
         };
         // Dev: DREAMSCAPE_PACK_PREVIEW=40 repeats this run's dreams to 40.
         let mut log = self.run_log.clone();
-        if let Some(n) = std::env::var("DREAMSCAPE_PACK_PREVIEW")
+        if let Some(n) = crate::dev::var("DREAMSCAPE_PACK_PREVIEW")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {
@@ -2316,7 +2370,7 @@ impl DreamscapeGame {
             return;
         }
         // A padded preview pack (DREAMSCAPE_PACK_PREVIEW) is never pressed.
-        if std::env::var_os("DREAMSCAPE_PACK_PREVIEW").is_some() {
+        if crate::dev::var_os("DREAMSCAPE_PACK_PREVIEW").is_some() {
             log::info!("Booklet: preview pack, not pressed");
             return;
         }
@@ -2398,6 +2452,7 @@ impl DreamscapeGame {
 
     fn restart(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         self.run_seed = gameplay::next_run_seed(self.run_seed);
+        crash::SEED.store(self.run_seed, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "Dream run seed = {} (replay with DREAMSCAPE_SEED={})",
             self.run_seed,
@@ -2433,14 +2488,14 @@ impl DreamscapeGame {
         self.run.no_free_reroll = !asc.free_rerolls();
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
-        if let Some(n) = std::env::var("DREAMSCAPE_SHARDS_NEEDED")
+        if let Some(n) = crate::dev::var("DREAMSCAPE_SHARDS_NEEDED")
             .ok()
             .and_then(|s| s.parse().ok())
         {
             self.director.shards_to_wake = n;
         }
         // Dev: DREAMSCAPE_GIVE=Decoy,Rewind starts the run holding those.
-        if let Ok(list) = std::env::var("DREAMSCAPE_GIVE") {
+        if let Ok(list) = crate::dev::var("DREAMSCAPE_GIVE") {
             for name in list.split(',') {
                 if let Some(&a) = upgrades::ALL_ABILITIES
                     .iter()
@@ -2506,14 +2561,14 @@ impl DreamscapeGame {
             self.run_active = false;
             progress::clear(&self.save_path);
         }
-        if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+        if self.autopilot && crate::dev::var("DREAMSCAPE_AUTOSAVE").is_ok() {
             self.open_pack();
             self.pack.age = f32::MAX;
             self.save_journal();
-            match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
+            match crate::dev::var("DREAMSCAPE_AUTOSAVE").as_deref() {
                 Ok("booklet") => {
                     self.open_booklet();
-                    self.export_requested = std::env::var("DREAMSCAPE_CARDS").is_ok();
+                    self.export_requested = crate::dev::var("DREAMSCAPE_CARDS").is_ok();
                 }
                 Ok("store") => {
                     self.open_store();
@@ -2850,7 +2905,7 @@ impl DreamscapeGame {
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
-        self.play_music(spec.music);
+        self.start_music(theme, dream.strangeness, self.director.dream_seed());
 
         let gl = ctx.gl();
         let player_mesh = self.mesh(Shape::Octahedron)?;
@@ -3293,7 +3348,7 @@ impl DreamscapeGame {
         self.dream = Some(dream);
         if !self.autopilot && self.director.depth > self.best_depth {
             self.best_depth = self.director.depth;
-            if let Err(e) = records::save(Path::new(records::RECORD_PATH), self.best_depth) {
+            if let Err(e) = records::save(&records::record_path(), self.best_depth) {
                 log::warn!("could not save best depth: {e}");
             }
         }
@@ -3372,10 +3427,12 @@ impl Game for DreamscapeGame {
         unsafe {
             gl.enable(engine::glow::DEPTH_TEST);
         }
-        let cycler = ProfileCycler::new(engine::profile::load_dir(Path::new(PROFILES_DIR))?)?;
+        let cycler = ProfileCycler::new(engine::profile::load_dir(&paths::asset(PROFILES_DIR))?)?;
         let first = cycler.current().clone();
-        let read =
-            |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading shader {p:?}"));
+        let read = |p: &Path| {
+            std::fs::read_to_string(paths::asset_path(p))
+                .with_context(|| format!("reading shader {p:?}"))
+        };
         let vertex_src = read(&first.vertex_shader)?;
         let fragment_src = read(&first.fragment_shader)?;
         let post_src = read(&first.post_fragment_shader)?;
@@ -3403,7 +3460,7 @@ impl Game for DreamscapeGame {
             self.begin_run();
         }
         // Dev switch: DREAMSCAPE_THEME=SkyStairs starts one dream deep in it.
-        if let Ok(name) = std::env::var("DREAMSCAPE_THEME") {
+        if let Ok(name) = crate::dev::var("DREAMSCAPE_THEME") {
             match dream::ALL_THEMES.iter().find(|t| format!("{t:?}") == name) {
                 Some(&t) => {
                     self.director.theme = t;
@@ -3413,12 +3470,12 @@ impl Game for DreamscapeGame {
             }
         }
         // Dev switch: DREAMSCAPE_NIGHTMARE=1 starts in a nightmare arena.
-        if std::env::var("DREAMSCAPE_NIGHTMARE").is_ok() {
+        if crate::dev::var("DREAMSCAPE_NIGHTMARE").is_ok() {
             if self.director.theme == DreamTheme::Lobby {
                 self.director.theme = DreamTheme::NightmareFactory;
             }
             // DREAMSCAPE_NIGHTMARE=3 starts in the third tier's arena.
-            let tier: u32 = std::env::var("DREAMSCAPE_NIGHTMARE")
+            let tier: u32 = crate::dev::var("DREAMSCAPE_NIGHTMARE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1)
@@ -3429,12 +3486,12 @@ impl Game for DreamscapeGame {
         }
         self.load_dream(ctx)?;
         // Dev switch: DREAMSCAPE_SCREEN=codex|settings opens that screen.
-        match std::env::var("DREAMSCAPE_SCREEN").as_deref() {
+        match crate::dev::var("DREAMSCAPE_SCREEN").as_deref() {
             Ok("codex") => self.open_codex(),
             Ok("settings") => self.open_settings(),
             _ => {}
         }
-        if std::env::var("DREAMSCAPE_CONTINUE").is_ok() {
+        if crate::dev::var("DREAMSCAPE_CONTINUE").is_ok() {
             self.pending_start = Some(StartKind::Continue);
         }
         log::info!("Dreamscape initialized");
@@ -3532,6 +3589,12 @@ impl Game for DreamscapeGame {
                 return;
             }
             match (self.mode, key) {
+                (hud::Mode::Warning, Keycode::Return | Keycode::Space | Keycode::Escape) => {
+                    if self.warning_age >= title_ui::WARNING_MIN {
+                        self.mode = hud::Mode::Title;
+                    }
+                    return;
+                }
                 (hud::Mode::Playing, Keycode::Escape) => {
                     ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
                     self.mouse_captured = false;
@@ -3719,7 +3782,14 @@ impl Game for DreamscapeGame {
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
-        if std::env::var_os("DREAMSCAPE_FPS").is_some() {
+        self.poll_music();
+        if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
+            panic!("DREAMSCAPE_CRASH: test crash");
+        }
+        if self.mode == hud::Mode::Warning {
+            self.warning_age += dt;
+        }
+        if crate::dev::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
             self.frame_ms.1 += 1;
             if self.frame_ms.1 == 300 {
@@ -3774,7 +3844,7 @@ impl Game for DreamscapeGame {
                 hud::Mode::Journal | hud::Mode::Booklet | hud::Mode::Reveal | hud::Mode::Store
             )
             && self.title_age
-                > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
+                > crate::dev::var("DREAMSCAPE_JOURNAL_HOLD")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(3.0)
@@ -4248,6 +4318,7 @@ impl Game for DreamscapeGame {
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
+        let reduce_flashing = self.settings.reduce_flashing;
         let melt = self.transition.melt();
         let transition = self.transition;
         let strangeness = self.visual_strangeness();
@@ -4552,7 +4623,7 @@ impl Game for DreamscapeGame {
                 color_levels: 256.0,
                 dither_strength: 0.0,
                 tint_color: flash.color,
-                tint_strength: flash.strength,
+                tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
             },
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
@@ -4624,10 +4695,10 @@ impl DreamscapeGame {
     /// DREAMSCAPE_SHOT=out.png: after DREAMSCAPE_SHOT_AT seconds (default 6)
     /// of the run, save the frame and quit. Used by tools/screenshots.sh.
     fn maybe_screenshot(&mut self, ctx: &mut Context) {
-        let Ok(path) = std::env::var("DREAMSCAPE_SHOT") else {
+        let Ok(path) = crate::dev::var("DREAMSCAPE_SHOT") else {
             return;
         };
-        let at: f32 = std::env::var("DREAMSCAPE_SHOT_AT")
+        let at: f32 = crate::dev::var("DREAMSCAPE_SHOT_AT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6.0);
@@ -4646,9 +4717,9 @@ impl DreamscapeGame {
         let Some(frame) = Self::read_frame(ctx) else {
             return;
         };
-        let dir = std::env::var_os("DREAMSCAPE_CARDS")
+        let dir = crate::dev::var_os("DREAMSCAPE_CARDS")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("games/dreamscape/cards"));
+            .unwrap_or_else(|| paths::save_file("cards"));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             log::error!("could not create {dir:?}: {e}");
             return;
@@ -4721,8 +4792,18 @@ impl DreamscapeGame {
 
 fn main() -> anyhow::Result<()> {
     init_logging();
-    std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+    crash::install();
+    paths::migrate_repo_saves();
     let seed = run_seed();
-    log::info!("Dream run seed = {seed} (replay with DREAMSCAPE_SEED={seed})");
-    App::run("Dreamscape", 1280, 720, DreamscapeGame::new(seed))
+    crash::SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    log::info!(
+        "Dreamscape {} ({}), run seed = {seed} (replay with DREAMSCAPE_SEED={seed})",
+        crash::VERSION,
+        crash::GIT
+    );
+    if let Err(e) = App::run("Dreamscape", 1280, 720, DreamscapeGame::new(seed)) {
+        crash::fatal(&e);
+        return Err(e);
+    }
+    Ok(())
 }

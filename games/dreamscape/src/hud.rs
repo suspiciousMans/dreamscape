@@ -11,6 +11,8 @@ use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
+    /// Photosensitivity warning, shown at every launch.
+    Warning,
     Title,
     Playing,
     Paused,
@@ -55,6 +57,8 @@ pub fn install_font(ctx: &egui::Context) {
 #[derive(Clone, Debug)]
 pub struct HudView {
     pub mode: Mode,
+    /// Seconds the photosensitivity warning has been up.
+    pub warning_age: f32,
     pub time: f32,
     pub depth: u32,
     pub best: u32,
@@ -336,6 +340,7 @@ pub fn draw(
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
+        Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),
         Mode::Booklet => return crate::booklet_ui::draw(ctx, &p, screen, v, art),
         Mode::Choice => return crate::upgrade_ui::draw(&p, screen, v, &v.choice),
         Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),

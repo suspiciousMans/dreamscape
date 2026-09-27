@@ -7,16 +7,10 @@ use engine::sdl2::keyboard::Keycode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[cfg(not(target_os = "emscripten"))]
-pub const SETTINGS_PATH: &str = "games/dreamscape/settings.ron";
-/// Browser build: an IndexedDB-backed folder the page mounts and syncs.
-#[cfg(target_os = "emscripten")]
-pub const SETTINGS_PATH: &str = "/persist/settings.ron";
-
 pub fn settings_path() -> PathBuf {
-    std::env::var_os("DREAMSCAPE_SETTINGS")
+    crate::dev::var_os("DREAMSCAPE_SETTINGS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(SETTINGS_PATH))
+        .unwrap_or_else(|| crate::paths::save_file("settings.ron"))
 }
 
 /// Things a key can be bound to.
@@ -78,6 +72,8 @@ pub struct Settings {
     pub vignette: f32,
     /// Tones down breathing, pulses and tracers.
     pub reduced_motion: bool,
+    /// Caps full-screen flashes.
+    pub reduce_flashing: bool,
     pub fullscreen: bool,
     /// First-person look speed, 0..=1.
     pub mouse_sens: f32,
@@ -95,6 +91,7 @@ impl Default for Settings {
             grain: 1.0,
             vignette: 1.0,
             reduced_motion: false,
+            reduce_flashing: false,
             fullscreen: false,
             mouse_sens: 0.5,
             invert_y: false,
@@ -173,6 +170,7 @@ pub enum Row {
     Grain,
     Vignette,
     ReducedMotion,
+    ReduceFlashing,
     Fullscreen,
     MouseSens,
     InvertY,
@@ -187,6 +185,7 @@ pub fn rows() -> Vec<Row> {
         Row::Grain,
         Row::Vignette,
         Row::ReducedMotion,
+        Row::ReduceFlashing,
         Row::Fullscreen,
         Row::MouseSens,
         Row::InvertY,
@@ -204,6 +203,7 @@ impl Row {
             Row::Grain => "film grain".into(),
             Row::Vignette => "vignette".into(),
             Row::ReducedMotion => "reduced motion".into(),
+            Row::ReduceFlashing => "reduce flashing".into(),
             Row::Fullscreen => "fullscreen".into(),
             Row::MouseSens => "mouse sensitivity".into(),
             Row::InvertY => "invert mouse y".into(),
@@ -222,6 +222,7 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::Grain => step(&mut s.grain),
         Row::Vignette => step(&mut s.vignette),
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
+        Row::ReduceFlashing => s.reduce_flashing = !s.reduce_flashing,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
         Row::MouseSens => step(&mut s.mouse_sens),
         Row::InvertY => s.invert_y = !s.invert_y,
@@ -239,6 +240,7 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::Grain => pct(s.grain),
         Row::Vignette => pct(s.vignette),
         Row::ReducedMotion => onoff(s.reduced_motion),
+        Row::ReduceFlashing => onoff(s.reduce_flashing),
         Row::Fullscreen => onoff(s.fullscreen),
         Row::MouseSens => pct(s.mouse_sens),
         Row::InvertY => onoff(s.invert_y),
@@ -303,7 +305,7 @@ mod tests {
         assert!(s.reduced_motion && s.motion() < 1.0);
         assert_eq!(value(&s, Row::Music), "100%");
         assert_eq!(value(&s, Row::Key(Action::Jump)), "Space");
-        assert_eq!(rows().len(), 8 + ALL_ACTIONS.len() + 1);
+        assert_eq!(rows().len(), 9 + ALL_ACTIONS.len() + 1);
     }
 
     #[test]
@@ -337,5 +339,15 @@ mod tests {
         assert!(x < -0.99 && z.abs() < 1e-6, "right on the stick = world -X");
         let (_, z) = stick_dir((0.0, -1.0)).unwrap();
         assert!(z > 0.99, "stick up = forward");
+    }
+
+    #[test]
+    fn reduce_flashing_toggles_and_old_files_load() {
+        let mut s = Settings::default();
+        assert!(!s.reduce_flashing);
+        adjust(&mut s, Row::ReduceFlashing, 1);
+        assert!(s.reduce_flashing);
+        let old: Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert!(!old.reduce_flashing);
     }
 }

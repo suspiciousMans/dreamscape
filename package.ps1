@@ -6,7 +6,9 @@
     .\package.ps1 -Game sandbox
 #>
 param(
-    [Parameter(Mandatory = $true)][string]$Game
+    [Parameter(Mandatory = $true)][string]$Game,
+    [string]$Features = "",
+    [switch]$Zip
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +21,9 @@ if (-not (Test-Path $gameDir)) {
 }
 
 Write-Host "Building '$Game' in release mode..." -ForegroundColor Cyan
-& cargo build --release -p $Game
+$cargoArgs = @("build", "--release", "-p", $Game)
+if ($Features) { $cargoArgs += @("--features", $Features) }
+& cargo @cargoArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "cargo build failed"
     exit $LASTEXITCODE
@@ -53,4 +57,10 @@ foreach ($folder in @("assets", "profiles", "levels", "rigs", "classes", "script
 Write-Host "Packaged to $distDir" -ForegroundColor Green
 Get-ChildItem $distDir -Recurse | Select-Object -ExpandProperty FullName | ForEach-Object {
     Write-Host "  $($_.Substring($distDir.Length + 1))"
+}
+
+if ($Zip) {
+    $zipPath = Join-Path $root "dist\$Game.zip"
+    Compress-Archive -Path (Join-Path $distDir "*") -DestinationPath $zipPath -Force
+    Write-Host "Zipped to $zipPath" -ForegroundColor Green
 }
