@@ -36,6 +36,7 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod lore;
 mod music;
 mod pad;
 mod paths;
@@ -530,6 +531,9 @@ impl DreamscapeGame {
             booklet: {
                 let mut b = cards::load(&cards::booklet_path());
                 b.stash.migrate();
+                if b.lore.save_seed == 0 {
+                    b.lore.save_seed = run_seed ^ 0x5EED_0F_D2EA;
+                }
                 b
             },
             booklet_path: cards::booklet_path(),
