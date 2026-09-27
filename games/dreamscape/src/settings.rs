@@ -332,7 +332,6 @@ mod tests {
 
     #[test]
     fn controller_maps_onto_the_same_actions() {
-        let s = Settings::default();
         assert_eq!(stick_dir((0.1, 0.1)), None, "deadzone");
         let (x, z) = stick_dir((1.0, 0.0)).unwrap();
         assert!(x < -0.99 && z.abs() < 1e-6, "right on the stick = world -X");

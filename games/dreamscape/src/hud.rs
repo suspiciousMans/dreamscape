@@ -415,9 +415,11 @@ fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
         return;
     }
     let rows = crate::pad::controls(v.pad, v.first_person);
+    // Sit above the ability boxes (bottom -84, 56 tall) when there are any.
+    let floor = if v.abilities.is_empty() { 36.0 } else { 96.0 };
     let mut at = Pos2::new(
         screen.left() + 28.0,
-        screen.bottom() - 36.0 - 26.0 * rows.len() as f32,
+        screen.bottom() - floor - 26.0 * rows.len() as f32,
     );
     for (key, what) in rows {
         let line = if key.is_empty() {
@@ -576,6 +578,44 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     }
 }
 
+/// Classic gap between shard pips, and the tightest we'll squeeze them.
+pub const PIP_SPACING: f32 = 30.0;
+pub const PIP_MIN_SPACING: f32 = 12.0;
+/// Right edge of the widest bottom-left thing (the controls legend's last
+/// line, then the ability boxes) plus a margin: the pip row stays between
+/// it and the mirrored gap on the right.
+const PIP_CLEAR: f32 = 410.0;
+
+/// How wide the pip row may be on a screen this wide.
+pub fn pip_room(screen_width: f32) -> f32 {
+    (screen_width - 2.0 * PIP_CLEAR).max(120.0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PipLayout {
+    /// One diamond per shard, `spacing` apart, drawn at pixel size `px`.
+    Row { spacing: f32, px: f32 },
+    /// Too many to draw: one diamond and "7 / 42".
+    Count,
+}
+
+/// Classic row while it fits; then tighter, then smaller pixels; then a count.
+pub fn pip_layout(target: u32, room: f32) -> PipLayout {
+    if target <= 1 {
+        return PipLayout::Row {
+            spacing: PIP_SPACING,
+            px: 3.0,
+        };
+    }
+    for px in [3.0_f32, 2.0] {
+        let spacing = ((room - px * 5.0) / (target - 1) as f32).min(PIP_SPACING);
+        if spacing >= PIP_MIN_SPACING.max(px * 5.0 + 1.0) {
+            return PipLayout::Row { spacing, px };
+        }
+    }
+    PipLayout::Count
+}
+
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
     let c = Pos2::new(screen.center().x, screen.bottom() - 96.0);
@@ -586,7 +626,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let cells = pixels::eye_pixels(open, v.shard_dir, lucid);
     let iris = iris_color(v, lucid);
     paint_eye(p, c, &cells, iris, v);
-    lucid_rays_and_pips(p, c, lucid, v);
+    lucid_rays_and_pips(p, c, lucid, screen.width(), v);
 }
 
 /// The shop's preview: the HUD eye, wide open and glancing about, in style `e`.
@@ -630,7 +670,7 @@ fn paint_eye(
     }
 }
 
-fn lucid_rays_and_pips(p: &egui::Painter, c: Pos2, lucid: bool, v: &HudView) {
+fn lucid_rays_and_pips(p: &egui::Painter, c: Pos2, lucid: bool, width: f32, v: &HudView) {
     use crate::pixels;
     if lucid {
         // Pixel sunburst: 8 flickering rays.
@@ -656,38 +696,62 @@ fn lucid_rays_and_pips(p: &egui::Painter, c: Pos2, lucid: bool, v: &HudView) {
         }
     }
     // Shard pips: pixel diamonds; a shard that could still be dropped blinks.
+    // Deep runs need more than fit, so the row tightens, then condenses.
     let full = pixels::sprite(&pixels::PIP);
     let empty = pixels::sprite(&pixels::PIP_EMPTY);
-    for i in 0..v.lucid_target {
-        let at = c + Vec2::new(
-            (i as f32 - (v.lucid_target - 1) as f32 * 0.5) * 30.0,
-            9.0 * EYE_PX,
-        );
-        let filled = i < v.lucidity;
-        let blinking = filled && v.unbanked && i + 1 == v.lucidity;
-        let alpha = if blinking {
-            if (v.time * 5.0) as i32 % 2 == 0 {
-                1.0
-            } else {
-                0.25
+    let blink_on = (v.time * 5.0) as i32 % 2 == 0;
+    let y = 9.0 * EYE_PX;
+    match pip_layout(v.lucid_target, pip_room(width)) {
+        PipLayout::Row { spacing, px } => {
+            for i in 0..v.lucid_target {
+                let at = c + Vec2::new((i as f32 - (v.lucid_target - 1) as f32 * 0.5) * spacing, y);
+                let filled = i < v.lucidity;
+                let blinking = filled && v.unbanked && i + 1 == v.lucidity;
+                let alpha = if blinking {
+                    if blink_on {
+                        1.0
+                    } else {
+                        0.25
+                    }
+                } else if filled {
+                    1.0
+                } else {
+                    0.55
+                };
+                let rgb = if filled {
+                    hue(v.time * 0.1 + i as f32 * 0.33)
+                } else {
+                    ink(v)
+                };
+                px_cells(
+                    p,
+                    at,
+                    px,
+                    if filled { full.clone() } else { empty.clone() },
+                    rgba(rgb, alpha),
+                );
             }
-        } else if filled {
-            1.0
-        } else {
-            0.55
-        };
-        let rgb = if filled {
-            hue(v.time * 0.1 + i as f32 * 0.33)
-        } else {
-            ink(v)
-        };
-        px_cells(
-            p,
-            at,
-            3.0,
-            if filled { full.clone() } else { empty.clone() },
-            rgba(rgb, alpha),
-        );
+        }
+        PipLayout::Count => {
+            let got = v.lucidity.min(v.lucid_target);
+            let rgb = if lucid { hue(v.time * 0.1) } else { ink(v) };
+            px_cells(
+                p,
+                c + Vec2::new(-34.0, y),
+                3.0,
+                if got > 0 { full.clone() } else { empty.clone() },
+                rgba(rgb, 1.0),
+            );
+            // The count itself blinks while the newest shard is unbanked.
+            let alpha = if v.unbanked && !blink_on { 0.35 } else { 1.0 };
+            p.text(
+                c + Vec2::new(-16.0, y + 7.0),
+                Align2::LEFT_CENTER,
+                format!("{got} / {}", v.lucid_target),
+                FontId::monospace(26.0),
+                rgba(rgb, alpha),
+            );
+        }
     }
 }
 
@@ -852,6 +916,15 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         rgba(ink(v), 0.55),
     );
     let first = v.journal.len().saturating_sub(14);
+    if first > 0 {
+        p.text(
+            Pos2::new(cx - 300.0, screen.top() + 148.0 + 26.0 * 14.0),
+            Align2::LEFT_TOP,
+            format!("... and {first} earlier dreams"),
+            FontId::monospace(20.0),
+            rgba(ink(v), 0.45),
+        );
+    }
     for (i, (line, rarity)) in v.journal[first..].iter().enumerate() {
         // Entries surface one by one, like remembering.
         let a = ((v.title_age - 0.12 * i as f32) / 0.4).clamp(0.0, 1.0);
@@ -910,6 +983,44 @@ pub(crate) fn hash01(k: u32, salt: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_pips_shrink_then_condense_but_never_leave_their_lane() {
+        for width in [1280.0_f32, 1920.0] {
+            let room = pip_room(width);
+            // Few shards: the classic spaced row.
+            assert_eq!(
+                pip_layout(3, room),
+                PipLayout::Row {
+                    spacing: PIP_SPACING,
+                    px: 3.0
+                }
+            );
+            let mut condensed_at = None;
+            for n in 1..=200u32 {
+                match pip_layout(n, room) {
+                    PipLayout::Row { spacing, px } => {
+                        assert!(
+                            condensed_at.is_none(),
+                            "went back to a row after condensing"
+                        );
+                        assert!(spacing >= PIP_MIN_SPACING && spacing <= PIP_SPACING);
+                        assert!(spacing >= px * 5.0, "pips overlap at n={n}");
+                        let span = spacing * (n - 1) as f32 + px * 5.0;
+                        assert!(span <= room + 0.01, "n={n} spans {span} > {room}");
+                    }
+                    PipLayout::Count => {
+                        condensed_at.get_or_insert(n);
+                    }
+                }
+            }
+            // Deep runs (GO DEEPER a dozen times) end up as a count.
+            assert!(
+                condensed_at.is_some_and(|n| n > 20 && n <= 200),
+                "{width}: {condensed_at:?}"
+            );
+        }
+    }
 
     #[test]
     fn eye_opens_with_lucidity() {
