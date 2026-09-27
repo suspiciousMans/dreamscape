@@ -14,6 +14,42 @@ pub fn run_blurb(length: &str) -> &'static str {
     }
 }
 
+/// Seconds before the warning can be dismissed.
+pub const WARNING_MIN: f32 = 2.0;
+
+pub fn draw_warning(p: &egui::Painter, screen: Rect, v: &HudView) {
+    p.rect_filled(screen, 0.0, rgba([0, 0, 0], 1.0));
+    let cx = screen.center().x;
+    p.text(
+        Pos2::new(cx, screen.top() + screen.height() * 0.16),
+        Align2::CENTER_TOP,
+        "PHOTOSENSITIVITY WARNING",
+        FontId::monospace(40.0),
+        rgba([255, 210, 80], 1.0),
+    );
+    let body = "A very small percentage of people may experience seizures when exposed to certain visual images, including flashing lights or patterns that may appear in video games. Dreamscape contains flashing colours, strobing patterns and rapidly shifting visuals.\n\nIf you or anyone in your family has an epileptic condition or has had seizures, consult a doctor before playing. Stop playing immediately and consult a doctor if you experience dizziness, altered vision, eye or muscle twitching, loss of awareness, disorientation or involuntary movements.\n\nSettings: \"reduce flashing\" and \"reduced motion\" tone the effects down.";
+    let galley = p.layout(
+        body.to_string(),
+        FontId::monospace(22.0),
+        rgba(ink(v), 0.9),
+        screen.width().min(900.0),
+    );
+    let at = Pos2::new(
+        cx - galley.size().x * 0.5,
+        screen.top() + screen.height() * 0.28,
+    );
+    p.galley(at, galley, rgba(ink(v), 0.9));
+    if v.warning_age >= WARNING_MIN {
+        p.text(
+            Pos2::new(cx, screen.bottom() - 60.0),
+            Align2::CENTER_TOP,
+            v.k("[enter] continue"),
+            FontId::monospace(24.0),
+            rgba(ink(v), 0.6 + 0.3 * (v.time * 2.0).sin()),
+        );
+    }
+}
+
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
     // Star field that breathes.

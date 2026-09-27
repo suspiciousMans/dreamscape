@@ -364,6 +364,8 @@ pub struct DreamscapeGame {
     mode: hud::Mode,
     /// Seconds since the current dream (or the journal) began.
     title_age: f32,
+    /// Seconds the photosensitivity warning has been up.
+    warning_age: f32,
     dream_name: String,
     dream_whisper: String,
     run_log: Vec<cards::DreamRecord>,
@@ -515,10 +517,13 @@ impl DreamscapeGame {
             ui: None,
             mode: if crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok() {
                 hud::Mode::Playing
-            } else {
+            } else if crate::dev::var("DREAMSCAPE_SKIP_WARNING").is_ok() {
                 hud::Mode::Title
+            } else {
+                hud::Mode::Warning
             },
             title_age: 0.0,
+            warning_age: 0.0,
             dream_name: String::new(),
             dream_whisper: String::new(),
             run_log: Vec::new(),
@@ -945,6 +950,7 @@ impl DreamscapeGame {
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
             title_age: self.title_age,
+            warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
                 if self.first_person_active() {
                     fpv::compass(self.player_position, self.yaw, t, 4.0)
@@ -3583,6 +3589,12 @@ impl Game for DreamscapeGame {
                 return;
             }
             match (self.mode, key) {
+                (hud::Mode::Warning, Keycode::Return | Keycode::Space | Keycode::Escape) => {
+                    if self.warning_age >= title_ui::WARNING_MIN {
+                        self.mode = hud::Mode::Title;
+                    }
+                    return;
+                }
                 (hud::Mode::Playing, Keycode::Escape) => {
                     ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
                     self.mouse_captured = false;
@@ -3773,6 +3785,9 @@ impl Game for DreamscapeGame {
         self.poll_music();
         if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
             panic!("DREAMSCAPE_CRASH: test crash");
+        }
+        if self.mode == hud::Mode::Warning {
+            self.warning_age += dt;
         }
         if crate::dev::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
@@ -4303,6 +4318,7 @@ impl Game for DreamscapeGame {
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
+        let reduce_flashing = self.settings.reduce_flashing;
         let melt = self.transition.melt();
         let transition = self.transition;
         let strangeness = self.visual_strangeness();
@@ -4607,7 +4623,7 @@ impl Game for DreamscapeGame {
                 color_levels: 256.0,
                 dither_strength: 0.0,
                 tint_color: flash.color,
-                tint_strength: flash.strength,
+                tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
             },
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);

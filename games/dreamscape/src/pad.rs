@@ -83,6 +83,10 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::A | P::Start => Some(Keycode::Return),
             _ => dpad,
         },
+        Mode::Warning => match button {
+            P::A | P::Start => Some(Keycode::Return),
+            _ => None,
+        },
         Mode::Summary => match button {
             P::A => Some(Keycode::Return),
             _ => None,
@@ -231,7 +235,8 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
 mod tests {
     use super::*;
 
-    const ALL_MODES: [Mode; 11] = [
+    const ALL_MODES: [Mode; 12] = [
+        Mode::Warning,
         Mode::Title,
         Mode::Playing,
         Mode::Paused,
