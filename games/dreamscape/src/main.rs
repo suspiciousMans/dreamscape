@@ -2363,6 +2363,13 @@ impl DreamscapeGame {
         self.run.penalty_cards = asc.fewer_cards();
         self.run.no_free_reroll = !asc.free_rerolls();
         self.director.shard_bonus = self.shard_bonus();
+        // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
+        if let Some(n) = std::env::var("DREAMSCAPE_SHARDS_NEEDED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.director.shards_to_wake = n;
+        }
         self.run_active = !self.autopilot;
         progress::clear(&self.save_path);
         if asc.0 > 0 {
