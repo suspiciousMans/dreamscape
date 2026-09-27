@@ -69,6 +69,8 @@ pub struct HudView {
     pub strangeness: f32,
     pub title: String,
     pub whisper: String,
+    /// What the eye is saying, and for how long (seconds).
+    pub eye_line: Option<(String, f32)>,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -632,6 +634,18 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let iris = iris_color(v, lucid);
     paint_eye(p, c, &cells, iris, v);
     lucid_rays_and_pips(p, c, lucid, screen.width(), v);
+    if let Some((text, age)) = &v.eye_line {
+        let a = crate::eye::alpha(*age);
+        if a > 0.0 {
+            p.text(
+                c + Vec2::new(0.0, -8.0 * EYE_PX),
+                Align2::CENTER_BOTTOM,
+                crate::eye::shown(text, *age),
+                FontId::proportional(22.0),
+                rgba([210, 200, 235], 0.9 * a),
+            );
+        }
+    }
 }
 
 /// The shop's preview: the HUD eye, wide open and glancing about, in style `e`.
