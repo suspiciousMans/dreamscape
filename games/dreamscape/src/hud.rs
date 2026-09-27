@@ -415,9 +415,11 @@ fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
         return;
     }
     let rows = crate::pad::controls(v.pad, v.first_person);
+    // Sit above the ability boxes (bottom -84, 56 tall) when there are any.
+    let floor = if v.abilities.is_empty() { 36.0 } else { 96.0 };
     let mut at = Pos2::new(
         screen.left() + 28.0,
-        screen.bottom() - 36.0 - 26.0 * rows.len() as f32,
+        screen.bottom() - floor - 26.0 * rows.len() as f32,
     );
     for (key, what) in rows {
         let line = if key.is_empty() {
@@ -914,6 +916,15 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         rgba(ink(v), 0.55),
     );
     let first = v.journal.len().saturating_sub(14);
+    if first > 0 {
+        p.text(
+            Pos2::new(cx - 300.0, screen.top() + 148.0 + 26.0 * 14.0),
+            Align2::LEFT_TOP,
+            format!("... and {first} earlier dreams"),
+            FontId::monospace(20.0),
+            rgba(ink(v), 0.45),
+        );
+    }
     for (i, (line, rarity)) in v.journal[first..].iter().enumerate() {
         // Entries surface one by one, like remembering.
         let a = ((v.title_age - 0.12 * i as f32) / 0.4).clamp(0.0, 1.0);

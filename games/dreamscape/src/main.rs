@@ -275,6 +275,10 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// DECOY: where it stands and its marker.
+    decoy: Option<(Vec3, Entity)>,
+    /// REWIND: where you've stood lately.
+    rewind_trail: upgrades::Trail,
     echo_timer: f32,
     player_tex: Option<Arc<GpuTexture>>,
     /// Watching Wallpaper: eyes in the walls.
@@ -443,6 +447,8 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            decoy: None,
+            rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
             player_tex: None,
             watchers: Vec::new(),
@@ -628,6 +634,8 @@ impl DreamscapeGame {
                     } else {
                         format!("ability · [{}]", upgrades::SLOT_KEYS[slot])
                     }
+                } else if self.run.would_max(u) {
+                    format!("{} · maxes out", info.tier.label())
                 } else if have > 0 {
                     format!("{} · {} / {}", info.tier.label(), have + 1, info.max)
                 } else {
@@ -1389,6 +1397,7 @@ impl DreamscapeGame {
                 self.flash.trigger([1.0, 0.8, 0.4], 0.4);
                 self.sfx(Sound::Deeper);
                 log::info!("Time loop {n}");
+                self.rewind_trail.clear(); // the past you'd rewind to no longer happened
             }
         }
         if self.autopilot {
@@ -1817,6 +1826,18 @@ impl DreamscapeGame {
     }
 
     /// Fire the ability in `slot`, if held and charged.
+    fn teleport_player(&mut self, at: Vec3) {
+        if let Some(p) = self.player {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
+                t.position = at;
+            }
+            if let Ok(mut b) = self.world.get::<&mut RigidBody>(p) {
+                b.velocity = Vec3::ZERO;
+            }
+        }
+        self.player_position = at;
+    }
+
     fn use_ability(&mut self, slot: usize) {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
@@ -1840,15 +1861,15 @@ impl DreamscapeGame {
                 self.sfx(Sound::Denied);
                 return;
             };
-            if let Some(p) = self.player {
-                if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
-                    t.position = at;
-                }
-                if let Ok(mut b) = self.world.get::<&mut RigidBody>(p) {
-                    b.velocity = Vec3::ZERO;
-                }
-            }
-            self.player_position = at;
+            self.teleport_player(at);
+        }
+        if state.ability == Ability::Rewind {
+            let Some(at) = self.rewind_trail.rewind(self.dream_age) else {
+                self.sfx(Sound::Denied); // no past yet: keep the charge
+                return;
+            };
+            self.teleport_player(at);
+            self.rewind_trail.clear(); // don't rewind into the moment you just left
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
@@ -1861,6 +1882,31 @@ impl DreamscapeGame {
                 Ability::Blink if self.run.has(upgrades::Synergy::Skywalk) => {
                     self.air_jumps_used = 0;
                 }
+                Ability::Decoy => {
+                    if let Some((_, e)) = self.decoy.take() {
+                        let _ = self.world.despawn(e);
+                    }
+                    if let (Some(tex), Ok(mesh)) =
+                        (self.player_tex.clone(), self.mesh(Shape::Octahedron))
+                    {
+                        let at = self.player_position;
+                        let e = self.world.spawn((
+                            Transform {
+                                position: at,
+                                rotation: Quat::IDENTITY,
+                                scale: Vec3::new(0.9, 1.25, 0.9),
+                            },
+                            MeshRenderer {
+                                mesh,
+                                texture: Some(tex),
+                            },
+                            Spin(3.0),
+                            Lit,
+                            Hero, // stays lit in the tunnel darkness, like the player
+                        ));
+                        self.decoy = Some((at, e));
+                    }
+                }
                 _ => {}
             }
             let color = match state.ability {
@@ -1869,6 +1915,10 @@ impl DreamscapeGame {
                 Ability::Stillness => [0.6, 0.7, 1.0],
                 Ability::Phase => [1.0, 1.0, 1.0],
                 Ability::ShardCall => [0.3, 1.0, 1.0],
+                Ability::Decoy => [1.0, 0.6, 0.9],
+                Ability::Float => [0.7, 1.0, 0.8],
+                Ability::Flare => [1.0, 0.95, 0.6],
+                Ability::Rewind => [0.6, 0.6, 1.0],
             };
             self.flash.trigger(color, 0.3);
             self.sfx(match state.ability {
@@ -1877,6 +1927,10 @@ impl DreamscapeGame {
                 Ability::Stillness => Sound::Stillness,
                 Ability::Phase => Sound::Phase,
                 Ability::ShardCall => Sound::ShardCall,
+                Ability::Decoy => Sound::JesterThrow,
+                Ability::Float => Sound::AirJump,
+                Ability::Flare => Sound::PortalOpen,
+                Ability::Rewind => Sound::Blink,
             });
         }
     }
@@ -2223,8 +2277,18 @@ impl DreamscapeGame {
             deep_memory: self.has_perk(store::Perk::DeepMemory),
             extra: self.run.memory_bonus(),
         };
+        // Dev: DREAMSCAPE_PACK_PREVIEW=40 repeats this run's dreams to 40.
+        let mut log = self.run_log.clone();
+        if let Some(n) = std::env::var("DREAMSCAPE_PACK_PREVIEW")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            while !log.is_empty() && log.len() < n {
+                log.push(log[log.len() % self.run_log.len()].clone());
+            }
+        }
         self.pack = reveal_ui::PackView {
-            pack: cards::recall(&self.run_log, boost),
+            pack: cards::recall(&log, boost),
             ..Default::default()
         };
         let kept = self.pack.pack.iter().filter(|r| r.remembered).count();
@@ -2249,6 +2313,11 @@ impl DreamscapeGame {
     fn save_journal(&mut self) {
         if self.pack.pressed || self.booklet.has_run(self.run_seed) {
             log::info!("Booklet: run {} already saved", self.run_seed);
+            return;
+        }
+        // A padded preview pack (DREAMSCAPE_PACK_PREVIEW) is never pressed.
+        if std::env::var_os("DREAMSCAPE_PACK_PREVIEW").is_some() {
+            log::info!("Booklet: preview pack, not pressed");
             return;
         }
         let before = self.booklet.clone();
@@ -2369,6 +2438,17 @@ impl DreamscapeGame {
             .and_then(|s| s.parse().ok())
         {
             self.director.shards_to_wake = n;
+        }
+        // Dev: DREAMSCAPE_GIVE=Decoy,Rewind starts the run holding those.
+        if let Ok(list) = std::env::var("DREAMSCAPE_GIVE") {
+            for name in list.split(',') {
+                if let Some(&a) = upgrades::ALL_ABILITIES
+                    .iter()
+                    .find(|a| format!("{a:?}").eq_ignore_ascii_case(name.trim()))
+                {
+                    self.run.take(Upgrade::Learn(a));
+                }
+            }
         }
         self.run_active = !self.autopilot;
         progress::clear(&self.save_path);
@@ -2762,6 +2842,8 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.decoy = None; // the old dream's world (and its marker) is gone
+        self.rewind_trail.clear();
         self.echo_timer = 0.0;
         self.watchers.clear();
         self.dissolve = None;
@@ -3840,7 +3922,11 @@ impl Game for DreamscapeGame {
         }
 
         // 2. Enemies (STILLNESS and STUTTERING dreams hold them in place)
-        let target = self.player_position;
+        let target = upgrades::lure_target(
+            self.player_position,
+            self.decoy.map(|(at, _)| at),
+            self.run.active(Ability::Decoy),
+        );
         let held =
             self.run.active(Ability::Stillness) || self.twists.enemies_frozen(self.dream_age);
         let mut splits = Vec::new();
@@ -3859,7 +3945,7 @@ impl Game for DreamscapeGame {
                         _ => 1.0,
                     };
                 let hidden = p.elite == Some(Elite::Shade)
-                    && (t.position - target).length() > specials::SHADE_SHOWS_WITHIN;
+                    && (t.position - self.player_position).length() > specials::SHADE_SHOWS_WITHIN;
                 t.scale = Vec3::splat(if hidden { 0.0 } else { size });
                 if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
@@ -3903,6 +3989,11 @@ impl Game for DreamscapeGame {
                 split: true,
             });
         }
+        if !self.run.active(Ability::Decoy) {
+            if let Some((_, e)) = self.decoy.take() {
+                let _ = self.world.despawn(e);
+            }
+        }
         self.update_specials(dt, held)?;
         self.update_features();
         let mut boss_events = Vec::new();
@@ -3938,6 +4029,7 @@ impl Game for DreamscapeGame {
         let physics = PhysicsParams {
             gravity: PhysicsParams::default().gravity
                 * self.twists.gravity()
+                * self.run.gravity()
                 * self
                     .dream
                     .as_ref()
@@ -3945,6 +4037,11 @@ impl Game for DreamscapeGame {
             ..PhysicsParams::default()
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
+        if let Some(p) = self.player {
+            if self.world.get::<&RigidBody>(p).is_ok_and(|b| b.grounded) {
+                self.rewind_trail.push(self.dream_age, self.player_position);
+            }
+        }
         if let Ok(t) = self.world.get::<&Transform>(player) {
             self.player_position = t.position;
         }
@@ -4037,6 +4134,7 @@ impl Game for DreamscapeGame {
             }
             // The mimic loses your trail; stalkers slink back to their lairs.
             self.trail.clear();
+            self.rewind_trail.clear();
             self.mimic_awake_at = self.dream_age + specials::MIMIC_DELAY;
             for sp in &self.specials {
                 if let SpecialAI::Stalker(st) = &sp.ai {
