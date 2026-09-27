@@ -38,7 +38,9 @@ mod gameplay;
 mod hud;
 mod hunter;
 mod lore;
+mod memories_ui;
 mod music;
+mod objective;
 mod pad;
 mod paths;
 mod pixels;
@@ -84,6 +86,9 @@ struct SigilMarker;
 /// Only appears once lucid: step through to wake up.
 #[derive(Clone, Copy)]
 struct WakeMarker;
+/// A note lying in the dream: touch to read it.
+#[derive(Clone, Copy)]
+struct NoteMarker;
 /// Spins in place (shards, wake door).
 #[derive(Clone, Copy)]
 struct Spin(f32);
@@ -191,6 +196,7 @@ enum TitleItem {
     Ascension,
     Store,
     Booklet,
+    Memories,
     Codex,
     Settings,
     Quit,
@@ -370,6 +376,15 @@ pub struct DreamscapeGame {
     warning_age: f32,
     /// The eye's current line and its age.
     eye_line: Option<(String, f32)>,
+    /// The note this dream holds: (dreamer, note index).
+    pending_note: Option<(u32, u32)>,
+    /// The note being read (Mode::Note).
+    note_view: Option<lore::Note>,
+    /// What this dream asks of you (None: nightmares, lucid dreams, no shard).
+    objective: Option<objective::Active>,
+    /// Rolled before the dream is built (fragments need cells).
+    objective_kind: Option<objective::Kind>,
+    memories_sel: usize,
     dream_name: String,
     dream_whisper: String,
     run_log: Vec<cards::DreamRecord>,
@@ -529,6 +544,11 @@ impl DreamscapeGame {
             title_age: 0.0,
             warning_age: 0.0,
             eye_line: None,
+            pending_note: None,
+            note_view: None,
+            objective: None,
+            objective_kind: None,
+            memories_sel: 0,
             dream_name: String::new(),
             dream_whisper: String::new(),
             run_log: Vec::new(),
@@ -945,10 +965,7 @@ impl DreamscapeGame {
     }
 
     fn hud_view(&self) -> hud::HudView {
-        let target = self
-            .shard_entities
-            .first()
-            .and_then(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position));
+        let target = self.objective_target();
         hud::HudView {
             mode: self.mode,
             time: self.time,
@@ -961,6 +978,15 @@ impl DreamscapeGame {
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
             eye_line: self.eye_line.clone(),
+            note: self
+                .note_view
+                .as_ref()
+                .map(|n| (n.object.to_string(), n.title.clone(), n.body.clone())),
+            memories: if self.mode == hud::Mode::Memories {
+                self.memories_view()
+            } else {
+                memories_ui::MemoriesView::default()
+            },
             title_age: self.title_age,
             warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
@@ -1175,6 +1201,13 @@ impl DreamscapeGame {
                         let left = specials::LOOP_SECS - self.dream_age % specials::LOOP_SECS;
                         format!("LOOP {}  ·  {:>2}s", self.loops + 1, left.ceil() as i32)
                     })
+                })
+                .or_else(|| {
+                    // A plain shard dream says nothing (the beacon says it all).
+                    self.objective
+                        .as_ref()
+                        .filter(|o| !matches!(o, objective::Active::Shard))
+                        .map(|o| o.label())
                 }),
             choice: if self.mode == hud::Mode::Choice {
                 self.choice_view.clone()
@@ -2150,6 +2183,7 @@ impl DreamscapeGame {
         items.extend([
             TitleItem::Store,
             TitleItem::Booklet,
+            TitleItem::Memories,
             TitleItem::Codex,
             TitleItem::Settings,
             TitleItem::Quit,
@@ -2190,6 +2224,11 @@ impl DreamscapeGame {
             ),
             TitleItem::Store => ("l", "the lucid store".into(), String::new()),
             TitleItem::Booklet => ("b", "dream booklet".into(), String::new()),
+            TitleItem::Memories => (
+                "m",
+                "memories".into(),
+                format!("{} notes found", self.booklet.lore.notes.len()),
+            ),
             TitleItem::Codex => (
                 "x",
                 "codex".into(),
@@ -2216,6 +2255,10 @@ impl DreamscapeGame {
             }
             TitleItem::Store => self.open_store(),
             TitleItem::Booklet => self.open_booklet(),
+            TitleItem::Memories => {
+                self.memories_sel = 0;
+                self.mode = hud::Mode::Memories;
+            }
             TitleItem::Codex => self.open_codex(),
             TitleItem::Settings => self.open_settings(),
             TitleItem::Quit => ctx.should_quit = true,
@@ -2832,8 +2875,252 @@ impl DreamscapeGame {
             Spin(-spin),
             Lit,
         ));
-        self.shard_entities = vec![entity, beacon];
+        self.shard_entities.extend([entity, beacon]);
         Ok(())
+    }
+
+    /// Before a dream is built: does it hold a note, and what does it ask?
+    fn plan_goals(&mut self) -> dream::Goals {
+        self.pending_note = None;
+        self.objective_kind = None;
+        if self.director.nightmare {
+            return dream::Goals::default();
+        }
+        let seed = self.director.dream_seed();
+        let lore = &self.booklet.lore;
+        let owner = lore::owner(lore.save_seed, seed);
+        let chance = if owner == 0 { 0.45 } else { 0.30 };
+        let roll = {
+            use rand::{rngs::StdRng, Rng, SeedableRng};
+            StdRng::seed_from_u64(seed ^ 0x0A7E_5EED).gen::<f32>()
+        };
+        self.pending_note = lore
+            .next_note(owner, self.director.depth)
+            .filter(|_| roll < chance)
+            .map(|k| (owner, k));
+        if self.director.has_shard && !self.director.lucid() {
+            let rolled = objective::roll(seed, self.director.depth, self.pending_note.is_some());
+            // Dev switch: DREAMSCAPE_OBJECTIVE=Chase forces one (FindMemory needs a note).
+            let forced = crate::dev::var("DREAMSCAPE_OBJECTIVE").ok().and_then(|n| {
+                [
+                    objective::Kind::Shard,
+                    objective::Kind::Fragments,
+                    objective::Kind::Chase,
+                    objective::Kind::HoldOn,
+                    objective::Kind::FindMemory,
+                ]
+                .into_iter()
+                .find(|k| format!("{k:?}") == n)
+            });
+            if forced == Some(objective::Kind::FindMemory) && self.pending_note.is_none() {
+                let o = lore::owner(lore.save_seed, seed);
+                self.pending_note = Some((o, lore.next_note(o, 99).unwrap_or(0)));
+            }
+            self.objective_kind = Some(forced.unwrap_or(rolled));
+        }
+        dream::Goals {
+            note: self.pending_note.is_some()
+                && self.objective_kind != Some(objective::Kind::FindMemory),
+            fragments: self.objective_kind == Some(objective::Kind::Fragments),
+        }
+    }
+
+    fn spawn_note(&mut self, at: Vec3) -> anyhow::Result<()> {
+        let tex = self.shard_tex.clone().context("textures not uploaded")?;
+        let size = Vec3::new(0.55, 0.06, 0.4);
+        let y = at.y + 0.9;
+        self.world.spawn((
+            Transform {
+                position: Vec3::new(at.x, y, at.z),
+                rotation: Quat::IDENTITY,
+                scale: size,
+            },
+            MeshRenderer {
+                mesh: self.mesh(Shape::Cube)?,
+                texture: Some(tex),
+            },
+            Spin(0.6),
+            Bob {
+                base: y,
+                amp: 0.12,
+                speed: 1.4,
+                phase: 0.0,
+            },
+            Lit,
+            Hero,
+            NoteMarker,
+            Collider {
+                shape: ColliderShape::Aabb {
+                    half_extents: Vec3::splat(0.6),
+                },
+                is_trigger: true,
+            },
+        ));
+        Ok(())
+    }
+
+    /// Where the compass points: the nearest shard piece, or the fleeing memory.
+    fn objective_target(&self) -> Option<Vec3> {
+        if matches!(
+            self.objective,
+            Some(objective::Active::HoldOn(_)) | Some(objective::Active::FindMemory)
+        ) {
+            return None;
+        }
+        self.shard_entities
+            .iter()
+            .step_by(2)
+            .filter_map(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position))
+            .min_by(|a, b| {
+                a.distance_squared(self.player_position)
+                    .total_cmp(&b.distance_squared(self.player_position))
+            })
+    }
+
+    /// The dream's objective is done: the shard is yours.
+    fn complete_objective(&mut self, ctx: &mut Context) {
+        // The autopilot may have left its route (chasing, holding on): pick it
+        // up again from wherever it stands.
+        if let Some(d) = &self.dream {
+            let p = self.player_position;
+            if let Some((i, _)) = d.lucid_route.iter().enumerate().min_by(|a, b| {
+                a.1.pos
+                    .distance_squared(p)
+                    .total_cmp(&b.1.pos.distance_squared(p))
+            }) {
+                self.route_index = self.route_index.max(i);
+            }
+        }
+        self.despawn_shard_slot();
+        self.objective = None;
+        self.flash.trigger([0.3, 1.0, 1.0], 0.6);
+        self.sfx(Sound::Shard);
+        self.director.collect_shard();
+        self.shards_this_run += 1;
+        if let Some(r) = self.run_log.last_mut() {
+            r.shard_taken = true;
+        }
+        log::info!(
+            "Lucidity shard collected at depth {} ({}/{})",
+            self.director.depth,
+            self.director.lucidity,
+            self.director.shards_to_wake
+        );
+        self.update_title(ctx);
+        self.think(eye::Moment::ShardTaken, false);
+        if self.director.lucid() {
+            self.eye_line = None;
+            self.think(eye::Moment::Lucid, false);
+        }
+    }
+
+    /// Picked a note up: keep it (saved at once), and read it.
+    fn read_note(&mut self, id: u32, k: u32) {
+        let before = self.booklet.lore.slots();
+        self.booklet.lore.found(id, k);
+        let lore = &self.booklet.lore;
+        let d = lore::dreamer(lore.save_seed, id);
+        let n = lore::note(&d, k, self.director.theme);
+        log::info!("Note found: {} ({})", n.title, n.object);
+        let complete = id != 0 && lore.dreamer_complete(id) && !lore.dreamers.contains(&id);
+        if complete {
+            self.booklet.lore.dreamers.push(id);
+            log::info!("Dreamer collected: {}", d.name);
+        }
+        let slot_up = self.booklet.lore.slots() > before;
+        self.note_view = Some(n);
+        self.sfx(Sound::Shard);
+        if !self.autopilot {
+            self.mode = hud::Mode::Note;
+            self.input = PlayerInputState::default();
+        }
+        self.persist_booklet(); // notes are kept even if the run is abandoned
+        self.eye_line = None;
+        if complete {
+            self.think(eye::Moment::DreamerComplete, false);
+        } else if slot_up {
+            self.think(eye::Moment::SlotUnlocked, false);
+        } else {
+            self.think(eye::Moment::NoteFound, true);
+        }
+    }
+
+    /// Per frame: the fleeing memory and the hold-on timer.
+    fn update_objective(&mut self, ctx: &mut Context, dt: f32) {
+        match &mut self.objective {
+            Some(objective::Active::Chase(c)) => {
+                let Some(dream) = &self.dream else { return };
+                let route: Vec<Vec3> = dream.lucid_route.iter().map(|w| w.pos).collect();
+                let before = c.pos;
+                let speed = if self.autopilot {
+                    gameplay::MOVE_SPEED
+                } else {
+                    self.run.speed() * gameplay::MOVE_SPEED
+                };
+                c.step(&route, self.player_position, speed, dt);
+                let moved = c.pos - before;
+                let caught = c.caught(self.player_position);
+                for &e in &self.shard_entities {
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                        t.position += moved;
+                    }
+                }
+                if caught && !self.shard_entities.is_empty() {
+                    log::info!("Caught the memory");
+                    self.complete_objective(ctx);
+                }
+            }
+            Some(objective::Active::HoldOn(h)) => {
+                let call = h.tick(dt);
+                let done = h.done();
+                if call {
+                    for p in &mut self.enemies {
+                        p.ai.alert();
+                    }
+                }
+                if done {
+                    log::info!("Held on");
+                    self.complete_objective(ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn memories_view(&self) -> memories_ui::MemoriesView {
+        let lore = &self.booklet.lore;
+        let rows: Vec<memories_ui::DreamerRow> = (0..lore::DREAMERS)
+            .map(|id| {
+                let d = lore::dreamer(lore.save_seed, id);
+                let found = lore.count(id);
+                memories_ui::DreamerRow {
+                    name: if id == 0 {
+                        "YOU".into()
+                    } else if found > 0 {
+                        d.name.to_uppercase()
+                    } else {
+                        "???".into()
+                    },
+                    found,
+                    total: lore::notes_for(id),
+                    weight: (id != 0 && lore.dreamer_complete(id))
+                        .then(|| format!("carrying {}", d.weight.label())),
+                }
+            })
+            .collect();
+        let sel = self.memories_sel.min(rows.len() - 1) as u32;
+        let d = lore::dreamer(lore.save_seed, sel);
+        let notes = (0..lore::notes_for(sel))
+            .map(|k| {
+                lore.has(sel, k)
+                    .then(|| lore::note(&d, k, DreamTheme::Lobby).body)
+            })
+            .collect();
+        memories_ui::MemoriesView {
+            rows,
+            selected: sel as usize,
+            notes,
+        }
     }
 
     fn despawn_shard_slot(&mut self) {
@@ -2862,6 +3149,7 @@ impl DreamscapeGame {
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
         self.air_jumps_used = 0;
+        let goals = self.plan_goals();
         let dream = if self.director.nightmare {
             dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
         } else {
@@ -2872,8 +3160,31 @@ impl DreamscapeGame {
                 self.motif,
                 self.director.has_shard,
                 self.pressure(),
+                goals,
             )
         };
+        // No shard cell (a pure corridor): nothing to ask for.
+        let kind = self.objective_kind.filter(|_| dream.shard.is_some());
+        self.objective = kind.map(|k| match k {
+            objective::Kind::Shard => objective::Active::Shard,
+            objective::Kind::Fragments if dream.fragments.len() > 1 => {
+                objective::Active::Fragments(
+                    objective::Fragments::new(dream.fragments.len() as u32),
+                )
+            }
+            objective::Kind::Fragments => objective::Active::Shard,
+            objective::Kind::Chase => {
+                let route: Vec<Vec3> = dream.lucid_route.iter().map(|w| w.pos).collect();
+                objective::Active::Chase(objective::Chase::new(&route, route.len() / 3))
+            }
+            objective::Kind::HoldOn => {
+                objective::Active::HoldOn(objective::HoldOn::new(self.director.depth))
+            }
+            objective::Kind::FindMemory => objective::Active::FindMemory,
+        });
+        if let Some(o) = &self.objective {
+            log::info!("Objective: {}", o.label());
+        }
         self.hunter = None;
         self.sealed_portal = None;
         self.sigils_left = dream.sigils.len();
@@ -3110,8 +3421,25 @@ impl DreamscapeGame {
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
-        if let Some(at) = dream.shard {
-            self.spawn_shard_slot(at, wake_door)?;
+        let find_memory = matches!(self.objective, Some(objective::Active::FindMemory));
+        match (&self.objective, dream.shard) {
+            (Some(objective::Active::Fragments(_)), _) => {
+                for &at in &dream.fragments {
+                    self.spawn_shard_slot(at, false)?;
+                }
+            }
+            (Some(objective::Active::Chase(c)), _) => {
+                let at = c.pos;
+                self.spawn_shard_slot(at, false)?;
+            }
+            (Some(objective::Active::HoldOn(_)), _) => {}
+            // No beacon: the memory is the thing to find.
+            (Some(objective::Active::FindMemory), Some(at)) => self.spawn_note(at)?,
+            (_, Some(at)) => self.spawn_shard_slot(at, wake_door)?,
+            _ => {}
+        }
+        if let (Some(at), false) = (dream.note, find_memory) {
+            self.spawn_note(at)?;
         }
 
         // FLOODED: a sheet of translucent water over the whole floor plan.
@@ -3464,6 +3792,45 @@ impl DreamscapeGame {
             self.player_position,
             grounded,
         );
+        // Objectives that aren't a place: wait it out, or run the memory down.
+        match &self.objective {
+            Some(objective::Active::HoldOn(_)) => return (Vec3::ZERO, false),
+            Some(objective::Active::Chase(c)) if grounded => {
+                // Walk the route toward the memory, one waypoint at a time.
+                let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+                if flat(c.pos - self.player_position).length() < 2.5 || route.is_empty() {
+                    return (
+                        gameplay::autopilot_velocity(self.player_position, c.pos),
+                        false,
+                    );
+                }
+                let near = route
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| {
+                        flat(a.1.pos - self.player_position)
+                            .length()
+                            .total_cmp(&flat(b.1.pos - self.player_position).length())
+                    })
+                    .map_or(0, |(i, _)| i);
+                let next = if near < c.target {
+                    near + 1
+                } else {
+                    near.saturating_sub(1)
+                };
+                let here = flat(route[near].pos - self.player_position).length();
+                let wp = if here > gameplay::CELL * 0.8 {
+                    &route[near]
+                } else {
+                    &route[next.min(route.len() - 1)]
+                };
+                return (
+                    gameplay::autopilot_velocity(self.player_position, wp.pos),
+                    wp.jump,
+                );
+            }
+            _ => {}
+        }
         match route.get(self.route_index) {
             Some(wp) => (
                 gameplay::autopilot_velocity(self.player_position, wp.pos),
@@ -3543,6 +3910,12 @@ impl Game for DreamscapeGame {
         match crate::dev::var("DREAMSCAPE_SCREEN").as_deref() {
             Ok("codex") => self.open_codex(),
             Ok("settings") => self.open_settings(),
+            Ok("memories") => self.mode = hud::Mode::Memories,
+            Ok("note") => {
+                let d = lore::dreamer(self.booklet.lore.save_seed, 3);
+                self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
+                self.mode = hud::Mode::Note;
+            }
             _ => {}
         }
         if crate::dev::var("DREAMSCAPE_CONTINUE").is_ok() {
@@ -3643,6 +4016,27 @@ impl Game for DreamscapeGame {
                 return;
             }
             match (self.mode, key) {
+                (hud::Mode::Note, Keycode::Return | Keycode::Space | Keycode::Escape) => {
+                    self.mode = hud::Mode::Playing;
+                    return;
+                }
+                (hud::Mode::Memories, Keycode::Escape) => {
+                    self.mode = hud::Mode::Title;
+                    return;
+                }
+                (hud::Mode::Memories, Keycode::W | Keycode::Up) => {
+                    self.memories_sel = self.memories_sel.saturating_sub(1);
+                    return;
+                }
+                (hud::Mode::Memories, Keycode::S | Keycode::Down) => {
+                    self.memories_sel = (self.memories_sel + 1).min(lore::DREAMERS as usize - 1);
+                    return;
+                }
+                (hud::Mode::Title, Keycode::M) => {
+                    self.memories_sel = 0;
+                    self.mode = hud::Mode::Memories;
+                    return;
+                }
                 (hud::Mode::Warning, Keycode::Return | Keycode::Space | Keycode::Escape) => {
                     if self.warning_age >= title_ui::WARNING_MIN {
                         self.mode = hud::Mode::Title;
@@ -3968,6 +4362,7 @@ impl Game for DreamscapeGame {
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
+        self.update_objective(ctx, dt);
 
         // 1. Input (or autopilot) -> player body
         let (desired, wants_jump) = if self.autopilot {
@@ -4228,6 +4623,9 @@ impl Game for DreamscapeGame {
                 self.dream_age
             );
             self.think(eye::Moment::Caught, false);
+            if let Some(objective::Active::HoldOn(h)) = &mut self.objective {
+                h.caught();
+            }
         }
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
@@ -4258,6 +4656,7 @@ impl Game for DreamscapeGame {
                     self.director.shards_to_wake
                 );
                 if let Some(at) = self.dream.as_ref().and_then(|d| d.shard) {
+                    self.despawn_shard_slot();
                     self.spawn_shard_slot(at, false)?;
                 }
             }
@@ -4315,27 +4714,41 @@ impl Game for DreamscapeGame {
             .map(|&(_, b)| b)
             .collect();
         for &e in &touched {
+            if self.world.get::<&NoteMarker>(e).is_ok() {
+                let _ = self.world.despawn(e);
+                if let Some((id, k)) = self.pending_note.take() {
+                    self.read_note(id, k);
+                }
+                if matches!(self.objective, Some(objective::Active::FindMemory)) {
+                    self.complete_objective(ctx);
+                }
+                break;
+            }
             if self.world.get::<&ShardMarker>(e).is_ok() {
-                self.despawn_shard_slot();
-                self.flash.trigger([0.3, 1.0, 1.0], 0.6);
-                self.sfx(Sound::Shard);
-                self.director.collect_shard();
-                self.shards_this_run += 1;
-                if let Some(r) = self.run_log.last_mut() {
-                    r.shard_taken = true;
+                if let Some(objective::Active::Fragments(f)) = &mut self.objective {
+                    f.take();
+                    let done = f.done();
+                    log::info!("Fragment {}", f.label());
+                    // Remove this piece and its beacon (spawned as a pair).
+                    if let Some(i) = self.shard_entities.iter().position(|&x| x == e) {
+                        for x in self
+                            .shard_entities
+                            .drain(i..(i + 2).min(self.shard_entities.len()))
+                        {
+                            let _ = self.world.despawn(x);
+                        }
+                    }
+                    self.sfx(Sound::Sigil);
+                    if done {
+                        self.complete_objective(ctx);
+                    }
+                    break;
                 }
-                log::info!(
-                    "Lucidity shard collected at depth {} ({}/{})",
-                    self.director.depth,
-                    self.director.lucidity,
-                    self.director.shards_to_wake
-                );
-                self.update_title(ctx);
-                self.think(eye::Moment::ShardTaken, false);
-                if self.director.lucid() {
-                    self.eye_line = None;
-                    self.think(eye::Moment::Lucid, false);
+                // A chased memory is caught by reaching it, not by its trigger.
+                if matches!(self.objective, Some(objective::Active::Chase(_))) {
+                    break;
                 }
+                self.complete_objective(ctx);
                 break;
             }
         }

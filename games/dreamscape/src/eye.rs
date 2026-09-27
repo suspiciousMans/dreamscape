@@ -22,9 +22,11 @@ pub enum Moment {
     SlotUnlocked,
     WakeDoor,
     WentDeeper,
+    #[allow(dead_code)] // Part G: fused dreams
     FusedDream,
 }
 
+#[cfg(test)]
 pub const ALL_MOMENTS: [Moment; 13] = [
     Moment::FirstDream,
     Moment::ShardTaken,

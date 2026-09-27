@@ -26,6 +26,10 @@ pub enum Mode {
     Summary,
     Settings,
     Codex,
+    /// Reading a note just picked up.
+    Note,
+    /// Every dreamer and the notes found.
+    Memories,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -71,6 +75,9 @@ pub struct HudView {
     pub whisper: String,
     /// What the eye is saying, and for how long (seconds).
     pub eye_line: Option<(String, f32)>,
+    /// The note being read: (object, title, body).
+    pub note: Option<(String, String, String)>,
+    pub memories: crate::memories_ui::MemoriesView,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -348,6 +355,13 @@ pub fn draw(
         Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
+        Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
+        Mode::Note => {
+            if let Some(n) = &v.note {
+                return crate::memories_ui::draw_note(&p, screen, v, n);
+            }
+            return;
+        }
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);

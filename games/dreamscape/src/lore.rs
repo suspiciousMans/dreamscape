@@ -149,6 +149,7 @@ pub fn object(theme: DreamTheme, _k: u32) -> &'static str {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub title: String,
     pub body: String,
@@ -293,6 +294,7 @@ pub struct Lore {
 }
 
 impl Lore {
+    #[cfg(test)]
     pub fn new(save_seed: u64) -> Self {
         Self {
             save_seed,

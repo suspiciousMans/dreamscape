@@ -78,6 +78,10 @@ pub struct Dream {
     pub surfaces: Surfaces,
     /// Lucidity shard location (floor level), if this dream has one.
     pub shard: Option<Vec3>,
+    /// Where a note lies, if this dream has one.
+    pub note: Option<Vec3>,
+    /// Shard fragments (the first is the shard cell), when asked for.
+    pub fragments: Vec<Vec3>,
     /// Route spawn → shard → portal (equals `route` when there is no shard).
     /// In a nightmare: spawn → every sigil → portal.
     pub lucid_route: Vec<Waypoint>,
@@ -225,6 +229,16 @@ pub fn portal_surface(next: DreamTheme, seed: u64) -> TexSpec {
     }
 }
 
+/// Extra things a dream should hold (each drawn from its own RNG stream, so
+/// asking for them never changes the rest of the layout).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Goals {
+    /// A note to find, off the route.
+    pub note: bool,
+    /// Two more shard fragments besides the shard cell.
+    pub fragments: bool,
+}
+
 #[cfg(test)]
 pub fn generate(
     theme: DreamTheme,
@@ -233,7 +247,15 @@ pub fn generate(
     motif: Option<PropKind>,
     with_shard: bool,
 ) -> Dream {
-    generate_with(theme, seed, depth, motif, with_shard, Pressure::default())
+    generate_with(
+        theme,
+        seed,
+        depth,
+        motif,
+        with_shard,
+        Pressure::default(),
+        Goals::default(),
+    )
 }
 
 pub fn generate_with(
@@ -243,6 +265,7 @@ pub fn generate_with(
     motif: Option<PropKind>,
     with_shard: bool,
     pressure: Pressure,
+    goals: Goals,
 ) -> Dream {
     let mut spec = theme.spec();
     spec.strangeness = strangeness(theme, depth);
@@ -267,13 +290,45 @@ pub fn generate_with(
     } else {
         None
     };
-    let lucid_path: Vec<(P, bool)> = match shard_cell {
-        Some(c) => {
-            let there = grid.path(layout.spawn, c).expect("shard chosen reachable");
-            let back = grid.path(c, layout.portal).expect("moves are symmetric");
-            there.into_iter().chain(back.into_iter().skip(1)).collect()
+    // Fragments and the note: separate streams, never on the route or each other.
+    let mut taken = on_path.clone();
+    taken.extend(shard_cell);
+    let mut fragment_cells = Vec::new();
+    if goals.fragments && shard_cell.is_some() {
+        let mut frng = StdRng::seed_from_u64(seed ^ 0xF4A6);
+        for _ in 0..2 {
+            if let Some(c) = pick_shard(grid, &taken, layout.spawn, &mut frng) {
+                taken.insert(c);
+                fragment_cells.push(c);
+            }
         }
-        None => path.clone(),
+    }
+    let note_cell = if goals.note {
+        let mut nrng = StdRng::seed_from_u64(seed ^ 0x0A7E);
+        pick_shard(grid, &taken, layout.spawn, &mut nrng)
+    } else {
+        None
+    };
+    // The lucid route visits every stop in order: spawn → shard → fragments → note → portal.
+    let stops: Vec<P> = shard_cell
+        .into_iter()
+        .chain(fragment_cells.iter().copied())
+        .chain(note_cell)
+        .collect();
+    let lucid_path: Vec<(P, bool)> = if stops.is_empty() {
+        path.clone()
+    } else {
+        let mut out: Vec<(P, bool)> = Vec::new();
+        let mut at = layout.spawn;
+        for &stop in stops.iter().chain(std::iter::once(&layout.portal)) {
+            let leg = grid
+                .path(at, stop)
+                .expect("stops chosen reachable; moves are symmetric");
+            let skip = usize::from(!out.is_empty());
+            out.extend(leg.into_iter().skip(skip));
+            at = stop;
+        }
+        out
     };
     on_path.extend(lucid_path.iter().map(|&(p, _)| p));
     // White Dissolve: every cell you walk through (bar the ends) can dissolve.
@@ -359,6 +414,16 @@ pub fn generate_with(
         route: waypoints(&path),
         lucid_route: waypoints(&lucid_path),
         shard: shard_cell.map(|c| grid.world(c)),
+        note: note_cell.map(|c| grid.world(c)),
+        fragments: if fragment_cells.is_empty() {
+            Vec::new()
+        } else {
+            shard_cell
+                .into_iter()
+                .chain(fragment_cells.iter().copied())
+                .map(|c| grid.world(c))
+                .collect()
+        },
         patrols: patrols.clone(),
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
@@ -632,6 +697,8 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         strangeness: spec.strangeness,
         surfaces,
         shard: None,
+        note: None,
+        fragments: Vec::new(),
         sigils: sigil_cells.iter().map(|&c| g.world(c)).collect(),
         hunter: Some(g.world(hunter) + Vec3::Y * 0.9),
         specials: Vec::new(),
@@ -1570,6 +1637,7 @@ mod tests {
                                 growth_cap: 24,
                                 ..Pressure::default()
                             },
+                            Goals::default(),
                         );
                         for (name, r) in [("route", &d.route), ("lucid", &d.lucid_route)] {
                             if let Err(e) = patient_walk(&d, r) {
@@ -2020,6 +2088,7 @@ mod tests {
                 force_special: k,
                 ..Pressure::default()
             },
+            Goals::default(),
         )
     }
 
@@ -2256,5 +2325,62 @@ mod tests {
             }
         }
         assert!(decor.len() >= 3, "decor shapes: {decor:?}");
+    }
+
+    #[test]
+    fn notes_and_fragments_are_off_route_distinct_and_visited() {
+        for seed in 0..40 {
+            for t in [
+                DreamTheme::Garden,
+                DreamTheme::LiminalOffice,
+                DreamTheme::TheTunnel,
+            ] {
+                let goals = Goals {
+                    note: true,
+                    fragments: true,
+                };
+                let d = generate_with(t, seed, 3, None, true, Pressure::default(), goals);
+                let plain = generate_with(
+                    t,
+                    seed,
+                    3,
+                    None,
+                    true,
+                    Pressure::default(),
+                    Goals::default(),
+                );
+                // Same layout (props may step aside for the longer walk).
+                assert_eq!(d.spawn, plain.spawn, "{t:?} {seed}");
+                assert_eq!(d.portal, plain.portal, "{t:?} {seed}");
+                let cells = |r: &[Waypoint]| r.iter().map(|w| w.pos).collect::<Vec<_>>();
+                assert_eq!(cells(&d.route), cells(&plain.route), "{t:?} {seed}");
+                assert_eq!(d.shard, plain.shard);
+                let mut spots: Vec<Vec3> = d.fragments.clone();
+                spots.extend(d.note);
+                for (i, a) in spots.iter().enumerate() {
+                    assert!(
+                        d.lucid_route.iter().any(|w| w.pos == *a),
+                        "{t:?} {seed}: stop not visited"
+                    );
+                    assert!(
+                        !d.route.iter().any(|w| w.pos == *a),
+                        "{t:?} {seed}: stop on the route"
+                    );
+                    for b in &spots[i + 1..] {
+                        assert!(a.distance(*b) > 0.5, "{t:?} {seed}: stops overlap");
+                    }
+                }
+                if t != DreamTheme::TheTunnel {
+                    assert!(d.note.is_some(), "{t:?} {seed}: no room for a note");
+                }
+                assert_eq!(d.lucid_route.last().unwrap().pos, d.portal);
+                for hop in d.lucid_route.windows(2) {
+                    assert!(
+                        hop[0].pos.distance(hop[1].pos) < 6.0,
+                        "{t:?} {seed}: route jumps"
+                    );
+                }
+            }
+        }
     }
 }
