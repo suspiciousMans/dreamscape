@@ -34,6 +34,7 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod music;
 mod pad;
 mod pixels;
 mod progress;
