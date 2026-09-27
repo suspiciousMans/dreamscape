@@ -18,3 +18,8 @@ image = { workspace = true }
 [[bin]]
 name = "dreamscape"
 path = "src/main.rs"
+
+[features]
+# Keep DREAMSCAPE_* dev switches working in a release build (for testing a
+# packaged copy). Never ship with this on.
+dev = []

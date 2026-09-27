@@ -369,16 +369,10 @@ pub fn page_range(total: usize, page: usize) -> std::ops::Range<usize> {
     start.min(total)..(start + CARDS_PER_PAGE).min(total)
 }
 
-#[cfg(not(target_os = "emscripten"))]
-pub const BOOKLET_PATH: &str = "games/dreamscape/booklet.ron";
-/// Browser build: an IndexedDB-backed folder the page mounts and syncs.
-#[cfg(target_os = "emscripten")]
-pub const BOOKLET_PATH: &str = "/persist/booklet.ron";
-
 pub fn booklet_path() -> PathBuf {
-    std::env::var_os("DREAMSCAPE_BOOKLET")
+    crate::dev::var_os("DREAMSCAPE_BOOKLET")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(BOOKLET_PATH))
+        .unwrap_or_else(|| crate::paths::save_file("booklet.ron"))
 }
 
 /// Missing file = empty booklet. A file that won't parse is moved aside to

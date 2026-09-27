@@ -27,6 +27,7 @@ mod booklet_ui;
 mod boss;
 mod cards;
 mod codex_ui;
+mod dev;
 mod dissolve;
 mod dream;
 mod enemy_ai;
@@ -36,6 +37,7 @@ mod hud;
 mod hunter;
 mod music;
 mod pad;
+mod paths;
 mod pixels;
 mod progress;
 mod records;
@@ -228,7 +230,7 @@ fn init_logging() {
 
 /// DREAMSCAPE_SEED=<u64> replays a run exactly; otherwise seed from the clock.
 fn run_seed() -> u64 {
-    std::env::var("DREAMSCAPE_SEED")
+    crate::dev::var("DREAMSCAPE_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
@@ -486,23 +488,23 @@ impl DreamscapeGame {
             yaw: 0.0,
             pitch: 0.0,
             mouse_captured: false,
-            force_fp: std::env::var_os("DREAMSCAPE_FP").is_some(),
+            force_fp: crate::dev::var_os("DREAMSCAPE_FP").is_some(),
             player_grounded: false,
             // Dev switch: DREAMSCAPE_PAD=1 starts with controller prompts.
-            using_pad: std::env::var_os("DREAMSCAPE_PAD").is_some(),
+            using_pad: crate::dev::var_os("DREAMSCAPE_PAD").is_some(),
             pad_held: HashMap::new(),
             camera_pos: gameplay::CAMERA_OFFSET,
             debug_camera: false,
-            autopilot: std::env::var("DREAMSCAPE_AUTOPILOT").is_ok(),
+            autopilot: crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok(),
             route_index: 0,
             flash: gameplay::Flash::default(),
             grace: 0.0,
             shard_entities: Vec::new(),
             shard_tex: None,
             wake_tex: None,
-            best_depth: records::load(Path::new(records::RECORD_PATH)),
+            best_depth: records::load(&records::record_path()),
             ui: None,
-            mode: if std::env::var("DREAMSCAPE_AUTOPILOT").is_ok() {
+            mode: if crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok() {
                 hud::Mode::Playing
             } else {
                 hud::Mode::Title
@@ -530,7 +532,7 @@ impl DreamscapeGame {
             shards_this_run: 0,
             second_wind_used: false,
             transition: transition::Transition::new(
-                std::env::var("DREAMSCAPE_MELT_SCALE")
+                crate::dev::var("DREAMSCAPE_MELT_SCALE")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1.0),
@@ -539,8 +541,8 @@ impl DreamscapeGame {
             restart_requested: false,
             fonts_installed: false,
             grain: None,
-            tunnel_on: std::env::var("DREAMSCAPE_NO_TUNNEL").is_err(),
-            run_length: match std::env::var("DREAMSCAPE_RUN").as_deref() {
+            tunnel_on: crate::dev::var("DREAMSCAPE_NO_TUNNEL").is_err(),
+            run_length: match crate::dev::var("DREAMSCAPE_RUN").as_deref() {
                 Ok("long") => RunLength::Long,
                 _ => RunLength::Short,
             },
@@ -578,7 +580,7 @@ impl DreamscapeGame {
             enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
             growth_cap: if hard { 24 } else { 12 },
             // Dev switch: DREAMSCAPE_SPECIAL=Stalker puts that kind in every dream.
-            force_special: std::env::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
+            force_special: crate::dev::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
                 dream::ALL_ENEMY_KINDS
                     .iter()
                     .copied()
@@ -2316,7 +2318,7 @@ impl DreamscapeGame {
         };
         // Dev: DREAMSCAPE_PACK_PREVIEW=40 repeats this run's dreams to 40.
         let mut log = self.run_log.clone();
-        if let Some(n) = std::env::var("DREAMSCAPE_PACK_PREVIEW")
+        if let Some(n) = crate::dev::var("DREAMSCAPE_PACK_PREVIEW")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {
@@ -2353,7 +2355,7 @@ impl DreamscapeGame {
             return;
         }
         // A padded preview pack (DREAMSCAPE_PACK_PREVIEW) is never pressed.
-        if std::env::var_os("DREAMSCAPE_PACK_PREVIEW").is_some() {
+        if crate::dev::var_os("DREAMSCAPE_PACK_PREVIEW").is_some() {
             log::info!("Booklet: preview pack, not pressed");
             return;
         }
@@ -2470,14 +2472,14 @@ impl DreamscapeGame {
         self.run.no_free_reroll = !asc.free_rerolls();
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
-        if let Some(n) = std::env::var("DREAMSCAPE_SHARDS_NEEDED")
+        if let Some(n) = crate::dev::var("DREAMSCAPE_SHARDS_NEEDED")
             .ok()
             .and_then(|s| s.parse().ok())
         {
             self.director.shards_to_wake = n;
         }
         // Dev: DREAMSCAPE_GIVE=Decoy,Rewind starts the run holding those.
-        if let Ok(list) = std::env::var("DREAMSCAPE_GIVE") {
+        if let Ok(list) = crate::dev::var("DREAMSCAPE_GIVE") {
             for name in list.split(',') {
                 if let Some(&a) = upgrades::ALL_ABILITIES
                     .iter()
@@ -2543,14 +2545,14 @@ impl DreamscapeGame {
             self.run_active = false;
             progress::clear(&self.save_path);
         }
-        if self.autopilot && std::env::var("DREAMSCAPE_AUTOSAVE").is_ok() {
+        if self.autopilot && crate::dev::var("DREAMSCAPE_AUTOSAVE").is_ok() {
             self.open_pack();
             self.pack.age = f32::MAX;
             self.save_journal();
-            match std::env::var("DREAMSCAPE_AUTOSAVE").as_deref() {
+            match crate::dev::var("DREAMSCAPE_AUTOSAVE").as_deref() {
                 Ok("booklet") => {
                     self.open_booklet();
-                    self.export_requested = std::env::var("DREAMSCAPE_CARDS").is_ok();
+                    self.export_requested = crate::dev::var("DREAMSCAPE_CARDS").is_ok();
                 }
                 Ok("store") => {
                     self.open_store();
@@ -3330,7 +3332,7 @@ impl DreamscapeGame {
         self.dream = Some(dream);
         if !self.autopilot && self.director.depth > self.best_depth {
             self.best_depth = self.director.depth;
-            if let Err(e) = records::save(Path::new(records::RECORD_PATH), self.best_depth) {
+            if let Err(e) = records::save(&records::record_path(), self.best_depth) {
                 log::warn!("could not save best depth: {e}");
             }
         }
@@ -3409,10 +3411,12 @@ impl Game for DreamscapeGame {
         unsafe {
             gl.enable(engine::glow::DEPTH_TEST);
         }
-        let cycler = ProfileCycler::new(engine::profile::load_dir(Path::new(PROFILES_DIR))?)?;
+        let cycler = ProfileCycler::new(engine::profile::load_dir(&paths::asset(PROFILES_DIR))?)?;
         let first = cycler.current().clone();
-        let read =
-            |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading shader {p:?}"));
+        let read = |p: &Path| {
+            std::fs::read_to_string(paths::asset_path(p))
+                .with_context(|| format!("reading shader {p:?}"))
+        };
         let vertex_src = read(&first.vertex_shader)?;
         let fragment_src = read(&first.fragment_shader)?;
         let post_src = read(&first.post_fragment_shader)?;
@@ -3440,7 +3444,7 @@ impl Game for DreamscapeGame {
             self.begin_run();
         }
         // Dev switch: DREAMSCAPE_THEME=SkyStairs starts one dream deep in it.
-        if let Ok(name) = std::env::var("DREAMSCAPE_THEME") {
+        if let Ok(name) = crate::dev::var("DREAMSCAPE_THEME") {
             match dream::ALL_THEMES.iter().find(|t| format!("{t:?}") == name) {
                 Some(&t) => {
                     self.director.theme = t;
@@ -3450,12 +3454,12 @@ impl Game for DreamscapeGame {
             }
         }
         // Dev switch: DREAMSCAPE_NIGHTMARE=1 starts in a nightmare arena.
-        if std::env::var("DREAMSCAPE_NIGHTMARE").is_ok() {
+        if crate::dev::var("DREAMSCAPE_NIGHTMARE").is_ok() {
             if self.director.theme == DreamTheme::Lobby {
                 self.director.theme = DreamTheme::NightmareFactory;
             }
             // DREAMSCAPE_NIGHTMARE=3 starts in the third tier's arena.
-            let tier: u32 = std::env::var("DREAMSCAPE_NIGHTMARE")
+            let tier: u32 = crate::dev::var("DREAMSCAPE_NIGHTMARE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1)
@@ -3466,12 +3470,12 @@ impl Game for DreamscapeGame {
         }
         self.load_dream(ctx)?;
         // Dev switch: DREAMSCAPE_SCREEN=codex|settings opens that screen.
-        match std::env::var("DREAMSCAPE_SCREEN").as_deref() {
+        match crate::dev::var("DREAMSCAPE_SCREEN").as_deref() {
             Ok("codex") => self.open_codex(),
             Ok("settings") => self.open_settings(),
             _ => {}
         }
-        if std::env::var("DREAMSCAPE_CONTINUE").is_ok() {
+        if crate::dev::var("DREAMSCAPE_CONTINUE").is_ok() {
             self.pending_start = Some(StartKind::Continue);
         }
         log::info!("Dreamscape initialized");
@@ -3757,7 +3761,7 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         self.poll_music();
-        if std::env::var_os("DREAMSCAPE_FPS").is_some() {
+        if crate::dev::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
             self.frame_ms.1 += 1;
             if self.frame_ms.1 == 300 {
@@ -3812,7 +3816,7 @@ impl Game for DreamscapeGame {
                 hud::Mode::Journal | hud::Mode::Booklet | hud::Mode::Reveal | hud::Mode::Store
             )
             && self.title_age
-                > std::env::var("DREAMSCAPE_JOURNAL_HOLD")
+                > crate::dev::var("DREAMSCAPE_JOURNAL_HOLD")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(3.0)
@@ -4662,10 +4666,10 @@ impl DreamscapeGame {
     /// DREAMSCAPE_SHOT=out.png: after DREAMSCAPE_SHOT_AT seconds (default 6)
     /// of the run, save the frame and quit. Used by tools/screenshots.sh.
     fn maybe_screenshot(&mut self, ctx: &mut Context) {
-        let Ok(path) = std::env::var("DREAMSCAPE_SHOT") else {
+        let Ok(path) = crate::dev::var("DREAMSCAPE_SHOT") else {
             return;
         };
-        let at: f32 = std::env::var("DREAMSCAPE_SHOT_AT")
+        let at: f32 = crate::dev::var("DREAMSCAPE_SHOT_AT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6.0);
@@ -4684,9 +4688,9 @@ impl DreamscapeGame {
         let Some(frame) = Self::read_frame(ctx) else {
             return;
         };
-        let dir = std::env::var_os("DREAMSCAPE_CARDS")
+        let dir = crate::dev::var_os("DREAMSCAPE_CARDS")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("games/dreamscape/cards"));
+            .unwrap_or_else(|| paths::save_file("cards"));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             log::error!("could not create {dir:?}: {e}");
             return;
