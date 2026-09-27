@@ -27,6 +27,7 @@ mod booklet_ui;
 mod boss;
 mod cards;
 mod codex_ui;
+mod crash;
 mod dev;
 mod dissolve;
 mod dream;
@@ -222,10 +223,18 @@ enum ChoiceKind {
 }
 
 fn init_logging() {
-    let _ = env_logger::builder()
-        .is_test(false)
-        .format_timestamp_millis()
-        .try_init();
+    let mut b = env_logger::Builder::from_default_env();
+    b.format_timestamp_millis();
+    // Release: no console, so log to a file players can send us.
+    if !cfg!(debug_assertions) {
+        if let Some(file) = crash::open_log() {
+            b.target(env_logger::Target::Pipe(Box::new(file)));
+            if std::env::var_os("RUST_LOG").is_none() {
+                b.filter_level(log::LevelFilter::Info);
+            }
+        }
+    }
+    let _ = b.try_init();
 }
 
 /// DREAMSCAPE_SEED=<u64> replays a run exactly; otherwise seed from the clock.
@@ -2437,6 +2446,7 @@ impl DreamscapeGame {
 
     fn restart(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         self.run_seed = gameplay::next_run_seed(self.run_seed);
+        crash::SEED.store(self.run_seed, std::sync::atomic::Ordering::Relaxed);
         log::info!(
             "Dream run seed = {} (replay with DREAMSCAPE_SEED={})",
             self.run_seed,
@@ -3761,6 +3771,9 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         self.poll_music();
+        if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
+            panic!("DREAMSCAPE_CRASH: test crash");
+        }
         if crate::dev::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
             self.frame_ms.1 += 1;
@@ -4763,8 +4776,18 @@ impl DreamscapeGame {
 
 fn main() -> anyhow::Result<()> {
     init_logging();
-    std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+    crash::install();
+    paths::migrate_repo_saves();
     let seed = run_seed();
-    log::info!("Dream run seed = {seed} (replay with DREAMSCAPE_SEED={seed})");
-    App::run("Dreamscape", 1280, 720, DreamscapeGame::new(seed))
+    crash::SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    log::info!(
+        "Dreamscape {} ({}), run seed = {seed} (replay with DREAMSCAPE_SEED={seed})",
+        crash::VERSION,
+        crash::GIT
+    );
+    if let Err(e) = App::run("Dreamscape", 1280, 720, DreamscapeGame::new(seed)) {
+        crash::fatal(&e);
+        return Err(e);
+    }
+    Ok(())
 }

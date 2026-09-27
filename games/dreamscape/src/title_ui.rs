@@ -104,4 +104,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             rgba([80, 230, 200], 0.8),
         );
     }
+    p.text(
+        screen.right_bottom() + Vec2::new(-16.0, -12.0),
+        Align2::RIGHT_BOTTOM,
+        format!("v{} {}", crate::crash::VERSION, crate::crash::GIT),
+        FontId::monospace(16.0),
+        rgba(ink(v), 0.35),
+    );
 }
