@@ -95,6 +95,14 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::B => Some(Keycode::Escape),
             _ => None,
         },
+        Mode::Note => match button {
+            P::A | P::B => Some(Keycode::Return),
+            _ => None,
+        },
+        Mode::Memories => match button {
+            P::B => Some(Keycode::Escape),
+            _ => dpad,
+        },
     }
 }
 
@@ -235,7 +243,7 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
 mod tests {
     use super::*;
 
-    const ALL_MODES: [Mode; 12] = [
+    const ALL_MODES: [Mode; 14] = [
         Mode::Warning,
         Mode::Title,
         Mode::Playing,
@@ -248,10 +256,14 @@ mod tests {
         Mode::Summary,
         Mode::Settings,
         Mode::Codex,
+        Mode::Note,
+        Mode::Memories,
     ];
 
     /// Every prompt the game shows, with the screen it's shown on.
     const PROMPTS: &[(Mode, &str)] = &[
+        (Mode::Note, "[enter] keep it"),
+        (Mode::Memories, "[w/s] choose  [esc] back"),
         (Mode::Paused, "[esc] keep dreaming"),
         (Mode::Paused, "[q] wake up for real"),
         (Mode::Paused, "[b] dream booklet"),

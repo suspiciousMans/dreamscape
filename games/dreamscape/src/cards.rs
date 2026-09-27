@@ -281,6 +281,9 @@ pub struct Booklet {
     /// Dreams and enemies met, ascension, daily bests.
     #[serde(default)]
     pub codex: crate::progress::Codex,
+    /// The story: dreamers, notes found, loadout, prologue.
+    #[serde(default)]
+    pub lore: crate::lore::Lore,
 }
 
 impl Booklet {
@@ -425,6 +428,12 @@ mod tests {
             shard_taken: shard,
             art: crate::dream::portal_surface(theme, seed),
         }
+    }
+
+    #[test]
+    fn old_booklets_load_with_empty_lore() {
+        let b: Booklet = ron::from_str("(runs: [])").unwrap();
+        assert!(b.lore.notes.is_empty());
     }
 
     #[test]

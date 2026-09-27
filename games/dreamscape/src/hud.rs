@@ -26,6 +26,10 @@ pub enum Mode {
     Summary,
     Settings,
     Codex,
+    /// Reading a note just picked up.
+    Note,
+    /// Every dreamer and the notes found.
+    Memories,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -69,6 +73,11 @@ pub struct HudView {
     pub strangeness: f32,
     pub title: String,
     pub whisper: String,
+    /// What the eye is saying, and for how long (seconds).
+    pub eye_line: Option<(String, f32)>,
+    /// The note being read: (object, title, body).
+    pub note: Option<(String, String, String)>,
+    pub memories: crate::memories_ui::MemoriesView,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -346,6 +355,13 @@ pub fn draw(
         Mode::Summary => return crate::summary_ui::draw(&p, screen, v, &v.summary),
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
+        Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
+        Mode::Note => {
+            if let Some(n) = &v.note {
+                return crate::memories_ui::draw_note(&p, screen, v, n);
+            }
+            return;
+        }
         Mode::Playing | Mode::Paused => {}
     }
     depth_counter(&p, screen, v);
@@ -632,6 +648,33 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let iris = iris_color(v, lucid);
     paint_eye(p, c, &cells, iris, v);
     lucid_rays_and_pips(p, c, lucid, screen.width(), v);
+    if let Some((text, age)) = &v.eye_line {
+        let a = crate::eye::alpha(*age);
+        if a > 0.0 {
+            let text = v.k(&if v.pad {
+                text.replace("[WASD]", "[L-STICK]")
+            } else {
+                text.clone()
+            });
+            let shown = crate::eye::shown(&text, *age);
+            // Measure the whole line so the plate doesn't grow as it types.
+            let font = FontId::proportional(24.0);
+            let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
+            let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
+            let plate = Rect::from_center_size(
+                at - Vec2::new(0.0, full.size().y * 0.5),
+                full.size() + Vec2::new(28.0, 12.0),
+            );
+            p.rect_filled(plate, 4.0, rgba([8, 4, 18], 0.72 * a));
+            p.text(
+                Pos2::new(plate.left() + 14.0, plate.center().y),
+                Align2::LEFT_CENTER,
+                shown,
+                font,
+                rgba([226, 214, 250], a),
+            );
+        }
+    }
 }
 
 /// The shop's preview: the HUD eye, wide open and glancing about, in style `e`.

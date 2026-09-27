@@ -510,7 +510,15 @@ mod tests {
             DreamTheme::SkyStairs,
         ] {
             for seed in 0..10 {
-                let d = generate_with(theme, seed, 3, None, false, Pressure::default());
+                let d = generate_with(
+                    theme,
+                    seed,
+                    3,
+                    None,
+                    false,
+                    Pressure::default(),
+                    Default::default(),
+                );
                 let mut landed = 0;
                 for w in d.route.windows(2) {
                     let dir = w[1].pos - w[0].pos;

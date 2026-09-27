@@ -69,6 +69,8 @@ pub struct DreamDirector {
     pub nightmare: bool,
     /// Every this-many dreams is a nightmare (ascension shortens it).
     pub nightmare_every: u32,
+    /// Themes to use next, front first, instead of rolling (the prologue).
+    pub forced: Vec<DreamTheme>,
 }
 
 impl DreamDirector {
@@ -90,6 +92,7 @@ impl DreamDirector {
             shard_bonus: 0.0,
             nightmare: false,
             nightmare_every: NIGHTMARE_EVERY,
+            forced: Vec::new(),
         }
     }
 
@@ -150,8 +153,15 @@ impl DreamDirector {
         }
         self.depth += 1;
         self.shard_this_dream = false;
-        self.theme = self.next;
-        self.next = roll(self.theme, &mut self.rng);
+        self.theme = if self.forced.is_empty() {
+            self.next
+        } else {
+            self.forced.remove(0)
+        };
+        self.next = match self.forced.first() {
+            Some(&t) => t,
+            None => roll(self.theme, &mut self.rng),
+        };
         // The white is only reachable by refusing to wake (GO DEEPER).
         if self.hard_from.is_some()
             && self.theme != DreamTheme::WhiteDissolve
@@ -386,5 +396,21 @@ mod tests {
         d.collect_shard(); // picked it back up
         d.wake();
         assert!(!d.caught(), "waking banks everything");
+    }
+
+    #[test]
+    fn forced_themes_come_first() {
+        let mut d = DreamDirector::new(3);
+        d.forced = vec![DreamTheme::Garden, DreamTheme::MirrorHall];
+        d.next = DreamTheme::Garden;
+        assert_eq!(d.descend(), Some(DreamTheme::Garden));
+        assert_eq!(
+            d.next,
+            DreamTheme::MirrorHall,
+            "the portal previews the forced one"
+        );
+        assert_eq!(d.descend(), Some(DreamTheme::MirrorHall));
+        assert!(d.forced.is_empty());
+        d.descend().unwrap(); // back to rolling
     }
 }
