@@ -1450,6 +1450,10 @@ impl DreamscapeGame {
                 }
                 self.flash.trigger([1.0, 0.8, 0.4], 0.4);
                 self.sfx(Sound::Deeper);
+                // Enemies just snapped back to their posts, which sit on the
+                // route, possibly on top of you. Same safety as a respawn,
+                // so a rewind can never catch you before you can react.
+                self.grace = self.grace.max(gameplay::RESPAWN_GRACE);
                 log::info!("Time loop {n}");
                 self.rewind_trail.clear(); // the past you'd rewind to no longer happened
             }
@@ -1802,7 +1806,8 @@ impl DreamscapeGame {
     }
 
     /// Is anything that catches you touching you right now?
-    fn touching_threat(&self) -> bool {
+    /// What's touching you, if anything (logged on a catch, for balancing).
+    fn threat_touching(&self) -> Option<&'static str> {
         let player = self.player_position;
         let at = |e: Entity| self.world.get::<&Transform>(e).ok().map(|t| t.position);
         let pacers = self.enemies.iter().any(|p| {
@@ -1842,7 +1847,16 @@ impl DreamscapeGame {
             specials::gate_closed(self.dream_age, phase) && specials::gate_blocks(at, dir, player)
         });
         let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
-        pacers || hunter || boss_fx || special || gate || beat
+        [
+            (pacers, "patrol"),
+            (hunter, "hunter"),
+            (boss_fx, "boss attack"),
+            (special, "special enemy"),
+            (gate, "gate"),
+            (beat, "beat tile"),
+        ]
+        .into_iter()
+        .find_map(|(hit, what)| hit.then_some(what))
     }
 
     /// Every sigil taken: the nightmare's portal opens.
@@ -4153,7 +4167,19 @@ impl Game for DreamscapeGame {
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
         let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
-        let caught = !self.autopilot && self.grace <= 0.0 && !untouchable && self.touching_threat();
+        let caught_by = if !self.autopilot && self.grace <= 0.0 && !untouchable {
+            self.threat_touching()
+        } else {
+            None
+        };
+        let caught = caught_by.is_some();
+        if let Some(by) = caught_by {
+            log::info!(
+                "Caught by: {by} (depth {}, {:.1}s into the dream)",
+                self.director.depth,
+                self.dream_age
+            );
+        }
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.sfx(Sound::Caught);
