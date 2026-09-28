@@ -1,7 +1,7 @@
 //! Pack opening and the Lucid Store: the two screens between waking up and
 //! dreaming again. Same pixel + VT323 language as the rest of the HUD.
 
-use crate::booklet_ui::{card, rarity_color, CardArt, CARD_SIZE};
+use crate::booklet_ui::{card, CardArt, CARD_SIZE};
 use crate::cards::Recalled;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
@@ -171,7 +171,7 @@ pub fn draw_reveal(
                     p.rect_filled(
                         squashed,
                         0.0,
-                        rgba(rarity_color(r.card.rarity, v.time), 0.9),
+                        rgba(crate::booklet_ui::card_frame(&r.card, v.time), 0.9),
                     );
                 }
             }
@@ -233,7 +233,7 @@ pub fn draw_reveal(
 /// A dream too many to show as a card: its rarity colour and depth.
 /// Forgotten ones are hollow and grey.
 fn chip(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView) {
-    let rgb = rarity_color(rec.card.rarity, v.time);
+    let rgb = crate::booklet_ui::card_frame(&rec.card, v.time);
     if rec.remembered {
         p.rect_filled(r, 0.0, rgba(rgb, 0.85));
     } else {
