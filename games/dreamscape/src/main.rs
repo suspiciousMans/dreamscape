@@ -2495,8 +2495,11 @@ impl DreamscapeGame {
                 log.push(log[log.len() % self.run_log.len()].clone());
             }
         }
+        let mut pack = cards::recall(&log, boost);
+        let owned: Vec<cards::Card> = self.booklet.cards().cloned().collect();
+        cards::shape_first_pack(&mut pack, &owned);
         self.pack = reveal_ui::PackView {
-            pack: cards::recall(&log, boost),
+            pack,
             ..Default::default()
         };
         let kept = self.pack.pack.iter().filter(|r| r.remembered).count();
