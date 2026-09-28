@@ -240,6 +240,23 @@ pub fn difficulty_reward(difficulty: f32) -> f32 {
     difficulty.clamp(1.0, 50.0)
 }
 
+/// An ability's burst: this many cubes in a ring at the player.
+pub const BURST_CUBES: usize = 8;
+/// Seconds a burst lasts.
+pub const BURST_SECONDS: f32 = 0.5;
+
+/// Where burst cube `i` sits `age` seconds in, relative to the player, and
+/// its scale (shrinking to nothing as it fades).
+pub fn burst_cube(i: usize, age: f32) -> (Vec3, f32) {
+    let t = (age / BURST_SECONDS).clamp(0.0, 1.0);
+    let a = i as f32 / BURST_CUBES as f32 * std::f32::consts::TAU;
+    let r = 0.4 + 1.2 * t;
+    (
+        Vec3::new(a.cos() * r, 0.6 + 0.3 * t, a.sin() * r),
+        0.22 * (1.0 - t),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +571,18 @@ mod tests {
         assert_eq!(chase_radius(1), 0.0);
         assert!(chase_radius(2) > 0.0 && chase_radius(2) < chase_radius(8));
         assert!(chase_radius(u32::MAX) <= 6.0);
+    }
+
+    #[test]
+    fn a_burst_rings_the_player_and_fades_in_half_a_second() {
+        let ring: Vec<Vec3> = (0..BURST_CUBES).map(|i| burst_cube(i, 0.0).0).collect();
+        let c = ring.iter().fold(Vec3::ZERO, |a, &b| a + b) / BURST_CUBES as f32;
+        assert!(
+            Vec3::new(c.x, 0.0, c.z).length() < 1e-4,
+            "centred on the player"
+        );
+        assert!(burst_cube(0, 0.25).0.length() > burst_cube(0, 0.0).0.length());
+        assert!(burst_cube(3, 0.0).1 > 0.0);
+        assert_eq!(burst_cube(3, BURST_SECONDS).1, 0.0);
     }
 }

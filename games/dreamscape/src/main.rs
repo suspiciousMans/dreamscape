@@ -300,6 +300,12 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// Each loadout ability and the dream colours of the card that taught it.
+    ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
+    /// An ability just fired: burst here, in these colours (spawned next update).
+    burst_pending: Option<(Vec3, [u8; 3], [u8; 3])>,
+    /// Burst cubes: (entity, dream age at birth, index in the ring, centre).
+    bursts: Vec<(Entity, f32, usize, Vec3)>,
     /// This dream's music, being composed on a worker thread.
     music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
     /// Length of the current music loop, seconds.
@@ -496,6 +502,9 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            ability_tints: Vec::new(),
+            burst_pending: None,
+            bursts: Vec::new(),
             music_job: None,
             music_loop: 1.0,
             decoy: None,
@@ -1254,6 +1263,49 @@ impl DreamscapeGame {
 
     /// A crumbling floor tile (solid, with its collider).
     /// Afterimage Fields: leave a fading ghost of yourself every ECHO_EVERY.
+    /// An ability's ring of cubes in its card's colours, fading out.
+    fn update_bursts(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
+        let now = self.dream_age;
+        if let Some((at, a, b)) = self.burst_pending.take() {
+            let cube = self.mesh(Shape::Cube)?;
+            for i in 0..gameplay::BURST_CUBES {
+                let c = if i % 2 == 0 { a } else { b };
+                let tex = self.texture(gl, [c[0], c[1], c[2], 255]);
+                let (off, s) = gameplay::burst_cube(i, 0.0);
+                let e = self.world.spawn((
+                    Transform {
+                        position: at + off,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::splat(s),
+                    },
+                    MeshRenderer {
+                        mesh: cube.clone(),
+                        texture: Some(tex),
+                    },
+                    Spin(4.0),
+                    Lit,
+                    Hero,
+                ));
+                self.bursts.push((e, now, i, at));
+            }
+        }
+        let world = &mut self.world;
+        self.bursts.retain(|&(e, born, i, at)| {
+            let age = now - born;
+            if age >= gameplay::BURST_SECONDS {
+                let _ = world.despawn(e);
+                return false;
+            }
+            if let Ok(mut t) = world.get::<&mut Transform>(e) {
+                let (off, s) = gameplay::burst_cube(i, age);
+                t.position = at + off;
+                t.scale = Vec3::splat(s);
+            }
+            true
+        });
+        Ok(())
+    }
+
     fn update_echoes(&mut self, player: Entity, dt: f32) -> anyhow::Result<()> {
         let echoing = self
             .dream
@@ -2075,7 +2127,16 @@ impl DreamscapeGame {
                 Ability::Flare => [1.0, 0.95, 0.6],
                 Ability::Rewind => [0.6, 0.6, 1.0],
             };
+            let tint = self
+                .ability_tints
+                .iter()
+                .find(|t| t.0 == state.ability)
+                .map(|&(_, a, b)| (a, b));
+            let color = tint.map_or(color, |(a, _)| a.map(|c| c as f32 / 255.0));
             self.flash.trigger(color, 0.3);
+            if let Some((a, b)) = tint {
+                self.burst_pending = Some((self.player_position, a, b));
+            }
             self.sfx(match state.ability {
                 Ability::Dash => Sound::Dash,
                 Ability::Blink => Sound::Blink,
@@ -2731,6 +2792,17 @@ impl DreamscapeGame {
             );
         }
         self.run = RunUpgrades::from_loadout(&cards);
+        self.ability_tints = cards
+            .iter()
+            .map(|c| {
+                let accents = c.fused.unwrap_or(c.theme).spec().accents;
+                (
+                    powers::power(c.theme).active,
+                    powers::power(c.theme).tint,
+                    accents[accents.len().min(2) - 1],
+                )
+            })
+            .collect();
         let asc = progress::Ascension(
             if self.daily.is_some() || self.autopilot || self.prologue.is_some() {
                 0
@@ -3457,6 +3529,8 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.bursts.clear();
+        self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.rewind_trail.clear();
         self.echo_timer = 0.0;
@@ -4815,6 +4889,7 @@ impl Game for DreamscapeGame {
         }
         self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
         self.update_echoes(player, dt)?;
+        self.update_bursts(ctx.gl())?;
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self
