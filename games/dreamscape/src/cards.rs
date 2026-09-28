@@ -22,6 +22,10 @@ pub enum Rarity {
     Vivid,
     Lucid,
     Prophetic,
+    /// Two cards merged at the moth, or a dream that blended two themes.
+    Fused,
+    /// A fused card from one of the resonant pairs (`fusion::resonant`).
+    Resonant,
 }
 
 impl Rarity {
@@ -41,6 +45,9 @@ impl Rarity {
             Rarity::Hazy => Rarity::Vivid,
             Rarity::Vivid => Rarity::Lucid,
             Rarity::Lucid | Rarity::Prophetic => Rarity::Prophetic,
+            // Made, not rolled: a recurring dream doesn't change them.
+            Rarity::Fused => Rarity::Fused,
+            Rarity::Resonant => Rarity::Resonant,
         }
     }
 
@@ -51,6 +58,8 @@ impl Rarity {
             Rarity::Vivid => "VIVID",
             Rarity::Lucid => "LUCID",
             Rarity::Prophetic => "PROPHETIC",
+            Rarity::Fused => "FUSED",
+            Rarity::Resonant => "RESONANT",
         }
     }
 }
@@ -143,6 +152,9 @@ pub struct DreamRecord {
     pub enemies: u32,
     pub shard_taken: bool,
     pub art: TexSpec,
+    /// The second theme, when this dream was a fused one.
+    #[serde(default)]
+    pub blend: Option<DreamTheme>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,6 +172,9 @@ pub struct Card {
     pub drift: u8,
     pub recurring: bool,
     pub art: TexSpec,
+    /// The second dream in a fused card (colours and mood come from it).
+    #[serde(default)]
+    pub fused: Option<DreamTheme>,
 }
 
 pub fn rarity_roll(seed: u64) -> f32 {
@@ -182,6 +197,9 @@ pub fn card_from(r: &DreamRecord) -> Card {
     if r.theme == DreamTheme::Awakening {
         rarity = rarity.max(Rarity::Vivid);
     }
+    if r.blend.is_some() {
+        rarity = Rarity::Fused;
+    }
     Card {
         number: 0,
         theme: r.theme,
@@ -195,6 +213,7 @@ pub fn card_from(r: &DreamRecord) -> Card {
         drift: stat(r.strangeness),
         recurring: false,
         art: r.art.clone(),
+        fused: r.blend,
     }
 }
 
@@ -208,6 +227,7 @@ pub fn base_memory(r: Rarity) -> f32 {
         Rarity::Vivid => 0.60,
         Rarity::Lucid => 0.80,
         Rarity::Prophetic => 0.95,
+        Rarity::Fused | Rarity::Resonant => 1.0,
     }
 }
 
@@ -240,6 +260,8 @@ pub fn fade_dust(r: Rarity) -> u32 {
         Rarity::Vivid => 8,
         Rarity::Lucid => 12,
         Rarity::Prophetic => 20,
+        Rarity::Fused => 30,
+        Rarity::Resonant => 45,
     }
 }
 
@@ -293,6 +315,39 @@ impl Booklet {
 
     pub fn card_count(&self) -> usize {
         self.runs.iter().map(|r| r.cards.len()).sum()
+    }
+
+    pub fn card(&self, number: u32) -> Option<&Card> {
+        self.cards().find(|c| c.number == number)
+    }
+
+    /// The cards this run brings: the saved loadout (cards no longer in the
+    /// booklet drop out), up to the unlocked slots. With nothing chosen,
+    /// the newest cards with different abilities fill the slots.
+    pub fn loadout_cards(&self) -> Vec<Card> {
+        let slots = self.lore.slots();
+        let chosen: Vec<Card> = self
+            .lore
+            .loadout
+            .iter()
+            .filter_map(|&n| self.card(n).cloned())
+            .take(slots)
+            .collect();
+        if !chosen.is_empty() {
+            return chosen;
+        }
+        let mut out: Vec<Card> = Vec::new();
+        for c in self.cards().collect::<Vec<_>>().into_iter().rev() {
+            let a = crate::powers::power(c.theme).active;
+            if out.len() < slots
+                && !out
+                    .iter()
+                    .any(|o| crate::powers::power(o.theme).active == a)
+            {
+                out.push(c.clone());
+            }
+        }
+        out
     }
 
     pub fn has_run(&self, run_seed: u64) -> bool {
@@ -406,7 +461,7 @@ pub fn save(path: &Path, booklet: &Booklet) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::dream::DreamTheme::*;
 
@@ -427,7 +482,69 @@ mod tests {
             enemies: 1,
             shard_taken: shard,
             art: crate::dream::portal_surface(theme, seed),
+            blend: None,
         }
+    }
+
+    #[test]
+    fn loadout_keeps_known_cards_and_fills_itself_when_empty() {
+        let mut b = Booklet::default();
+        b.add_run(
+            1,
+            &[
+                record(TheTunnel, 1, 1, 0.1, false),
+                record(SynesthesiaHall, 2, 2, 0.1, false),
+                record(Garden, 3, 3, 0.1, false),
+            ],
+        );
+        // One slot at first: the newest card.
+        assert_eq!(
+            b.loadout_cards()
+                .iter()
+                .map(|c| c.number)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        b.lore.loadout = vec![99, 1];
+        assert_eq!(
+            b.loadout_cards()
+                .iter()
+                .map(|c| c.number)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        b.lore.loadout = vec![99];
+        assert_eq!(
+            b.loadout_cards().len(),
+            1,
+            "a vanished card falls back to the default"
+        );
+        assert!(Booklet::default().loadout_cards().is_empty());
+    }
+
+    #[test]
+    fn fused_and_resonant_are_never_rolled() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for _ in 0..10_000 {
+            let r = Rarity::from_score(rng.gen_range(-0.5..2.0));
+            assert!(!matches!(r, Rarity::Fused | Rarity::Resonant), "{r:?}");
+        }
+        assert_eq!(Rarity::Fused.bumped(), Rarity::Fused);
+        assert_eq!(Rarity::Resonant.bumped(), Rarity::Resonant);
+        assert_eq!(base_memory(Rarity::Fused), 1.0);
+        assert_eq!(fade_dust(Rarity::Resonant), 45);
+    }
+
+    #[test]
+    fn a_blended_dream_presses_a_fused_card_that_round_trips() {
+        let mut r = record(Garden, 3, 4, 0.5, true);
+        assert_eq!(card_from(&r).fused, None);
+        r.blend = Some(MyceliumGrove);
+        let c = card_from(&r);
+        assert_eq!(c.rarity, Rarity::Fused);
+        assert_eq!(c.fused, Some(MyceliumGrove));
+        let text = ron::to_string(&c).unwrap();
+        assert_eq!(ron::from_str::<Card>(&text).unwrap(), c);
     }
 
     #[test]

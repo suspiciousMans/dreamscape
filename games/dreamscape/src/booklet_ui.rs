@@ -40,6 +40,32 @@ pub fn rarity_color(r: Rarity, time: f32) -> [u8; 3] {
         Rarity::Vivid => [255, 80, 200],
         Rarity::Lucid => [255, 210, 80],
         Rarity::Prophetic => hue(time * 0.4),
+        // Per-card colours come from `card_frame`; these are the fallbacks.
+        Rarity::Fused => [255, 150, 90],
+        Rarity::Resonant => resonant_color(time),
+    }
+}
+
+/// A resonant frame: the whole wheel, with a white pulse.
+pub fn resonant_color(time: f32) -> [u8; 3] {
+    let c = hue(time * 0.8);
+    let w = (0.5 + 0.5 * (time * 4.0).sin()).powi(4);
+    c.map(|v| (v as f32 + (255.0 - v as f32) * w) as u8)
+}
+
+/// A fused frame cycles between the two dreams' first accents.
+pub fn fused_color(a: [u8; 3], b: [u8; 3], time: f32) -> [u8; 3] {
+    let t = 0.5 + 0.5 * (time * 1.5).sin();
+    [0, 1, 2].map(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t) as u8)
+}
+
+/// The frame colour for this particular card.
+pub fn card_frame(card: &Card, time: f32) -> [u8; 3] {
+    match (card.rarity, card.fused) {
+        (Rarity::Fused, Some(b)) => {
+            fused_color(card.theme.spec().accents[0], b.spec().accents[0], time)
+        }
+        (r, _) => rarity_color(r, time),
     }
 }
 
@@ -144,7 +170,7 @@ pub fn card(
     scale: f32,
 ) {
     let frame = match v.card_style {
-        crate::store::CardStyle::Plain => rarity_color(c.rarity, v.time),
+        crate::store::CardStyle::Plain => card_frame(c, v.time),
         crate::store::CardStyle::Gilt => [255, 205, 90],
         crate::store::CardStyle::Holo => hue(v.time * 0.3 + c.number as f32 * 0.13),
     };

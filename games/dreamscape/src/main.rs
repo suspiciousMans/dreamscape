@@ -44,6 +44,7 @@ mod objective;
 mod pad;
 mod paths;
 mod pixels;
+mod powers;
 mod progress;
 mod records;
 mod reveal_ui;
@@ -2644,7 +2645,19 @@ impl DreamscapeGame {
     fn begin_run(&mut self) {
         self.eye_sticky = false;
         self.shards_this_run = 0;
-        self.run = RunUpgrades::default();
+        // Abilities come from the loadout's cards (none in the prologue).
+        self.run = if self.prologue.is_some() {
+            RunUpgrades::default()
+        } else {
+            let cards = self.booklet.loadout_cards();
+            if !cards.is_empty() {
+                log::info!(
+                    "Loadout: {:?}",
+                    cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+                );
+            }
+            RunUpgrades::from_loadout(&cards)
+        };
         let asc = progress::Ascension(
             if self.daily.is_some() || self.autopilot || self.prologue.is_some() {
                 0
@@ -3323,6 +3336,7 @@ impl DreamscapeGame {
             enemies: dream.patrols.len() as u32,
             shard_taken: false,
             art: dream.surfaces.floor.clone(),
+            blend: None,
         });
         log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(
