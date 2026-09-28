@@ -30,6 +30,8 @@ pub enum Mode {
     Note,
     /// Every dreamer and the notes found.
     Memories,
+    /// Choosing the run's cards before falling asleep.
+    Loadout,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -78,6 +80,7 @@ pub struct HudView {
     /// The note being read: (object, title, body).
     pub note: Option<(String, String, String)>,
     pub memories: crate::memories_ui::MemoriesView,
+    pub loadout: crate::loadout_ui::LoadoutView,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -356,6 +359,7 @@ pub fn draw(
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
         Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
+        Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
         Mode::Note => {
             if let Some(n) = &v.note {
                 return crate::memories_ui::draw_note(&p, screen, v, n);

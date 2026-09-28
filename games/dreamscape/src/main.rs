@@ -37,6 +37,7 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod loadout_ui;
 mod lore;
 mod memories_ui;
 mod music;
@@ -389,6 +390,7 @@ pub struct DreamscapeGame {
     /// Rolled before the dream is built (fragments need cells).
     objective_kind: Option<objective::Kind>,
     memories_sel: usize,
+    loadout_sel: usize,
     /// The first-time guided dreams, while they run.
     prologue: Option<tutorial::Prologue>,
     /// The eye's line is a tutorial prompt: stays up until the step changes.
@@ -559,6 +561,7 @@ impl DreamscapeGame {
             objective: None,
             objective_kind: None,
             memories_sel: 0,
+            loadout_sel: 0,
             prologue: None,
             eye_sticky: false,
             eye_queue: Vec::new(),
@@ -1008,6 +1011,16 @@ impl DreamscapeGame {
                 self.memories_view()
             } else {
                 memories_ui::MemoriesView::default()
+            },
+            loadout: if self.mode == hud::Mode::Loadout {
+                loadout_ui::LoadoutView {
+                    cards: self.booklet.cards().cloned().collect(),
+                    chosen: self.booklet.lore.loadout.clone(),
+                    slots: self.booklet.lore.slots(),
+                    selected: self.loadout_sel,
+                }
+            } else {
+                loadout_ui::LoadoutView::default()
             },
             title_age: self.title_age,
             warning_age: self.warning_age,
@@ -2283,7 +2296,7 @@ impl DreamscapeGame {
     fn title_select(&mut self, ctx: &mut Context, item: TitleItem, dir: i32) {
         match item {
             TitleItem::Continue => self.pending_start = Some(StartKind::Continue),
-            TitleItem::Start => self.start_from_title(),
+            TitleItem::Start => self.open_loadout(),
             TitleItem::Prologue => self.pending_start = Some(StartKind::Prologue),
             TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
             TitleItem::RunLength => self.run_length = self.run_length.toggled(),
@@ -2594,6 +2607,56 @@ impl DreamscapeGame {
         self.booklet_return = self.mode;
         self.booklet_page = cards::page_count(self.booklet.card_count()) - 1;
         self.mode = hud::Mode::Booklet;
+    }
+
+    /// START: choose the run's cards first, unless there are none yet.
+    fn open_loadout(&mut self) {
+        if self.booklet.card_count() == 0 {
+            return self.start_from_title();
+        }
+        // Cards no longer in the booklet drop out silently.
+        let b = &self.booklet;
+        let kept: Vec<u32> = b
+            .lore
+            .loadout
+            .iter()
+            .copied()
+            .filter(|&n| b.card(n).is_some())
+            .take(b.lore.slots())
+            .collect();
+        self.booklet.lore.loadout = kept;
+        self.loadout_sel = self.loadout_sel.min(self.booklet.card_count() - 1);
+        self.mode = hud::Mode::Loadout;
+    }
+
+    fn loadout_key(&mut self, key: Keycode) {
+        let n = self.booklet.card_count();
+        let (dx, dy) = match key {
+            Keycode::A | Keycode::Left => (-1, 0),
+            Keycode::D | Keycode::Right => (1, 0),
+            Keycode::W | Keycode::Up => (0, -1),
+            Keycode::S | Keycode::Down => (0, 1),
+            _ => (0, 0),
+        };
+        if (dx, dy) != (0, 0) {
+            self.loadout_sel = loadout_ui::step(self.loadout_sel, n, dx, dy);
+            return;
+        }
+        match key {
+            Keycode::Return => {
+                let Some(number) = self.booklet.cards().nth(self.loadout_sel).map(|c| c.number)
+                else {
+                    return;
+                };
+                let slots = self.booklet.lore.slots();
+                if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
+                    self.persist_booklet();
+                }
+            }
+            Keycode::Space => self.start_from_title(),
+            Keycode::Escape => self.mode = hud::Mode::Title,
+            _ => {}
+        }
     }
 
     /// Enter on the title: the dream already loaded behind it becomes the run.
@@ -4051,6 +4114,7 @@ impl Game for DreamscapeGame {
             Ok("codex") => self.open_codex(),
             Ok("settings") => self.open_settings(),
             Ok("memories") => self.mode = hud::Mode::Memories,
+            Ok("loadout") => self.open_loadout(),
             Ok("note") => {
                 let d = lore::dreamer(self.booklet.lore.save_seed, 3);
                 self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
@@ -4161,6 +4225,10 @@ impl Game for DreamscapeGame {
             match (self.mode, key) {
                 (hud::Mode::Note, Keycode::Return | Keycode::Space | Keycode::Escape) => {
                     self.mode = hud::Mode::Playing;
+                    return;
+                }
+                (hud::Mode::Loadout, _) => {
+                    self.loadout_key(key);
                     return;
                 }
                 (hud::Mode::Memories, Keycode::Escape) => {
