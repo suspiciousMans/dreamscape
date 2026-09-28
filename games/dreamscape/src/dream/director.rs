@@ -71,6 +71,29 @@ pub struct DreamDirector {
     pub nightmare_every: u32,
     /// Themes to use next, front first, instead of rolling (the prologue).
     pub forced: Vec<DreamTheme>,
+    /// The loadout's dreams, each due once at `CARD_DEPTHS`.
+    pub cards: Vec<CardDream>,
+    /// The current dream is one of the loadout's.
+    pub card_dream: bool,
+    /// The current dream's second theme, when it's a fused one.
+    pub blend: Option<DreamTheme>,
+    /// Index into `cards` of the dream the portal leads to, if it's one.
+    next_card: Option<usize>,
+}
+
+/// A loadout card's dream, planned into the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CardDream {
+    pub theme: DreamTheme,
+    pub blend: Option<DreamTheme>,
+    /// The depth it's due at; it slides later past a nightmare.
+    pub at: u32,
+    pub done: bool,
+}
+
+/// Card dreams come at depths 3, 6, 9, 12, 15.
+pub fn card_depth(i: usize) -> u32 {
+    3 + 3 * i as u32
 }
 
 impl DreamDirector {
@@ -93,6 +116,49 @@ impl DreamDirector {
             nightmare: false,
             nightmare_every: NIGHTMARE_EVERY,
             forced: Vec::new(),
+            cards: Vec::new(),
+            card_dream: false,
+            blend: None,
+            next_card: None,
+        }
+    }
+
+    /// Plans the loadout's dreams into the run (the waking dream can't be
+    /// planned: it would end the run).
+    pub fn plan_cards(&mut self, dreams: &[(DreamTheme, Option<DreamTheme>)]) {
+        self.cards = dreams
+            .iter()
+            .filter(|(t, _)| *t != DreamTheme::Awakening)
+            .enumerate()
+            .map(|(i, &(theme, blend))| CardDream {
+                theme,
+                blend,
+                at: card_depth(i),
+                done: false,
+            })
+            .collect();
+        self.pick_next_card();
+    }
+
+    pub fn is_nightmare_depth(&self, depth: u32) -> bool {
+        depth.is_multiple_of(self.nightmare_every.max(2))
+    }
+
+    /// Points the portal at a due card dream, unless the next dream is a
+    /// nightmare or this one was a card dream. (A card dream may repeat the
+    /// dream before it; sliding for that too could push it two late.)
+    fn pick_next_card(&mut self) {
+        self.next_card = None;
+        if !self.forced.is_empty() || self.card_dream {
+            return;
+        }
+        let upcoming = self.depth + 1;
+        if self.is_nightmare_depth(upcoming) {
+            return;
+        }
+        if let Some(i) = self.cards.iter().position(|c| !c.done && c.at <= upcoming) {
+            self.next_card = Some(i);
+            self.next = self.cards[i].theme;
         }
     }
 
@@ -169,10 +235,19 @@ impl DreamDirector {
         {
             self.next = DreamTheme::WhiteDissolve;
         }
+        self.card_dream = false;
+        self.blend = None;
+        if let Some(i) = self.next_card.take() {
+            let c = &mut self.cards[i];
+            c.done = true;
+            self.card_dream = true;
+            self.blend = c.blend;
+        }
+        self.pick_next_card();
         // Always roll, so the shard sequence doesn't depend on lucidity.
         let roll: f64 = self.rng.gen();
         let lucky = roll < (SHARD_CHANCE + self.shard_bonus).clamp(0.05, 0.95);
-        self.nightmare = self.depth.is_multiple_of(self.nightmare_every.max(2));
+        self.nightmare = self.is_nightmare_depth(self.depth);
         // A nightmare has no shard slot: the wake door waits for the next dream.
         self.has_shard = !self.nightmare && (lucky || self.lucid());
         Some(self.theme)
@@ -185,6 +260,8 @@ impl DreamDirector {
         self.theme = DreamTheme::Awakening;
         self.has_shard = false;
         self.nightmare = false;
+        self.card_dream = false;
+        self.blend = None;
     }
 }
 
@@ -230,6 +307,57 @@ mod tests {
                 "seed {seed} repeated a dream back-to-back"
             );
         }
+    }
+
+    #[test]
+    fn card_dreams_come_spaced_out_and_never_on_a_nightmare() {
+        use DreamTheme::*;
+        let plan = [Garden, TheTunnel, MirrorHall, JellyfishSky, Elfworks];
+        for seed in 0..200 {
+            for every in [2, 3, 5] {
+                let mut d = DreamDirector::new(seed);
+                d.nightmare_every = every;
+                d.plan_cards(&plan.map(|t| (t, None)));
+                let mut hits: Vec<(u32, DreamTheme)> = Vec::new();
+                let mut last_card = false;
+                for _ in 0..20 {
+                    let promised = d.next;
+                    let t = d.descend().unwrap();
+                    assert_eq!(t, promised, "the portal preview stays honest");
+                    if d.card_dream {
+                        assert!(!d.nightmare, "seed {seed}: card dream on a nightmare");
+                        assert!(!last_card, "seed {seed}: card dreams back to back");
+                        hits.push((d.depth, t));
+                    }
+                    last_card = d.card_dream;
+                }
+                assert_eq!(hits.len(), 5, "seed {seed} every {every}: {hits:?}");
+                for (i, &(depth, t)) in hits.iter().enumerate() {
+                    assert_eq!(t, plan[i]);
+                    let due = card_depth(i);
+                    assert!(
+                        depth == due || depth == due + 1,
+                        "{t:?} at {depth}, due {due}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fused_card_dream_blends_and_the_waking_dream_is_never_planned() {
+        use DreamTheme::*;
+        let mut d = DreamDirector::new(3);
+        d.nightmare_every = 5;
+        d.plan_cards(&[(Awakening, None), (Garden, Some(MyceliumGrove))]);
+        assert_eq!(d.cards.len(), 1);
+        while d.depth < 3 {
+            d.descend();
+        }
+        assert!(d.card_dream);
+        assert_eq!(d.blend, Some(MyceliumGrove));
+        d.descend();
+        assert_eq!(d.blend, None);
     }
 
     #[test]

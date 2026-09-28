@@ -2435,6 +2435,12 @@ impl DreamscapeGame {
                 self.stats.time,
                 self.stats.skipped,
             ),
+            card_dreams: self
+                .director
+                .cards
+                .iter()
+                .map(|c| (c.theme, c.blend))
+                .collect(),
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -2645,19 +2651,20 @@ impl DreamscapeGame {
     fn begin_run(&mut self) {
         self.eye_sticky = false;
         self.shards_this_run = 0;
-        // Abilities come from the loadout's cards (none in the prologue).
-        self.run = if self.prologue.is_some() {
-            RunUpgrades::default()
+        // Abilities come from the loadout's cards (none in the prologue),
+        // and each card's dream is planned into the run.
+        let cards = if self.prologue.is_some() {
+            Vec::new()
         } else {
-            let cards = self.booklet.loadout_cards();
-            if !cards.is_empty() {
-                log::info!(
-                    "Loadout: {:?}",
-                    cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
-                );
-            }
-            RunUpgrades::from_loadout(&cards)
+            self.booklet.loadout_cards()
         };
+        if !cards.is_empty() {
+            log::info!(
+                "Loadout: {:?}",
+                cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        self.run = RunUpgrades::from_loadout(&cards);
         let asc = progress::Ascension(
             if self.daily.is_some() || self.autopilot || self.prologue.is_some() {
                 0
@@ -2668,6 +2675,8 @@ impl DreamscapeGame {
         self.active_asc = asc;
         self.director.shards_to_wake += asc.extra_shards();
         self.director.nightmare_every = asc.nightmare_every();
+        self.director
+            .plan_cards(&cards.iter().map(|c| (c.theme, c.fused)).collect::<Vec<_>>());
         if asc.always_hard() {
             self.director.hard_from.get_or_insert(0);
         }
@@ -3336,7 +3345,7 @@ impl DreamscapeGame {
             enemies: dream.patrols.len() as u32,
             shard_taken: false,
             art: dream.surfaces.floor.clone(),
-            blend: None,
+            blend: self.director.blend,
         });
         log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(

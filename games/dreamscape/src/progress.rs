@@ -196,6 +196,9 @@ pub struct SavedRun {
     pub run_log: Vec<DreamRecord>,
     pub seen_kinds: Vec<EnemyKind>,
     pub stats: (u32, u32, u32, f32, u32),
+    /// The loadout's dreams (theme, fused theme), replanned on continue.
+    #[serde(default)]
+    pub card_dreams: Vec<(DreamTheme, Option<DreamTheme>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +248,8 @@ impl SavedRun {
     /// of descents lands on the same dream types, then the rest is restored.
     pub fn director(&self) -> DreamDirector {
         let mut d = DreamDirector::with_length(self.run_seed, self.length.into());
+        d.nightmare_every = Ascension(self.ascension).nightmare_every();
+        d.plan_cards(&self.card_dreams);
         for _ in 0..self.depth {
             d.descend();
         }
@@ -383,6 +388,7 @@ mod tests {
             run_log: vec![],
             seen_kinds: vec![EnemyKind::Stalker],
             stats: (1, 2, 0, 88.0, 0),
+            card_dreams: Vec::new(),
         }
     }
 
@@ -405,6 +411,22 @@ mod tests {
         assert_eq!(held, vec![Ability::Blink, Ability::Phase]);
         assert_eq!(r.rerolls_used, 1);
         assert_eq!(s.motif.unwrap().kind(), PropKind::Tree);
+    }
+
+    #[test]
+    fn a_continued_run_keeps_its_card_dreams() {
+        use crate::dream::DreamTheme::*;
+        let mut s = sample(7);
+        s.card_dreams = vec![(Garden, None), (MirrorHall, Some(TheTunnel))];
+        let mut live = DreamDirector::with_length(77, RunLength::Long);
+        live.nightmare_every = Ascension(2).nightmare_every();
+        live.plan_cards(&s.card_dreams);
+        for _ in 0..7 {
+            live.descend();
+        }
+        let d = s.director();
+        assert_eq!((d.theme, d.next), (live.theme, live.next));
+        assert_eq!(d.cards, live.cards);
     }
 
     #[test]
