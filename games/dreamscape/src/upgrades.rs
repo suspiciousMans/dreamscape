@@ -1,6 +1,7 @@
 //! The roguelike layer: every dream you get through offers three random
 //! upgrades for the rest of the run. Most are passive (faster feet, wider
-//! sight, calmer enemies); the rarer ones teach an *ability* bound to a key.
+//! sight, calmer enemies). Abilities bound to a key come from the run's
+//! loadout cards (`from_loadout`), not from picks.
 //! Everything is pure and unit-tested; `main.rs` reads the multipliers.
 
 use engine::glam::Vec3;
@@ -666,6 +667,37 @@ impl RunUpgrades {
         self.taken.push(u);
     }
 
+    /// A run's starting kit from its loadout cards: the first cards fill
+    /// the ability slots (no active twice), every card adds its passive, a
+    /// fused card adds its second dream's passive too, and a resonant one
+    /// one more stack. Passives stop at their caps.
+    pub fn from_loadout(cards: &[crate::cards::Card]) -> Self {
+        use crate::cards::Rarity;
+        use crate::powers::power;
+        let mut run = Self::default();
+        for c in cards {
+            let p = power(c.theme);
+            if run.abilities.len() < ABILITY_SLOTS
+                && !run.abilities.iter().any(|a| a.ability == p.active)
+            {
+                run.take(Upgrade::Learn(p.active));
+            }
+            let mut passives = vec![p.passive];
+            if let Some(b) = c.fused {
+                passives.push(power(b).passive);
+            }
+            if c.rarity == Rarity::Resonant {
+                passives.push(p.passive);
+            }
+            for u in passives {
+                if run.count(u) < u.info().max {
+                    run.taken.push(u);
+                }
+            }
+        }
+        run
+    }
+
     pub fn stats(&self) -> Stats {
         use crate::dream::SHARD_CHANCE;
         Stats {
@@ -916,10 +948,10 @@ impl RunUpgrades {
 /// Deterministic per `seed`.
 pub fn roll_choices(seed: u64, run: &RunUpgrades, roll: Roll) -> Vec<Upgrade> {
     let mut rng = StdRng::seed_from_u64(seed ^ 0x0F_FE12);
+    // Abilities come from loadout cards now, never from picks.
     let mut pool: Vec<Upgrade> = PASSIVES
         .iter()
         .copied()
-        .chain(ALL_ABILITIES.iter().map(|&a| Upgrade::Learn(a)))
         .filter(|&u| run.available(u))
         .filter(|&u| !roll.boss || u.tier() >= Tier::Rare)
         .collect();
@@ -999,16 +1031,22 @@ mod tests {
         for u in PASSIVES {
             assert!(seen.contains(&u), "{u:?} never offered");
         }
-        for a in ALL_ABILITIES.iter().skip(1) {
-            assert!(seen.contains(&Upgrade::Learn(*a)), "{a:?} never offered");
-        }
         for c in ALL_CURSES {
             assert!(seen.contains(&Upgrade::Cursed(c)), "{c:?} never offered");
         }
-        assert!(
-            !seen.contains(&Upgrade::Learn(Ability::Dash)),
-            "already held"
-        );
+    }
+
+    #[test]
+    fn abilities_come_from_cards_not_picks() {
+        let run = RunUpgrades::default();
+        for seed in 0..5000 {
+            for depth in [1, 5, 15] {
+                for boss in [false, true] {
+                    let c = roll_choices(seed, &run, Roll { depth, boss });
+                    assert!(!c.iter().any(|u| u.is_ability()), "{c:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1342,20 +1380,59 @@ mod tests {
         assert_eq!(t.rewind(5.0), None);
     }
 
+    fn card(theme: crate::dream::DreamTheme) -> crate::cards::Card {
+        let r = crate::cards::tests::record(theme, 1, 3, 0.2, false);
+        crate::cards::card_from(&r)
+    }
+
     #[test]
-    fn nine_abilities_all_learnable() {
-        assert_eq!(ALL_ABILITIES.len(), 9);
-        let seen: HashSet<Upgrade> = (0..5000)
-            .flat_map(|s| roll(s, &RunUpgrades::default()))
-            .collect();
-        for a in [
-            Ability::Decoy,
-            Ability::Float,
-            Ability::Flare,
-            Ability::Rewind,
-        ] {
-            assert!(seen.contains(&Upgrade::Learn(a)), "{a:?} never offered");
-        }
+    fn one_loadout_card_gives_one_active_and_one_passive() {
+        use crate::dream::DreamTheme::*;
+        let r = RunUpgrades::from_loadout(&[card(TheTunnel)]);
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].ability, Ability::Dash);
+        assert_eq!(r.count(Upgrade::SwiftFeet), 1);
+        assert_eq!(r.taken.iter().filter(|u| !u.is_ability()).count(), 1);
+    }
+
+    #[test]
+    fn three_cards_give_two_actives_and_three_passives() {
+        use crate::dream::DreamTheme::*;
+        let r = RunUpgrades::from_loadout(&[card(TheTunnel), card(Garden), card(SkyStairs)]);
+        let actives: Vec<Ability> = r.abilities.iter().map(|a| a.ability).collect();
+        assert_eq!(actives, vec![Ability::Dash, Ability::ShardCall]);
+        assert_eq!(r.taken.iter().filter(|u| !u.is_ability()).count(), 3);
+    }
+
+    #[test]
+    fn a_shared_active_is_learned_once() {
+        use crate::dream::DreamTheme::*;
+        // Both teach DASH: the second fills no slot, the third does.
+        let r = RunUpgrades::from_loadout(&[card(TheTunnel), card(SynesthesiaHall), card(Garden)]);
+        let actives: Vec<Ability> = r.abilities.iter().map(|a| a.ability).collect();
+        assert_eq!(actives, vec![Ability::Dash, Ability::ShardCall]);
+    }
+
+    #[test]
+    fn fused_and_resonant_cards_bring_more_passives_within_caps() {
+        use crate::cards::Rarity;
+        use crate::dream::DreamTheme::*;
+        let mut f = card(Garden);
+        f.rarity = Rarity::Fused;
+        f.fused = Some(TheTunnel);
+        let r = RunUpgrades::from_loadout(&[f.clone()]);
+        assert_eq!(r.count(Upgrade::LuckyMemory), 1);
+        assert_eq!(r.count(Upgrade::SwiftFeet), 1);
+        f.rarity = Rarity::Resonant;
+        let r = RunUpgrades::from_loadout(&[f]);
+        assert_eq!(r.count(Upgrade::LuckyMemory), 2);
+        // SkyStairs' DOUBLE JUMP caps at 1: a second card can't push past it.
+        let r = RunUpgrades::from_loadout(&[card(SkyStairs), card(SkyStairs)]);
+        assert_eq!(r.count(Upgrade::DoubleJump), 1);
+        assert!(
+            !r.available(Upgrade::DoubleJump),
+            "picks won't offer a maxed passive"
+        );
     }
 
     #[test]
