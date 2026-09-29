@@ -22,7 +22,6 @@ pub enum Moment {
     SlotUnlocked,
     WakeDoor,
     WentDeeper,
-    #[allow(dead_code)] // Part G: fused dreams
     FusedDream,
 }
 

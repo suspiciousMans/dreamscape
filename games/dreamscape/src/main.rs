@@ -34,12 +34,14 @@ mod dream;
 mod enemy_ai;
 mod eye;
 mod fpv;
+mod fusion;
 mod gameplay;
 mod hud;
 mod hunter;
 mod loadout_ui;
 mod lore;
 mod memories_ui;
+mod merge_ui;
 mod music;
 mod objective;
 mod pad;
@@ -397,6 +399,11 @@ pub struct DreamscapeGame {
     objective_kind: Option<objective::Kind>,
     memories_sel: usize,
     loadout_sel: usize,
+    /// The merge screen: cursor, first card picked, last result, where to go back.
+    merge_sel: usize,
+    merge_first: Option<u32>,
+    merge_status: Option<String>,
+    merge_return: hud::Mode,
     /// The first-time guided dreams, while they run.
     prologue: Option<tutorial::Prologue>,
     /// The eye's line is a tutorial prompt: stays up until the step changes.
@@ -571,6 +578,10 @@ impl DreamscapeGame {
             objective_kind: None,
             memories_sel: 0,
             loadout_sel: 0,
+            merge_sel: 0,
+            merge_first: None,
+            merge_status: None,
+            merge_return: hud::Mode::Title,
             prologue: None,
             eye_sticky: false,
             eye_queue: Vec::new(),
@@ -761,13 +772,26 @@ impl DreamscapeGame {
         self.open_upgrade_choice();
     }
 
+    /// After a beaten nightmare's reward, the moth offers to merge cards.
+    fn moth_after_nightmare(&mut self) {
+        let cards: Vec<cards::Card> = self.booklet.cards().cloned().collect();
+        if self.boss_reward
+            && !self.autopilot
+            && self.prologue.is_none()
+            && merge_ui::any_pair(&cards)
+        {
+            self.open_merge(hud::Mode::Playing);
+        }
+    }
+
     fn skip_choice(&mut self) {
         if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) {
             return;
         }
         self.choice = None;
-        self.boss_reward = false;
         self.mode = hud::Mode::Playing;
+        self.moth_after_nightmare();
+        self.boss_reward = false;
         self.bonus_dust += upgrades::SKIP_DUST;
         self.stats.skipped += 1;
         log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
@@ -825,6 +849,7 @@ impl DreamscapeGame {
                 };
                 let before = self.run.synergies();
                 self.run.take(u);
+                self.moth_after_nightmare();
                 self.boss_reward = false;
                 self.director.shard_bonus = self.shard_bonus();
                 if u == Upgrade::LucidHeart {
@@ -1030,6 +1055,16 @@ impl DreamscapeGame {
                 }
             } else {
                 loadout_ui::LoadoutView::default()
+            },
+            merge: if self.mode == hud::Mode::Merge {
+                merge_ui::MergeView {
+                    cards: self.booklet.cards().cloned().collect(),
+                    selected: self.merge_sel,
+                    first: self.merge_first,
+                    status: self.merge_status.clone(),
+                }
+            } else {
+                merge_ui::MergeView::default()
             },
             title_age: self.title_age,
             warning_age: self.warning_age,
@@ -2690,6 +2725,67 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Loadout;
     }
 
+    /// The moth's merge screen; `back` is where escape returns to.
+    fn open_merge(&mut self, back: hud::Mode) {
+        self.merge_return = back;
+        self.merge_first = None;
+        self.merge_status = None;
+        self.merge_sel = self
+            .merge_sel
+            .min(self.booklet.card_count().saturating_sub(1));
+        self.mode = hud::Mode::Merge;
+    }
+
+    fn merge_key(&mut self, key: Keycode) {
+        let n = self.booklet.card_count();
+        let (dx, dy) = match key {
+            Keycode::A | Keycode::Left => (-1, 0),
+            Keycode::D | Keycode::Right => (1, 0),
+            Keycode::W | Keycode::Up => (0, -1),
+            Keycode::S | Keycode::Down => (0, 1),
+            _ => (0, 0),
+        };
+        if (dx, dy) != (0, 0) {
+            self.merge_sel = loadout_ui::step(self.merge_sel, n, dx, dy);
+            return;
+        }
+        match key {
+            Keycode::Return | Keycode::Space => {
+                let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number)
+                else {
+                    return;
+                };
+                match self.merge_first {
+                    None => {
+                        self.merge_first = Some(number);
+                        self.merge_status = None;
+                        self.sfx(Sound::Pick);
+                    }
+                    Some(a) if a == number => self.merge_first = None,
+                    Some(a) => match self.booklet.merge(a, number) {
+                        Some(c) => {
+                            log::info!("Merged #{a} and #{number}: {} ({:?})", c.name, c.rarity);
+                            self.merge_status = Some(format!("{}: {}", c.rarity.label(), c.name));
+                            self.merge_first = None;
+                            self.merge_sel = self
+                                .booklet
+                                .cards()
+                                .position(|x| x.number == a)
+                                .unwrap_or(0);
+                            self.flash.trigger([1.0, 0.8, 1.0], 0.5);
+                            self.sfx(Sound::Pick);
+                            self.persist_booklet();
+                        }
+                        None => self.sfx(Sound::Denied),
+                    },
+                }
+            }
+            Keycode::Escape if self.merge_first.is_some() => self.merge_first = None,
+            Keycode::Escape => self.mode = self.merge_return,
+            _ => {}
+        }
+    }
+
     fn loadout_key(&mut self, key: Keycode) {
         let n = self.booklet.card_count();
         let (dx, dy) = match key {
@@ -3418,7 +3514,7 @@ impl DreamscapeGame {
         self.dream_age = 0.0;
         self.air_jumps_used = 0;
         let goals = self.plan_goals();
-        let dream = if self.director.nightmare {
+        let mut dream = if self.director.nightmare {
             dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
         } else {
             dream::generate_with(
@@ -3431,6 +3527,10 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        if let Some(b) = self.director.blend {
+            dream::blend_surfaces(&mut dream.surfaces, b);
+            log::info!("Fused dream: {theme:?} with {b:?}");
+        }
         // No shard cell (a pure corridor): nothing to ask for.
         let kind = self.objective_kind.filter(|_| dream.shard.is_some());
         self.objective = kind.map(|k| match k {
@@ -3998,6 +4098,9 @@ impl DreamscapeGame {
             self.eye_line = None;
             self.think(eye::Moment::NightmareAhead, false);
         }
+        if self.director.blend.is_some() {
+            self.think(eye::Moment::FusedDream, false);
+        }
 
         // The next dream inherits one of this dream's prop kinds as its motif.
         self.motif = spec
@@ -4303,6 +4406,16 @@ impl Game for DreamscapeGame {
                 }
                 (hud::Mode::Loadout, _) => {
                     self.loadout_key(key);
+                    return;
+                }
+                (hud::Mode::Merge, _) => {
+                    self.merge_key(key);
+                    return;
+                }
+                (hud::Mode::Store, Keycode::M) => {
+                    let back = self.booklet_return;
+                    self.open_merge(hud::Mode::Store);
+                    self.booklet_return = back;
                     return;
                 }
                 (hud::Mode::Memories, Keycode::Escape) => {

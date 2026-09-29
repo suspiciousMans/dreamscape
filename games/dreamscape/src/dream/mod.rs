@@ -12,8 +12,8 @@ mod variant;
 mod vocab;
 
 pub use build::{
-    generate_nightmare, generate_with, portal_surface, Atmosphere, Block, BlockKind, Dream, Goals,
-    Pressure, TexSpec, SIGILS,
+    blend_surfaces, generate_nightmare, generate_with, portal_surface, Atmosphere, Block,
+    BlockKind, Dream, Goals, Pressure, TexSpec, SIGILS,
 };
 pub use director::{DreamDirector, RunLength, DEEPER_SHARDS, NIGHTMARE_EVERY, SHARD_CHANCE};
 pub use meshes::{build as build_mesh, Shape, ALL_SHAPES};

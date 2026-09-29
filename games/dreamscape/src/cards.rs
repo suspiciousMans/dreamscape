@@ -430,7 +430,8 @@ impl Booklet {
     }
 
     fn push_cards(&mut self, run_seed: u64, deepest: u32, cards: Vec<Card>) -> usize {
-        let mut next = self.card_count() as u32 + 1;
+        // Max, not count: merging removes cards, and numbers never repeat.
+        let mut next = self.cards().map(|c| c.number).max().unwrap_or(0) + 1;
         let mut seen: HashSet<String> = self.cards().map(|c| c.name.clone()).collect();
         let cards: Vec<Card> = cards
             .into_iter()

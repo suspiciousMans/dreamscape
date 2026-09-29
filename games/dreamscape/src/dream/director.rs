@@ -140,6 +140,11 @@ impl DreamDirector {
         self.pick_next_card();
     }
 
+    /// No prologue steering left (the prologue's dreams never fuse).
+    fn forced_run_free(&self) -> bool {
+        self.forced.is_empty() && self.run_seed != crate::tutorial::PROLOGUE_SEED
+    }
+
     pub fn is_nightmare_depth(&self, depth: u32) -> bool {
         depth.is_multiple_of(self.nightmare_every.max(2))
     }
@@ -248,6 +253,9 @@ impl DreamDirector {
         let roll: f64 = self.rng.gen();
         let lucky = roll < (SHARD_CHANCE + self.shard_bonus).clamp(0.05, 0.95);
         self.nightmare = self.is_nightmare_depth(self.depth);
+        if !self.card_dream && !self.nightmare && self.forced_run_free() {
+            self.blend = natural_blend(self.dream_seed(), self.depth, self.theme);
+        }
         // A nightmare has no shard slot: the wake door waits for the next dream.
         self.has_shard = !self.nightmare && (lucky || self.lucid());
         Some(self.theme)
@@ -263,6 +271,35 @@ impl DreamDirector {
         self.card_dream = false;
         self.blend = None;
     }
+}
+
+/// Chance a dream fuses on its own: none early, growing slowly, capped.
+pub fn fuse_chance(depth: u32) -> f64 {
+    if depth < 5 {
+        return 0.0;
+    }
+    (0.02 + 0.004 * (depth - 5) as f64).min(0.14)
+}
+
+/// Whether this dream fuses on its own, and with what (its own RNG stream,
+/// so the rest of the run replays unchanged).
+fn natural_blend(dream_seed: u64, depth: u32, theme: DreamTheme) -> Option<DreamTheme> {
+    let mut rng = StdRng::seed_from_u64(dream_seed ^ 0xF05E_D0D0);
+    if !rng.gen_bool(fuse_chance(depth)) {
+        return None;
+    }
+    let pool: Vec<DreamTheme> = crate::dream::ALL_THEMES
+        .iter()
+        .copied()
+        .filter(|&t| {
+            t != theme
+                && !matches!(
+                    t,
+                    DreamTheme::Awakening | DreamTheme::Lobby | DreamTheme::WhiteDissolve
+                )
+        })
+        .collect();
+    Some(pool[rng.gen_range(0..pool.len())])
 }
 
 fn roll(from: DreamTheme, rng: &mut StdRng) -> DreamTheme {
@@ -358,6 +395,30 @@ mod tests {
         assert_eq!(d.blend, Some(MyceliumGrove));
         d.descend();
         assert_eq!(d.blend, None);
+    }
+
+    #[test]
+    fn dreams_sometimes_fuse_on_their_own_deeper_down() {
+        let mut fused = 0;
+        let mut total = 0;
+        for seed in 0..10 {
+            let mut d = DreamDirector::new(seed);
+            for _ in 0..300 {
+                d.descend();
+                total += 1;
+                if let Some(b) = d.blend {
+                    fused += 1;
+                    assert!(!d.nightmare, "a nightmare never fuses");
+                    assert!(d.depth >= 5);
+                    assert_ne!(b, d.theme);
+                }
+            }
+        }
+        let rate = fused as f64 / total as f64;
+        assert!((0.04..=0.16).contains(&rate), "{rate}");
+        assert_eq!(fuse_chance(4), 0.0);
+        assert!(fuse_chance(6) < fuse_chance(20));
+        assert_eq!(fuse_chance(1000), 0.14);
     }
 
     #[test]
