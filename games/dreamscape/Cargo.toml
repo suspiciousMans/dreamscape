@@ -14,6 +14,7 @@ env_logger = "0.11"
 serde = { workspace = true }
 ron = { workspace = true }
 image = { workspace = true }
+steamworks = { version = "0.13", optional = true }
 
 [[bin]]
 name = "dreamscape"
@@ -23,3 +24,6 @@ path = "src/main.rs"
 # Keep DREAMSCAPE_* dev switches working in a release build (for testing a
 # packaged copy). Never ship with this on.
 dev = []
+# Steamworks: achievements (and later lobbies). Off by default; needs the
+# Steam client running, and steam_appid.txt next to the exe for dev runs.
+steam = ["dep:steamworks"]
