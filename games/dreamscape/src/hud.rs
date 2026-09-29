@@ -36,6 +36,8 @@ pub enum Mode {
     Merge,
     /// The bottom: the eye's last words, then credits.
     Ending,
+    /// Hosting or joining a shared dream.
+    Lobby,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -88,6 +90,9 @@ pub struct HudView {
     pub merge: crate::merge_ui::MergeView,
     /// Seconds into the ending.
     pub ending_age: f32,
+    pub lobby: crate::coop_game::LobbyView,
+    /// Co-op status while playing ("3 dreamers · you're a ghost (40%)").
+    pub coop_line: Option<String>,
     /// A just-earned achievement: (name, seconds shown).
     pub achievement: Option<(String, f32)>,
     /// Seconds since this dream (or the journal) began.
@@ -364,6 +369,15 @@ pub fn draw(
         ));
         achievement_toast(&top, screen, name, *age);
     }
+    if let (Mode::Playing, Some(line)) = (v.mode, &v.coop_line) {
+        p.text(
+            Pos2::new(screen.center().x, screen.top() + 64.0),
+            Align2::CENTER_TOP,
+            line,
+            FontId::monospace(16.0),
+            rgba([220, 210, 255], 0.85),
+        );
+    }
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
@@ -379,6 +393,7 @@ pub fn draw(
         Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
         Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
         Mode::Ending => return crate::ending::draw(&p, screen, v),
+        Mode::Lobby => return crate::coop_game::draw_lobby(&p, screen, v),
         Mode::Note => {
             if let Some(n) = &v.note {
                 return crate::memories_ui::draw_note(&p, screen, v, n);

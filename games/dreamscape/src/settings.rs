@@ -81,6 +81,8 @@ pub struct Settings {
     pub invert_y: bool,
     /// (action, SDL key name).
     pub keys: Vec<(Action, String)>,
+    /// The last co-op host joined.
+    pub coop_address: String,
 }
 
 impl Default for Settings {
@@ -99,6 +101,7 @@ impl Default for Settings {
                 .iter()
                 .map(|&a| (a, a.default_key().to_string()))
                 .collect(),
+            coop_address: "127.0.0.1".into(),
         }
     }
 }
