@@ -599,6 +599,8 @@ pub struct RunUpgrades {
     pub penalty_cards: usize,
     /// Ascension: no free reroll.
     pub no_free_reroll: bool,
+    /// A companion's weight, pressing on one stat (`companion::burden`).
+    pub burden: Option<crate::lore::Weight>,
 }
 
 /// Free rerolls per run.
@@ -698,6 +700,26 @@ impl RunUpgrades {
         run
     }
 
+    /// A collected dreamer rides along: their boon, and their burden.
+    pub fn with_companion(mut self, w: crate::lore::Weight) -> Self {
+        let u = crate::companion::boon(w);
+        for _ in 0..crate::companion::BOON_STACKS {
+            if self.count(u) < u.info().max {
+                self.taken.push(u);
+            }
+        }
+        self.burden = Some(w);
+        self
+    }
+
+    /// The burden's factor if it weighs on `s`, else `none`.
+    fn weigh(&self, s: crate::companion::Stat, none: f32) -> f32 {
+        match self.burden {
+            Some(w) if crate::companion::burden(w) == s => crate::companion::burden_factor(s),
+            _ => none,
+        }
+    }
+
     pub fn stats(&self) -> Stats {
         use crate::dream::SHARD_CHANCE;
         Stats {
@@ -784,11 +806,15 @@ impl RunUpgrades {
     pub fn choice_count(&self) -> usize {
         (3 + self.n(Upgrade::WideChoice)
             - self.cursed(Curse::Greed) as i32
-            - self.penalty_cards as i32)
+            - self.penalty_cards as i32
+            - self.weigh(crate::companion::Stat::Choices, 0.0) as i32)
             .max(2) as usize
     }
 
     pub fn speed(&self) -> f32 {
+        self.weigh(crate::companion::Stat::Speed, 1.0) * self.speed_unburdened()
+    }
+    fn speed_unburdened(&self) -> f32 {
         1.0 + 0.12 * self.n(Upgrade::SwiftFeet) as f32
             + if self.cursed(Curse::GlassCannon) {
                 0.3
@@ -797,6 +823,9 @@ impl RunUpgrades {
             }
     }
     pub fn jump(&self) -> f32 {
+        self.weigh(crate::companion::Stat::Jump, 1.0) * self.jump_unburdened()
+    }
+    fn jump_unburdened(&self) -> f32 {
         1.0 + 0.12 * self.n(Upgrade::Spring) as f32
             + if self.cursed(Curse::Featherfall) {
                 0.3
@@ -815,15 +844,17 @@ impl RunUpgrades {
     }
     /// Multiplies the sight radius.
     pub fn sight(&self) -> f32 {
-        (if self.cursed(Curse::Insomnia) {
-            0.75
-        } else {
-            1.0
-        }) * if self.active(Ability::Flare) {
-            FLARE_SIGHT
-        } else {
-            1.0
-        }
+        self.weigh(crate::companion::Stat::Sight, 1.0)
+            * (if self.cursed(Curse::Insomnia) {
+                0.75
+            } else {
+                1.0
+            })
+            * if self.active(Ability::Flare) {
+                FLARE_SIGHT
+            } else {
+                1.0
+            }
     }
     /// Multiplies gravity (FLOAT).
     pub fn gravity(&self) -> f32 {
@@ -835,14 +866,16 @@ impl RunUpgrades {
     }
     /// Multiplies how far away enemies notice you.
     pub fn alert(&self) -> f32 {
-        if self.cursed(Curse::GlassCannon) {
-            1.4
-        } else {
-            1.0
-        }
+        self.weigh(crate::companion::Stat::Alert, 1.0)
+            * if self.cursed(Curse::GlassCannon) {
+                1.4
+            } else {
+                1.0
+            }
     }
     pub fn enemy_speed(&self) -> f32 {
-        0.9_f32.powi(self.n(Upgrade::HeavyAir))
+        self.weigh(crate::companion::Stat::EnemySpeed, 1.0)
+            * 0.9_f32.powi(self.n(Upgrade::HeavyAir))
             * if self.cursed(Curse::BloodMoon) {
                 1.15
             } else {
@@ -850,7 +883,8 @@ impl RunUpgrades {
             }
     }
     pub fn grace(&self) -> f32 {
-        (1.0 + 0.6 * self.n(Upgrade::LongBreath) as f32)
+        self.weigh(crate::companion::Stat::Grace, 1.0)
+            * (1.0 + 0.6 * self.n(Upgrade::LongBreath) as f32)
             * if self.has(Synergy::SafeHarbour) {
                 2.0
             } else {
@@ -863,7 +897,8 @@ impl RunUpgrades {
             }
     }
     pub fn shard_bonus(&self) -> f64 {
-        0.12 * self.n(Upgrade::ShardSense) as f64
+        -(self.weigh(crate::companion::Stat::ShardBonus, 0.0) as f64)
+            + 0.12 * self.n(Upgrade::ShardSense) as f64
             + if self.cursed(Curse::Greed) { 0.25 } else { 0.0 }
     }
     pub fn anchors_left(&self) -> u32 {

@@ -34,6 +34,8 @@ pub enum Mode {
     Loadout,
     /// The moth merging two cards into one.
     Merge,
+    /// The bottom: the eye's last words, then credits.
+    Ending,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -84,6 +86,8 @@ pub struct HudView {
     pub memories: crate::memories_ui::MemoriesView,
     pub loadout: crate::loadout_ui::LoadoutView,
     pub merge: crate::merge_ui::MergeView,
+    /// Seconds into the ending.
+    pub ending_age: f32,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -364,6 +368,7 @@ pub fn draw(
         Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
         Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
         Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
+        Mode::Ending => return crate::ending::draw(&p, screen, v),
         Mode::Note => {
             if let Some(n) = &v.note {
                 return crate::memories_ui::draw_note(&p, screen, v, n);
@@ -683,6 +688,12 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
             );
         }
     }
+}
+
+/// The ending's eye: centred, lucid, with the lid at `open`.
+pub(crate) fn draw_big_eye(p: &egui::Painter, c: Pos2, open: f32, v: &HudView) {
+    let cells = crate::pixels::eye_pixels(open.max(0.02), None, true);
+    paint_eye(p, c, &cells, iris_color(v, true), v);
 }
 
 /// The shop's preview: the HUD eye, wide open and glancing about, in style `e`.

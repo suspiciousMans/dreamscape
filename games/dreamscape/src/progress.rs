@@ -199,6 +199,9 @@ pub struct SavedRun {
     /// The loadout's dreams (theme, fused theme), replanned on continue.
     #[serde(default)]
     pub card_dreams: Vec<(DreamTheme, Option<DreamTheme>)>,
+    /// The companion's weight, if one rode along.
+    #[serde(default)]
+    pub burden: Option<crate::lore::Weight>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +271,7 @@ impl SavedRun {
             r.take(u);
         }
         r.anchors_used = self.anchors_used;
+        r.burden = self.burden;
         r.rerolls_used = self.rerolls_used;
         r
     }
@@ -389,6 +393,7 @@ mod tests {
             seen_kinds: vec![EnemyKind::Stalker],
             stats: (1, 2, 0, 88.0, 0),
             card_dreams: Vec::new(),
+            burden: None,
         }
     }
 
