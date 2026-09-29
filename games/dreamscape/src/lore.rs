@@ -326,6 +326,23 @@ impl Lore {
         (id == 0 || depth >= depth_for(k)).then_some(k)
     }
 
+    /// The companion riding along, if they're still a collected dreamer.
+    pub fn companion(&self) -> Option<u32> {
+        self.companion.filter(|id| self.dreamers.contains(id))
+    }
+
+    /// The next choice when cycling the companion slot: none, then each
+    /// collected dreamer in order.
+    pub fn next_companion(&self) -> Option<u32> {
+        match self.companion() {
+            None => self.dreamers.first().copied(),
+            Some(id) => {
+                let i = self.dreamers.iter().position(|&d| d == id).unwrap_or(0);
+                self.dreamers.get(i + 1).copied()
+            }
+        }
+    }
+
     pub fn slots(&self) -> usize {
         (1 + self.count(0) as usize / 3).min(MAX_SLOTS)
     }
@@ -437,5 +454,19 @@ mod tests {
             assert!(!object(t, 0).is_empty(), "{t:?}");
         }
         let _ = DreamTheme::Lobby;
+    }
+
+    #[test]
+    fn the_companion_slot_cycles_through_collected_dreamers() {
+        let mut l = Lore::new(1);
+        assert_eq!(l.next_companion(), None, "nobody collected yet");
+        l.dreamers = vec![3, 5];
+        assert_eq!(l.next_companion(), Some(3));
+        l.companion = Some(3);
+        assert_eq!(l.next_companion(), Some(5));
+        l.companion = Some(5);
+        assert_eq!(l.next_companion(), None);
+        l.companion = Some(7);
+        assert_eq!(l.companion(), None, "not collected");
     }
 }

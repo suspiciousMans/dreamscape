@@ -22,6 +22,9 @@ pub struct LoadoutView {
     pub chosen: Vec<u32>,
     pub slots: usize,
     pub selected: usize,
+    /// The companion slot: `None` until a dreamer is collected, then the
+    /// line to show ("[c] Ada: + CALM MIND x2 · ...", or "[c] nobody").
+    pub companion: Option<String>,
 }
 
 /// Adds the card, or takes it out if it's already in. A full loadout
@@ -171,8 +174,18 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         );
     }
 
+    if let Some(line) = &m.companion {
+        p.text(
+            Pos2::new(cx, row_y + 50.0),
+            Align2::CENTER_TOP,
+            v.k(line),
+            FontId::monospace(15.0),
+            rgba([200, 170, 230], 0.9),
+        );
+    }
+
     // The grid (scrolls with the cursor).
-    let grid_top = row_y + 64.0;
+    let grid_top = row_y + 76.0;
     draw_grid(p, screen, v, &m.cards, m.selected, &m.chosen, grid_top);
 
     // The selected card, big, and what it does.

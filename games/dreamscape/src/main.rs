@@ -27,10 +27,12 @@ mod booklet_ui;
 mod boss;
 mod cards;
 mod codex_ui;
+mod companion;
 mod crash;
 mod dev;
 mod dissolve;
 mod dream;
+mod ending;
 mod enemy_ai;
 mod eye;
 mod fpv;
@@ -404,6 +406,10 @@ pub struct DreamscapeGame {
     merge_first: Option<u32>,
     merge_status: Option<String>,
     merge_return: hud::Mode,
+    /// Seconds into the ending (`Mode::Ending`).
+    ending_age: f32,
+    /// This run's portal leads to the bottom (the ending plays on arrival).
+    to_bottom: bool,
     /// The first-time guided dreams, while they run.
     prologue: Option<tutorial::Prologue>,
     /// The eye's line is a tutorial prompt: stays up until the step changes.
@@ -582,6 +588,8 @@ impl DreamscapeGame {
             merge_first: None,
             merge_status: None,
             merge_return: hud::Mode::Title,
+            ending_age: 0.0,
+            to_bottom: false,
             prologue: None,
             eye_sticky: false,
             eye_queue: Vec::new(),
@@ -770,6 +778,26 @@ impl DreamscapeGame {
         log::info!("Rerolled the pick");
         self.sfx(Sound::Reroll);
         self.open_upgrade_choice();
+    }
+
+    /// Every one of your own notes found, and the ending not yet seen.
+    fn ending_due(&self) -> bool {
+        let l = &self.booklet.lore;
+        self.prologue.is_none()
+            && !l.ending_seen
+            && l.count(0) >= lore::notes_for(0)
+            && (!self.autopilot || crate::dev::var("DREAMSCAPE_ENDING").is_ok())
+    }
+
+    /// [enter] after the credits: the story is told; the run goes on awake.
+    fn finish_ending(&mut self) {
+        if !ending::can_continue(self.ending_age) {
+            return;
+        }
+        self.booklet.lore.ending_seen = true;
+        self.persist_booklet();
+        log::info!("The ending is seen");
+        self.mode = hud::Mode::Playing;
     }
 
     /// After a beaten nightmare's reward, the moth offers to merge cards.
@@ -1052,6 +1080,20 @@ impl DreamscapeGame {
                     chosen: self.booklet.lore.loadout.clone(),
                     slots: self.booklet.lore.slots(),
                     selected: self.loadout_sel,
+                    companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
+                        let l = &self.booklet.lore;
+                        match l.companion() {
+                            Some(id) => {
+                                let d = lore::dreamer(l.save_seed, id);
+                                format!(
+                                    "[c] companion: {}  {}",
+                                    d.name,
+                                    companion::describe(d.weight)
+                                )
+                            }
+                            None => "[c] companion: nobody".to_string(),
+                        }
+                    }),
                 }
             } else {
                 loadout_ui::LoadoutView::default()
@@ -1066,6 +1108,7 @@ impl DreamscapeGame {
             } else {
                 merge_ui::MergeView::default()
             },
+            ending_age: self.ending_age,
             title_age: self.title_age,
             warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
@@ -2373,7 +2416,14 @@ impl DreamscapeGame {
             TitleItem::Memories => (
                 "m",
                 "memories".into(),
-                format!("{} notes found", self.booklet.lore.notes.len()),
+                if self.booklet.lore.ending_seen {
+                    format!(
+                        "{} notes found · you woke up. the others still dream",
+                        self.booklet.lore.notes.len()
+                    )
+                } else {
+                    format!("{} notes found", self.booklet.lore.notes.len())
+                },
             ),
             TitleItem::Codex => (
                 "x",
@@ -2550,6 +2600,7 @@ impl DreamscapeGame {
                 .iter()
                 .map(|c| (c.theme, c.blend))
                 .collect(),
+            burden: self.run.burden,
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -2810,6 +2861,10 @@ impl DreamscapeGame {
                     self.persist_booklet();
                 }
             }
+            Keycode::C if !self.booklet.lore.dreamers.is_empty() => {
+                self.booklet.lore.companion = self.booklet.lore.next_companion();
+                self.persist_booklet();
+            }
             Keycode::Space => self.start_from_title(),
             Keycode::Escape => self.mode = hud::Mode::Title,
             _ => {}
@@ -2888,6 +2943,16 @@ impl DreamscapeGame {
             );
         }
         self.run = RunUpgrades::from_loadout(&cards);
+        if let Some(id) = self
+            .booklet
+            .lore
+            .companion()
+            .filter(|_| self.prologue.is_none())
+        {
+            let d = lore::dreamer(self.booklet.lore.save_seed, id);
+            log::info!("Companion: {} ({})", d.name, d.weight.label());
+            self.run = std::mem::take(&mut self.run).with_companion(d.weight);
+        }
         self.ability_tints = cards
             .iter()
             .map(|c| {
@@ -3137,6 +3202,17 @@ impl DreamscapeGame {
             }
             transition::Pending::Wake => {
                 self.director.wake();
+                if std::mem::take(&mut self.to_bottom) {
+                    // The bottom: waking, blended with the first dream you kept.
+                    self.director.blend = Some(DreamTheme::Garden);
+                    self.load_dream(ctx)?;
+                    self.eye_line = None;
+                    self.eye_queue.clear();
+                    self.ending_age = 0.0;
+                    self.mode = hud::Mode::Ending;
+                    log::info!("The ending begins");
+                    return Ok(());
+                }
                 self.load_dream(ctx)
             }
             transition::Pending::Finish => {
@@ -4292,6 +4368,14 @@ impl Game for DreamscapeGame {
             Ok("settings") => self.open_settings(),
             Ok("memories") => self.mode = hud::Mode::Memories,
             Ok("loadout") => self.open_loadout(),
+            Ok("merge") => self.open_merge(hud::Mode::Title),
+            Ok("ending") => {
+                self.ending_age = crate::dev::var("DREAMSCAPE_ENDING_AT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                self.mode = hud::Mode::Ending;
+            }
             Ok("note") => {
                 let d = lore::dreamer(self.booklet.lore.save_seed, 3);
                 self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
@@ -4408,6 +4492,11 @@ impl Game for DreamscapeGame {
                     self.loadout_key(key);
                     return;
                 }
+                (hud::Mode::Ending, Keycode::Return | Keycode::Space) => {
+                    self.finish_ending();
+                    return;
+                }
+                (hud::Mode::Ending, _) => return,
                 (hud::Mode::Merge, _) => {
                     self.merge_key(key);
                     return;
@@ -4638,6 +4727,13 @@ impl Game for DreamscapeGame {
         }
         if self.mode == hud::Mode::Warning {
             self.warning_age += dt;
+        }
+        if self.mode == hud::Mode::Ending {
+            self.ending_age += dt;
+            // E2E runs sit through it, then carry on.
+            if self.autopilot && ending::can_continue(self.ending_age) {
+                self.finish_ending();
+            }
         }
         if let Some((_, age)) = &mut self.eye_line {
             *age += dt;
@@ -5225,8 +5321,12 @@ impl Game for DreamscapeGame {
                 self.eye_line = None;
                 self.think(eye::Moment::NightmareBeaten, false);
             }
+            self.to_bottom = self.ending_due() && !self.director.nightmare;
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {
                 transition::Pending::Finish
+            } else if self.to_bottom {
+                log::info!("The portal leads to the bottom");
+                transition::Pending::Wake
             } else {
                 transition::Pending::Descend
             });
