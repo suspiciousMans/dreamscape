@@ -4357,6 +4357,9 @@ impl DreamscapeGame {
         if self.director.blend.is_some() {
             self.think(eye::Moment::FusedDream, false);
         }
+        if self.director.card_dream {
+            log::info!("Card dream: {theme:?} at depth {}", self.director.depth);
+        }
 
         // The next dream inherits one of this dream's prop kinds as its motif.
         self.motif = spec
@@ -4527,6 +4530,13 @@ impl Game for DreamscapeGame {
                 }
                 None => log::warn!("DREAMSCAPE_THEME={name}: no such dream"),
             }
+        }
+        // Dev switch: DREAMSCAPE_BLEND=TheTunnel fuses the first dream with it.
+        if let Ok(name) = crate::dev::var("DREAMSCAPE_BLEND") {
+            self.director.blend = dream::ALL_THEMES
+                .iter()
+                .copied()
+                .find(|t| format!("{t:?}") == name);
         }
         // Dev switch: DREAMSCAPE_NIGHTMARE=1 starts in a nightmare arena.
         if crate::dev::var("DREAMSCAPE_NIGHTMARE").is_ok() {

@@ -64,7 +64,8 @@ pub fn describe(c: &Card, slot: Option<usize>) -> (String, String) {
     if let Some(b) = c.fused {
         passive += &format!("  + {}", power(b).passive.info().name);
     }
-    if c.rarity == crate::cards::Rarity::Resonant {
+    // A resonant card doubles its own passive (where the cap allows).
+    if c.rarity == crate::cards::Rarity::Resonant && p.passive.info().max >= 2 {
         passive += "  (x2)";
     }
     (active, passive)

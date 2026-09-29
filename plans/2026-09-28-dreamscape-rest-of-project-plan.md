@@ -10,6 +10,24 @@ Stage 1 of Phase 19 (lore, eye, objectives, prologue, `DreamDirector.forced`) is
 - No new story text except the 6 ending lines below (need your approval).
 - Existing seeds must replay: new RNG draws use their own seeded streams.
 
+## Status (2026-09-29)
+| Milestone | PR | State |
+|---|---|---|
+| M0 tables + M1 powers/rarities/loadout abilities | #13 | merged |
+| M2 card-dream schedule, loadout screen, tinted abilities | #14 | merged |
+| M3 merging, fused dreams, the moth | #15 | merged |
+| M4 companions, the ending | #16 | merged |
+| M5 balance + M6 Linux/Steam Deck packaging | #17 | merged |
+| M7 achievements + Steam bridge | #18 | merged |
+| M8 co-op (8a–8c in one PR) | #19 | open |
+| M9 bug-testing round | — | in progress |
+
+Deviations from the plan, decided while building:
+- The "moth shop" is the Lucid Store's moth: merging is its own screen, opened with `[m]` in the store and after every beaten nightmare's reward. There are no secret rooms in the game yet.
+- The bottom (the ending) is the waking dream blended with the Garden. The eye's six lines play over it, then the credits, then the run goes on awake.
+- Balance: starting kits cap at 10 passive stacks. Difficulty is ×(1 + 0.03·kit power), capped at ×1.5.
+- Co-op: pacers and the nightmare hunter are host-synced. Specials (stalker, mimic, sentry, drifter, jester) and nightmare sigils still run on each peer. Steam lobbies wait for the App ID.
+
 ## M0 — Tables for your approval (before any code)
 Committed as `plans/2026-09-28-phase19-tables.md`. Drafts:
 
