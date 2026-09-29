@@ -229,6 +229,17 @@ pub fn portal_surface(next: DreamTheme, seed: u64) -> TexSpec {
     }
 }
 
+/// A fused dream: the walls and props take the second dream's pattern and
+/// colours; the floor (the dream's shape) stays its own.
+pub fn blend_surfaces(s: &mut Surfaces, with: DreamTheme) {
+    let spec = with.spec();
+    let mut palette = spec.floor_colors.to_vec();
+    palette.extend_from_slice(spec.accents);
+    s.wall.pattern = spec.patterns[0];
+    s.wall.palette = palette.clone();
+    s.prop.palette = palette;
+}
+
 /// Extra things a dream should hold (each drawn from its own RNG stream, so
 /// asking for them never changes the rest of the layout).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

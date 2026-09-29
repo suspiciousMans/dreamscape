@@ -84,6 +84,52 @@ pub fn slot_of(chosen: &[&Card], number: u32) -> Option<usize> {
     None
 }
 
+/// The booklet's cards as small tiles, `COLS` wide, scrolling with the
+/// cursor; `marked` cards are filled in.
+pub fn draw_grid(
+    p: &egui::Painter,
+    screen: Rect,
+    v: &HudView,
+    cards: &[Card],
+    selected: usize,
+    marked: &[u32],
+    grid_top: f32,
+) {
+    let left = screen.left() + screen.width() * 0.05;
+    let tile = Vec2::new(92.0, 48.0);
+    let first_row = (selected / COLS).saturating_sub(ROWS - 1);
+    for (i, c) in cards.iter().enumerate() {
+        let row = i / COLS;
+        if row < first_row || row >= first_row + ROWS {
+            continue;
+        }
+        let at = Pos2::new(
+            left + (i % COLS) as f32 * (tile.x + 8.0),
+            grid_top + (row - first_row) as f32 * (tile.y + 8.0),
+        );
+        let r = Rect::from_min_size(at, tile);
+        let col = card_frame(c, v.time);
+        let inn = marked.contains(&c.number);
+        p.rect_filled(r, 3.0, rgba(col, if inn { 0.35 } else { 0.08 }));
+        let w = if i == selected { 3.0 } else { 1.0 };
+        p.rect_stroke(r, 3.0, Stroke::new(w, rgba(col, 0.9)));
+        p.text(
+            r.center() - Vec2::new(0.0, 8.0),
+            Align2::CENTER_CENTER,
+            format!("#{}", c.number),
+            FontId::monospace(12.0),
+            rgba(ink(v), 0.8),
+        );
+        p.text(
+            r.center() + Vec2::new(0.0, 10.0),
+            Align2::CENTER_CENTER,
+            c.attribute.label(),
+            FontId::monospace(12.0),
+            rgba(col, 1.0),
+        );
+    }
+}
+
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     let m = &v.loadout;
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.95));
@@ -126,40 +172,8 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     }
 
     // The grid (scrolls with the cursor).
-    let left = screen.left() + screen.width() * 0.05;
     let grid_top = row_y + 64.0;
-    let tile = Vec2::new(92.0, 48.0);
-    let first_row = (m.selected / COLS).saturating_sub(ROWS - 1);
-    for (i, c) in m.cards.iter().enumerate() {
-        let row = i / COLS;
-        if row < first_row || row >= first_row + ROWS {
-            continue;
-        }
-        let at = Pos2::new(
-            left + (i % COLS) as f32 * (tile.x + 8.0),
-            grid_top + (row - first_row) as f32 * (tile.y + 8.0),
-        );
-        let r = Rect::from_min_size(at, tile);
-        let col = card_frame(c, v.time);
-        let inn = m.chosen.contains(&c.number);
-        p.rect_filled(r, 3.0, rgba(col, if inn { 0.35 } else { 0.08 }));
-        let w = if i == m.selected { 3.0 } else { 1.0 };
-        p.rect_stroke(r, 3.0, Stroke::new(w, rgba(col, 0.9)));
-        p.text(
-            r.center() - Vec2::new(0.0, 8.0),
-            Align2::CENTER_CENTER,
-            format!("#{}", c.number),
-            FontId::monospace(12.0),
-            rgba(ink(v), 0.8),
-        );
-        p.text(
-            r.center() + Vec2::new(0.0, 10.0),
-            Align2::CENTER_CENTER,
-            c.attribute.label(),
-            FontId::monospace(12.0),
-            rgba(col, 1.0),
-        );
-    }
+    draw_grid(p, screen, v, &m.cards, m.selected, &m.chosen, grid_top);
 
     // The selected card, big, and what it does.
     if let Some(c) = m.cards.get(m.selected) {

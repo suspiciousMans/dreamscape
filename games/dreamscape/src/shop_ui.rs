@@ -430,7 +430,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         Pos2::new(cx, screen.bottom() - 44.0),
         Align2::CENTER_TOP,
-        v.k("[w/s] shelf   [a/d] item   [enter] buy / equip   [esc] back"),
+        v.k("[w/s] shelf   [a/d] item   [enter] buy / equip   [m] merge cards   [esc] back"),
         FontId::monospace(20.0),
         rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
     );

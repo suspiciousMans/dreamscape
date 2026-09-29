@@ -32,6 +32,8 @@ pub enum Mode {
     Memories,
     /// Choosing the run's cards before falling asleep.
     Loadout,
+    /// The moth merging two cards into one.
+    Merge,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -81,6 +83,7 @@ pub struct HudView {
     pub note: Option<(String, String, String)>,
     pub memories: crate::memories_ui::MemoriesView,
     pub loadout: crate::loadout_ui::LoadoutView,
+    pub merge: crate::merge_ui::MergeView,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -360,6 +363,7 @@ pub fn draw(
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
         Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
         Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
+        Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
         Mode::Note => {
             if let Some(n) = &v.note {
                 return crate::memories_ui::draw_note(&p, screen, v, n);
