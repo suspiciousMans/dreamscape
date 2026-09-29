@@ -29,6 +29,8 @@ mod boss;
 mod cards;
 mod codex_ui;
 mod companion;
+mod coop;
+mod coop_game;
 mod crash;
 mod dev;
 mod dissolve;
@@ -210,6 +212,8 @@ enum TitleItem {
     Prologue,
     Codex,
     Settings,
+    HostCoop,
+    JoinCoop,
     Quit,
 }
 
@@ -233,6 +237,17 @@ struct RunStats {
     skipped: u32,
     /// Abilities fired this run.
     abilities: u32,
+}
+
+/// The point in `among` nearest `from` (`among` must not be empty).
+fn nearest(among: &[Vec3], from: Vec3) -> Vec3 {
+    *among
+        .iter()
+        .min_by(|a, b| {
+            a.distance_squared(from)
+                .total_cmp(&b.distance_squared(from))
+        })
+        .expect("someone to hunt")
 }
 
 /// Seconds an achievement's name stays up.
@@ -417,6 +432,10 @@ pub struct DreamscapeGame {
     ending_age: f32,
     /// This run's difficulty factor from its starting kit.
     loadout_scale: f32,
+    /// A shared dream, if this is one.
+    coop: Option<coop_game::CoopState>,
+    /// Co-op: the run to start next frame (seed, long, dreamers).
+    pending_coop_start: Option<(u64, bool, usize)>,
     /// Times caught in the current dream (untouched nightmares).
     caught_this_dream: u32,
     /// Seconds spent holding a stalker still with your gaze.
@@ -605,6 +624,8 @@ impl DreamscapeGame {
             merge_return: hud::Mode::Title,
             ending_age: 0.0,
             loadout_scale: 1.0,
+            coop: None,
+            pending_coop_start: None,
             caught_this_dream: 0,
             stare: 0.0,
             achievement_toast: None,
@@ -680,6 +701,10 @@ impl DreamscapeGame {
     }
 
     fn pressure(&self) -> Pressure {
+        self.coop_pressure(self.pressure_base())
+    }
+
+    fn pressure_base(&self) -> Pressure {
         let hard = self.director.hardness().is_some();
         Pressure {
             enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
@@ -803,6 +828,7 @@ impl DreamscapeGame {
     fn ending_due(&self) -> bool {
         let l = &self.booklet.lore;
         self.prologue.is_none()
+            && self.coop.is_none()
             && !l.ending_seen
             && l.count(0) >= lore::notes_for(0)
             && (!self.autopilot || crate::dev::var("DREAMSCAPE_ENDING").is_ok())
@@ -825,6 +851,7 @@ impl DreamscapeGame {
         if self.boss_reward
             && !self.autopilot
             && self.prologue.is_none()
+            && self.coop.is_none()
             && merge_ui::any_pair(&cards)
         {
             self.open_merge(hud::Mode::Playing);
@@ -841,6 +868,7 @@ impl DreamscapeGame {
         self.boss_reward = false;
         self.bonus_dust += upgrades::SKIP_DUST;
         self.stats.skipped += 1;
+        self.coop_ready();
         log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
     }
 
@@ -914,6 +942,7 @@ impl DreamscapeGame {
                     }
                 }
                 log::info!("Upgrade taken: {u:?} (run: {:?})", self.run.taken);
+                self.coop_ready();
                 self.flash
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
                 self.sfx(Sound::Pick);
@@ -1136,6 +1165,12 @@ impl DreamscapeGame {
             },
             ending_age: self.ending_age,
             achievement: self.achievement_toast.clone(),
+            coop_line: self.coop_line(),
+            lobby: if self.mode == hud::Mode::Lobby {
+                self.lobby_view()
+            } else {
+                coop_game::LobbyView::default()
+            },
             title_age: self.title_age,
             warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
@@ -2408,6 +2443,8 @@ impl DreamscapeGame {
             TitleItem::Memories,
             TitleItem::Codex,
             TitleItem::Settings,
+            TitleItem::HostCoop,
+            TitleItem::JoinCoop,
         ]);
         if self.booklet.lore.prologue_done {
             items.push(TitleItem::Prologue);
@@ -2480,6 +2517,12 @@ impl DreamscapeGame {
                 ),
             ),
             TitleItem::Settings => ("o", "settings".into(), String::new()),
+            TitleItem::HostCoop => (
+                "h",
+                "host a shared dream".into(),
+                format!("up to {} dreamers · the others join you", coop::MAX_PLAYERS),
+            ),
+            TitleItem::JoinCoop => ("j", "join a shared dream".into(), String::new()),
             TitleItem::Quit => ("q", "stay awake".into(), String::new()),
         }
     }
@@ -2503,6 +2546,8 @@ impl DreamscapeGame {
             }
             TitleItem::Codex => self.open_codex(),
             TitleItem::Settings => self.open_settings(),
+            TitleItem::HostCoop => self.open_host_lobby(),
+            TitleItem::JoinCoop => self.open_join_lobby(),
             TitleItem::Quit => ctx.should_quit = true,
         }
     }
@@ -3023,7 +3068,12 @@ impl DreamscapeGame {
             log::info!("Companion: {} ({})", d.name, d.weight.label());
             self.run = std::mem::take(&mut self.run).with_companion(d.weight);
         }
-        self.loadout_scale = gameplay::loadout_difficulty(self.run.power());
+        // In co-op the host's dreams are everyone's: no per-kit pressure.
+        self.loadout_scale = if self.coop.is_some() {
+            1.0
+        } else {
+            gameplay::loadout_difficulty(self.run.power())
+        };
         log::info!(
             "Starting kit power {:.1}: difficulty x{:.2}",
             self.run.power(),
@@ -3041,7 +3091,11 @@ impl DreamscapeGame {
             })
             .collect();
         let asc = progress::Ascension(
-            if self.daily.is_some() || self.autopilot || self.prologue.is_some() {
+            if self.daily.is_some()
+                || self.autopilot
+                || self.prologue.is_some()
+                || self.coop.is_some()
+            {
                 0
             } else {
                 self.ascension
@@ -3050,8 +3104,11 @@ impl DreamscapeGame {
         self.active_asc = asc;
         self.director.shards_to_wake += asc.extra_shards();
         self.director.nightmare_every = asc.nightmare_every();
-        self.director
-            .plan_cards(&cards.iter().map(|c| (c.theme, c.fused)).collect::<Vec<_>>());
+        // Card dreams are personal: a shared dream has none.
+        if self.coop.is_none() {
+            self.director
+                .plan_cards(&cards.iter().map(|c| (c.theme, c.fused)).collect::<Vec<_>>());
+        }
         if asc.always_hard() {
             self.director.hard_from.get_or_insert(0);
         }
@@ -3281,8 +3338,27 @@ impl DreamscapeGame {
         log::info!("Melt: swap ({pending:?})");
         match pending {
             transition::Pending::Descend => {
-                self.director.descend();
+                if self.coop_client() {
+                    // The host already rolled it.
+                    if let Some(p) = self.coop.as_ref().and_then(|c| c.plan.clone()) {
+                        self.apply_plan(&p);
+                    }
+                } else {
+                    self.director.descend();
+                    self.coop_broadcast_plan();
+                }
                 self.offer_upgrade = self.prologue.is_none();
+                self.load_dream(ctx)
+            }
+            transition::Pending::Wake if self.coop_active() => {
+                if self.coop_client() {
+                    if let Some(p) = self.coop.as_ref().and_then(|c| c.plan.clone()) {
+                        self.apply_plan(&p);
+                    }
+                } else {
+                    self.director.wake();
+                    self.coop_broadcast_plan();
+                }
                 self.load_dream(ctx)
             }
             transition::Pending::Wake => {
@@ -3302,6 +3378,10 @@ impl DreamscapeGame {
             }
             transition::Pending::Finish => {
                 self.complete_run();
+                if self.coop.is_some() {
+                    log::info!("Co-op: the shared dream ends");
+                    self.coop = None;
+                }
                 Ok(())
             }
         }
@@ -3407,6 +3487,13 @@ impl DreamscapeGame {
             return dream::Goals::default();
         }
         if self.director.nightmare {
+            return dream::Goals::default();
+        }
+        // A shared dream has no story: just the shard.
+        if self.coop.is_some() {
+            if self.director.has_shard && !self.director.lucid() {
+                self.objective_kind = Some(objective::Kind::Shard);
+            }
             return dream::Goals::default();
         }
         let seed = self.director.dream_seed();
@@ -4393,6 +4480,7 @@ impl DreamscapeGame {
 impl Game for DreamscapeGame {
     fn init(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         steam::init(&self.booklet.achievements.ids);
+        self.coop_dev_start();
         log::info!("Initializing Dreamscape");
         let gl = ctx.gl();
         unsafe {
@@ -4584,6 +4672,10 @@ impl Game for DreamscapeGame {
                 }
                 (hud::Mode::Loadout, _) => {
                     self.loadout_key(key);
+                    return;
+                }
+                (hud::Mode::Lobby, _) => {
+                    self.lobby_key(key);
                     return;
                 }
                 (hud::Mode::Ending, Keycode::Return | Keycode::Space) => {
@@ -4816,6 +4908,10 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         steam::tick();
+        self.coop_tick(ctx, dt)?;
+        if let Some((seed, long, players)) = self.pending_coop_start.take() {
+            self.start_coop_run(ctx, seed, long, players)?;
+        }
         if let Some((_, age)) = &mut self.achievement_toast {
             *age += dt;
             if *age > ACHIEVEMENT_TOAST {
@@ -5004,7 +5100,12 @@ impl Game for DreamscapeGame {
             if self.inverted() {
                 v = Vec3::new(-v.x, v.y, -v.z);
             }
-            (v, self.input.jump)
+            // Co-op: waiting in the portal for the others.
+            if self.coop.as_ref().is_some_and(|c| c.in_portal) {
+                (Vec3::ZERO, false)
+            } else {
+                (v, self.input.jump)
+            }
         };
         if desired.length_squared() > 1e-4 {
             self.facing = desired.normalize();
@@ -5070,16 +5171,29 @@ impl Game for DreamscapeGame {
             self.decoy.map(|(at, _)| at),
             self.run.active(Ability::Decoy),
         );
-        let held =
-            self.run.active(Ability::Stillness) || self.twists.enemies_frozen(self.dream_age);
+        let held = self.run.active(Ability::Stillness)
+            || self.twists.enemies_frozen(self.dream_age)
+            || self.coop_hold();
+        // Co-op: the host's enemies hunt whoever's nearest; clients just
+        // show where the host put them.
+        let hunted = self.coop_targets();
+        let puppet = self.coop_client();
+        if puppet {
+            self.coop_apply_enemies();
+        }
         let mut splits = Vec::new();
         let mut noticed = false;
         for (k, p) in self.enemies.iter_mut().enumerate() {
-            if held {
+            if held || puppet {
                 continue;
             }
             if let Ok(mut t) = self.world.get::<&mut Transform>(p.entity) {
                 let was = p.ai.chasing;
+                let target = if self.run.active(Ability::Decoy) || hunted.is_empty() {
+                    target
+                } else {
+                    nearest(&hunted, t.position)
+                };
                 p.ai.update(&mut t.position, target, dt);
                 // Swell when they notice you: the tell that you've been seen.
                 let size = if p.ai.chasing { 1.25 } else { 0.9 }
@@ -5146,8 +5260,13 @@ impl Game for DreamscapeGame {
         self.update_features();
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
-            if !held {
+            if !held && !puppet {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                    let target = if hunted.is_empty() {
+                        target
+                    } else {
+                        nearest(&hunted, t.position)
+                    };
                     boss_events = b.update(&mut t.position, target, dt);
                     // It swells and throbs while it winds up an attack: the tell.
                     let pulse = if b.warning().is_some() {
@@ -5232,11 +5351,12 @@ impl Game for DreamscapeGame {
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
         let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
-        let caught_by = if !self.autopilot && self.grace <= 0.0 && !untouchable {
-            self.threat_touching()
-        } else {
-            None
-        };
+        let caught_by =
+            if !self.autopilot && self.grace <= 0.0 && !untouchable && !self.coop_ghost() {
+                self.threat_touching()
+            } else {
+                None
+            };
         let caught = caught_by.is_some();
         if let Some(by) = caught_by {
             log::info!(
@@ -5248,6 +5368,15 @@ impl Game for DreamscapeGame {
             if let Some(objective::Active::HoldOn(h)) = &mut self.objective {
                 h.caught();
             }
+        }
+        if caught && self.coop_active() {
+            // Co-op: no respawn and no dropped shard, just a ghost.
+            self.flash.trigger([1.0, 0.1, 0.15], 0.7);
+            self.sfx(Sound::Caught);
+            self.stats.caught += 1;
+            self.caught_this_dream += 1;
+            self.coop_caught();
+            return Ok(());
         }
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
@@ -5371,6 +5500,12 @@ impl Game for DreamscapeGame {
                 if matches!(self.objective, Some(objective::Active::Chase(_))) {
                     break;
                 }
+                if self.coop_active() {
+                    if !self.coop_ghost() {
+                        self.coop_touch_shard(ctx);
+                    }
+                    break;
+                }
                 self.complete_objective(ctx);
                 break;
             }
@@ -5400,13 +5535,18 @@ impl Game for DreamscapeGame {
         if touched
             .iter()
             .any(|&e| self.world.get::<&WakeMarker>(e).is_ok())
+            && !self.coop_client()
+            && !self.coop_ghost()
         {
             self.open_wake_choice();
             return Ok(());
         }
+        let waiting = self.coop.as_ref().is_some_and(|c| c.in_portal);
         if touched
             .iter()
             .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
+            && !waiting
+            && !self.coop_ghost()
         {
             log::info!("Portal entered at depth {}", self.director.depth);
             self.tutorial(tutorial::Event::Portal);
@@ -5427,6 +5567,10 @@ impl Game for DreamscapeGame {
                 log::info!("Nightmare beaten at depth {}", self.director.depth);
                 self.eye_line = None;
                 self.think(eye::Moment::NightmareBeaten, false);
+            }
+            if self.coop_active() {
+                self.coop_enter_portal();
+                return Ok(());
             }
             self.to_bottom = self.ending_due() && !self.director.nightmare;
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {

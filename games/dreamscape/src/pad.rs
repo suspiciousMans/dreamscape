@@ -99,6 +99,11 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::A | P::B => Some(Keycode::Return),
             _ => None,
         },
+        Mode::Lobby => match button {
+            P::A | P::Start => Some(Keycode::Space),
+            P::B => Some(Keycode::Escape),
+            _ => None,
+        },
         Mode::Ending => match button {
             P::A | P::Start => Some(Keycode::Return),
             _ => None,

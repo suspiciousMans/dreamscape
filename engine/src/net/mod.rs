@@ -12,12 +12,14 @@ pub use protocol::{
     PROTOCOL_VERSION,
 };
 
-use framing::NetConnection;
+/// Length-prefixed bincode framing over a non-blocking `TcpStream`, for
+/// games with their own message types (Dreamscape's co-op).
+pub use framing::NetConnection;
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Total players including the host — a `NetHost` accepts at most
 /// `MAX_PLAYERS - 1` remote connections.
-pub const MAX_PLAYERS: usize = 4;
+pub const MAX_PLAYERS: usize = 5;
 pub const SNAPSHOT_RATE_HZ: f32 = 20.0;
 /// How long an accepted-but-not-yet-`Hello`'d connection may sit in
 /// `NetHost::pending` before it's dropped. Without this, a peer that
