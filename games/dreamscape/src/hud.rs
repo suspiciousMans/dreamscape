@@ -88,6 +88,8 @@ pub struct HudView {
     pub merge: crate::merge_ui::MergeView,
     /// Seconds into the ending.
     pub ending_age: f32,
+    /// A just-earned achievement: (name, seconds shown).
+    pub achievement: Option<(String, f32)>,
     /// Seconds since this dream (or the journal) began.
     pub title_age: f32,
     /// Screen-space unit direction to the shard / wake door, when it's far.
@@ -354,6 +356,14 @@ pub fn draw(
         egui::Id::new("dream_hud"),
     ));
     let screen = ctx.screen_rect();
+    if let Some((name, age)) = &v.achievement {
+        // Its own top layer, so every screen shows it.
+        let top = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("achievement"),
+        ));
+        achievement_toast(&top, screen, name, *age);
+    }
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
@@ -688,6 +698,32 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
             );
         }
     }
+}
+
+/// "ACHIEVEMENT · Lucid", sliding in at the top right, then fading.
+fn achievement_toast(p: &egui::Painter, screen: Rect, name: &str, age: f32) {
+    let a = (age * 4.0).min(1.0) * (4.0 - age).clamp(0.0, 1.0);
+    let slide = (1.0 - (age * 4.0).min(1.0)) * 40.0;
+    let r = Rect::from_min_size(
+        Pos2::new(screen.right() - 340.0 + slide, screen.top() + 20.0),
+        Vec2::new(320.0, 58.0),
+    );
+    p.rect_filled(r, 4.0, rgba([12, 6, 24], 0.9 * a));
+    p.rect_stroke(r, 4.0, egui::Stroke::new(2.0_f32, rgba([255, 210, 110], a)));
+    p.text(
+        r.left_top() + Vec2::new(14.0, 8.0),
+        Align2::LEFT_TOP,
+        "ACHIEVEMENT",
+        FontId::monospace(13.0),
+        rgba([255, 210, 110], a),
+    );
+    p.text(
+        r.left_top() + Vec2::new(14.0, 26.0),
+        Align2::LEFT_TOP,
+        name,
+        FontId::proportional(22.0),
+        rgba([240, 230, 255], a),
+    );
 }
 
 /// The ending's eye: centred, lucid, with the lid at `open`.

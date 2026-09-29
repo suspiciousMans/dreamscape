@@ -65,6 +65,9 @@ jobs:
       - name: Test engine and dreamscape
         run: cargo test -p engine -p dreamscape
 
+      - name: Check the Steam build
+        run: cargo check -p dreamscape --features steam
+
       - name: Dream screenshots (every dream type, autopilot, software GL)
         run: games/dreamscape/tools/screenshots.sh target/dream-shots
 

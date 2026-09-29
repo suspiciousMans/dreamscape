@@ -23,6 +23,7 @@ use engine::ui::EguiState;
 
 use engine::ui::egui;
 
+mod achievements;
 mod booklet_ui;
 mod boss;
 mod cards;
@@ -58,6 +59,7 @@ mod settings_ui;
 mod shop_ui;
 mod sounds;
 mod specials;
+mod steam;
 mod store;
 mod summary_ui;
 mod title_ui;
@@ -229,7 +231,12 @@ struct RunStats {
     /// Seconds spent dreaming (not in menus or melts).
     time: f32,
     skipped: u32,
+    /// Abilities fired this run.
+    abilities: u32,
 }
+
+/// Seconds an achievement's name stays up.
+const ACHIEVEMENT_TOAST: f32 = 4.0;
 
 /// What the choice screen is choosing.
 #[derive(Clone, Debug, PartialEq)]
@@ -410,6 +417,12 @@ pub struct DreamscapeGame {
     ending_age: f32,
     /// This run's difficulty factor from its starting kit.
     loadout_scale: f32,
+    /// Times caught in the current dream (untouched nightmares).
+    caught_this_dream: u32,
+    /// Seconds spent holding a stalker still with your gaze.
+    stare: f32,
+    /// A just-earned achievement's name, and how long it has shown.
+    achievement_toast: Option<(String, f32)>,
     /// This run's portal leads to the bottom (the ending plays on arrival).
     to_bottom: bool,
     /// The first-time guided dreams, while they run.
@@ -592,6 +605,9 @@ impl DreamscapeGame {
             merge_return: hud::Mode::Title,
             ending_age: 0.0,
             loadout_scale: 1.0,
+            caught_this_dream: 0,
+            stare: 0.0,
+            achievement_toast: None,
             to_bottom: false,
             prologue: None,
             eye_sticky: false,
@@ -888,6 +904,10 @@ impl DreamscapeGame {
                     self.director.lucidity += 1;
                     self.shards_this_run += 1;
                 }
+                if self.run_active {
+                    let n = self.run.synergies().len();
+                    self.achieve(Some(achievements::Event::Synergies(n)));
+                }
                 for s in self.run.synergies() {
                     if !before.contains(&s) {
                         log::info!("Synergy: {} ({})", s.name(), s.desc());
@@ -906,6 +926,9 @@ impl DreamscapeGame {
             }
             ChoiceKind::WakeDoor => {
                 self.director.go_deeper();
+                if self.run_active {
+                    self.achieve(Some(achievements::Event::WentDeeper));
+                }
                 log::info!(
                     "Refused to wake at depth {}: {} shards to wake, difficulty now x{:.2}",
                     self.director.depth,
@@ -1112,6 +1135,7 @@ impl DreamscapeGame {
                 merge_ui::MergeView::default()
             },
             ending_age: self.ending_age,
+            achievement: self.achievement_toast.clone(),
             title_age: self.title_age,
             warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
@@ -1851,6 +1875,16 @@ impl DreamscapeGame {
                 + self.run.sight_bonus())
                 * (1.0 - tunnel::SIGHT_FADE);
         let yaw = self.fp_yaw();
+        let watched = !held
+            && self.first_person_active()
+            && self
+                .specials
+                .iter()
+                .any(|sp| matches!(&sp.ai, SpecialAI::Stalker(s) if !s.moving));
+        self.stare = if watched { self.stare + dt } else { 0.0 };
+        if self.stare >= achievements::STARE_SECONDS && self.run_active {
+            self.achieve(Some(achievements::Event::Stare(self.stare)));
+        }
         let mut calls = Vec::new();
         for sp in &mut self.specials {
             let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
@@ -2161,6 +2195,14 @@ impl DreamscapeGame {
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            self.stats.abilities += 1;
+            if self.run_active {
+                self.achieve(Some(achievements::Event::AbilityUsed {
+                    ability: state.ability,
+                    nightmare: self.director.nightmare,
+                    theme: self.director.theme,
+                }));
+            }
             match state.ability {
                 Ability::Dash if self.run.has(upgrades::Synergy::GhostStep) => {
                     self.grace = self
@@ -2517,6 +2559,7 @@ impl DreamscapeGame {
                     twists: Vec::new(),
                     time,
                     skipped,
+                    abilities: 0,
                 };
                 self.run_active = true;
                 self.pack = reveal_ui::PackView::default();
@@ -2633,7 +2676,26 @@ impl DreamscapeGame {
         self.perks.contains(&p)
     }
 
+    /// Reports to the achievements (and whatever the booklet now proves);
+    /// new unlocks are saved, toasted, and sent to Steam.
+    fn achieve(&mut self, e: Option<achievements::Event>) {
+        let ids = achievements::check(&self.booklet, e);
+        let fresh = self.booklet.achievements.grant(ids);
+        if fresh.is_empty() {
+            return;
+        }
+        for id in &fresh {
+            log::info!("Achievement: {} ({id})", achievements::name(id));
+            steam::unlock(id);
+        }
+        self.achievement_toast =
+            Some((achievements::name(fresh[fresh.len() - 1]).to_string(), 0.0));
+        self.sfx(Sound::Pick);
+        let _ = cards::save(&self.booklet_path, &self.booklet);
+    }
+
     fn persist_booklet(&mut self) -> bool {
+        self.achieve(None);
         match cards::save(&self.booklet_path, &self.booklet) {
             Ok(()) => true,
             Err(e) => {
@@ -2734,6 +2796,9 @@ impl DreamscapeGame {
         let item = shop_ui::cursor_item(self.shop_shelf, self.shop_col);
         let before = self.booklet.stash.clone();
         let outcome = self.booklet.stash.select(item);
+        if outcome == store::Outcome::Bought {
+            self.booklet.achievements.purchases += 1;
+        }
         let name = item.info().name;
         self.store_status = Some(match outcome {
             store::Outcome::Bought => format!("{name} is yours"),
@@ -3067,6 +3132,15 @@ impl DreamscapeGame {
         }
         self.title_age = 0.0;
         if self.run_active {
+            self.achieve(Some(achievements::Event::Woke {
+                depth: self.director.depth,
+                caught: self.stats.caught,
+                fell: self.stats.fell,
+                abilities_used: self.stats.abilities,
+                daily: self.daily.is_some(),
+                long_at: (self.run_length == RunLength::Long && self.daily.is_none())
+                    .then_some(self.active_asc.0),
+            }));
             let depth = self.director.depth;
             if let Some(day) = self.daily {
                 self.booklet.codex.record_daily(day, depth);
@@ -3446,6 +3520,9 @@ impl DreamscapeGame {
         self.sfx(Sound::Shard);
         self.director.collect_shard();
         self.shards_this_run += 1;
+        if self.run_active {
+            self.achieve(Some(achievements::Event::ShardTaken));
+        }
         if let Some(r) = self.run_log.last_mut() {
             r.shard_taken = true;
         }
@@ -3599,6 +3676,11 @@ impl DreamscapeGame {
         }
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
+        self.caught_this_dream = 0;
+        self.stare = 0.0;
+        if self.run_active {
+            self.achieve(Some(achievements::Event::Depth(self.director.depth)));
+        }
         self.air_jumps_used = 0;
         let goals = self.plan_goals();
         let mut dream = if self.director.nightmare {
@@ -4310,6 +4392,7 @@ impl DreamscapeGame {
 
 impl Game for DreamscapeGame {
     fn init(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        steam::init(&self.booklet.achievements.ids);
         log::info!("Initializing Dreamscape");
         let gl = ctx.gl();
         unsafe {
@@ -4732,6 +4815,13 @@ impl Game for DreamscapeGame {
     }
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
+        steam::tick();
+        if let Some((_, age)) = &mut self.achievement_toast {
+            *age += dt;
+            if *age > ACHIEVEMENT_TOAST {
+                self.achievement_toast = None;
+            }
+        }
         self.poll_music();
         if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
             panic!("DREAMSCAPE_CRASH: test crash");
@@ -5205,6 +5295,7 @@ impl Game for DreamscapeGame {
             );
             if caught {
                 self.stats.caught += 1;
+                self.caught_this_dream += 1;
             } else {
                 self.stats.fell += 1;
             }
@@ -5327,6 +5418,11 @@ impl Game for DreamscapeGame {
                 self.boss_reward = true;
                 if self.run_active {
                     self.booklet.codex.nightmares_beaten += 1;
+                    let tier = self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier);
+                    self.achieve(Some(achievements::Event::NightmareBeaten {
+                        tier,
+                        caught_in_it: self.caught_this_dream,
+                    }));
                 }
                 log::info!("Nightmare beaten at depth {}", self.director.depth);
                 self.eye_line = None;

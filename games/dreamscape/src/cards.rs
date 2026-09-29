@@ -342,6 +342,9 @@ pub struct Booklet {
     /// The story: dreamers, notes found, loadout, prologue.
     #[serde(default)]
     pub lore: crate::lore::Lore,
+    /// Achievements earned (and the counters they need).
+    #[serde(default)]
+    pub achievements: crate::achievements::Unlocked,
 }
 
 impl Booklet {

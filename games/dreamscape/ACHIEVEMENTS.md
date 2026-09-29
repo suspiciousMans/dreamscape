@@ -65,7 +65,12 @@ API names use the `snake_case` Steamworks requires.
 
 That's 29 achievements. 21 are computable from state the game already saves or tracks; 8 need a small new counter.
 
-## Implementation plan (Phase 3, after the App ID)
+## Implementation (done)
+- `src/achievements.rs`: all 29, `check(&Booklet, Option<Event>)`, unlocks kept in the booklet (`achievements`), with a purchase counter. Ascension ones unlock on waking from a long run at level 5 / 10.
+- `src/steam.rs`: behind the `steam` feature. It initialises with App ID 480 (Spacewar) until Dreamscape has its own, pushes offline unlocks at start, and sets and stores on unlock. `steam_appid.txt` holds the placeholder ID.
+- Still to do once the App ID exists: register the 29 API names in Steamworks, and make the 64×64 icons.
+
+## Original implementation plan (Phase 3, after the App ID)
 - A pure `achievements.rs` with the list above, and `check(&Booklet, &RunStats, &Event) -> Vec<Id>`, tested per achievement. Unlocks are stored in the booklet (`#[serde(default)]`), so they work offline and in non-Steam builds.
 - A Steam bridge that calls `set_achievement` + `store_stats` on unlock, and on startup pushes any unlocked while offline.
 - Icons: 64×64 pixel art per achievement, locked and unlocked versions, generated the same way as the store icons.
