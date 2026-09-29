@@ -287,6 +287,42 @@ pub fn recall(records: &[DreamRecord], boost: MemoryBoost) -> Vec<Recalled> {
         .collect()
 }
 
+/// Cards until the booklet stops shaping packs for variety.
+pub const FIRST_CARDS: usize = 5;
+
+/// A new player's first cards teach different things: until the booklet
+/// holds `FIRST_CARDS`, a remembered dream whose ability is already held
+/// fades instead (the waking dream always stays). And the very first pack
+/// always keeps one dream to build a loadout from, the Garden if it's there.
+pub fn shape_first_pack(pack: &mut [Recalled], owned: &[Card]) {
+    use crate::powers::power;
+    let mut held: Vec<crate::upgrades::Ability> =
+        owned.iter().map(|c| power(c.theme).active).collect();
+    let mut count = owned.len();
+    for r in pack.iter_mut().filter(|r| r.remembered) {
+        if count >= FIRST_CARDS {
+            break;
+        }
+        let a = power(r.card.theme).active;
+        if held.contains(&a) && r.card.theme != DreamTheme::Awakening {
+            r.remembered = false;
+            continue;
+        }
+        held.push(a);
+        count += 1;
+    }
+    let playable = |r: &Recalled| r.card.theme != DreamTheme::Awakening;
+    if owned.is_empty() && !pack.iter().any(|r| r.remembered && playable(r)) {
+        let pick = pack
+            .iter()
+            .position(|r| r.card.theme == DreamTheme::Garden)
+            .or_else(|| pack.iter().position(playable));
+        if let Some(i) = pick {
+            pack[i].remembered = true;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedRun {
     pub run_seed: u64,
@@ -520,6 +556,52 @@ pub(crate) mod tests {
             "a vanished card falls back to the default"
         );
         assert!(Booklet::default().loadout_cards().is_empty());
+    }
+
+    fn recalled(theme: DreamTheme, seed: u64, remembered: bool) -> Recalled {
+        Recalled {
+            card: card_from(&record(theme, seed, 1, 0.1, false)),
+            remembered,
+        }
+    }
+
+    #[test]
+    fn the_first_pack_always_keeps_a_dream_to_play_with() {
+        let mut pack = vec![
+            recalled(Lobby, 1, false),
+            recalled(Garden, 2, false),
+            recalled(Awakening, 3, true),
+        ];
+        shape_first_pack(&mut pack, &[]);
+        assert!(pack[1].remembered, "the Garden is kept");
+        assert!(!pack[0].remembered);
+    }
+
+    #[test]
+    fn the_first_five_cards_teach_different_abilities() {
+        // TheTunnel and SynesthesiaHall both teach DASH.
+        let mut pack = vec![
+            recalled(TheTunnel, 1, true),
+            recalled(SynesthesiaHall, 2, true),
+            recalled(Garden, 3, true),
+            recalled(Awakening, 4, true),
+        ];
+        shape_first_pack(&mut pack, &[]);
+        let kept: Vec<_> = pack
+            .iter()
+            .filter(|r| r.remembered)
+            .map(|r| r.card.theme)
+            .collect();
+        assert_eq!(kept, vec![TheTunnel, Garden, Awakening]);
+        // Once five are held, duplicates are kept again.
+        let owned: Vec<Card> = [Lobby, LiminalOffice, VoidPlatforms, Garden, TheTunnel]
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| card_from(&record(t, i as u64, 1, 0.1, false)))
+            .collect();
+        let mut pack = vec![recalled(SynesthesiaHall, 9, true)];
+        shape_first_pack(&mut pack, &owned);
+        assert!(pack[0].remembered);
     }
 
     #[test]

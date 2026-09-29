@@ -37,6 +37,7 @@ mod fpv;
 mod gameplay;
 mod hud;
 mod hunter;
+mod loadout_ui;
 mod lore;
 mod memories_ui;
 mod music;
@@ -299,6 +300,12 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// Each loadout ability and the dream colours of the card that taught it.
+    ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
+    /// An ability just fired: burst here, in these colours (spawned next update).
+    burst_pending: Option<(Vec3, [u8; 3], [u8; 3])>,
+    /// Burst cubes: (entity, dream age at birth, index in the ring, centre).
+    bursts: Vec<(Entity, f32, usize, Vec3)>,
     /// This dream's music, being composed on a worker thread.
     music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
     /// Length of the current music loop, seconds.
@@ -389,6 +396,7 @@ pub struct DreamscapeGame {
     /// Rolled before the dream is built (fragments need cells).
     objective_kind: Option<objective::Kind>,
     memories_sel: usize,
+    loadout_sel: usize,
     /// The first-time guided dreams, while they run.
     prologue: Option<tutorial::Prologue>,
     /// The eye's line is a tutorial prompt: stays up until the step changes.
@@ -494,6 +502,9 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            ability_tints: Vec::new(),
+            burst_pending: None,
+            bursts: Vec::new(),
             music_job: None,
             music_loop: 1.0,
             decoy: None,
@@ -559,6 +570,7 @@ impl DreamscapeGame {
             objective: None,
             objective_kind: None,
             memories_sel: 0,
+            loadout_sel: 0,
             prologue: None,
             eye_sticky: false,
             eye_queue: Vec::new(),
@@ -1009,6 +1021,16 @@ impl DreamscapeGame {
             } else {
                 memories_ui::MemoriesView::default()
             },
+            loadout: if self.mode == hud::Mode::Loadout {
+                loadout_ui::LoadoutView {
+                    cards: self.booklet.cards().cloned().collect(),
+                    chosen: self.booklet.lore.loadout.clone(),
+                    slots: self.booklet.lore.slots(),
+                    selected: self.loadout_sel,
+                }
+            } else {
+                loadout_ui::LoadoutView::default()
+            },
             title_age: self.title_age,
             warning_age: self.warning_age,
             shard_dir: target.and_then(|t| {
@@ -1241,6 +1263,49 @@ impl DreamscapeGame {
 
     /// A crumbling floor tile (solid, with its collider).
     /// Afterimage Fields: leave a fading ghost of yourself every ECHO_EVERY.
+    /// An ability's ring of cubes in its card's colours, fading out.
+    fn update_bursts(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
+        let now = self.dream_age;
+        if let Some((at, a, b)) = self.burst_pending.take() {
+            let cube = self.mesh(Shape::Cube)?;
+            for i in 0..gameplay::BURST_CUBES {
+                let c = if i % 2 == 0 { a } else { b };
+                let tex = self.texture(gl, [c[0], c[1], c[2], 255]);
+                let (off, s) = gameplay::burst_cube(i, 0.0);
+                let e = self.world.spawn((
+                    Transform {
+                        position: at + off,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::splat(s),
+                    },
+                    MeshRenderer {
+                        mesh: cube.clone(),
+                        texture: Some(tex),
+                    },
+                    Spin(4.0),
+                    Lit,
+                    Hero,
+                ));
+                self.bursts.push((e, now, i, at));
+            }
+        }
+        let world = &mut self.world;
+        self.bursts.retain(|&(e, born, i, at)| {
+            let age = now - born;
+            if age >= gameplay::BURST_SECONDS {
+                let _ = world.despawn(e);
+                return false;
+            }
+            if let Ok(mut t) = world.get::<&mut Transform>(e) {
+                let (off, s) = gameplay::burst_cube(i, age);
+                t.position = at + off;
+                t.scale = Vec3::splat(s);
+            }
+            true
+        });
+        Ok(())
+    }
+
     fn update_echoes(&mut self, player: Entity, dt: f32) -> anyhow::Result<()> {
         let echoing = self
             .dream
@@ -2062,7 +2127,16 @@ impl DreamscapeGame {
                 Ability::Flare => [1.0, 0.95, 0.6],
                 Ability::Rewind => [0.6, 0.6, 1.0],
             };
+            let tint = self
+                .ability_tints
+                .iter()
+                .find(|t| t.0 == state.ability)
+                .map(|&(_, a, b)| (a, b));
+            let color = tint.map_or(color, |(a, _)| a.map(|c| c as f32 / 255.0));
             self.flash.trigger(color, 0.3);
+            if let Some((a, b)) = tint {
+                self.burst_pending = Some((self.player_position, a, b));
+            }
             self.sfx(match state.ability {
                 Ability::Dash => Sound::Dash,
                 Ability::Blink => Sound::Blink,
@@ -2283,7 +2357,7 @@ impl DreamscapeGame {
     fn title_select(&mut self, ctx: &mut Context, item: TitleItem, dir: i32) {
         match item {
             TitleItem::Continue => self.pending_start = Some(StartKind::Continue),
-            TitleItem::Start => self.start_from_title(),
+            TitleItem::Start => self.open_loadout(),
             TitleItem::Prologue => self.pending_start = Some(StartKind::Prologue),
             TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
             TitleItem::RunLength => self.run_length = self.run_length.toggled(),
@@ -2435,6 +2509,12 @@ impl DreamscapeGame {
                 self.stats.time,
                 self.stats.skipped,
             ),
+            card_dreams: self
+                .director
+                .cards
+                .iter()
+                .map(|c| (c.theme, c.blend))
+                .collect(),
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -2489,8 +2569,11 @@ impl DreamscapeGame {
                 log.push(log[log.len() % self.run_log.len()].clone());
             }
         }
+        let mut pack = cards::recall(&log, boost);
+        let owned: Vec<cards::Card> = self.booklet.cards().cloned().collect();
+        cards::shape_first_pack(&mut pack, &owned);
         self.pack = reveal_ui::PackView {
-            pack: cards::recall(&log, boost),
+            pack,
             ..Default::default()
         };
         let kept = self.pack.pack.iter().filter(|r| r.remembered).count();
@@ -2587,6 +2670,56 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Booklet;
     }
 
+    /// START: choose the run's cards first, unless there are none yet.
+    fn open_loadout(&mut self) {
+        if self.booklet.card_count() == 0 {
+            return self.start_from_title();
+        }
+        // Cards no longer in the booklet drop out silently.
+        let b = &self.booklet;
+        let kept: Vec<u32> = b
+            .lore
+            .loadout
+            .iter()
+            .copied()
+            .filter(|&n| b.card(n).is_some())
+            .take(b.lore.slots())
+            .collect();
+        self.booklet.lore.loadout = kept;
+        self.loadout_sel = self.loadout_sel.min(self.booklet.card_count() - 1);
+        self.mode = hud::Mode::Loadout;
+    }
+
+    fn loadout_key(&mut self, key: Keycode) {
+        let n = self.booklet.card_count();
+        let (dx, dy) = match key {
+            Keycode::A | Keycode::Left => (-1, 0),
+            Keycode::D | Keycode::Right => (1, 0),
+            Keycode::W | Keycode::Up => (0, -1),
+            Keycode::S | Keycode::Down => (0, 1),
+            _ => (0, 0),
+        };
+        if (dx, dy) != (0, 0) {
+            self.loadout_sel = loadout_ui::step(self.loadout_sel, n, dx, dy);
+            return;
+        }
+        match key {
+            Keycode::Return => {
+                let Some(number) = self.booklet.cards().nth(self.loadout_sel).map(|c| c.number)
+                else {
+                    return;
+                };
+                let slots = self.booklet.lore.slots();
+                if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
+                    self.persist_booklet();
+                }
+            }
+            Keycode::Space => self.start_from_title(),
+            Keycode::Escape => self.mode = hud::Mode::Title,
+            _ => {}
+        }
+    }
+
     /// Enter on the title: the dream already loaded behind it becomes the run.
     fn start_from_title(&mut self) {
         self.prologue = None;
@@ -2645,19 +2778,31 @@ impl DreamscapeGame {
     fn begin_run(&mut self) {
         self.eye_sticky = false;
         self.shards_this_run = 0;
-        // Abilities come from the loadout's cards (none in the prologue).
-        self.run = if self.prologue.is_some() {
-            RunUpgrades::default()
+        // Abilities come from the loadout's cards (none in the prologue),
+        // and each card's dream is planned into the run.
+        let cards = if self.prologue.is_some() {
+            Vec::new()
         } else {
-            let cards = self.booklet.loadout_cards();
-            if !cards.is_empty() {
-                log::info!(
-                    "Loadout: {:?}",
-                    cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
-                );
-            }
-            RunUpgrades::from_loadout(&cards)
+            self.booklet.loadout_cards()
         };
+        if !cards.is_empty() {
+            log::info!(
+                "Loadout: {:?}",
+                cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+        self.run = RunUpgrades::from_loadout(&cards);
+        self.ability_tints = cards
+            .iter()
+            .map(|c| {
+                let accents = c.fused.unwrap_or(c.theme).spec().accents;
+                (
+                    powers::power(c.theme).active,
+                    powers::power(c.theme).tint,
+                    accents[accents.len().min(2) - 1],
+                )
+            })
+            .collect();
         let asc = progress::Ascension(
             if self.daily.is_some() || self.autopilot || self.prologue.is_some() {
                 0
@@ -2668,6 +2813,8 @@ impl DreamscapeGame {
         self.active_asc = asc;
         self.director.shards_to_wake += asc.extra_shards();
         self.director.nightmare_every = asc.nightmare_every();
+        self.director
+            .plan_cards(&cards.iter().map(|c| (c.theme, c.fused)).collect::<Vec<_>>());
         if asc.always_hard() {
             self.director.hard_from.get_or_insert(0);
         }
@@ -3336,7 +3483,7 @@ impl DreamscapeGame {
             enemies: dream.patrols.len() as u32,
             shard_taken: false,
             art: dream.surfaces.floor.clone(),
-            blend: None,
+            blend: self.director.blend,
         });
         log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(
@@ -3382,6 +3529,8 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.bursts.clear();
+        self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.rewind_trail.clear();
         self.echo_timer = 0.0;
@@ -4039,6 +4188,7 @@ impl Game for DreamscapeGame {
             Ok("codex") => self.open_codex(),
             Ok("settings") => self.open_settings(),
             Ok("memories") => self.mode = hud::Mode::Memories,
+            Ok("loadout") => self.open_loadout(),
             Ok("note") => {
                 let d = lore::dreamer(self.booklet.lore.save_seed, 3);
                 self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
@@ -4149,6 +4299,10 @@ impl Game for DreamscapeGame {
             match (self.mode, key) {
                 (hud::Mode::Note, Keycode::Return | Keycode::Space | Keycode::Escape) => {
                     self.mode = hud::Mode::Playing;
+                    return;
+                }
+                (hud::Mode::Loadout, _) => {
+                    self.loadout_key(key);
                     return;
                 }
                 (hud::Mode::Memories, Keycode::Escape) => {
@@ -4735,6 +4889,7 @@ impl Game for DreamscapeGame {
         }
         self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
         self.update_echoes(player, dt)?;
+        self.update_bursts(ctx.gl())?;
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self

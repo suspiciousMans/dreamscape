@@ -99,6 +99,12 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::A | P::B => Some(Keycode::Return),
             _ => None,
         },
+        Mode::Loadout => match button {
+            P::A => Some(Keycode::Return),
+            P::X => Some(Keycode::Space),
+            P::B => Some(Keycode::Escape),
+            _ => dpad,
+        },
         Mode::Memories => match button {
             P::B => Some(Keycode::Escape),
             _ => dpad,
