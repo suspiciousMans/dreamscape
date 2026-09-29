@@ -217,6 +217,13 @@ pub fn difficulty(hardness: Option<(u32, u32)>) -> f32 {
     }
 }
 
+/// A strong loadout makes the dreams push back: difficulty grows 3% per
+/// point of starting power (see `RunUpgrades::power`), up to +50%.
+pub fn loadout_difficulty(power: f32) -> f32 {
+    (1.0 + 0.03 * power.max(0.0)).min(LOADOUT_DIFFICULTY_CAP)
+}
+pub const LOADOUT_DIFFICULTY_CAP: f32 = 1.5;
+
 /// Enemy speed under pressure. Grows with difficulty but a chasing enemy is
 /// always a bit slower than you, however hard it gets.
 pub fn pressured_enemy_speed(depth: u32, difficulty: f32, player_speed: f32) -> f32 {
@@ -584,5 +591,12 @@ mod tests {
         assert!(burst_cube(0, 0.25).0.length() > burst_cube(0, 0.0).0.length());
         assert!(burst_cube(3, 0.0).1 > 0.0);
         assert_eq!(burst_cube(3, BURST_SECONDS).1, 0.0);
+    }
+
+    #[test]
+    fn a_stronger_loadout_pushes_back_harder_but_capped() {
+        assert_eq!(loadout_difficulty(0.0), 1.0);
+        assert!(loadout_difficulty(4.0) < loadout_difficulty(10.0));
+        assert_eq!(loadout_difficulty(1000.0), LOADOUT_DIFFICULTY_CAP);
     }
 }

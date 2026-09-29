@@ -408,6 +408,8 @@ pub struct DreamscapeGame {
     merge_return: hud::Mode,
     /// Seconds into the ending (`Mode::Ending`).
     ending_age: f32,
+    /// This run's difficulty factor from its starting kit.
+    loadout_scale: f32,
     /// This run's portal leads to the bottom (the ending plays on arrival).
     to_bottom: bool,
     /// The first-time guided dreams, while they run.
@@ -589,6 +591,7 @@ impl DreamscapeGame {
             merge_status: None,
             merge_return: hud::Mode::Title,
             ending_age: 0.0,
+            loadout_scale: 1.0,
             to_bottom: false,
             prologue: None,
             eye_sticky: false,
@@ -657,7 +660,7 @@ impl DreamscapeGame {
     }
 
     fn difficulty(&self) -> f32 {
-        gameplay::difficulty(self.director.hardness())
+        gameplay::difficulty(self.director.hardness()) * self.loadout_scale
     }
 
     fn pressure(&self) -> Pressure {
@@ -2495,6 +2498,7 @@ impl DreamscapeGame {
                 self.director = s.director();
                 self.director.nightmare_every = self.active_asc.nightmare_every();
                 self.run = s.upgrades();
+                self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
                 self.run.penalty_cards = self.active_asc.fewer_cards();
                 self.run.no_free_reroll = !self.active_asc.free_rerolls();
                 self.director.shard_bonus = self.shard_bonus();
@@ -2601,6 +2605,7 @@ impl DreamscapeGame {
                 .map(|c| (c.theme, c.blend))
                 .collect(),
             burden: self.run.burden,
+            loadout_scale: Some(self.loadout_scale),
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -2953,6 +2958,12 @@ impl DreamscapeGame {
             log::info!("Companion: {} ({})", d.name, d.weight.label());
             self.run = std::mem::take(&mut self.run).with_companion(d.weight);
         }
+        self.loadout_scale = gameplay::loadout_difficulty(self.run.power());
+        log::info!(
+            "Starting kit power {:.1}: difficulty x{:.2}",
+            self.run.power(),
+            self.loadout_scale
+        );
         self.ability_tints = cards
             .iter()
             .map(|c| {

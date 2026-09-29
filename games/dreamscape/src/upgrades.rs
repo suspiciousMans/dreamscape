@@ -605,6 +605,9 @@ pub struct RunUpgrades {
 
 /// Free rerolls per run.
 pub const REROLLS_PER_RUN: u32 = 1;
+/// Most passive stacks a loadout can start a run with (balance: about what
+/// ten picks would give).
+pub const KIT_PASSIVES: usize = 10;
 /// Dust for skipping a pick.
 pub const SKIP_DUST: u32 = 5;
 
@@ -692,12 +695,30 @@ impl RunUpgrades {
                 passives.push(p.passive);
             }
             for u in passives {
-                if run.count(u) < u.info().max {
+                let held = run.taken.iter().filter(|t| !t.is_ability()).count();
+                if run.count(u) < u.info().max && held < KIT_PASSIVES {
                     run.taken.push(u);
                 }
             }
         }
         run
+    }
+
+    /// How strong a starting kit is: 2 per ability, and each passive stack
+    /// by its tier (common 1, rare 1.5, mythic 2).
+    pub fn power(&self) -> f32 {
+        let passives: f32 = self
+            .taken
+            .iter()
+            .map(|u| match u.tier() {
+                _ if u.is_ability() => 0.0,
+                Tier::Common => 1.0,
+                Tier::Rare => 1.5,
+                Tier::Mythic => 2.0,
+                Tier::Cursed => 0.0,
+            })
+            .sum();
+        2.0 * self.abilities.len() as f32 + passives
     }
 
     /// A collected dreamer rides along: their boon, and their burden.
@@ -1479,5 +1500,64 @@ mod tests {
                 "{a:?} could be kept on forever"
             );
         }
+    }
+
+    #[test]
+    fn no_loadout_starts_a_run_too_strong() {
+        use crate::cards::Rarity;
+        use crate::dream::ALL_THEMES;
+        let themes: Vec<_> = ALL_THEMES.to_vec();
+        let n = themes.len();
+        let mut strongest = 0.0_f32;
+        let mut weakest = f32::MAX;
+        // Every 5-card loadout of different dreams, plain and all-resonant.
+        for a in 0..n {
+            for b in a + 1..n {
+                for c in b + 1..n {
+                    for d in c + 1..n {
+                        for e in d + 1..n {
+                            let plain: Vec<_> =
+                                [a, b, c, d, e].iter().map(|&i| card(themes[i])).collect();
+                            let rich: Vec<_> = plain
+                                .iter()
+                                .map(|c| {
+                                    let mut c = c.clone();
+                                    c.rarity = Rarity::Resonant;
+                                    c.fused = Some(
+                                        crate::fusion::RESONANT
+                                            .iter()
+                                            .find_map(|&(x, y)| {
+                                                if x == c.theme {
+                                                    Some(y)
+                                                } else if y == c.theme {
+                                                    Some(x)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .unwrap(),
+                                    );
+                                    c
+                                })
+                                .collect();
+                            for kit in [plain, rich] {
+                                let r = RunUpgrades::from_loadout(&kit);
+                                strongest = strongest.max(r.power());
+                                weakest = weakest.min(r.power());
+                                assert!(
+                                    r.speed() <= 1.37 && r.enemy_speed() >= 0.72,
+                                    "{:?}",
+                                    r.taken
+                                );
+                                assert!(r.abilities.len() <= ABILITY_SLOTS);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The best kit is about what ten good picks would give, never more.
+        assert!(strongest <= 22.0, "strongest kit {strongest}");
+        assert!(weakest >= 7.0, "weakest 5-card kit {weakest}");
     }
 }
