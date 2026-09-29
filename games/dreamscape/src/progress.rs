@@ -202,6 +202,9 @@ pub struct SavedRun {
     /// The companion's weight, if one rode along.
     #[serde(default)]
     pub burden: Option<crate::lore::Weight>,
+    /// The starting kit's difficulty factor (older saves: none).
+    #[serde(default)]
+    pub loadout_scale: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,6 +397,7 @@ mod tests {
             stats: (1, 2, 0, 88.0, 0),
             card_dreams: Vec::new(),
             burden: None,
+            loadout_scale: None,
         }
     }
 

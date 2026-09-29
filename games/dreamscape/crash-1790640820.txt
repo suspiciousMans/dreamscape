@@ -1,0 +1,8 @@
+Dreamscape 0.1.0 (aefaa4a)
+OS: linux x86_64
+Run seed: 2
+
+SDL error: SDL not configured with OpenGL/GLX support
+
+Backtrace:
+
