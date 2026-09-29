@@ -153,7 +153,16 @@ pub fn load(path: &Path) -> Settings {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| ron::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| first_launch(std::env::var("SteamDeck").ok().as_deref()))
+}
+
+/// Settings on a first launch: fullscreen on a Steam Deck (SteamOS sets
+/// `SteamDeck=1`), the defaults everywhere else.
+pub fn first_launch(steam_deck: Option<&str>) -> Settings {
+    Settings {
+        fullscreen: steam_deck == Some("1"),
+        ..Settings::default()
+    }
 }
 
 pub fn save(path: &Path, s: &Settings) -> anyhow::Result<()> {
@@ -349,5 +358,12 @@ mod tests {
         assert!(s.reduce_flashing);
         let old: Settings = ron::from_str("(music: 0.5)").unwrap();
         assert!(!old.reduce_flashing);
+    }
+
+    #[test]
+    fn a_steam_deck_starts_fullscreen() {
+        assert!(first_launch(Some("1")).fullscreen);
+        assert!(!first_launch(None).fullscreen);
+        assert!(!first_launch(Some("0")).fullscreen);
     }
 }

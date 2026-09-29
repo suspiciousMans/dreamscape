@@ -74,3 +74,12 @@ jobs:
         with:
           name: dream-shots
           path: target/dream-shots
+
+      - name: Package (Linux / Steam Deck)
+        run: ./package.sh dreamscape --tar
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dreamscape-linux
+          path: dist/dreamscape-linux.tar.gz
