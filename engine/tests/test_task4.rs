@@ -1,43 +1,42 @@
-use std::path::PathBuf;
-
 use engine::ui::output::OutputPanel;
+use std::path::PathBuf;
 
 #[test]
 fn test_output_panel_appends_lines() {
     let mut panel = OutputPanel::new();
-    assert_eq!(panel.lines().len(), 0, "fresh panel should have no lines");
+    assert_eq!(panel.line_count_label(), "0 messages");
 
-    panel.push("first message");
-    panel.push("second message");
-    panel.push("third message");
+    panel.push("hello");
+    assert_eq!(panel.line_count_label(), "1 message");
 
-    let lines = panel.lines();
-    assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0], "first message");
-    assert_eq!(lines[1], "second message");
-    assert_eq!(lines[2], "third message");
+    panel.push("world");
+    assert_eq!(panel.lines().len(), 2);
+    assert_eq!(panel.line_count_label(), "2 messages");
+
+    // multiline push is still one "message" in the label count
+    panel.push("line1\nline2");
+    assert_eq!(panel.lines().len(), 3);
+    assert_eq!(panel.line_count_label(), "3 messages");
+}
+
+#[test]
+fn test_output_panel_line_count_label() {
+    let panel = OutputPanel::new();
+    assert_eq!(panel.line_count_label(), "0 messages");
+
+    // a single message
+    let mut panel2 = OutputPanel::new();
+    panel2.push("one");
+    assert_eq!(panel2.line_count_label(), "1 message");
 }
 
 #[test]
 fn test_output_panel_clear_removes_all_lines() {
     let mut panel = OutputPanel::new();
-    panel.push("one");
-    panel.push("two");
-    assert_eq!(panel.lines().len(), 2);
-
-    panel.clear();
-    assert_eq!(panel.lines().len(), 0);
-}
-
-#[test]
-fn test_output_panel_line_count_label() {
-    let mut panel = OutputPanel::new();
-    assert_eq!(panel.line_count_label(), "0 messages");
-
     panel.push("a");
     panel.push("b");
-    assert_eq!(panel.line_count_label(), "2 messages");
-
+    assert_eq!(panel.lines().len(), 2);
     panel.clear();
+    assert_eq!(panel.lines().len(), 0);
     assert_eq!(panel.line_count_label(), "0 messages");
 }

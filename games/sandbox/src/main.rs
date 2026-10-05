@@ -35,7 +35,8 @@ use engine::sdl2::controller::Button as ControllerButton;
 use engine::sdl2::event::Event;
 use engine::sdl2::keyboard::Keycode;
 use engine::sdl2::mouse::MouseButton;
-use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
+use engine::material::MaterialVariant;
+use engine::shader::{shader_files_for, ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::{draw_hud, draw_pause_menu, hud_style_editor, render_params_editor, EguiState, PauseMenuAction};
 
@@ -688,6 +689,13 @@ struct MeshUniforms {
     point_light_intensity: Vec<Option<glow::UniformLocation>>,
     point_light_range: Vec<Option<glow::UniformLocation>>,
     point_light_count: Option<glow::UniformLocation>,
+    // Only present in the `LitNormals` program (mesh_normals.*); `None`
+    // locations in the standard program, where uploads are GL no-ops.
+    camera_pos: Option<glow::UniformLocation>,
+    normal_map: Option<glow::UniformLocation>,
+    has_normal_map: Option<glow::UniformLocation>,
+    roughness: Option<glow::UniformLocation>,
+    metallic: Option<glow::UniformLocation>,
 }
 
 /// Matches the fixed-size point-light arrays declared in `mesh.vert`.
@@ -721,9 +729,75 @@ impl MeshUniforms {
                     .map(|i| gl.get_uniform_location(program, &format!("uPointLightRange[{i}]")))
                     .collect(),
                 point_light_count: gl.get_uniform_location(program, "uPointLightCount"),
+                camera_pos: gl.get_uniform_location(program, "uCameraPos"),
+                normal_map: gl.get_uniform_location(program, "uNormalMap"),
+                has_normal_map: gl.get_uniform_location(program, "uHasNormalMap"),
+                roughness: gl.get_uniform_location(program, "uRoughness"),
+                metallic: gl.get_uniform_location(program, "uMetallic"),
             }
         }
     }
+
+    /// Uploads everything that's the same for every mesh this frame —
+    /// shared by the standard and `LitNormals` passes so the two programs
+    /// can never disagree about the scene's camera, lights or fog.
+    ///
+    /// # Safety
+    /// The program these locations were resolved from must be in use.
+    unsafe fn upload_frame(
+        &self,
+        gl: &glow::Context,
+        params: &RenderParams,
+        view: Mat4,
+        proj: Mat4,
+        camera_pos: Vec3,
+        point_lights: &[(Vec3, Vec3, f32, f32)],
+    ) {
+        gl.uniform_matrix_4_f32_slice(self.view.as_ref(), false, &view.to_cols_array());
+        gl.uniform_matrix_4_f32_slice(self.proj.as_ref(), false, &proj.to_cols_array());
+        gl.uniform_3_f32(self.camera_pos.as_ref(), camera_pos.x, camera_pos.y, camera_pos.z);
+        let light_dir = Vec3::from(params.light_dir).normalize_or_zero();
+        gl.uniform_3_f32(self.light_dir.as_ref(), light_dir.x, light_dir.y, light_dir.z);
+        gl.uniform_3_f32(
+            self.ambient_color.as_ref(),
+            params.ambient_color[0],
+            params.ambient_color[1],
+            params.ambient_color[2],
+        );
+        gl.uniform_1_i32(
+            self.lighting_mode.as_ref(),
+            match params.lighting_mode {
+                LightingMode::Unlit => 0,
+                LightingMode::VertexLit => 1,
+            },
+        );
+        gl.uniform_1_f32(self.vertex_snap_amount.as_ref(), params.vertex_snap_amount);
+        gl.uniform_1_f32(self.fog_start.as_ref(), params.fog_start);
+        gl.uniform_1_f32(self.fog_end.as_ref(), params.fog_end);
+        gl.uniform_3_f32(
+            self.fog_color.as_ref(),
+            params.fog_color[0],
+            params.fog_color[1],
+            params.fog_color[2],
+        );
+
+        for (i, (position, color, intensity, range)) in point_lights.iter().enumerate() {
+            gl.uniform_3_f32(self.point_light_pos[i].as_ref(), position.x, position.y, position.z);
+            gl.uniform_3_f32(self.point_light_color[i].as_ref(), color.x, color.y, color.z);
+            gl.uniform_1_f32(self.point_light_intensity[i].as_ref(), *intensity);
+            gl.uniform_1_f32(self.point_light_range[i].as_ref(), *range);
+        }
+        gl.uniform_1_i32(self.point_light_count.as_ref(), point_lights.len() as i32);
+    }
+}
+
+/// Whether a mesh should be drawn by the `LitNormals` program rather than
+/// the profile's standard mesh program.
+fn uses_normals_program(mesh_renderer: &MeshRenderer) -> bool {
+    mesh_renderer
+        .material
+        .as_ref()
+        .is_some_and(|material| material.variant == MaterialVariant::LitNormals)
 }
 
 /// Where `assets/` and `profiles/` are read from at runtime.
@@ -917,6 +991,14 @@ struct Sandbox {
     /// section rather than sharing the flat Scene Objects outliner.
     selected_rig: Option<Entity>,
     selected_rig_part: Option<Entity>,
+    /// Cache for loaded normal map textures, keyed by file path. `None`
+    /// records a failed load so a bad path is logged once, not every frame.
+    normal_map_cache: HashMap<String, Option<Arc<GpuTexture>>>,
+    /// Program for `MaterialVariant::LitNormals` meshes, rebuilt alongside
+    /// `shader_cache` in `apply_profile`. `None` if its shader files are
+    /// missing or failed to compile — those meshes then fall back to the
+    /// profile's standard program rather than disappearing.
+    normals_shader_cache: Option<ShaderVariantCache>,
     /// Baked from static level geometry in `apply_level` — `None` only
     /// before the first level ever loads. Used by `engine::ai::step` for
     /// character pathfinding.
@@ -1050,6 +1132,8 @@ impl Sandbox {
             rigs: Vec::new(),
             selected_rig: None,
             selected_rig_part: None,
+            normal_map_cache: HashMap::new(),
+            normals_shader_cache: None,
             nav_grid: None,
             selected_character: None,
             selected_spawner: None,
@@ -1166,10 +1250,13 @@ impl Sandbox {
     fn handle_hot_reload(&mut self, ctx: &mut Context, changed_paths: &[PathBuf]) {
         let gl = ctx.gl();
 
+        let (normals_vertex, normals_fragment) = Self::normals_shader_paths();
         let shader_changed = changed_paths.iter().any(|path| {
             self.hot_reload_path_matches(&self.shader_paths.0, path)
                 || self.hot_reload_path_matches(&self.shader_paths.1, path)
                 || self.hot_reload_path_matches(&self.shader_paths.2, path)
+                || self.hot_reload_path_matches(&normals_vertex, path)
+                || self.hot_reload_path_matches(&normals_fragment, path)
         });
         if shader_changed {
             if let Some(cycler) = &self.profiles {
@@ -1219,6 +1306,28 @@ impl Sandbox {
         }
     }
 
+    /// The `LitNormals` shader pair, relative to `asset_root` like the
+    /// profile's own shader paths (`shader_files_for` is relative to
+    /// `assets/`).
+    fn normals_shader_paths() -> (PathBuf, PathBuf) {
+        let (vertex, fragment) = shader_files_for(&MaterialVariant::LitNormals);
+        (Path::new("assets").join(vertex), Path::new("assets").join(fragment))
+    }
+
+    fn load_normals_shader_cache(&self) -> Option<ShaderVariantCache> {
+        let (vertex_path, fragment_path) = Self::normals_shader_paths();
+        let read = |path: &Path| std::fs::read_to_string(self.asset_root.join(path));
+        match (read(&vertex_path), read(&fragment_path)) {
+            (Ok(vertex_body), Ok(fragment_body)) => {
+                Some(ShaderVariantCache::new(vertex_body, fragment_body))
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                log::warn!("normal-mapped materials disabled, couldn't read LitNormals shaders: {err}");
+                None
+            }
+        }
+    }
+
     /// Loads the profile's shader files, swaps the composite shader, and
     /// resizes the offscreen target for its resolution scale. Only needs
     /// `gl`/`drawable_size` (not a full `&mut Context`) so it can be called
@@ -1233,6 +1342,7 @@ impl Sandbox {
         let fragment_body =
             std::fs::read_to_string(self.asset_root.join(&profile.fragment_shader))?;
         self.shader_cache = Some(ShaderVariantCache::new(vertex_body, fragment_body));
+        self.normals_shader_cache = self.load_normals_shader_cache();
 
         let post_fragment_src =
             std::fs::read_to_string(self.asset_root.join(&profile.post_fragment_shader))?;
@@ -1430,6 +1540,7 @@ impl Sandbox {
             MeshRenderer {
                 mesh,
                 texture: Some(texture),
+                material: None,
             },
             LevelObjectMeta {
                 name: obj.name.clone(),
@@ -1566,7 +1677,7 @@ impl Sandbox {
         let position = Vec3::from(instance.position);
         let entity = self.world.spawn((
             Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
-            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))), material: None },
             Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
             RigidBody::default(),
             CharacterMeta {
@@ -1752,7 +1863,7 @@ impl Sandbox {
                 rotation: local_rotation,
                 scale: Vec3::from(def.scale),
             },
-            MeshRenderer { mesh, texture: Some(texture) },
+            MeshRenderer { mesh, texture: Some(texture), material: None },
             RigPart { parent: None, local_position, local_rotation_euler_deg, local_rotation },
             engine::rig::RigPartMeta { mesh_source: def.mesh.clone(), texture_path: def.texture_path.clone() },
         ));
@@ -5523,6 +5634,19 @@ impl Game for Sandbox {
         let program = shader_cache.get_or_compile(gl, flags)?;
         let uniforms = MeshUniforms::resolve(gl, program);
 
+        // Compiled eagerly (not on first LitNormals mesh) so a broken
+        // normals shader surfaces at startup. A compile failure disables
+        // the pass for this profile instead of failing every frame.
+        let normals_pass = match self.normals_shader_cache.as_mut().map(|cache| cache.get_or_compile(gl, flags)) {
+            Some(Ok(normals_program)) => Some((normals_program, MeshUniforms::resolve(gl, normals_program))),
+            Some(Err(err)) => {
+                log::error!("LitNormals shader failed to compile, falling back to the standard mesh shader: {err}");
+                self.normals_shader_cache = None;
+                None
+            }
+            None => None,
+        };
+
         unsafe {
             gl.clear_color(params.fog_color[0], params.fog_color[1], params.fog_color[2], 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
@@ -5546,39 +5670,6 @@ impl Game for Sandbox {
                 gl.disable(glow::CULL_FACE);
             }
 
-            gl.use_program(Some(program));
-            gl.uniform_matrix_4_f32_slice(uniforms.view.as_ref(), false, &view.to_cols_array());
-            gl.uniform_matrix_4_f32_slice(uniforms.proj.as_ref(), false, &proj.to_cols_array());
-            let light_dir = Vec3::from(params.light_dir).normalize_or_zero();
-            gl.uniform_3_f32(
-                uniforms.light_dir.as_ref(),
-                light_dir.x,
-                light_dir.y,
-                light_dir.z,
-            );
-            gl.uniform_3_f32(
-                uniforms.ambient_color.as_ref(),
-                params.ambient_color[0],
-                params.ambient_color[1],
-                params.ambient_color[2],
-            );
-            gl.uniform_1_i32(
-                uniforms.lighting_mode.as_ref(),
-                match params.lighting_mode {
-                    LightingMode::Unlit => 0,
-                    LightingMode::VertexLit => 1,
-                },
-            );
-            gl.uniform_1_f32(uniforms.vertex_snap_amount.as_ref(), params.vertex_snap_amount);
-            gl.uniform_1_f32(uniforms.fog_start.as_ref(), params.fog_start);
-            gl.uniform_1_f32(uniforms.fog_end.as_ref(), params.fog_end);
-            gl.uniform_3_f32(
-                uniforms.fog_color.as_ref(),
-                params.fog_color[0],
-                params.fog_color[1],
-                params.fog_color[2],
-            );
-
             let point_lights: Vec<(Vec3, Vec3, f32, f32)> = self
                 .world
                 .query::<(&Transform, &Light)>()
@@ -5591,31 +5682,94 @@ impl Game for Sandbox {
                 })
                 .take(MAX_POINT_LIGHTS)
                 .collect();
+            let camera_pos = view.inverse().w_axis.truncate();
 
-            for (i, (position, color, intensity, range)) in point_lights.iter().enumerate() {
-                gl.uniform_3_f32(uniforms.point_light_pos[i].as_ref(), position.x, position.y, position.z);
-                gl.uniform_3_f32(uniforms.point_light_color[i].as_ref(), color.x, color.y, color.z);
-                gl.uniform_1_f32(uniforms.point_light_intensity[i].as_ref(), *intensity);
-                gl.uniform_1_f32(uniforms.point_light_range[i].as_ref(), *range);
-            }
-            gl.uniform_1_i32(uniforms.point_light_count.as_ref(), point_lights.len() as i32);
-
+            // Pass 1: the profile's standard mesh program — everything
+            // except LitNormals meshes (unless that pass is unavailable).
+            gl.use_program(Some(program));
+            uniforms.upload_frame(gl, &params, view, proj, camera_pos, &point_lights);
             for (_entity, (transform, mesh_renderer)) in
                 self.world.query::<(&Transform, &MeshRenderer)>().iter()
             {
+                if normals_pass.is_some() && uses_normals_program(mesh_renderer) {
+                    continue;
+                }
                 gl.uniform_matrix_4_f32_slice(
                     uniforms.model.as_ref(),
                     false,
                     &transform.matrix().to_cols_array(),
                 );
-
                 if let Some(texture) = &mesh_renderer.texture {
                     texture.bind(gl, 0);
                     gl.uniform_1_i32(uniforms.tex.as_ref(), 0);
                 }
-
                 mesh_renderer.mesh.draw(gl);
                 draw_calls += 1;
+            }
+
+            // Pass 2: LitNormals meshes — base texture on unit 0, normal
+            // map on unit 1, per-pixel lighting.
+            if let Some((normals_program, normals_uniforms)) = &normals_pass {
+                gl.use_program(Some(*normals_program));
+                normals_uniforms.upload_frame(gl, &params, view, proj, camera_pos, &point_lights);
+                gl.uniform_1_i32(normals_uniforms.tex.as_ref(), 0);
+                gl.uniform_1_i32(normals_uniforms.normal_map.as_ref(), 1);
+
+                for (_entity, (transform, mesh_renderer)) in
+                    self.world.query::<(&Transform, &MeshRenderer)>().iter()
+                {
+                    let Some(material) = mesh_renderer
+                        .material
+                        .as_ref()
+                        .filter(|_| uses_normals_program(mesh_renderer))
+                    else {
+                        continue;
+                    };
+
+                    gl.uniform_matrix_4_f32_slice(
+                        normals_uniforms.model.as_ref(),
+                        false,
+                        &transform.matrix().to_cols_array(),
+                    );
+                    if let Some(texture) = &mesh_renderer.texture {
+                        texture.bind(gl, 0);
+                    }
+
+                    let normal_tex = material.normal_map.as_ref().and_then(|path| {
+                        self.normal_map_cache
+                            .entry(path.clone())
+                            .or_insert_with(|| {
+                                match GpuTexture::load_from_file(
+                                    gl,
+                                    &self.asset_root.join(path),
+                                    TextureFilter::Bilinear,
+                                ) {
+                                    Ok(texture) => Some(Arc::new(texture)),
+                                    Err(err) => {
+                                        log::error!("failed to load normal map {path:?}, drawing without it: {err}");
+                                        None
+                                    }
+                                }
+                            })
+                            .clone()
+                    });
+                    match &normal_tex {
+                        Some(texture) => {
+                            texture.bind(gl, 1);
+                            gl.uniform_1_i32(normals_uniforms.has_normal_map.as_ref(), 1);
+                        }
+                        None => gl.uniform_1_i32(normals_uniforms.has_normal_map.as_ref(), 0),
+                    }
+                    gl.uniform_1_f32(normals_uniforms.roughness.as_ref(), material.roughness);
+                    gl.uniform_1_f32(normals_uniforms.metallic.as_ref(), material.metallic);
+
+                    mesh_renderer.mesh.draw(gl);
+                    draw_calls += 1;
+                }
+
+                // `GpuTexture::bind` leaves the active unit where it was
+                // last set; later passes (particles, egui) assume unit 0.
+                gl.active_texture(glow::TEXTURE0);
             }
 
             gl.disable(glow::CULL_FACE);

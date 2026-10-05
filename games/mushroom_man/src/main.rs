@@ -1612,6 +1612,7 @@ impl Sandbox {
             MeshRenderer {
                 mesh,
                 texture: Some(texture),
+                material: None,
             },
             LevelObjectMeta {
                 name: obj.name.clone(),
@@ -1748,7 +1749,7 @@ impl Sandbox {
         let position = Vec3::from(instance.position);
         let entity = self.world.spawn((
             Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
-            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))), material: None },
             Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
             RigidBody::default(),
             CharacterMeta {
@@ -1921,7 +1922,7 @@ impl Sandbox {
                 rotation: local_rotation,
                 scale: Vec3::from(def.scale),
             },
-            MeshRenderer { mesh, texture: Some(texture) },
+            MeshRenderer { mesh, texture: Some(texture), material: None },
             RigPart { parent: None, local_position, local_rotation_euler_deg, local_rotation },
             engine::rig::RigPartMeta { mesh_source: def.mesh.clone(), texture_path: def.texture_path.clone() },
         ));
