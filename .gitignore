@@ -1,5 +1,1 @@
-/target
-/dist
-.vscode
-*.pdb
-game.log
+target/

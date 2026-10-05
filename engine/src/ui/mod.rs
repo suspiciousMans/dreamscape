@@ -1,19 +1,23 @@
 mod appearance_panel;
 mod asset_browser;
 mod backend;
+pub mod output;
+pub mod dock_skeleton;
 mod hud;
 mod multiplayer_panel;
 mod panels;
 mod pause_menu;
 mod profiler;
+pub mod theme;
 
 pub use appearance_panel::{draw_appearance_panel, AppearanceAction};
 pub use asset_browser::AssetBrowserState;
 pub use backend::EguiState;
+pub use dock_skeleton::EditorDocks;
 pub use hud::draw_hud;
+pub use output::{OutputPanel, scan_for_files};
 pub use multiplayer_panel::{draw_multiplayer_panel, MultiplayerAction};
 pub use panels::{hud_style_editor, render_params_editor};
 pub use pause_menu::{draw_pause_menu, PauseMenuAction};
 pub use profiler::{draw_profiler_overlay, ProfilerStats};
-
-pub use egui;
+pub use theme::EditorTheme;
