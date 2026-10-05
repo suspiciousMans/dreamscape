@@ -11,6 +11,7 @@ pub mod hotreload;
 pub mod hud;
 pub mod input;
 pub mod level;
+pub mod material;
 pub mod mesh;
 pub mod net;
 pub mod particles;
@@ -27,8 +28,12 @@ pub mod shader;
 pub mod testkit;
 pub mod texture;
 pub mod time;
+pub mod tilemap;
 pub mod ui;
 
 pub use glam;
 pub use glow;
 pub use sdl2;
+
+pub use material::{Material, MaterialFile, MaterialVariant};
+pub use tilemap::{TileLayer, Tilemap, TileOrientation, TileSet};

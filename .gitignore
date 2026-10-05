@@ -10,3 +10,4 @@ games/dreamscape/settings.ron
 games/dreamscape/saved_run.ron
 games/dreamscape/cards/
 dist/
+target/
