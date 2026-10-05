@@ -43,6 +43,7 @@ pub fn load_obj(path: &Path) -> anyhow::Result<Vec<MeshData>> {
                 } else {
                     [0.0, 0.0]
                 },
+                color: [0.0, 0.0, 0.0],
             })
             .collect();
 

@@ -87,6 +87,9 @@ pub struct Light {
     pub color: Vec3,
     pub intensity: f32,
     pub kind: LightKind,
+    /// Mirrors `engine::level::LevelLight::is_static` — see
+    /// `Sandbox::bake_static_lighting`.
+    pub is_static: bool,
 }
 
 /// Marks an entity as a level-editor-placed object and carries enough

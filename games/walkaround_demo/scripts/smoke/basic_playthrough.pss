@@ -1,0 +1,48 @@
+// Scripted smoke test, driven by engine::app::App::run_scripted /
+// engine::testkit::SmokeTestHost (not the in-game Behavior/ScriptApi
+// system bob_demo.pss uses — this script's `tick()` is called once per
+// real frame by the smoke-test harness itself, and its "standard library"
+// is press/release/time/assert_true/assert_eq/finish/log instead).
+//
+// Enters Play mode, walks forward for a couple of seconds, then finishes
+// successfully — proving the harness can drive a real window end to end
+// (input injection, a live game loop, timed phases) without the game
+// hanging or crashing. Run with:
+//   cargo run -p sandbox -- --smoke-test scripts/smoke/basic_playthrough.pss
+
+let phase = 0.0;
+let phase_started_at = 0.0;
+
+fn enter_phase(next) {
+    phase = next;
+    phase_started_at = time();
+    log("entering phase " + next);
+}
+
+fn seconds_in_phase() {
+    return time() - phase_started_at;
+}
+
+fn tick() {
+    if phase == 0.0 {
+        // Toggle from Edit mode into Play mode.
+        press("F3");
+        release("F3");
+        enter_phase(1.0);
+    } else if phase == 1.0 {
+        // Give Play mode a moment to spin up before moving.
+        if seconds_in_phase() > 0.3 {
+            press("W");
+            enter_phase(2.0);
+        }
+    } else if phase == 2.0 {
+        if seconds_in_phase() > 2.0 {
+            release("W");
+            enter_phase(3.0);
+        }
+    } else if phase == 3.0 {
+        assert_true(time() > 2.0, "expected in-game time to have advanced past 2 seconds");
+        log("basic playthrough smoke test passed");
+        finish(true);
+    }
+}

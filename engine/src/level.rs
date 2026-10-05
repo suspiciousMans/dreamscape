@@ -129,6 +129,13 @@ pub struct LevelLight {
     pub color: [f32; 3],
     pub intensity: f32,
     pub range: f32,
+    /// Whether this light is baked into static geometry's vertex colors
+    /// (see `Sandbox::bake_static_lighting`) instead of contributing to
+    /// the per-frame dynamic point-light uniforms. `#[serde(default)]`
+    /// so existing level files load unchanged as `false` (dynamic,
+    /// today's only behavior).
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 /// A placed instance of a `engine::rig::RigAsset` — a separate list from
@@ -158,14 +165,19 @@ pub struct LevelParticleEmitter {
 /// A placed character (enemy/NPC/passive) — a sibling list on `Level` like
 /// `RigInstance`/`LevelLight`, since a character's shape (disposition,
 /// combat/dialogue config) doesn't fit `LevelObject`'s generic mesh/
-/// texture/trigger schema. Spawned as a solid-colored cube (see
-/// `Sandbox::spawn_character`) rather than an imported mesh/rig.
+/// texture/trigger schema. Spawned as a cube (see `Sandbox::spawn_character`)
+/// rather than an imported mesh/rig — solid-`color`-filled by default, or
+/// textured if `texture_path` is set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacterInstance {
     pub name: String,
     pub position: [f32; 3],
     pub scale: [f32; 3],
     pub color: [f32; 3],
+    /// `#[serde(default)]` so levels saved before this field existed still
+    /// load (as `None`/solid-color, the prior-only behavior).
+    #[serde(default)]
+    pub texture_path: Option<PathBuf>,
     pub disposition: Disposition,
     pub move_speed: f32,
     pub wander_radius: f32,

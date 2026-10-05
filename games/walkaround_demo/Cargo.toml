@@ -1,0 +1,19 @@
+[package]
+name = "walkaround_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine = { path = "../../engine" }
+sdl2.workspace = true
+glow.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+egui.workspace = true
+rfd.workspace = true
+rodio.workspace = true
+
+[build-dependencies]
+winres = "0.1"

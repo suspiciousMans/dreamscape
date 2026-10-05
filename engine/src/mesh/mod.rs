@@ -14,6 +14,12 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Baked static-lighting contribution (see `Sandbox::bake_static_lighting`),
+    /// added to the shader's live ambient/directional/dynamic-point-light
+    /// sum in `mesh.vert`. `[0.0, 0.0, 0.0]` (the default every loader
+    /// produces) is a pure no-op — a never-baked mesh renders identically
+    /// to before this field existed.
+    pub color: [f32; 3],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,6 +39,7 @@ pub struct GpuMesh {
 const ATTR_POSITION: u32 = 0;
 const ATTR_NORMAL: u32 = 1;
 const ATTR_UV: u32 = 2;
+const ATTR_COLOR: u32 = 3;
 
 impl GpuMesh {
     pub fn upload(gl: &glow::Context, mesh: &MeshData) -> anyhow::Result<Self> {
@@ -40,7 +47,17 @@ impl GpuMesh {
             let vao = gl.create_vertex_array().map_err(anyhow::Error::msg)?;
             gl.bind_vertex_array(Some(vao));
 
-            let vbo = gl.create_buffer().map_err(anyhow::Error::msg)?;
+            // On a buffer-creation failure, delete the objects already made
+            // (the VAO, then the VBO too) before propagating — otherwise
+            // they'd be orphaned since no `GpuMesh` is returned to `destroy`.
+            let vbo = match gl.create_buffer().map_err(anyhow::Error::msg) {
+                Ok(vbo) => vbo,
+                Err(err) => {
+                    gl.bind_vertex_array(None);
+                    gl.delete_vertex_array(vao);
+                    return Err(err);
+                }
+            };
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             gl.buffer_data_u8_slice(
                 glow::ARRAY_BUFFER,
@@ -48,7 +65,15 @@ impl GpuMesh {
                 glow::STATIC_DRAW,
             );
 
-            let ebo = gl.create_buffer().map_err(anyhow::Error::msg)?;
+            let ebo = match gl.create_buffer().map_err(anyhow::Error::msg) {
+                Ok(ebo) => ebo,
+                Err(err) => {
+                    gl.bind_vertex_array(None);
+                    gl.delete_vertex_array(vao);
+                    gl.delete_buffer(vbo);
+                    return Err(err);
+                }
+            };
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
             gl.buffer_data_u8_slice(
                 glow::ELEMENT_ARRAY_BUFFER,
@@ -77,6 +102,15 @@ impl GpuMesh {
                 std::mem::size_of::<[f32; 6]>() as i32,
             );
             gl.enable_vertex_attrib_array(ATTR_UV);
+            gl.vertex_attrib_pointer_f32(
+                ATTR_COLOR,
+                3,
+                glow::FLOAT,
+                false,
+                stride,
+                std::mem::size_of::<[f32; 8]>() as i32,
+            );
+            gl.enable_vertex_attrib_array(ATTR_COLOR);
 
             gl.bind_vertex_array(None);
 

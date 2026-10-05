@@ -84,7 +84,7 @@ pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(he
         if !is_dynamic {
             continue;
         }
-        for &(other_entity, other_position, other_shape, _, other_is_trigger) in &colliders {
+        for &(other_entity, other_position, other_shape, other_is_dynamic, other_is_trigger) in &colliders {
             if other_entity == entity {
                 continue;
             }
@@ -100,7 +100,14 @@ pub fn step(world: &mut hecs::World, dt: f32, params: &PhysicsParams) -> Vec<(he
 
             if let Ok(mut query) = world.query_one::<(&mut Transform, &mut RigidBody)>(entity) {
                 if let Some((transform, body)) = query.get() {
-                    transform.position += overlap.push;
+                    // When both bodies are dynamic, each one runs this loop as
+                    // the outer entity and pushes *itself* out — against the
+                    // same frozen snapshot positions — so applying the full
+                    // depth to each would separate the pair by ~2x the
+                    // penetration and pop them apart. Split the correction so
+                    // the two half-pushes sum to exactly one penetration depth.
+                    let push = if other_is_dynamic { overlap.push * 0.5 } else { overlap.push };
+                    transform.position += push;
                     let into_surface = body.velocity.dot(overlap.normal);
                     if into_surface < 0.0 {
                         body.velocity -= overlap.normal * into_surface;
@@ -196,13 +203,80 @@ fn sphere_vs_aabb(sphere_pos: Vec3, radius: f32, box_pos: Vec3, half_extents: Ve
     let closest_local = local.clamp(-half_extents, half_extents);
     let diff = local - closest_local;
     let distance = diff.length();
-    if distance < radius && distance > 1e-5 {
-        let normal = diff / distance;
+    if distance > 1e-5 {
+        // Normal case: the sphere center is outside the box, so `diff` points
+        // from the nearest surface point out to the center.
+        if distance < radius {
+            let normal = diff / distance;
+            Some(Overlap {
+                push: normal * (radius - distance),
+                normal,
+            })
+        } else {
+            None
+        }
+    } else {
+        // The sphere center is *inside* the box: the clamped closest point is
+        // the center itself, so `diff` is ~zero and there's no surface
+        // direction to eject along. Without this branch the sphere would
+        // simply pass through (a fast fall with a large `dt`, or an entity
+        // spawned overlapping thick geometry). Eject along the axis whose
+        // face the center is nearest to — the minimum-translation axis, same
+        // approach `aabb_vs_aabb` uses — by that remaining depth plus the
+        // full radius so the sphere clears the box entirely.
+        let penetration = half_extents - local.abs();
+        let (axis, depth) = if penetration.x < penetration.y && penetration.x < penetration.z {
+            (Vec3::X, penetration.x)
+        } else if penetration.y < penetration.z {
+            (Vec3::Y, penetration.y)
+        } else {
+            (Vec3::Z, penetration.z)
+        };
+        // Push toward whichever side of the mid-plane the center sits on
+        // (`signum()` of an exact-zero component is +1, a fine arbitrary pick).
+        let normal = axis * local.dot(axis).signum();
         Some(Overlap {
-            push: normal * (radius - distance),
+            push: normal * (depth + radius),
             normal,
         })
-    } else {
-        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sphere_center_inside_box_is_ejected() {
+        // Deep-penetration case: a sphere whose center sits *inside* the AABB
+        // must still produce a separating push rather than returning None and
+        // silently tunnelling through.
+        let sphere = ColliderShape::Sphere { radius: 0.5 };
+        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        // Center just above the box's own center — still well inside it.
+        let overlap = resolve_overlap(Vec3::new(0.0, 0.2, 0.0), sphere, Vec3::ZERO, aabb)
+            .expect("a sphere centered inside the box must be resolved");
+        // Nearest face is +Y, so it ejects upward.
+        assert!(overlap.normal.abs_diff_eq(Vec3::Y, 1e-4), "normal was {:?}", overlap.normal);
+        assert!(overlap.push.y > 0.0, "push should be upward, was {:?}", overlap.push);
+    }
+
+    #[test]
+    fn sphere_grazing_a_face_still_resolves() {
+        // Regression guard for the ordinary center-outside path.
+        let sphere = ColliderShape::Sphere { radius: 0.5 };
+        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        // Top face is at y = 1.0; a center at y = 1.3 with radius 0.5 overlaps by 0.2.
+        let overlap = resolve_overlap(Vec3::new(0.0, 1.3, 0.0), sphere, Vec3::ZERO, aabb)
+            .expect("a sphere grazing the top face must be resolved");
+        assert!(overlap.normal.abs_diff_eq(Vec3::Y, 1e-4), "normal was {:?}", overlap.normal);
+        assert!((overlap.push.y - 0.2).abs() < 1e-3, "push.y was {}", overlap.push.y);
+    }
+
+    #[test]
+    fn distant_shapes_do_not_overlap() {
+        let sphere = ColliderShape::Sphere { radius: 0.5 };
+        let aabb = ColliderShape::Aabb { half_extents: Vec3::splat(1.0) };
+        assert!(resolve_overlap(Vec3::new(0.0, 5.0, 0.0), sphere, Vec3::ZERO, aabb).is_none());
     }
 }

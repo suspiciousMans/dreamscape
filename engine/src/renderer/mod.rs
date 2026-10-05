@@ -76,7 +76,17 @@ impl Renderer {
         gl: &glow::Context,
         post_fragment_src: &str,
     ) -> anyhow::Result<()> {
-        self.composite = CompositePass::new(gl, post_fragment_src)?;
+        // Build the replacement first, so a compile/link failure leaves the
+        // existing pass intact. Only once the new pass is ready do we tear
+        // down the old one's GL program and VAO — `CompositePass` has no
+        // `Drop`, so without this explicit `destroy` those objects would
+        // leak in the driver on every shader-profile switch (unlike
+        // `resize_if_needed`, which already destroys the old framebuffer).
+        let composite = CompositePass::new(gl, post_fragment_src)?;
+        unsafe {
+            self.composite.destroy(gl);
+        }
+        self.composite = composite;
         Ok(())
     }
 

@@ -172,6 +172,14 @@ pub fn step(world: &mut hecs::World, dt: f32) -> Vec<Entity> {
                 let particle = emitter.spawn_one(transform.position);
                 emitter.particles.push(particle);
             }
+            // While the pool is saturated the `while` above can't drain the
+            // accumulator, so a high-rate emitter would bank an ever-growing
+            // backlog and then dump a catch-up burst the instant slots free
+            // up (a visible "pop" instead of a steady stream). Cap it so no
+            // more than one spawn's worth of credit is ever carried over.
+            // A no-op whenever slots are free (the loop already drains below
+            // 1.0 then).
+            emitter.spawn_accumulator = emitter.spawn_accumulator.min(1.0);
         } else if emitter.particles.is_empty() {
             spent.push(entity);
         }

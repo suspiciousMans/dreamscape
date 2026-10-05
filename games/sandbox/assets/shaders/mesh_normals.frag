@@ -14,6 +14,7 @@ in vec2 vUV;
 #endif
 in vec3 vWorldPos;
 in vec3 vWorldNormal;
+in vec3 vBakedLight;
 in float vFogFactor;
 
 out vec4 FragColor;
@@ -97,6 +98,10 @@ void main() {
 
     vec3 color = texColor.rgb * uAmbientColor;
     color += shade(N, V, normalize(uLightDir), albedo, specColor, shininess);
+    // Baked static lights (`Sandbox::bake_static_lighting`, same as
+    // mesh.vert's `vLight += aColor`). Baked per vertex from the geometric
+    // normal, so the normal map can't perturb it; zero if never baked.
+    color += albedo * vBakedLight;
 
     for (int i = 0; i < uPointLightCount; i++) {
         vec3 toLight = uPointLightPos[i] - vWorldPos;

@@ -11,6 +11,7 @@
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aUV;
+layout (location = 3) in vec3 aColor;
 
 uniform mat4 uModel;
 uniform mat4 uView;
@@ -26,6 +27,7 @@ out vec2 vUV;
 #endif
 out vec3 vWorldPos;
 out vec3 vWorldNormal;
+out vec3 vBakedLight;
 out float vFogFactor;
 
 void main() {
@@ -43,6 +45,7 @@ void main() {
     gl_Position = clipPos;
     vUV = aUV;
     vWorldPos = worldPos.xyz;
+    vBakedLight = aColor;
     // Inverse-transpose keeps normals perpendicular under non-uniform scale.
     vWorldNormal = mat3(transpose(inverse(uModel))) * aNormal;
 

@@ -40,8 +40,18 @@ impl AudioContext {
     /// A procedural sine-wave blip — no asset file required. Handy as a
     /// placeholder SFX while prototyping (jump, interact, UI clicks, ...).
     pub fn play_tone(&self, frequency_hz: f32, duration_secs: f32) {
+        // `Duration::from_secs_f32` panics on a negative, NaN, or infinite
+        // argument. This is a game-/script-reachable API, so a duration
+        // that comes out of a bad division or a designer typo would
+        // otherwise crash the whole single-threaded engine mid-frame
+        // instead of just skipping the blip — sanitize to a finite,
+        // non-negative value first (and skip a zero-length source).
+        let secs = if duration_secs.is_finite() { duration_secs.max(0.0) } else { 0.0 };
+        if secs <= 0.0 {
+            return;
+        }
         let source = SineWave::new(frequency_hz)
-            .take_duration(Duration::from_secs_f32(duration_secs))
+            .take_duration(Duration::from_secs_f32(secs))
             .amplify(0.3);
         if let Ok(sink) = Sink::try_new(&self.handle) {
             sink.append(source);

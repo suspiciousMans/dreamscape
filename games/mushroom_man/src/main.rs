@@ -20,12 +20,16 @@ use engine::ecs::{euler_deg_to_quat, Entity, Light, LevelObjectMeta, LightKind, 
 use engine::hotreload::HotReloadWatcher;
 use engine::hud::HudState;
 use engine::screen_effect::{ScreenEffectSpec, ScreenEffectState};
-use engine::glam::{Mat4, Quat, Vec3};
+use engine::glam::{Mat3, Mat4, Quat, Vec3};
 use engine::glow::{self, HasContext};
 use engine::level::{AnimationSpec, CharacterInstance, Level, LevelLight, LevelObject, LevelParticleEmitter, LevelTransition, MeshSource, PrimitiveKind, RigInstance, SpawnerInstance};
 use engine::rig::{Keyframe, JointTrack, Rig, RigAnimator, RigAsset, RigClip, RigPart, RigPartDef};
 use engine::save::SaveData;
-use engine::mesh::{load_gltf, load_obj, primitives, GpuMesh};
+use engine::mesh::{load_gltf, load_obj, primitives, GpuMesh, MeshData};
+use engine::net::{
+    spawn_ring_offset, CharacterSnapshot, InputState, NetClient, NetHost, NetId, ObjectSnapshot, PlayerSnapshot,
+    ServerMessage,
+};
 use engine::particles::{ParticleEmitter, ParticleEmitterDef};
 use engine::pathfinding::NavGrid;
 use engine::physics::{Collider, ColliderShape, PhysicsParams, RigidBody};
@@ -231,6 +235,7 @@ fn entrance_level() -> Level {
         color: [1.0, 0.85, 0.6],
         intensity: 1.6,
         range: 8.0,
+        is_static: false,
     };
 
     let bounce_mushroom = mushroom_pickup_object("Bounce Mushroom", [0.0, 1.0, 1.0], MushroomKind::Bounce);
@@ -301,6 +306,7 @@ fn entrance_level() -> Level {
         position: [1.6, 1.0, 3.0],
         scale: [0.6, 1.0, 0.6],
         color: [0.6, 0.9, 1.0],
+        texture_path: None,
         disposition: Disposition::Friendly,
         move_speed: 1.5,
         wander_radius: 1.0,
@@ -371,6 +377,7 @@ fn tunnels_level() -> Level {
         color: [0.7, 0.8, 1.0],
         intensity: 1.4,
         range: 7.0,
+        is_static: false,
     };
 
     let shrink_mushroom = mushroom_pickup_object("Shrink Mushroom", [0.0, 1.0, 2.0], MushroomKind::Shrink);
@@ -427,6 +434,7 @@ fn tunnels_level() -> Level {
         position: [0.8, 1.0, -0.5],
         scale: [0.5, 0.4, 0.5],
         color: [0.9, 0.8, 0.3],
+        texture_path: None,
         disposition: Disposition::Passive,
         move_speed: 2.5,
         wander_radius: 2.0,
@@ -450,6 +458,7 @@ fn tunnels_level() -> Level {
             position: [0.0, 0.0, 0.0],
             scale: [0.5, 0.4, 0.5],
             color: [0.9, 0.8, 0.3],
+            texture_path: None,
             disposition: Disposition::Passive,
             move_speed: 2.5,
             wander_radius: 2.0,
@@ -582,6 +591,7 @@ fn grotto_level() -> Level {
         position: [0.0, 1.0, -9.0],
         scale: [0.9, 1.7, 0.9],
         color: [0.55, 0.15, 0.6],
+        texture_path: None,
         disposition: Disposition::Hostile,
         move_speed: 2.2,
         wander_radius: 1.5,
@@ -945,6 +955,7 @@ enum EditorMode {
 enum PendingTexturePick {
     ForEntity(Entity),
     ForClass(usize),
+    ForCharacter(Entity),
 }
 
 /// Whether the dev-time level/shader editor should ever be reachable —
@@ -988,6 +999,36 @@ struct RigRoot {
 /// `build_level_from_ecs` can write `LevelObject::class` back out.
 struct ClassMember {
     class_path: PathBuf,
+}
+
+/// A host-assigned network identity, attached to any entity whose state
+/// needs to be replicated to other peers — players, `CharacterMeta`
+/// characters, dynamic props. Static level geometry never gets one: it's
+/// already fully described by the `Level` sent in `Welcome`/
+/// `LevelTransition`, which `apply_level` reconstructs identically on
+/// every peer (see `engine::net`'s "Entity replication model").
+struct Networked(NetId);
+
+/// Tags a host-side entity representing a connected client's avatar —
+/// distinguishes it from the host's own local `player_entity` (which has
+/// no mesh, being first-person) and from NPCs (`CharacterMeta`). Only
+/// ever exists under `NetMode::Host`; look it up by `NetId` via
+/// `Sandbox::remote_players` rather than querying for this marker.
+struct RemotePlayer;
+
+/// Client-side: the latest authoritative position/rotation for a
+/// networked entity OTHER than the local player, nudged toward every
+/// frame (`Sandbox::smooth_networked_transforms`) instead of snapped to
+/// instantly on arrival — snapshots land at a fixed 20Hz, and a hard
+/// `Transform` overwrite reads as visible stepping for anything the
+/// player is watching move (another player, an AI character, a pushed
+/// physics prop). The local player's own entity is handled separately
+/// (see `update_player_input`'s dead reckoning plus `net_local_target`
+/// for the correction it layers on top), since it has real per-frame
+/// local input to stay responsive to.
+struct NetTarget {
+    position: Vec3,
+    rotation: Option<Quat>,
 }
 
 struct Sandbox {
@@ -1170,6 +1211,91 @@ struct Sandbox {
     /// `play_music_file` itself has no volume parameter — re-applied via
     /// `set_music_volume` every time music (re)starts.
     music_volume: f32,
+    /// Which side of a listen-server session this instance is playing,
+    /// if any — see `engine::net`. `Offline` is the default (unchanged
+    /// single-player behavior).
+    net_mode: NetMode,
+    /// Client-side: maps a replicated entity's host-assigned `NetId` to
+    /// this process's own local `hecs::Entity` for it — built from
+    /// `ServerMessage::Welcome`'s `named_net_ids` after `apply_level`, and
+    /// extended as `PlayerJoined`/`CharacterSpawned` events arrive.
+    net_id_to_entity: HashMap<NetId, Entity>,
+    /// Host-side: maps a connected client's `NetId` to the `RemotePlayer`
+    /// entity spawned for them, so `NetHost::poll_inputs()`'s results can
+    /// be applied to the right entity each frame.
+    remote_players: HashMap<NetId, Entity>,
+    /// Sibling to `remote_players`: the extra visual rig-part entities
+    /// (if any) `spawn_remote_player_at` attached to that `NetId`'s root
+    /// when its chosen appearance resolved to a rig instead of the
+    /// default cube. Tracked separately so disconnect/rebuild code can
+    /// despawn the whole visual tree, not just the root — a `NetId` with
+    /// no entry here (or an empty one) is just showing the default cube.
+    remote_player_rig_parts: HashMap<NetId, Vec<Entity>>,
+    /// The local player's chosen player-model rig, as a path relative to
+    /// `asset_root` (e.g. `Some("rigs/my_character.ron")`), or `None` for
+    /// the default. Purely outbound — sent via `Hello`/`SetAppearance` so
+    /// *other* peers can build a proxy of you; never used to build a
+    /// local visual, since the local player stays first-person with no
+    /// self-mesh regardless of this value. Transient — not persisted to
+    /// `SaveData`.
+    local_appearance: Option<PathBuf>,
+    /// F2-panel-style transient input buffers for the multiplayer panel's
+    /// "Address"/"Name" fields, persisted across frames the same way
+    /// `level_save_as_name` already is.
+    net_join_address: String,
+    net_player_name: String,
+    /// Host-side: `NetId`s of networked characters/objects despawned since
+    /// the last `Snapshot` broadcast — flushed into that snapshot's
+    /// `removed` list and cleared, so clients despawn the matching local
+    /// entity instead of leaving a stale cube behind forever.
+    net_removed: Vec<NetId>,
+    /// Client-side sibling to `active_dialogue` — dialogue state itself is
+    /// host-authoritative under `NetMode::Client`, so instead of reading a
+    /// local `Dialogue` component, `draw_dialogue_choices` and the number-
+    /// key handler read this instead: `(speaker, text, choices)` from the
+    /// last `ServerMessage::Dialogue`, cleared by `DialogueClosed` or a
+    /// picked choice.
+    net_dialogue: Option<(NetId, String, Vec<(String, usize)>)>,
+    /// Client-side smoothing target for the local player's own position
+    /// — the latest authoritative value from `Snapshot`, nudged toward
+    /// every frame the same way `NetTarget` smooths every other entity,
+    /// rather than hard-snapped. A hard snap on every snapshot arrival
+    /// was tried first and made the joining client's own view visibly
+    /// wobble every ~50ms, since even tiny natural client/host timing
+    /// differences (not just real collisions) show up as a full pop;
+    /// smoothing hides that jitter while still correcting real drift
+    /// (e.g. the host stopping the player at a wall) within a few
+    /// frames. Applied on top of `update_player_input`'s per-frame X/Z
+    /// dead reckoning, which stays instantly responsive to input.
+    /// `None` until the first `Snapshot` arrives.
+    net_local_target: Option<Vec3>,
+    /// Host-side: `NetId`s of connected players granted permission to
+    /// trigger a level transition themselves by walking into an exit —
+    /// by default only the host's own local player can (see
+    /// `Game::update`'s trigger-overlap handling), since a remote
+    /// player's physical overlap is otherwise never checked at all.
+    /// Toggled per-player from the multiplayer panel's player list.
+    remote_level_switch_permission: HashMap<NetId, bool>,
+    /// Client-side: attempts left in an automatic reconnect sequence
+    /// after an unexpected drop (see `update_networking`'s
+    /// `!client.is_connected()` handling) — `0` means no sequence is
+    /// active. Reuses `net_join_address`/`net_player_name`, the same
+    /// values `join_game` reads from the multiplayer panel's text
+    /// fields, so it retries the exact same connection the player
+    /// originally made.
+    net_reconnect_attempts_left: u32,
+    /// Seconds until the next automatic reconnect attempt.
+    net_reconnect_timer: f32,
+}
+
+/// Which side of a listen-server multiplayer session `Sandbox` is
+/// currently playing, if any — see the `engine::net` module for the
+/// underlying transport. `Host`/`Client` wrap the connection state;
+/// `Offline` (the default) is unchanged single-player behavior.
+enum NetMode {
+    Offline,
+    Host(NetHost),
+    Client(NetClient),
 }
 
 impl Sandbox {
@@ -1255,6 +1381,19 @@ impl Sandbox {
             despawned_since_load: Vec::new(),
             current_music_path: None,
             music_volume: 1.0,
+            net_mode: NetMode::Offline,
+            net_id_to_entity: HashMap::new(),
+            remote_players: HashMap::new(),
+            remote_player_rig_parts: HashMap::new(),
+            local_appearance: None,
+            net_join_address: format!("127.0.0.1:{}", engine::net::DEFAULT_PORT),
+            net_player_name: String::from("Player"),
+            net_removed: Vec::new(),
+            net_dialogue: None,
+            net_local_target: None,
+            remote_level_switch_permission: HashMap::new(),
+            net_reconnect_attempts_left: 0,
+            net_reconnect_timer: 0.0,
             audio: match AudioContext::new() {
                 Ok(audio) => Some(audio),
                 Err(err) => {
@@ -1534,6 +1673,134 @@ impl Sandbox {
         })
     }
 
+    /// Regenerates a `MeshSource`'s raw `MeshData` without touching the GPU
+    /// or the primitive cache — `resolve_mesh`'s cache/upload-free twin.
+    /// `bake_static_lighting` needs mutable CPU-side vertices (to write
+    /// baked colors into) before doing its own private `GpuMesh::upload`,
+    /// so it can't reuse a cached/shared `Arc<GpuMesh>` the way normal
+    /// rendering does.
+    fn resolve_mesh_data(&self, source: &MeshSource) -> anyhow::Result<MeshData> {
+        Ok(match source {
+            MeshSource::Primitive(PrimitiveKind::Cube) => primitives::cube(),
+            MeshSource::Primitive(PrimitiveKind::Plane) => primitives::plane(),
+            MeshSource::ObjFile(path) => {
+                let data = load_obj(&self.asset_root.join(path))?;
+                data.into_iter().next().ok_or_else(|| anyhow::anyhow!("OBJ file {path:?} has no sub-meshes"))?
+            }
+            MeshSource::GltfFile(path) => {
+                let scene = load_gltf(&self.asset_root.join(path))?;
+                scene
+                    .meshes
+                    .into_iter()
+                    .next()
+                    .map(|entry| entry.mesh)
+                    .ok_or_else(|| anyhow::anyhow!("glTF file {path:?} has no mesh-carrying node"))?
+            }
+            MeshSource::GltfNode { path, node } => {
+                let scene = load_gltf(&self.asset_root.join(path))?;
+                scene
+                    .meshes
+                    .into_iter()
+                    .find(|entry| &entry.name == node)
+                    .map(|entry| entry.mesh)
+                    .ok_or_else(|| anyhow::anyhow!("glTF file {path:?} has no node named '{node}'"))?
+            }
+        })
+    }
+
+    /// Bakes every `is_static` point light's contribution into the vertex
+    /// colors of static (non-`RigidBody`) level geometry, once — see the
+    /// `mesh.vert` comment at `vLight += aColor;` for the shader side.
+    /// Uses the *exact* N·dot·L + attenuation formula the dynamic
+    /// point-light loop in `mesh.vert` uses, computed here on the CPU
+    /// instead of per-frame on the GPU, so baked and live lighting agree.
+    ///
+    /// Called automatically at the end of `apply_level` (mirroring
+    /// `NavGrid::bake` — cheap enough to always recompute fresh on every
+    /// level load/undo/redo, never persisted to `Level`/RON) and also
+    /// exposed as an F2 "Rebake Lighting" button for previewing a moved
+    /// static light without a full reload.
+    fn bake_static_lighting(&mut self, gl: &glow::Context) {
+        let static_lights: Vec<(Vec3, Vec3, f32, f32)> = self
+            .world
+            .query::<(&Transform, &Light)>()
+            .iter()
+            .filter(|(_, (_, light))| light.is_static)
+            .filter_map(|(_, (transform, light))| match light.kind {
+                LightKind::Point { range } => Some((transform.position, light.color, light.intensity, range)),
+                LightKind::Directional { .. } => None,
+            })
+            .collect();
+        // Nothing to bake — skip entirely, leaving every static object's
+        // mesh (shared cache or otherwise) untouched. Note this means
+        // deleting every static light after a previous bake doesn't
+        // retroactively un-bake already-baked geometry; add a static
+        // light and rebake (or reload from a save predating the bake) to
+        // reset it — an accepted limitation given baking is never
+        // persisted (see the plan's non-goals).
+        if static_lights.is_empty() {
+            return;
+        }
+
+        let targets: Vec<(Entity, Transform, MeshSource)> = self
+            .world
+            .query::<(&Transform, &LevelObjectMeta)>()
+            .without::<&RigidBody>()
+            .iter()
+            .map(|(entity, (transform, meta))| (entity, *transform, meta.mesh_source.clone()))
+            .collect();
+
+        for (entity, transform, mesh_source) in targets {
+            let mut mesh_data = match self.resolve_mesh_data(&mesh_source) {
+                Ok(data) => data,
+                Err(err) => {
+                    log::warn!("bake_static_lighting: failed to regenerate mesh for {mesh_source:?}: {err}");
+                    continue;
+                }
+            };
+
+            let model = transform.matrix();
+            let normal_matrix = Mat3::from_mat4(model);
+            for vertex in &mut mesh_data.vertices {
+                let world_pos = model.transform_point3(Vec3::from(vertex.position));
+                let world_normal = (normal_matrix * Vec3::from(vertex.normal)).normalize_or_zero();
+
+                let mut baked = Vec3::ZERO;
+                for &(light_pos, light_color, intensity, range) in &static_lights {
+                    let to_light = light_pos - world_pos;
+                    let dist = to_light.length();
+                    let atten = (1.0 - dist / range.max(0.001)).clamp(0.0, 1.0);
+                    let ndotl = world_normal.dot(to_light.normalize_or_zero()).max(0.0);
+                    baked += light_color * intensity * ndotl * atten;
+                }
+                vertex.color = baked.to_array();
+            }
+
+            let new_mesh = match GpuMesh::upload(gl, &mesh_data) {
+                Ok(mesh) => Arc::new(mesh),
+                Err(err) => {
+                    log::error!("bake_static_lighting: failed to upload baked mesh for {mesh_source:?}: {err}");
+                    continue;
+                }
+            };
+
+            if let Ok(mut renderer) = self.world.get::<&mut MeshRenderer>(entity) {
+                let old_mesh = Arc::clone(&renderer.mesh);
+                // Never destroy the shared primitive cache — only a
+                // private (already-unshared) mesh is safe to free here.
+                let is_shared_primitive = self.cube_mesh.as_ref().is_some_and(|c| Arc::ptr_eq(c, &old_mesh))
+                    || self.plane_mesh.as_ref().is_some_and(|p| Arc::ptr_eq(p, &old_mesh));
+                renderer.mesh = new_mesh;
+                drop(renderer);
+                if !is_shared_primitive && Arc::strong_count(&old_mesh) == 1 {
+                    unsafe {
+                        old_mesh.destroy(gl);
+                    }
+                }
+            }
+        }
+    }
+
     /// Resolves an optional texture path to a GPU texture, or a solid white
     /// 1x1 fallback if `path` is `None` or fails to load. Shared by
     /// `spawn_level_object` and `spawn_rig_part`.
@@ -1692,6 +1959,7 @@ impl Sandbox {
                 color: Vec3::from(light.color),
                 intensity: light.intensity,
                 kind: LightKind::Point { range: light.range },
+                is_static: light.is_static,
             },
             LevelObjectMeta {
                 name: light.name.clone(),
@@ -1745,15 +2013,26 @@ impl Sandbox {
             (instance.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
             255,
         ];
+        let texture = match &instance.texture_path {
+            Some(path) => match GpuTexture::load_from_file(gl, &self.asset_root.join(path), TextureFilter::Nearest) {
+                Ok(texture) => texture,
+                Err(err) => {
+                    log::error!("failed to load character texture {path:?}: {err}, falling back to solid color");
+                    solid_color_texture(gl, rgba)
+                }
+            },
+            None => solid_color_texture(gl, rgba),
+        };
         let position = Vec3::from(instance.position);
         let entity = self.world.spawn((
             Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
-            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
+            MeshRenderer { mesh, texture: Some(Arc::new(texture)) },
             Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
             RigidBody::default(),
             CharacterMeta {
                 name: instance.name.clone(),
                 color: instance.color,
+                texture_path: instance.texture_path.clone(),
                 disposition: instance.disposition,
                 move_speed: instance.move_speed,
                 wander_radius: instance.wander_radius,
@@ -1771,6 +2050,248 @@ impl Sandbox {
             let _ = self.world.insert_one(entity, Dialogue::new(instance.dialogue_nodes.clone()));
         }
         Ok(entity)
+    }
+
+    /// Resolves a chosen appearance path (relative to `asset_root`, e.g.
+    /// `rigs/my_character.ron`) into a loaded `RigAsset` — checking
+    /// `self.rigs` first (`find_rig_asset`, matched by file stem, same as
+    /// a level-placed `RigInstance` does), then falling back to a fresh
+    /// disk load via `engine::rig::load_from_file`, since a peer may
+    /// receive a `NetId`'s appearance path over the network before ever
+    /// loading that specific rig file itself this session (e.g. the file
+    /// was imported by another peer after this process started). A
+    /// freshly-loaded asset is cached into `self.rigs` so a repeat lookup
+    /// doesn't re-read the file. Returns `None` on any failure (missing
+    /// file, parse error) — the caller treats that identically to "no
+    /// appearance chosen."
+    fn resolve_rig_asset_for_appearance(&mut self, rig_path: &Path) -> Option<RigAsset> {
+        if let Some(existing) = self.find_rig_asset(rig_path) {
+            return Some(existing.clone());
+        }
+        match engine::rig::load_from_file(&self.asset_root.join(rig_path)) {
+            Ok(asset) => {
+                self.rigs.push(asset.clone());
+                Some(asset)
+            }
+            Err(err) => {
+                log::warn!("could not load appearance rig {rig_path:?}: {err}");
+                None
+            }
+        }
+    }
+
+    /// Spawns just the visual rig-part entities for a networked player's
+    /// chosen appearance, parented (via `spawn_rig_parts_and_wire`) to
+    /// `attach_to` — the player's physics/network root — so
+    /// `engine::rig::update_world_transforms` inherits that entity's
+    /// `Transform` every frame no matter how it's driven (physics
+    /// integration host-side, `NetTarget` smoothing client-side; see that
+    /// function's plain-`Transform`-parent fallback). No `Rig`/
+    /// `RigAnimator`/`RigRoot` involved — no animation for player rigs in
+    /// v1, so nothing needs to drive clip playback, and this deliberately
+    /// keeps player proxies out of the F2 "Rigs" panel (which only lists
+    /// `RigRoot` entities).
+    fn spawn_player_rig_visual(
+        &mut self,
+        gl: &glow::Context,
+        asset: &RigAsset,
+        attach_to: Entity,
+    ) -> anyhow::Result<Vec<Entity>> {
+        let (_root, _parts_by_name, all_parts) = self.spawn_rig_parts_and_wire(gl, asset, Some(attach_to))?;
+        Ok(all_parts)
+    }
+
+    /// Core of both `spawn_remote_player_at` (a fresh join/transition,
+    /// which computes an offset `position`/`rotation` first) and
+    /// `rebuild_remote_player_appearance` (a mid-session appearance
+    /// change, which must keep the player exactly where they already
+    /// were): spawns the physics/network root at the given exact
+    /// `position`/`rotation` (same shape as before this feature — sphere
+    /// `Collider`, `RigidBody`, 100 HP, tagged `Networked`/`RemotePlayer`),
+    /// plus either a rig-based visual attached to it (if `appearance`
+    /// resolves to a loadable `RigAsset` on this peer's own disk) or the
+    /// original hardcoded gray cube as a fallback. Falls back to the cube
+    /// — logging a warning, never a hard error — on a missing file, parse
+    /// error, or any rig part's mesh failing to load, exactly as if no
+    /// appearance had been chosen at all (see the plan's stated
+    /// simplifications: appearances never travel over the network as
+    /// bytes, only as a path both sides are expected to already have).
+    fn spawn_player_proxy_at(
+        &mut self,
+        gl: &glow::Context,
+        net_id: NetId,
+        position: Vec3,
+        rotation: Quat,
+        appearance: Option<&Path>,
+    ) -> anyhow::Result<Entity> {
+        let entity = self.world.spawn((
+            Transform { position, rotation, scale: Vec3::ONE },
+            Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+            RigidBody::default(),
+            PlayerController::default(),
+            Health::new(100.0),
+            Networked(net_id),
+            RemotePlayer,
+        ));
+
+        if let Some(asset) = appearance.and_then(|path| self.resolve_rig_asset_for_appearance(path)) {
+            match self.spawn_player_rig_visual(gl, &asset, entity) {
+                Ok(parts) => {
+                    self.remote_player_rig_parts.insert(net_id, parts);
+                    return Ok(entity);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "appearance rig for {net_id:?} failed to spawn, falling back to the default appearance: {err}"
+                    );
+                }
+            }
+        }
+
+        let mesh = self.resolve_mesh(gl, &MeshSource::Primitive(PrimitiveKind::Cube))?;
+        let _ = self.world.insert_one(
+            entity,
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, [200, 200, 200, 255]))) },
+        );
+        if let Ok(mut transform) = self.world.get::<&mut Transform>(entity) {
+            transform.scale = Vec3::new(0.8, 1.6, 0.8);
+        }
+        Ok(entity)
+    }
+
+    /// Spawns a visible avatar for a newly-joined remote player, or one
+    /// respawning at a level transition's shared spawn point — positioned
+    /// via `spawn_ring_offset` around `base_position` so 2-4 players
+    /// landing at the same point don't stack on top of each other.
+    fn spawn_remote_player_at(
+        &mut self,
+        gl: &glow::Context,
+        net_id: NetId,
+        base_position: Vec3,
+        base_yaw_deg: f32,
+        appearance: Option<&Path>,
+    ) -> anyhow::Result<Entity> {
+        let (position, _) = spawn_ring_offset(base_position, base_yaw_deg, net_id);
+        self.spawn_player_proxy_at(gl, net_id, position, Quat::IDENTITY, appearance)
+    }
+
+    /// Despawns every entity belonging to a remote player's proxy — the
+    /// physics/network root plus any rig-part children tracked in
+    /// `remote_player_rig_parts` — used by disconnect handling and by
+    /// `rebuild_remote_player_appearance`.
+    fn despawn_remote_player(&mut self, net_id: NetId, root: Entity) {
+        let _ = self.world.despawn(root);
+        for part in self.remote_player_rig_parts.remove(&net_id).unwrap_or_default() {
+            let _ = self.world.despawn(part);
+        }
+    }
+
+    /// Applies a mid-session appearance change for `net_id`: despawns its
+    /// current proxy (`old_root` — whatever `remote_players`/
+    /// `net_id_to_entity` has on file for it) and respawns one with the
+    /// new appearance at the exact position/rotation it already had.
+    /// Unlike a fresh join or transition, this must never reposition the
+    /// player via `spawn_ring_offset` — the player was already there.
+    fn rebuild_remote_player_appearance(
+        &mut self,
+        gl: &glow::Context,
+        net_id: NetId,
+        old_root: Entity,
+        appearance: Option<&Path>,
+    ) -> anyhow::Result<Entity> {
+        let (position, rotation) = self
+            .world
+            .get::<&Transform>(old_root)
+            .map(|t| (t.position, t.rotation))
+            .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
+        self.despawn_remote_player(net_id, old_root);
+        self.spawn_player_proxy_at(gl, net_id, position, rotation, appearance)
+    }
+
+    /// Host-side: applies a remote player's latest `InputState` directly
+    /// to their `RigidBody`/facing — the same "set horizontal velocity,
+    /// jump if grounded" shape `update_player_input` applies to the local
+    /// player, except `move_dir` arrives pre-computed (already
+    /// camera-relative, in world space) from the client rather than being
+    /// derived from `ctx.input` here, since the host has no camera/input
+    /// state for a remote player. `physics::step`'s existing all-entities
+    /// query then resolves gravity/collision for this `RigidBody` exactly
+    /// like any other — no changes needed there.
+    fn apply_remote_input(&mut self, entity: Entity, input: &InputState) {
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut RigidBody, &PlayerController)>(entity) {
+            if let Some((transform, body, controller)) = query.get() {
+                let move_dir = Vec3::new(input.move_dir[0], 0.0, input.move_dir[1]);
+                body.velocity.x = move_dir.x * controller.move_speed;
+                body.velocity.z = move_dir.z * controller.move_speed;
+                transform.rotation = Quat::from_rotation_y(input.yaw_deg.to_radians());
+                if input.jump && body.grounded {
+                    body.velocity.y = controller.jump_speed;
+                }
+            }
+        }
+    }
+
+    /// Client-side: matches a name carried in `ServerMessage::Welcome`'s
+    /// `named_net_ids` against the entity `apply_level` just spawned for
+    /// it, so `net_id_to_entity` can be built without needing `Level`'s
+    /// shape itself to carry any multiplayer-specific data. Searches
+    /// `LevelObjectMeta` then `CharacterMeta` — the two component kinds
+    /// that carry a `name` at all.
+    fn find_entity_by_name(&self, name: &str) -> Option<Entity> {
+        for (entity, meta) in self.world.query::<&LevelObjectMeta>().iter() {
+            if meta.name == name {
+                return Some(entity);
+            }
+        }
+        for (entity, meta) in self.world.query::<&CharacterMeta>().iter() {
+            if meta.name == name {
+                return Some(entity);
+            }
+        }
+        None
+    }
+
+    /// Host-side: every currently-`Networked` character/object's name and
+    /// `NetId`, for `ServerMessage::Welcome`'s `named_net_ids` — matched
+    /// back up against the client's own freshly-`apply_level`'d entities
+    /// via `find_entity_by_name`. Players are deliberately excluded (they
+    /// have no `CharacterMeta`/`LevelObjectMeta` to match against anyway,
+    /// and are announced separately via `PlayerJoined`).
+    fn build_named_net_ids(&self) -> Vec<(String, NetId)> {
+        let mut named = Vec::new();
+        for (_entity, (meta, networked)) in self.world.query::<(&CharacterMeta, &Networked)>().iter() {
+            named.push((meta.name.clone(), networked.0));
+        }
+        for (_entity, (meta, networked)) in self.world.query::<(&LevelObjectMeta, &Networked)>().iter() {
+            named.push((meta.name.clone(), networked.0));
+        }
+        named
+    }
+
+    /// If hosting, allocates a fresh `NetId` and tags `entity` with it —
+    /// a no-op returning `None` under `Offline`/`Client` (only the host
+    /// assigns identities). `self.net_mode` is taken out for the
+    /// duration, the same "take-before-mutate" shape `update_networking`
+    /// uses, since inserting a component needs `&mut self.world` while
+    /// `NetHost` is borrowed from `self.net_mode`.
+    fn assign_net_id_if_hosting(&mut self, entity: Entity) -> Option<NetId> {
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        let assigned = if let NetMode::Host(host) = &mut net_mode {
+            let net_id = host.allocate_net_id();
+            let _ = self.world.insert_one(entity, Networked(net_id));
+            Some(net_id)
+        } else {
+            None
+        };
+        self.net_mode = net_mode;
+        assigned
+    }
+
+    /// Broadcasts `msg` if hosting; a silent no-op under `Offline`/`Client`.
+    fn broadcast_if_hosting(&mut self, msg: &ServerMessage) {
+        if let NetMode::Host(host) = &mut self.net_mode {
+            host.broadcast(msg);
+        }
     }
 
     /// Spawns a placed periodic spawner: `Transform` (its position is where
@@ -1866,6 +2387,7 @@ impl Sandbox {
         // characters themselves are dynamic bodies, so they're excluded
         // from the bake regardless of spawn order (see `NavGrid::bake`).
         self.nav_grid = Some(NavGrid::bake(&self.world, 0.5));
+        self.bake_static_lighting(gl);
         self.current_level_name = level.name.clone();
         self.physics_params = level.physics;
         // Only (re)trigger music if the track actually changed — undo/redo
@@ -1928,24 +2450,55 @@ impl Sandbox {
         Ok(entity)
     }
 
-    /// Spawns every part of `asset`, wires up the parent hierarchy by name,
-    /// and tags the root with `Rig`/`RigAnimator`/`RigRoot` — the root being
-    /// whichever part has `parent: None` (the first one found, if an asset
-    /// somehow has more than one, which authoring through the F2 panel never
-    /// produces). `instance`'s position/rotation become the root's local
-    /// pose (a root's local pose *is* its world pose).
-    fn spawn_rig_instance(&mut self, gl: &glow::Context, asset: &RigAsset, instance: &RigInstance) -> anyhow::Result<Entity> {
+    /// Spawns every part of `asset` and wires up the parent hierarchy by
+    /// name, without touching anything about how the result is used — the
+    /// shared core of both `spawn_rig_instance` (a level-placed prop,
+    /// `root_parent_override: None`) and `spawn_player_rig_visual` (a
+    /// networked player's visual attachment, `root_parent_override:
+    /// Some(physics_root_entity)`). The asset's nominal root part (the one
+    /// with `parent: None`) is wired to `root_parent_override` instead of
+    /// staying parentless — for a level prop that's still `None` (a root's
+    /// local pose *is* its world pose, unchanged from before this was
+    /// factored out); for a player it lets `engine::rig::update_world_transforms`
+    /// inherit the physics/network root's plain `Transform` every frame
+    /// (see that function's fallback for non-`RigPart` parents).
+    ///
+    /// Returns `(root_entity, parts_by_name, all_part_entities)` — the
+    /// caller decides what extra components (if any) belong on the root.
+    fn spawn_rig_parts_and_wire(
+        &mut self,
+        gl: &glow::Context,
+        asset: &RigAsset,
+        root_parent_override: Option<Entity>,
+    ) -> anyhow::Result<(Entity, HashMap<String, Entity>, Vec<Entity>)> {
         let mut parts_by_name: HashMap<String, Entity> = HashMap::with_capacity(asset.parts.len());
+        let mut all_parts: Vec<Entity> = Vec::with_capacity(asset.parts.len());
         for def in &asset.parts {
-            let entity = self.spawn_rig_part(gl, def)?;
+            let entity = match self.spawn_rig_part(gl, def) {
+                Ok(entity) => entity,
+                Err(err) => {
+                    // A rig must never appear with missing limbs — clean
+                    // up whatever this call already spawned before
+                    // propagating the error, rather than leaving a
+                    // partial, orphaned rig tree in the world.
+                    for entity in all_parts {
+                        let _ = self.world.despawn(entity);
+                    }
+                    return Err(err);
+                }
+            };
             parts_by_name.insert(def.name.clone(), entity);
+            all_parts.push(entity);
         }
 
         // Second pass: every part entity now exists, so parent references
         // can be resolved regardless of authoring order in the file.
         for def in &asset.parts {
             let Some(&entity) = parts_by_name.get(&def.name) else { continue };
-            let parent = def.parent.as_ref().and_then(|name| parts_by_name.get(name).copied());
+            let parent = match &def.parent {
+                Some(name) => parts_by_name.get(name).copied(),
+                None => root_parent_override,
+            };
             if let Ok(mut part) = self.world.get::<&mut RigPart>(entity) {
                 part.parent = parent;
             }
@@ -1959,6 +2512,17 @@ impl Sandbox {
         let root_entity = *parts_by_name
             .get(&root_def.name)
             .ok_or_else(|| anyhow::anyhow!("failed to resolve root entity for rig '{}'", asset.name))?;
+
+        Ok((root_entity, parts_by_name, all_parts))
+    }
+
+    /// Spawns a level-placed rig instance: every part of `asset` (via
+    /// `spawn_rig_parts_and_wire`), plus tags the root with
+    /// `Rig`/`RigAnimator`/`RigRoot`. `instance`'s position/rotation become
+    /// the root's local pose (a root's local pose *is* its world pose,
+    /// since it has no external parent).
+    fn spawn_rig_instance(&mut self, gl: &glow::Context, asset: &RigAsset, instance: &RigInstance) -> anyhow::Result<Entity> {
+        let (root_entity, parts_by_name, _all_parts) = self.spawn_rig_parts_and_wire(gl, asset, None)?;
 
         let rotation_euler_deg = Vec3::from(instance.rotation_euler_deg);
         if let Ok(mut root_part) = self.world.get::<&mut RigPart>(root_entity) {
@@ -2093,6 +2657,7 @@ impl Sandbox {
             position: transform.position.to_array(),
             scale: transform.scale.to_array(),
             color: meta.color,
+            texture_path: meta.texture_path.clone(),
             disposition: meta.disposition,
             move_speed: meta.move_speed,
             wander_radius: meta.wander_radius,
@@ -2133,6 +2698,7 @@ impl Sandbox {
                 color: light.color.to_array(),
                 intensity: light.intensity,
                 range,
+                is_static: light.is_static,
             });
         }
 
@@ -2194,11 +2760,35 @@ impl Sandbox {
         }
     }
 
-    fn save_current_level(&self) {
+    /// Snapshots the currently-loaded level's live ECS state back into
+    /// `self.levels`'s cached entry for it (the same `build_level_from_ecs`
+    /// round-trip `push_undo_snapshot`/`save_current_level` already use) —
+    /// call this just before switching to a *different* level (F2 "Load"
+    /// click). `self.levels` is otherwise only populated once at boot, so
+    /// without this, any in-session edit that was never explicitly saved to
+    /// disk (e.g. an assigned character texture, a moved object) is lost
+    /// the moment you swap away from the level and back — `apply_level`
+    /// would respawn from the stale boot-time snapshot instead of what's
+    /// actually on screen.
+    fn sync_current_level_into_cache(&mut self) {
+        let level = self.build_level_from_ecs();
+        if let Some(existing) = self.levels.iter_mut().find(|l| l.name == level.name) {
+            *existing = level;
+        } else {
+            self.levels.push(level);
+        }
+    }
+
+    fn save_current_level(&mut self) {
         let level = self.build_level_from_ecs();
         let path = self.levels_dir.join(format!("{}.ron", level.name));
         match engine::level::save_to_file(&level, &path) {
-            Ok(()) => log::info!("saved level '{}' to {path:?}", level.name),
+            Ok(()) => {
+                log::info!("saved level '{}' to {path:?}", level.name);
+                if let Some(existing) = self.levels.iter_mut().find(|l| l.name == level.name) {
+                    *existing = level;
+                }
+            }
             Err(err) => log::error!("failed to save level '{}': {err}", level.name),
         }
     }
@@ -2533,6 +3123,33 @@ impl Sandbox {
         }
     }
 
+    /// Sibling to `assign_texture_to_entity` for a placed character.
+    fn assign_texture_to_character(&mut self, gl: &glow::Context, entity: Entity) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .set_directory(&self.asset_root)
+            .pick_file()
+        else {
+            return;
+        };
+
+        let texture = match GpuTexture::load_from_file(gl, &path, TextureFilter::Nearest) {
+            Ok(tex) => Arc::new(tex),
+            Err(err) => {
+                log::error!("failed to load texture {path:?}: {err}");
+                return;
+            }
+        };
+
+        let relative_path = engine::level::relativize(&path, &self.asset_root);
+        if let Ok(mut query) = self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity) {
+            if let Some((renderer, meta)) = query.get() {
+                renderer.texture = Some(texture);
+                meta.texture_path = Some(relative_path);
+            }
+        }
+    }
+
     // --- Play mode ---
 
     const PLAYER_EYE_HEIGHT: f32 = 0.5;
@@ -2619,6 +3236,765 @@ impl Sandbox {
     fn resume(&mut self, ctx: &mut Context) {
         self.paused = false;
         ctx.platform.sdl.mouse().set_relative_mouse_mode(true);
+    }
+
+    /// One-line status the multiplayer panel shows above its buttons.
+    fn net_status_text(&self) -> String {
+        if self.net_reconnect_attempts_left > 0 {
+            return format!("Reconnecting... ({} attempts left)", self.net_reconnect_attempts_left);
+        }
+        match &self.net_mode {
+            NetMode::Offline => "Offline".to_string(),
+            NetMode::Host(host) => format!("Hosting ({}/{})", host.player_count(), engine::net::MAX_PLAYERS),
+            NetMode::Client(client) if client.is_connected() => {
+                format!("Connected to {}", self.net_join_address)
+            }
+            NetMode::Client(_) => "Disconnected".to_string(),
+        }
+    }
+
+    /// Multiplayer panel's "Host Game" button.
+    fn start_hosting(&mut self) {
+        match NetHost::bind(engine::net::DEFAULT_PORT) {
+            Ok(mut host) => {
+                log::info!("hosting on port {}", engine::net::DEFAULT_PORT);
+                // The multiplayer panel only appears while already in Play
+                // mode (paused), so `player_entity` is guaranteed to exist
+                // here — tag it so it shows up in the (future) snapshot
+                // broadcast the same as any other replicated entity.
+                if let Some(player) = self.player_entity {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(player, Networked(net_id));
+                }
+                // Tag every character/dynamic prop already in the level
+                // too, so they show up in `named_net_ids` for clients that
+                // join afterward and in the periodic `Snapshot` broadcast.
+                // New ones can only appear afterward via a spawner (F2
+                // editing is Edit-mode-only, mutually exclusive with this
+                // Play-mode-only panel) — those get tagged individually as
+                // they spawn instead, via `assign_net_id_if_hosting`.
+                let characters: Vec<Entity> = self.world.query::<&CharacterMeta>().iter().map(|(e, _)| e).collect();
+                for entity in characters {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(entity, Networked(net_id));
+                }
+                // Eligible objects are anything `interact()` itself would
+                // consider interactable — a `RigidBody` (pushable) or a
+                // `BehaviorSlot` (scripted `on_interact`) — mirrored here
+                // so a remote client's `Interact` can ever resolve to one
+                // via `find_networked_entity` (which only searches
+                // `Networked` entities).
+                let interactable_objects: Vec<Entity> = self
+                    .world
+                    .query::<&LevelObjectMeta>()
+                    .iter()
+                    .filter(|&(entity, _)| {
+                        self.world.get::<&RigidBody>(entity).is_ok()
+                            || self.world.get::<&BehaviorSlot>(entity).is_ok()
+                    })
+                    .map(|(e, _)| e)
+                    .collect();
+                for entity in interactable_objects {
+                    let net_id = host.allocate_net_id();
+                    let _ = self.world.insert_one(entity, Networked(net_id));
+                }
+                self.net_mode = NetMode::Host(host);
+                self.hud.show_toast("Hosting a game", 2.0);
+            }
+            Err(err) => {
+                log::error!("failed to start hosting: {err}");
+                self.hud.show_toast(&format!("Failed to host: {err}"), 3.0);
+            }
+        }
+    }
+
+    /// Multiplayer panel's "Join Game" button.
+    fn join_game(&mut self) {
+        // A manual join always supersedes any automatic reconnect
+        // sequence still counting down in the background.
+        self.net_reconnect_attempts_left = 0;
+        let Ok(addr) = self.net_join_address.parse() else {
+            log::error!("invalid address {:?}", self.net_join_address);
+            self.hud.show_toast("Invalid address", 2.0);
+            return;
+        };
+        match NetClient::connect(addr, self.net_player_name.clone(), self.local_appearance.clone(), std::time::Duration::from_secs(3)) {
+            Ok(client) => {
+                log::info!("connecting to {addr}");
+                self.net_mode = NetMode::Client(client);
+                self.hud.show_toast(&format!("Connecting to {addr}..."), 2.0);
+            }
+            Err(err) => {
+                log::error!("failed to connect to {addr}: {err}");
+                self.hud.show_toast(&format!("Failed to connect: {err}"), 3.0);
+            }
+        }
+    }
+
+    /// Multiplayer panel's "Disconnect" button — drops the host/client
+    /// state and clears the replication bookkeeping. Does not touch the
+    /// currently-loaded level or player entity; single-player play just
+    /// continues locally.
+    fn disconnect_net(&mut self) {
+        self.net_mode = NetMode::Offline;
+        self.net_id_to_entity.clear();
+        self.remote_players.clear();
+        self.remote_player_rig_parts.clear();
+        self.net_dialogue = None;
+        self.net_local_target = None;
+        self.remote_level_switch_permission.clear();
+        // Any call to `disconnect_net` — manual or automatic — cancels a
+        // pending reconnect sequence; `update_networking`'s drop-handling
+        // re-arms it explicitly right afterward when that's actually
+        // what's happening.
+        self.net_reconnect_attempts_left = 0;
+        self.hud.show_toast("Disconnected", 1.5);
+    }
+
+    /// Multiplayer panel's "Cancel" button while an automatic reconnect
+    /// sequence is counting down.
+    fn cancel_reconnect(&mut self) {
+        self.net_reconnect_attempts_left = 0;
+        self.hud.show_toast("Reconnect cancelled", 1.5);
+    }
+
+    /// Multiplayer panel's per-player "Can switch levels" checkbox
+    /// (host-only — see `Sandbox.remote_level_switch_permission`).
+    fn set_level_switch_permission(&mut self, net_id: NetId, allowed: bool) {
+        self.remote_level_switch_permission.insert(net_id, allowed);
+    }
+
+    /// Appearance panel's "Import New Model..." — reuses
+    /// `import_gltf_as_rig_asset` (the same glTF-to-`RigAsset` pipeline as
+    /// the F2 editor's "Import glTF as Rig...") but, instead of placing a
+    /// level instance, adopts the result as the local player's own
+    /// appearance via `select_appearance`.
+    fn pick_new_appearance_model(&mut self) {
+        if let Some(index) = self.import_gltf_as_rig_asset() {
+            self.select_appearance(index);
+        }
+    }
+
+    /// Appearance panel's "pick an already-loaded rig" action — also the
+    /// tail end of `pick_new_appearance_model` after a fresh import.
+    fn select_appearance(&mut self, index: usize) {
+        let Some(rig) = self.rigs.get(index) else { return };
+        let path = PathBuf::from(format!("rigs/{}.ron", rig.name));
+        self.set_local_appearance(Some(path));
+    }
+
+    /// Appearance panel's "Reset to Default" action.
+    fn reset_appearance(&mut self) {
+        self.set_local_appearance(None);
+    }
+
+    /// Shared core of `select_appearance`/`reset_appearance`: updates
+    /// `self.local_appearance` (purely local — the local player is never
+    /// visually affected by its own appearance, see the field's doc
+    /// comment) and, if currently networked, propagates the change so
+    /// other peers rebuild how they see this player. A connected client
+    /// sends `SetAppearance` to the host, which relays it as
+    /// `PlayerAppearanceChanged` (see `update_networking`'s
+    /// `poll_appearance_changes` handling); the host changing its own
+    /// appearance has no connection to itself to round-trip through, so
+    /// it broadcasts `PlayerAppearanceChanged` directly for its own
+    /// `NetId` (read off `player_entity`'s `Networked` tag, present only
+    /// once hosting has actually started).
+    fn set_local_appearance(&mut self, appearance: Option<PathBuf>) {
+        self.local_appearance = appearance.clone();
+        match &mut self.net_mode {
+            NetMode::Client(client) => client.send_set_appearance(appearance),
+            NetMode::Host(host) => {
+                if let Some(local_player) = self.player_entity {
+                    let own_net_id = self.world.get::<&Networked>(local_player).ok().map(|networked| networked.0);
+                    if let Some(net_id) = own_net_id {
+                        host.broadcast(&ServerMessage::PlayerAppearanceChanged { net_id, appearance });
+                    }
+                }
+            }
+            NetMode::Offline => {}
+        }
+        self.hud.show_toast("Appearance updated", 1.5);
+    }
+
+    /// Pumps whichever side of a listen-server session is active, every
+    /// frame, regardless of pause state — see `engine::net`'s "never
+    /// blocks" framing contract. This pass handles the connection
+    /// lifecycle (accept/handshake/disconnect) plus the join bootstrap
+    /// (spawning a remote player's avatar, sending/receiving `Welcome`),
+    /// snapshot-driven player/character/object replication, dialogue
+    /// replication, and level-transition replication.
+    ///
+    /// `self.net_mode` is taken out (replaced with a placeholder
+    /// `Offline`) for the duration of this call rather than matched on
+    /// directly — spawning a remote player or applying a level needs
+    /// `&mut self` broadly, which would otherwise conflict with
+    /// `host`/`client`'s live borrow of `self.net_mode` itself (the same
+    /// "take-before-mutate" shape `self.nav_grid.take()` already uses
+    /// elsewhere, extended to a whole enum instead of an `Option`).
+    fn update_networking(&mut self, ctx: &mut Context, dt: f32) {
+        const NET_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+        const NET_RECONNECT_INTERVAL_SECS: f32 = 3.0;
+
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        let mut go_offline = false;
+        let mut start_reconnect = false;
+
+        // Ticks down between automatic reconnect attempts after an
+        // unexpected drop (see the `!client.is_connected()` branch
+        // below) — reuses `net_join_address`/`net_player_name` and the
+        // exact same `NetClient::connect` call `join_game` makes from a
+        // button click, just fired on a timer instead. A no-op whenever
+        // no reconnect sequence is active.
+        if self.net_reconnect_attempts_left > 0 {
+            self.net_reconnect_timer -= dt;
+            if self.net_reconnect_timer <= 0.0 {
+                self.net_reconnect_attempts_left -= 1;
+                let attempts_left = self.net_reconnect_attempts_left;
+                match self.net_join_address.parse() {
+                    Ok(addr) => match NetClient::connect(
+                        addr,
+                        self.net_player_name.clone(),
+                        self.local_appearance.clone(),
+                        std::time::Duration::from_secs(2),
+                    ) {
+                        Ok(client) => {
+                            log::info!("reconnected to {addr}");
+                            net_mode = NetMode::Client(client);
+                            self.net_reconnect_attempts_left = 0;
+                            self.hud.show_toast("Reconnected", 2.0);
+                        }
+                        Err(err) => {
+                            log::warn!("reconnect attempt failed: {err}");
+                            if attempts_left == 0 {
+                                self.hud.show_toast("Could not reconnect", 2.5);
+                            } else {
+                                self.net_reconnect_timer = NET_RECONNECT_INTERVAL_SECS;
+                                self.hud.show_toast(&format!("Reconnecting... ({attempts_left} left)"), 2.0);
+                            }
+                        }
+                    },
+                    Err(_) => self.net_reconnect_attempts_left = 0,
+                }
+            }
+        }
+
+        match &mut net_mode {
+            NetMode::Offline => {}
+            NetMode::Host(host) => {
+                for (net_id, name, appearance) in host.poll_new_connections() {
+                    let gl = ctx.gl();
+                    match self.spawn_remote_player_at(gl, net_id, Vec3::new(0.0, 3.0, 4.0), 0.0, appearance.as_deref()) {
+                        Ok(entity) => {
+                            self.remote_players.insert(net_id, entity);
+                            let level = self.build_level_from_ecs();
+                            let named_net_ids = self.build_named_net_ids();
+                            host.send_to(
+                                net_id,
+                                &ServerMessage::Welcome {
+                                    your_net_id: net_id,
+                                    level,
+                                    named_net_ids,
+                                    tick_rate: engine::net::SNAPSHOT_RATE_HZ,
+                                },
+                            );
+                            // Catch the new client up on everyone already in
+                            // the session (the host's own player + any
+                            // other already-connected remote players) —
+                            // they arrived before this client did, so no
+                            // `PlayerJoined` broadcast ever reached it. Each
+                            // one's current `appearance` rides along so the
+                            // new client's own proxy for them is right from
+                            // the start, rather than defaulting to the cube
+                            // and correcting later.
+                            if let Some(local_player) = self.player_entity {
+                                if let Ok(networked) = self.world.get::<&Networked>(local_player) {
+                                    host.send_to(
+                                        net_id,
+                                        &ServerMessage::PlayerJoined {
+                                            net_id: networked.0,
+                                            name: self.net_player_name.clone(),
+                                            appearance: self.local_appearance.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                            for other_id in host.connected_ids() {
+                                if other_id == net_id {
+                                    continue;
+                                }
+                                if let Some(other_name) = host.player_name(other_id) {
+                                    host.send_to(
+                                        net_id,
+                                        &ServerMessage::PlayerJoined {
+                                            net_id: other_id,
+                                            name: other_name.to_string(),
+                                            appearance: host.player_appearance(other_id).map(Path::to_path_buf),
+                                        },
+                                    );
+                                }
+                            }
+                            host.broadcast(&ServerMessage::PlayerJoined { net_id, name: name.clone(), appearance });
+                            log::info!("{name} joined as {net_id:?}");
+                            self.hud.show_toast(&format!("{name} joined"), 2.0);
+                        }
+                        Err(err) => log::error!("failed to spawn a remote player for {name}: {err}"),
+                    }
+                }
+
+                for (net_id, input) in host.poll_inputs() {
+                    if let Some(&entity) = self.remote_players.get(&net_id) {
+                        self.apply_remote_input(entity, &input);
+                    }
+                }
+                for (requester, target) in host.poll_interacts() {
+                    let Some(entity) = self.find_networked_entity(target) else { continue };
+                    let has_dialogue = self.world.get::<&Dialogue>(entity).is_ok();
+                    if has_dialogue {
+                        if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                            if let Some(dialogue) = query.get() {
+                                let text = dialogue.current_text().to_string();
+                                let choices = dialogue.current_choices().to_vec();
+                                if choices.is_empty() {
+                                    // Mirrors `interact()`'s local behavior:
+                                    // no choices means linear cycling, so
+                                    // advance immediately rather than waiting
+                                    // on a pick that will never come.
+                                    dialogue.advance();
+                                }
+                                host.send_to(requester, &ServerMessage::Dialogue { speaker: target, text, choices });
+                            }
+                        }
+                        continue;
+                    }
+
+                    // A `Hostile` character with `Health` is a fight, not
+                    // a push — same rule `interact()` uses locally.
+                    // Death handling happens next frame via
+                    // `AiEvent::CharacterDied`, the same path a
+                    // character's own attack uses.
+                    const PLAYER_ATTACK_DAMAGE: f32 = 10.0;
+                    let is_hostile = self
+                        .world
+                        .get::<&CharacterMeta>(entity)
+                        .is_ok_and(|meta| meta.disposition == Disposition::Hostile);
+                    if is_hostile {
+                        let hit = {
+                            let mut query = self.world.query_one::<&mut Health>(entity);
+                            match query.as_mut().ok().and_then(|q| q.get()) {
+                                Some(health) => {
+                                    health.damage(PLAYER_ATTACK_DAMAGE);
+                                    true
+                                }
+                                None => false,
+                            }
+                        };
+                        if hit {
+                            self.play_tone(180.0, 0.08);
+                            if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                                self.spawn_burst_at(position, ParticleEmitterDef::default(), 8);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // A scripted/native-behavior object handles its own
+                    // interaction instead of the generic push — mirrors
+                    // `interact()`'s own ordering. Only reachable at all
+                    // if it was tagged `Networked` while hosting (see
+                    // `start_hosting`/`transition_to_level`'s
+                    // `interactable_objects` tagging, which includes
+                    // `BehaviorSlot` objects specifically so this can
+                    // resolve).
+                    if self.with_behavior(entity, |behavior, api| behavior.on_interact(api)) {
+                        continue;
+                    }
+
+                    // Nothing else claimed it — treat it as the
+                    // requesting client's own version of `interact()`'s
+                    // "push the nearest dynamic object" action, using the
+                    // requester's own remote avatar as the push origin
+                    // (not the host's own local player). The resulting
+                    // `RigidBody.velocity` change reaches every client
+                    // for free via the next periodic `Snapshot` — no
+                    // extra broadcast needed.
+                    let Some(&requester_entity) = self.remote_players.get(&requester) else { continue };
+                    let Some(requester_position) =
+                        self.world.get::<&Transform>(requester_entity).ok().map(|t| t.position)
+                    else {
+                        continue;
+                    };
+                    let Some(controller) =
+                        self.world.get::<&PlayerController>(requester_entity).ok().map(|c| *c)
+                    else {
+                        continue;
+                    };
+                    let mut pushed = false;
+                    if let Ok(mut query) = self.world.query_one::<(&Transform, &mut RigidBody)>(entity) {
+                        if let Some((transform, body)) = query.get() {
+                            let mut push_dir = transform.position - requester_position;
+                            push_dir.y = 0.0;
+                            let push_dir = push_dir.normalize_or_zero();
+                            let push_dir = if push_dir == Vec3::ZERO { Vec3::X } else { push_dir };
+                            body.velocity += push_dir * controller.interact_impulse
+                                + Vec3::Y * (controller.interact_impulse * 0.3);
+                            pushed = true;
+                        }
+                    }
+                    if pushed {
+                        self.play_tone(220.0, 0.1);
+                        if let Ok(position) = self.world.get::<&Transform>(entity).map(|t| t.position) {
+                            self.spawn_burst_at(
+                                position,
+                                ParticleEmitterDef { rate_per_sec: 0.0, ..ParticleEmitterDef::default() },
+                                12,
+                            );
+                        }
+                    }
+                }
+                for (requester, speaker, index) in host.poll_dialogue_choices() {
+                    let Some(entity) = self.find_networked_entity(speaker) else { continue };
+                    if let Ok(mut query) = self.world.query_one::<&mut Dialogue>(entity) {
+                        if let Some(dialogue) = query.get() {
+                            if dialogue.choose(index) {
+                                let text = dialogue.current_text().to_string();
+                                let choices = dialogue.current_choices().to_vec();
+                                host.send_to(requester, &ServerMessage::Dialogue { speaker, text, choices });
+                            }
+                        }
+                    }
+                }
+                for (net_id, appearance) in host.poll_appearance_changes() {
+                    let Some(&old_root) = self.remote_players.get(&net_id) else { continue };
+                    let gl = ctx.gl();
+                    match self.rebuild_remote_player_appearance(gl, net_id, old_root, appearance.as_deref()) {
+                        Ok(new_root) => {
+                            self.remote_players.insert(net_id, new_root);
+                            host.broadcast(&ServerMessage::PlayerAppearanceChanged { net_id, appearance });
+                        }
+                        Err(err) => log::error!("failed to rebuild {net_id:?}'s appearance: {err}"),
+                    }
+                }
+                for net_id in host.take_disconnected() {
+                    if let Some(entity) = self.remote_players.remove(&net_id) {
+                        self.despawn_remote_player(net_id, entity);
+                    }
+                    self.remote_level_switch_permission.remove(&net_id);
+                    host.broadcast(&ServerMessage::PlayerLeft { net_id });
+                    log::info!("{net_id:?} disconnected");
+                    self.hud.show_toast("A player disconnected", 2.0);
+                }
+
+                if host.should_send_snapshot(dt) {
+                    // Keep the host's own avatar's facing in sync with its
+                    // camera — the local player never otherwise touches its
+                    // own `Transform.rotation` (first-person, no mesh to
+                    // rotate), so without this every `PlayerSnapshot` for
+                    // the host would report a stale/identity yaw.
+                    if let Some(local_player) = self.player_entity {
+                        if let Ok(mut transform) = self.world.get::<&mut Transform>(local_player) {
+                            transform.rotation = Quat::from_rotation_y(self.fp_camera.yaw);
+                        }
+                    }
+
+                    let mut players = Vec::new();
+                    for (_entity, (transform, networked, _controller, health)) in self
+                        .world
+                        .query::<(&Transform, &Networked, &PlayerController, Option<&Health>)>()
+                        .iter()
+                    {
+                        let (yaw, _, _) = transform.rotation.to_euler(engine::glam::EulerRot::YXZ);
+                        players.push(PlayerSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            yaw_deg: yaw.to_degrees(),
+                            health: health.map(|h| (h.current, h.max)),
+                        });
+                    }
+
+                    let mut characters = Vec::new();
+                    for (_entity, (transform, networked, _meta, health)) in self
+                        .world
+                        .query::<(&Transform, &Networked, &CharacterMeta, Option<&Health>)>()
+                        .iter()
+                    {
+                        characters.push(CharacterSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            health: health.map(|h| (h.current, h.max)),
+                        });
+                    }
+
+                    let mut objects = Vec::new();
+                    for (_entity, (transform, networked, _meta)) in
+                        self.world.query::<(&Transform, &Networked, &LevelObjectMeta)>().iter()
+                    {
+                        objects.push(ObjectSnapshot {
+                            net_id: networked.0,
+                            position: transform.position.to_array(),
+                            rotation: transform.rotation.to_array(),
+                        });
+                    }
+
+                    host.broadcast(&ServerMessage::Snapshot {
+                        tick: 0,
+                        players,
+                        characters,
+                        objects,
+                        removed: std::mem::take(&mut self.net_removed),
+                    });
+                }
+            }
+            NetMode::Client(client) => {
+                for msg in client.poll_messages() {
+                    match msg {
+                        ServerMessage::Reject { reason } => {
+                            log::error!("host rejected connection: {reason}");
+                            self.hud.show_toast(&format!("Connection rejected: {reason}"), 3.0);
+                            go_offline = true;
+                        }
+                        ServerMessage::Welcome { your_net_id, level, named_net_ids, .. } => {
+                            let gl = ctx.gl();
+                            if let Err(err) = self.apply_level(gl, &level) {
+                                log::error!("failed to apply the host's level: {err}");
+                            }
+                            self.net_id_to_entity.clear();
+                            for (name, net_id) in named_net_ids {
+                                if let Some(entity) = self.find_entity_by_name(&name) {
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                    // Without this, entities that already
+                                    // existed in the level at join time
+                                    // (as opposed to arriving later via
+                                    // `CharacterSpawned`) are tracked in
+                                    // `net_id_to_entity` but never actually
+                                    // tagged `Networked` — `interact_or_send`'s
+                                    // nearest-target search queries for
+                                    // `&Networked`, so it silently found
+                                    // nothing for any pre-placed NPC.
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                }
+                            }
+                            // `apply_level` just cleared the whole world,
+                            // including whatever single-player
+                            // `player_entity` existed before — spawn a
+                            // fresh one for this client's own avatar. Its
+                            // position/rotation are host-authoritative from
+                            // here on (see the `Snapshot` handling below);
+                            // only look direction (`fp_camera`) stays local.
+                            let position = Vec3::new(0.0, 3.0, 4.0);
+                            let entity = self.world.spawn((
+                                Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                                RigidBody::default(),
+                                Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+                                PlayerController::default(),
+                                Health::new(100.0),
+                                Networked(your_net_id),
+                            ));
+                            self.player_entity = Some(entity);
+                            self.net_id_to_entity.insert(your_net_id, entity);
+                            self.fp_camera = FirstPersonCamera::new();
+                            self.resume(ctx);
+                            log::info!("joined as {your_net_id:?}");
+                            self.hud.show_toast("Joined the game", 2.0);
+                        }
+                        ServerMessage::PlayerJoined { net_id, name, appearance } => {
+                            if Some(net_id) != client.my_net_id() && !self.net_id_to_entity.contains_key(&net_id) {
+                                let gl = ctx.gl();
+                                match self.spawn_remote_player_at(
+                                    gl,
+                                    net_id,
+                                    Vec3::new(0.0, 3.0, 4.0),
+                                    0.0,
+                                    appearance.as_deref(),
+                                ) {
+                                    Ok(entity) => {
+                                        self.net_id_to_entity.insert(net_id, entity);
+                                        log::info!("{name} joined ({net_id:?})");
+                                    }
+                                    Err(err) => log::error!("failed to spawn an avatar for {name}: {err}"),
+                                }
+                            }
+                        }
+                        ServerMessage::PlayerLeft { net_id } => {
+                            if let Some(entity) = self.net_id_to_entity.remove(&net_id) {
+                                self.despawn_remote_player(net_id, entity);
+                            }
+                        }
+                        ServerMessage::CharacterSpawned { net_id, instance } => {
+                            let gl = ctx.gl();
+                            match self.spawn_character(gl, &instance) {
+                                Ok(entity) => {
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                }
+                                Err(err) => log::error!("failed to spawn '{}': {err}", instance.name),
+                            }
+                        }
+                        ServerMessage::Snapshot { players, characters, objects, removed, .. } => {
+                            for player in players {
+                                let Some(&entity) = self.net_id_to_entity.get(&player.net_id) else {
+                                    continue;
+                                };
+                                if Some(entity) == self.player_entity {
+                                    // Stored as a smoothing target, not
+                                    // applied directly — see
+                                    // `net_local_target`'s doc comment
+                                    // and `update_player_input`'s
+                                    // per-frame blend.
+                                    self.net_local_target = Some(Vec3::from(player.position));
+                                } else {
+                                    let _ = self.world.insert_one(
+                                        entity,
+                                        NetTarget {
+                                            position: Vec3::from(player.position),
+                                            rotation: Some(Quat::from_rotation_y(player.yaw_deg.to_radians())),
+                                        },
+                                    );
+                                }
+                                if let Some((current, max)) = player.health {
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(entity) {
+                                        health.current = current;
+                                        health.max = max;
+                                    }
+                                }
+                            }
+                            for character in characters {
+                                let Some(&entity) = self.net_id_to_entity.get(&character.net_id) else {
+                                    continue;
+                                };
+                                let _ = self.world.insert_one(
+                                    entity,
+                                    NetTarget { position: Vec3::from(character.position), rotation: None },
+                                );
+                                if let Some((current, max)) = character.health {
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(entity) {
+                                        health.current = current;
+                                        health.max = max;
+                                    }
+                                }
+                            }
+                            for object in objects {
+                                let Some(&entity) = self.net_id_to_entity.get(&object.net_id) else {
+                                    continue;
+                                };
+                                let _ = self.world.insert_one(
+                                    entity,
+                                    NetTarget {
+                                        position: Vec3::from(object.position),
+                                        rotation: Some(Quat::from_array(object.rotation)),
+                                    },
+                                );
+                            }
+                            for net_id in removed {
+                                if let Some(entity) = self.net_id_to_entity.remove(&net_id) {
+                                    let _ = self.world.despawn(entity);
+                                }
+                            }
+                        }
+                        ServerMessage::Dialogue { speaker, text, choices } => {
+                            self.hud.show_toast(&text, 3.0);
+                            self.net_dialogue = if choices.is_empty() { None } else { Some((speaker, text, choices)) };
+                        }
+                        ServerMessage::DialogueClosed => {
+                            self.net_dialogue = None;
+                        }
+                        ServerMessage::LevelTransition { level, spawn_position, spawn_yaw_deg, named_net_ids } => {
+                            let gl = ctx.gl();
+                            if let Err(err) = self.apply_level(gl, &level) {
+                                log::error!("failed to apply the host's level transition: {err}");
+                            }
+                            self.net_id_to_entity.clear();
+                            for (name, net_id) in named_net_ids {
+                                if let Some(entity) = self.find_entity_by_name(&name) {
+                                    self.net_id_to_entity.insert(net_id, entity);
+                                    let _ = self.world.insert_one(entity, Networked(net_id));
+                                }
+                            }
+                            // Same "spawn a fresh local avatar, position/
+                            // rotation host-authoritative from here" shape
+                            // as the initial `Welcome` handling — `apply_level`
+                            // just wiped the old one. Position is a
+                            // deterministic offset from the shared spawn
+                            // point (see `spawn_ring_offset`) computed
+                            // identically host- and client-side from just
+                            // this client's own `NetId`, so no extra data
+                            // needs to travel over the wire for it.
+                            if let Some(my_net_id) = client.my_net_id() {
+                                let (position, yaw_deg) =
+                                    spawn_ring_offset(Vec3::from(spawn_position), spawn_yaw_deg, my_net_id);
+                                let entity = self.world.spawn((
+                                    Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                                    RigidBody::default(),
+                                    Collider { shape: ColliderShape::Sphere { radius: 0.4 }, is_trigger: false },
+                                    PlayerController::default(),
+                                    Health::new(100.0),
+                                    Networked(my_net_id),
+                                ));
+                                self.player_entity = Some(entity);
+                                self.net_id_to_entity.insert(my_net_id, entity);
+                                self.fp_camera.pitch = 0.0;
+                                self.fp_camera.yaw = yaw_deg.to_radians();
+                            }
+                            self.hud.show_toast(&format!("Entering {}", level.name), 1.5);
+                        }
+                        ServerMessage::PlayerAppearanceChanged { net_id, appearance } => {
+                            if let Some(&old_root) = self.net_id_to_entity.get(&net_id) {
+                                let gl = ctx.gl();
+                                match self.rebuild_remote_player_appearance(gl, net_id, old_root, appearance.as_deref()) {
+                                    Ok(new_root) => {
+                                        self.net_id_to_entity.insert(net_id, new_root);
+                                    }
+                                    Err(err) => log::error!("failed to rebuild {net_id:?}'s appearance: {err}"),
+                                }
+                            }
+                        }
+                        ServerMessage::ParticleBurst { position, def, count } => {
+                            self.spawn_burst_at(Vec3::from(position), def, count);
+                        }
+                    }
+                }
+                if !client.is_connected() {
+                    log::warn!("disconnected from host — will attempt to reconnect");
+                    go_offline = true;
+                    start_reconnect = true;
+                }
+            }
+        }
+
+        self.net_mode = net_mode;
+        if go_offline {
+            self.disconnect_net();
+            if start_reconnect {
+                self.net_reconnect_attempts_left = NET_RECONNECT_MAX_ATTEMPTS;
+                self.net_reconnect_timer = NET_RECONNECT_INTERVAL_SECS;
+                self.hud.show_toast("Connection lost — reconnecting...", 2.0);
+            }
+            // Surface the disconnect immediately rather than leaving the
+            // player wondering why nothing else is moving anymore —
+            // pausing (if not already) brings up the pause menu, and with
+            // it the multiplayer panel showing the current status
+            // ("Reconnecting..." or "Offline"). No host migration: if
+            // the host quits, the session still ends for everyone.
+            if !self.paused {
+                self.pause(ctx);
+            }
+        }
+    }
+
+    /// Client-side: nudges every `NetTarget`-tagged entity's rendered
+    /// `Transform` toward its latest `Snapshot` value instead of snapping
+    /// to it instantly — see `NetTarget`'s doc comment for why. A no-op
+    /// in single-player/hosting, since nothing there is ever tagged
+    /// `NetTarget` (only client-side `Snapshot` handling inserts one).
+    fn smooth_networked_transforms(&mut self, dt: f32) {
+        const NET_REMOTE_SMOOTH_RATE: f32 = 15.0;
+        let alpha = (NET_REMOTE_SMOOTH_RATE * dt).min(1.0);
+        for (_entity, (transform, target)) in self.world.query::<(&mut Transform, &NetTarget)>().iter() {
+            transform.position = transform.position.lerp(target.position, alpha);
+            if let Some(rotation) = target.rotation {
+                transform.rotation = transform.rotation.slerp(rotation, alpha);
+            }
+        }
     }
 
     /// Pause menu's "Restart Level" (offered instead of "Exit to Editor"
@@ -2742,27 +4118,12 @@ impl Sandbox {
         self.hud.show_toast("Checkpoint loaded", 1.5);
     }
 
-    /// Reads input each frame in Play mode and drives the player: mouse-look,
-    /// WASD movement, Space to jump. **This is the place to add your own
-    /// game's input handling** — swap the movement scheme, add sprint/crouch,
-    /// wire up new keys, etc. `interact` below is the sibling hook for
-    /// one-shot actions (currently bound to E).
-    fn update_player_input(&mut self, ctx: &mut Context, dt: f32) {
-        let Some(player) = self.player_entity else {
-            return;
-        };
-
-        // Gamepad right stick blends additively with mouse look — whichever
-        // is actually being used drives the camera, no mode switch needed.
-        // `CONTROLLER_LOOK_SPEED` is in radians/sec at full stick deflection.
-        const CONTROLLER_LOOK_SPEED: f32 = 2.5;
-        let (mouse_dx, mouse_dy) = ctx.input.mouse_delta();
-        let (right_stick_x, right_stick_y) = ctx.input.right_stick();
-        self.fp_camera.look(
-            mouse_dx as f32 * 0.0025 + right_stick_x * CONTROLLER_LOOK_SPEED * dt,
-            -mouse_dy as f32 * 0.0025 - right_stick_y * CONTROLLER_LOOK_SPEED * dt,
-        );
-
+    /// This frame's camera-relative horizontal move direction (WASD +
+    /// left-stick, blended, normalized, Y always 0) — factored out of
+    /// `update_player_input` so a `NetMode::Client` can send the exact
+    /// same world-space direction to the host via `ClientMessage::Input`
+    /// instead of re-deriving movement from raw key state a second way.
+    fn compute_move_dir(&self, ctx: &Context) -> Vec3 {
         let forward = self.fp_camera.forward();
         let right = self.fp_camera.right();
         // Flatten to the horizontal plane so looking up/down doesn't change ground speed.
@@ -2787,7 +4148,33 @@ impl Sandbox {
         // positive-down convention, so forward is `-left_stick_y`.
         let (left_stick_x, left_stick_y) = ctx.input.left_stick();
         move_dir += forward_flat * -left_stick_y + right_flat * left_stick_x;
-        move_dir = move_dir.normalize_or_zero();
+        move_dir.normalize_or_zero()
+    }
+
+    /// Reads input each frame in Play mode and drives the player: mouse-look,
+    /// WASD movement, Space to jump. **This is the place to add your own
+    /// game's input handling** — swap the movement scheme, add sprint/crouch,
+    /// wire up new keys, etc. `interact` below is the sibling hook for
+    /// one-shot actions (currently bound to E).
+    fn update_player_input(&mut self, ctx: &mut Context, dt: f32) {
+        let Some(player) = self.player_entity else {
+            return;
+        };
+
+        // Gamepad right stick blends additively with mouse look — whichever
+        // is actually being used drives the camera, no mode switch needed.
+        // `CONTROLLER_LOOK_SPEED` is in radians/sec at full stick deflection.
+        const CONTROLLER_LOOK_SPEED: f32 = 2.5;
+        let (mouse_dx, mouse_dy) = ctx.input.mouse_delta();
+        let (right_stick_x, right_stick_y) = ctx.input.right_stick();
+        self.fp_camera.look(
+            mouse_dx as f32 * 0.0025 + right_stick_x * CONTROLLER_LOOK_SPEED * dt,
+            -mouse_dy as f32 * 0.0025 - right_stick_y * CONTROLLER_LOOK_SPEED * dt,
+        );
+
+        let right = self.fp_camera.right();
+        let right_flat = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+        let move_dir = self.compute_move_dir(ctx);
 
         // How much of this frame's movement is sideways, -1 (left) to 1
         // (right) — reused as-is for the strafe-tilt target rather than
@@ -2799,11 +4186,56 @@ impl Sandbox {
         self.landing_dip.update(dt);
 
         let mut jumped = false;
-        if let Ok(mut query) = self.world.query_one::<(&mut RigidBody, &PlayerController)>(player) {
-            if let Some((body, controller)) = query.get() {
+        if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut RigidBody, &PlayerController)>(player) {
+            if let Some((transform, body, controller)) = query.get() {
                 let horizontal_velocity = move_dir * controller.move_speed;
                 body.velocity.x = horizontal_velocity.x;
                 body.velocity.z = horizontal_velocity.z;
+                // Under `NetMode::Client`, `physics::step` never runs
+                // locally (see `Game::update`'s `is_client` gate), so
+                // without this the camera's eye position (`player_eye_position`
+                // reads `Transform.position` directly) would only ever
+                // advance once per incoming `Snapshot` — 20Hz — making
+                // movement look stepped/frozen every frame in between.
+                // Dead reckoning smooths that out for X/Z; a gentle blend
+                // toward the latest `Snapshot` (all three axes, since Y
+                // has no local prediction of its own) corrects any drift
+                // every frame instead of either freezing between
+                // snapshots or hard-snapping on arrival — a hard snap
+                // was tried first and reproduced a visible wobble every
+                // ~50ms, since even tiny natural client/host timing
+                // differences show up as a full pop that way. See
+                // `net_local_target`'s doc comment.
+                if matches!(self.net_mode, NetMode::Client(_)) {
+                    transform.position.x += horizontal_velocity.x * dt;
+                    transform.position.z += horizontal_velocity.z * dt;
+                    if let Some(target) = self.net_local_target {
+                        const NET_LOCAL_SMOOTH_RATE: f32 = 10.0;
+                        let alpha = (NET_LOCAL_SMOOTH_RATE * dt).min(1.0);
+                        // X/Z: dead reckoning above already tracks the
+                        // host closely in the common case — continuously
+                        // blending toward a target that's merely a few
+                        // frames stale (ordinary network latency, not a
+                        // real desync) fights the player's own forward
+                        // momentum every frame and reads as a persistent
+                        // wobble/drag instead of smooth motion. Only
+                        // reconcile once the gap exceeds a small
+                        // tolerance, which only happens on a genuine
+                        // desync (e.g. the host stopped the player at a
+                        // wall the local prediction doesn't know about).
+                        const NET_LOCAL_XZ_DEADZONE: f32 = 0.3;
+                        let xz_error = Vec3::new(target.x - transform.position.x, 0.0, target.z - transform.position.z);
+                        if xz_error.length() > NET_LOCAL_XZ_DEADZONE {
+                            transform.position.x += xz_error.x * alpha;
+                            transform.position.z += xz_error.z * alpha;
+                        }
+                        // Y (jump/fall) has no local prediction to fight
+                        // — always blended, not gated behind a
+                        // tolerance, or it'd reintroduce the choppy
+                        // step-then-catch-up motion this replaced.
+                        transform.position.y += (target.y - transform.position.y) * alpha;
+                    }
+                }
                 self.head_bob.update(horizontal_velocity.length(), body.grounded, dt);
                 self.speed_fov.update(horizontal_velocity.length(), dt);
                 self.fp_camera.fov_y_radians = self.base_fov_radians + self.speed_fov.kick_radians();
@@ -2855,6 +4287,65 @@ impl Sandbox {
             move_dir -= Vec3::Y;
         }
         self.camera.target += move_dir.normalize_or_zero() * Self::EDITOR_CAMERA_MOVE_SPEED * dt;
+    }
+
+    /// `E`/gamepad-X dispatcher — offline or hosting, runs the normal local
+    /// `interact()` below unchanged (the host is always authoritative for
+    /// its own actions). Under `NetMode::Client`, every flavor of
+    /// interaction replicates — dialogue, hitting a hostile character,
+    /// a scripted object's own `on_interact`, and pushing a dynamic
+    /// object: it searches the client's own locally-mirrored `Networked`
+    /// characters/objects for the nearest one in range — the same
+    /// combined search `interact()` does locally, just against
+    /// replicated positions — and sends `ClientMessage::Interact` instead
+    /// of touching any component directly, since the actual state (a
+    /// `Dialogue`'s current node, a `Health`, a pushed object's
+    /// `RigidBody.velocity`) lives host-side only. The host resolves
+    /// which flavor applies (see `update_networking`'s `poll_interacts`
+    /// handling) using the exact same dispatch order `interact()` uses.
+    fn interact_or_send(&mut self) {
+        if self.net_dialogue.is_some() {
+            return;
+        }
+        let NetMode::Client(client) = &mut self.net_mode else {
+            self.interact();
+            return;
+        };
+        let Some(player) = self.player_entity else { return };
+        let Some(player_position) = self.world.get::<&Transform>(player).ok().map(|t| t.position) else {
+            return;
+        };
+        let Some(controller) = self.world.get::<&PlayerController>(player).ok().map(|c| *c) else {
+            return;
+        };
+
+        let mut nearest: Option<(NetId, f32)> = None;
+        for (_entity, (transform, networked, _meta)) in
+            self.world.query::<(&Transform, &Networked, &CharacterMeta)>().iter()
+        {
+            let distance = transform.position.distance(player_position);
+            if distance <= controller.interact_radius && nearest.is_none_or(|(_, best)| distance < best) {
+                nearest = Some((networked.0, distance));
+            }
+        }
+        for (_entity, (transform, networked, _meta)) in
+            self.world.query::<(&Transform, &Networked, &LevelObjectMeta)>().iter()
+        {
+            let distance = transform.position.distance(player_position);
+            if distance <= controller.interact_radius && nearest.is_none_or(|(_, best)| distance < best) {
+                nearest = Some((networked.0, distance));
+            }
+        }
+        if let Some((target, _)) = nearest {
+            client.send_interact(target);
+        }
+    }
+
+    /// Host-side: finds the entity currently tagged with `net_id`, if any
+    /// — a linear scan, fine at this engine's entity-count scale (see the
+    /// plan's stated simplifications for `NetId` lookups in general).
+    fn find_networked_entity(&self, net_id: NetId) -> Option<Entity> {
+        self.world.query::<&Networked>().iter().find(|(_, networked)| networked.0 == net_id).map(|(e, _)| e)
     }
 
     /// Pushes the nearest dynamic level object within reach with an outward
@@ -3014,16 +4505,34 @@ impl Sandbox {
         }
     }
 
-    /// Draws the choice-picker overlay while `active_dialogue` is set —
-    /// bottom-center, numbered to match the 1-9 key hints. A no-op (and
-    /// self-healing) if the character despawned or its current node no
-    /// longer has choices; `active_dialogue` itself is only cleared by
-    /// `choose_dialogue_option`, so a stale reference just draws nothing
-    /// here until the next successful/failed pick clears it.
+    /// Client-side sibling to `choose_dialogue_option` — sends the pick to
+    /// the host instead of resolving it locally, since under
+    /// `NetMode::Client` the `Dialogue` component itself lives host-side
+    /// only. Clears `net_dialogue` regardless of connection state, same
+    /// "the prompt was only ever for this one pick" reasoning.
+    fn choose_net_dialogue_option(&mut self, index: usize) {
+        let Some((speaker, _, _)) = self.net_dialogue.take() else { return };
+        if let NetMode::Client(client) = &mut self.net_mode {
+            client.send_dialogue_choice(speaker, index);
+        }
+    }
+
+    /// Draws the choice-picker overlay while `active_dialogue` (offline/
+    /// host) or `net_dialogue` (client) is set — bottom-center, numbered to
+    /// match the 1-9 key hints. A no-op (and self-healing) if the character
+    /// despawned or its current node no longer has choices; `active_dialogue`
+    /// itself is only cleared by `choose_dialogue_option`, so a stale
+    /// reference just draws nothing here until the next successful/failed
+    /// pick clears it.
     fn draw_dialogue_choices(&self, egui_ctx: &egui::Context) {
-        let Some(entity) = self.active_dialogue else { return };
-        let Ok(dialogue) = self.world.get::<&Dialogue>(entity) else { return };
-        let choices = dialogue.current_choices();
+        let choices: Vec<(String, usize)> = if let Some(entity) = self.active_dialogue {
+            let Ok(dialogue) = self.world.get::<&Dialogue>(entity) else { return };
+            dialogue.current_choices().to_vec()
+        } else if let Some((_, _, choices)) = &self.net_dialogue {
+            choices.clone()
+        } else {
+            return;
+        };
         if choices.is_empty() {
             return;
         }
@@ -3045,10 +4554,22 @@ impl Sandbox {
     /// particle it made has aged out (see `Game::update`). Ties particles +
     /// physics + the `interact` hook together, the same demo spirit as the
     /// jump/push tones.
+    ///
+    /// If hosting, also broadcasts the burst to every connected client —
+    /// a purely cosmetic effect like this has no `Networked` entity of
+    /// its own to ride along on a `Snapshot`, so without this, particle
+    /// feedback for a network-triggered action (a client pushing an
+    /// object, a hostile character dying) would only ever show up on the
+    /// *host's* screen. Every call site gets this for free, host-only
+    /// (`broadcast_if_hosting` is a silent no-op offline/as a client);
+    /// the client-side `ServerMessage::ParticleBurst` handler calls this
+    /// same function to actually spawn the effect, so there's no
+    /// separate client-side particle-spawning path to keep in sync.
     fn spawn_burst_at(&mut self, position: Vec3, def: ParticleEmitterDef, count: u32) {
         let mut emitter = ParticleEmitter::new(def);
         emitter.spawn_burst(position, count);
         self.world.spawn((Transform { position, rotation: Quat::IDENTITY, scale: Vec3::ONE }, emitter));
+        self.broadcast_if_hosting(&ServerMessage::ParticleBurst { position: position.to_array(), def, count });
     }
 
     /// Sibling to `interact` for the other kind of "things that happen when
@@ -3160,6 +4681,7 @@ impl Sandbox {
                         color: Vec3::new(1.0, 0.9, 0.45),
                         intensity: 5.0,
                         kind: LightKind::Point { range: 14.0 },
+                        is_static: false,
                     },
                 );
             }
@@ -3234,6 +4756,112 @@ impl Sandbox {
         // one after `world.clear()` resets id generations.
         self.trigger_overlaps.clear();
         self.hud.show_toast(&format!("Entering {}", level.name), 1.5);
+
+        // Only the host's own local player can trigger a transition at all
+        // (a remote player physically overlapping the same trigger in the
+        // host's simulation is never checked — see the plan's stated
+        // simplifications), so if hosting, this is always host-initiated:
+        // `apply_level` above just wiped every remote player's avatar and
+        // every character/object's `Networked` tag along with everything
+        // else — rebuild both and tell every connected client to follow.
+        let mut net_mode = std::mem::replace(&mut self.net_mode, NetMode::Offline);
+        if let NetMode::Host(host) = &mut net_mode {
+            let net_id = host.allocate_net_id();
+            let _ = self.world.insert_one(entity, Networked(net_id));
+
+            let characters: Vec<Entity> = self.world.query::<&CharacterMeta>().iter().map(|(e, _)| e).collect();
+            for char_entity in characters {
+                let net_id = host.allocate_net_id();
+                let _ = self.world.insert_one(char_entity, Networked(net_id));
+            }
+            let interactable_objects: Vec<Entity> = self
+                .world
+                .query::<&LevelObjectMeta>()
+                .iter()
+                .filter(|&(entity, _)| {
+                    self.world.get::<&RigidBody>(entity).is_ok() || self.world.get::<&BehaviorSlot>(entity).is_ok()
+                })
+                .map(|(e, _)| e)
+                .collect();
+            for obj_entity in interactable_objects {
+                let net_id = host.allocate_net_id();
+                let _ = self.world.insert_one(obj_entity, Networked(net_id));
+            }
+
+            let remote_ids = host.connected_ids();
+            self.remote_players.clear();
+            // `apply_level` above already wiped every entity in the world
+            // (including any rig-part children), so the old entries here
+            // are already dangling — clearing this alongside
+            // `remote_players` avoids `despawn_remote_player` later
+            // double-despawning (or, worse, despawning an unrelated
+            // entity that reused a recycled `Entity` id/generation).
+            self.remote_player_rig_parts.clear();
+            for remote_id in remote_ids {
+                let appearance = host.player_appearance(remote_id).map(Path::to_path_buf);
+                match self.spawn_remote_player_at(
+                    gl,
+                    remote_id,
+                    Vec3::from(transition.spawn_position),
+                    transition.spawn_yaw_deg,
+                    appearance.as_deref(),
+                ) {
+                    Ok(remote_entity) => {
+                        self.remote_players.insert(remote_id, remote_entity);
+                    }
+                    Err(err) => log::error!("failed to respawn a remote player after transition: {err}"),
+                }
+            }
+
+            let named_net_ids = self.build_named_net_ids();
+            host.broadcast(&ServerMessage::LevelTransition {
+                level,
+                spawn_position: transition.spawn_position,
+                spawn_yaw_deg: transition.spawn_yaw_deg,
+                named_net_ids,
+            });
+        }
+        self.net_mode = net_mode;
+    }
+
+    /// Host-side: permitted remote players (see
+    /// `Sandbox.remote_level_switch_permission` and the multiplayer
+    /// panel's per-player "Can switch levels" checkbox) can also trigger
+    /// a level transition — checked separately from the host's own
+    /// trigger-overlap bookkeeping in `Game::update`
+    /// (`trigger_overlaps`/`on_trigger_entered`), since firing the full
+    /// generic trigger dispatch for a remote player's overlap would
+    /// wrongly flash/shake the *host's* own screen and log/play a sound
+    /// for something only the remote player is near. No enter/exit
+    /// diffing here (unlike `trigger_overlaps`) — mirrors the same
+    /// acceptable one-frame re-trigger risk the host's own transition
+    /// already has (`trigger_overlaps` is cleared by
+    /// `transition_to_level` too), since a transition wipes the whole
+    /// world anyway. Returns `true` if a transition fired.
+    fn check_remote_level_switch_triggers(&mut self, gl: &glow::Context, overlaps: &[(Entity, Entity)]) -> bool {
+        if !matches!(self.net_mode, NetMode::Host(_)) {
+            return false;
+        }
+        let permitted_entered: Vec<Entity> = overlaps
+            .iter()
+            .filter_map(|&(dynamic, trigger)| {
+                self.remote_players
+                    .iter()
+                    .find(|&(_, &entity)| entity == dynamic)
+                    .map(|(&net_id, _)| (net_id, trigger))
+            })
+            .filter(|(net_id, _)| self.remote_level_switch_permission.get(net_id).copied().unwrap_or(false))
+            .map(|(_, trigger)| trigger)
+            .collect();
+        for trigger in permitted_entered {
+            let transition =
+                self.world.get::<&LevelObjectMeta>(trigger).ok().and_then(|meta| meta.level_transition.clone());
+            if let Some(transition) = transition {
+                self.transition_to_level(gl, &transition);
+                return true;
+            }
+        }
+        false
     }
 
     fn on_trigger_exited(&mut self, trigger: Entity) {
@@ -3289,6 +4917,7 @@ impl Sandbox {
                 }
             }
             if let Some(i) = clicked_index {
+                self.sync_current_level_into_cache();
                 let level = self.levels[i].clone();
                 if let Err(err) = self.apply_level(gl, &level) {
                     log::error!("failed to load level '{}': {err}", level.name);
@@ -3344,9 +4973,17 @@ impl Sandbox {
                 color: [1.0, 1.0, 1.0],
                 intensity: 1.0,
                 range: 5.0,
+                is_static: false,
             };
             let entity = self.spawn_level_light(&light);
             self.selected_entity = Some(entity);
+        }
+        if ui
+            .button("Rebake Lighting")
+            .on_hover_text("Recomputes every Static light's baked vertex colors in place, without a full level reload.")
+            .clicked()
+        {
+            self.bake_static_lighting(gl);
         }
         if ui.button("Add Particle Emitter").clicked() {
             self.push_undo_snapshot();
@@ -3453,6 +5090,7 @@ impl Sandbox {
                 position: [0.0, 1.0, 0.0],
                 scale: [0.8, 1.6, 0.8],
                 color: [0.8, 0.2, 0.2],
+                texture_path: None,
                 disposition: Disposition::Passive,
                 move_speed: 2.0,
                 wander_radius: 3.0,
@@ -3493,7 +5131,7 @@ impl Sandbox {
         ui.separator();
         if let Some(entity) = self.selected_character {
             if self.world.contains(entity) {
-                self.draw_selected_character_ui(ui, entity);
+                self.draw_selected_character_ui(ui, gl, entity);
             } else {
                 self.selected_character = None;
             }
@@ -3514,6 +5152,7 @@ impl Sandbox {
                     position: [0.0, 1.0, 0.0],
                     scale: [0.8, 1.6, 0.8],
                     color: [0.8, 0.2, 0.2],
+                    texture_path: None,
                     disposition: Disposition::Hostile,
                     move_speed: 2.0,
                     wander_radius: 2.0,
@@ -3991,9 +5630,12 @@ impl Sandbox {
     /// placed character — name/position/AI tuning, plus the same optional-
     /// field Add/Clear pattern `screen_effect`/`camera_shake` use, applied
     /// here to combat (`CharacterMeta::damage`) and to `Health`/`Dialogue`.
-    fn draw_selected_character_ui(&mut self, ui: &mut egui::Ui, entity: Entity) {
+    fn draw_selected_character_ui(&mut self, ui: &mut egui::Ui, gl: &glow::Context, entity: Entity) {
         let mut delete = false;
         let mut preview_line: Option<String> = None;
+        let mut assign_texture = false;
+        let mut browse_texture = false;
+        let mut clear_texture = false;
 
         if let Ok(mut query) = self.world.query_one::<(&mut Transform, &mut CharacterMeta)>(entity) {
             if let Some((transform, meta)) = query.get() {
@@ -4012,6 +5654,21 @@ impl Sandbox {
                 ui.horizontal(|ui| {
                     ui.label("Color:");
                     ui.color_edit_button_rgb(&mut meta.color);
+                });
+                ui.label(match &meta.texture_path {
+                    Some(path) => format!("Texture: {}", path.display()),
+                    None => "Texture: (solid color)".to_string(),
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Assign Texture...").clicked() {
+                        assign_texture = true;
+                    }
+                    if ui.button("Browse Texture...").clicked() {
+                        browse_texture = true;
+                    }
+                    if meta.texture_path.is_some() && ui.button("Clear Texture").clicked() {
+                        clear_texture = true;
+                    }
                 });
 
                 ui.label("Disposition");
@@ -4149,6 +5806,32 @@ impl Sandbox {
 
         if let Some(line) = preview_line {
             self.hud.show_toast(&line, 3.0);
+        }
+        if assign_texture {
+            self.assign_texture_to_character(gl, entity);
+        }
+        if browse_texture {
+            self.pending_texture_pick = Some(PendingTexturePick::ForCharacter(entity));
+            self.texture_asset_browser.open(&self.asset_root);
+        }
+        if clear_texture {
+            let rgba = if let Ok(meta) = self.world.get::<&CharacterMeta>(entity) {
+                [
+                    (meta.color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (meta.color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    (meta.color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                    255,
+                ]
+            } else {
+                [255, 255, 255, 255]
+            };
+            let texture = Arc::new(solid_color_texture(gl, rgba));
+            if let Ok(mut query) = self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity) {
+                if let Some((renderer, meta)) = query.get() {
+                    renderer.texture = Some(texture);
+                    meta.texture_path = None;
+                }
+            }
         }
         if delete {
             self.push_undo_snapshot();
@@ -4290,6 +5973,13 @@ impl Sandbox {
                     ui.add(egui::Slider::new(range, 0.5..=30.0).text("Range"));
                 }
 
+                ui.checkbox(&mut light.is_static, "Static (baked)").on_hover_text(
+                    "Baked once into nearby static geometry's vertex colors \
+                     instead of costing one of the 4 live dynamic-light \
+                     slots every frame. Click \"Rebake Lighting\" (or \
+                     reload the level) to see a change take effect.",
+                );
+
                 if ui.button("Delete").clicked() {
                     delete = true;
                 }
@@ -4407,39 +6097,43 @@ impl Sandbox {
         self.add_rig_instance(gl, index);
     }
 
-    /// F2 "Import glTF as Rig..." — maps a multi-node glTF/GLB file's node
-    /// hierarchy onto a `RigAsset` (one `RigPartDef` per mesh-carrying
-    /// node, `MeshSource::GltfNode` addressing that specific node so
-    /// parts don't collide the way `MeshSource::GltfFile`'s "first node
-    /// only" convention would). No clips are generated — see
+    /// The glTF-loading + `RigAsset`-construction core of "Import glTF as
+    /// Rig..." — maps a multi-node glTF/GLB file's node hierarchy onto a
+    /// `RigAsset` (one `RigPartDef` per mesh-carrying node,
+    /// `MeshSource::GltfNode` addressing that specific node so parts
+    /// don't collide the way `MeshSource::GltfFile`'s "first node only"
+    /// convention would). No clips are generated — see
     /// `engine::mesh::load_gltf`'s doc comment for why animation import is
-    /// out of scope. The new rig is saved to `rigs/` and immediately
-    /// placeable via the existing "Add instance of" list, same as any
-    /// hand-authored rig.
-    fn import_gltf_as_rig(&mut self, gl: &glow::Context) {
-        let Some(path) = rfd::FileDialog::new()
+    /// out of scope. The new rig is saved to `rigs/` and pushed onto
+    /// `self.rigs`, but — unlike `import_gltf_as_rig` — nothing is placed
+    /// in the level; this is shared by that level-prop importer (which
+    /// then calls `add_rig_instance`) and the player-appearance picker's
+    /// "Import New Model..." (which instead sets the result as the local
+    /// player's appearance). Returns the new rig's index into
+    /// `self.rigs`, or `None` if the user cancelled the picker, the file
+    /// failed to load, or a rig by that name already exists (each case
+    /// already logged at the point of failure below).
+    fn import_gltf_as_rig_asset(&mut self) -> Option<usize> {
+        let path = rfd::FileDialog::new()
             .add_filter("glTF", &["gltf", "glb"])
             .set_directory(&self.asset_root)
-            .pick_file()
-        else {
-            return;
-        };
+            .pick_file()?;
         let scene = match load_gltf(&path) {
             Ok(scene) => scene,
             Err(err) => {
                 log::error!("failed to load glTF {path:?}: {err}");
-                return;
+                return None;
             }
         };
         if scene.meshes.is_empty() {
             log::warn!("glTF {path:?} has no mesh-carrying nodes; nothing to import");
-            return;
+            return None;
         }
 
         let rig_name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "imported_rig".to_string());
         if self.rigs.iter().any(|rig| rig.name == rig_name) {
             log::warn!("a rig named '{rig_name}' already exists; pick a differently-named glTF file or delete the existing rig first");
-            return;
+            return None;
         }
         let relative_gltf_path = engine::level::relativize(&path, &self.asset_root);
         let textures_dir = self.asset_root.join("textures");
@@ -4477,12 +6171,21 @@ impl Sandbox {
         let rig_path = self.rigs_dir.join(format!("{rig_name}.ron"));
         if let Err(err) = engine::rig::save_to_file(&asset, &rig_path) {
             log::error!("failed to save imported rig '{rig_name}': {err}");
-            return;
+            return None;
         }
         log::info!("imported glTF {path:?} as rig '{rig_name}' ({} parts)", asset.parts.len());
         self.rigs.push(asset);
-        let index = self.rigs.len() - 1;
-        self.add_rig_instance(gl, index);
+        Some(self.rigs.len() - 1)
+    }
+
+    /// F2 "Import glTF as Rig..." — see `import_gltf_as_rig_asset` for the
+    /// actual glTF-to-`RigAsset` conversion; this just also places a new
+    /// level instance of the result, immediately usable via the existing
+    /// "Add instance of" list, same as any hand-authored rig.
+    fn import_gltf_as_rig(&mut self, gl: &glow::Context) {
+        if let Some(index) = self.import_gltf_as_rig_asset() {
+            self.add_rig_instance(gl, index);
+        }
     }
 
     /// Places a new instance of `self.rigs[asset_index]`, offset along X by
@@ -5557,21 +7260,28 @@ impl Game for Sandbox {
                 repeat: false,
                 ..
             } if self.mode == EditorMode::Play && !self.paused => {
-                self.interact();
+                self.interact_or_send();
             }
             Event::KeyDown {
                 keycode: Some(keycode),
                 repeat: false,
                 ..
-            } if self.mode == EditorMode::Play && !self.paused && self.active_dialogue.is_some() => {
+            } if self.mode == EditorMode::Play
+                && !self.paused
+                && (self.active_dialogue.is_some() || self.net_dialogue.is_some()) =>
+            {
                 if let Some(choice_index) = number_key_index(keycode) {
-                    self.choose_dialogue_option(choice_index);
+                    if self.net_dialogue.is_some() {
+                        self.choose_net_dialogue_option(choice_index);
+                    } else {
+                        self.choose_dialogue_option(choice_index);
+                    }
                 }
             }
             Event::ControllerButtonDown { button: ControllerButton::X, .. }
                 if self.mode == EditorMode::Play && !self.paused =>
             {
-                self.interact();
+                self.interact_or_send();
             }
             _ => {}
         }
@@ -5588,6 +7298,12 @@ impl Game for Sandbox {
         if !hot_reload_changes.is_empty() {
             self.handle_hot_reload(ctx, &hot_reload_changes);
         }
+
+        // Network I/O is polled unconditionally, every frame, regardless of
+        // `paused`/Edit-vs-Play — sockets never block (see `engine::net`),
+        // and a paused game shouldn't stop noticing a dropped connection or
+        // a newly-joined player.
+        self.update_networking(ctx, dt);
 
         // Runs in both Edit and Play mode — a live preview while editing
         // costs nothing extra and is a nice default. The one exception is a
@@ -5614,6 +7330,7 @@ impl Game for Sandbox {
             }
             self.hud.tick(dt);
             self.screen_effects.tick(dt);
+            self.smooth_networked_transforms(dt);
         }
 
         if self.mode == EditorMode::Edit {
@@ -5626,6 +7343,30 @@ impl Game for Sandbox {
         if self.mode == EditorMode::Play && !self.paused {
             self.update_player_input(ctx, dt);
 
+            // `update_player_input` above still runs unconditionally — it
+            // drives local camera feel (look, head bob, strafe tilt, FOV
+            // kick) and sets `RigidBody.velocity` on `player_entity`, but
+            // that velocity is simply never consumed client-side (physics
+            // isn't stepped there, see below), so it's harmless. A client
+            // additionally reports its intent to the host instead of
+            // simulating locally.
+            let is_client = matches!(self.net_mode, NetMode::Client(_));
+            if is_client {
+                let move_dir = self.compute_move_dir(ctx);
+                let jump = ctx.input.just_pressed(Keycode::Space)
+                    || ctx.input.controller_just_pressed(ControllerButton::A);
+                let input = InputState {
+                    move_dir: [move_dir.x, move_dir.z],
+                    yaw_deg: self.fp_camera.yaw.to_degrees(),
+                    pitch_deg: self.fp_camera.pitch.to_degrees(),
+                    jump,
+                };
+                if let NetMode::Client(client) = &mut self.net_mode {
+                    client.send_input(&input);
+                }
+            }
+
+        if !is_client {
             // Collected up front (mirrors the physics-collider pattern
             // above) so dispatching `on_update` can freely use `&mut self`
             // per entity without holding this query's borrow of `world`.
@@ -5639,24 +7380,53 @@ impl Game for Sandbox {
             // — which can call `restart_level` (needs the whole `&mut
             // self`) — never fights a live borrow of `self.nav_grid`.
             if let Some(nav_grid) = self.nav_grid.take() {
-                let player_position = self
+                // Every player currently in the session — the host's own
+                // local player plus every connected remote player's
+                // avatar (see `engine::net`) — so hostile/passive AI
+                // reacts to whichever one is actually nearest instead of
+                // being blind to everyone but the host.
+                let player_positions: Vec<(Entity, Vec3)> = self
                     .player_entity
-                    .and_then(|entity| self.world.get::<&Transform>(entity).ok())
-                    .map(|transform| transform.position)
-                    .unwrap_or(Vec3::ZERO);
-                let events = engine::ai::step(&mut self.world, dt, player_position, &nav_grid);
+                    .iter()
+                    .chain(self.remote_players.values())
+                    .filter_map(|&entity| self.world.get::<&Transform>(entity).ok().map(|t| (entity, t.position)))
+                    .collect();
+                let events = engine::ai::step(&mut self.world, dt, &player_positions, &nav_grid);
                 self.nav_grid = Some(nav_grid);
 
                 for event in events {
                     match event {
-                        AiEvent::AttackedPlayer { damage, .. } => {
-                            let Some(player) = self.player_entity else { continue };
+                        AiEvent::AttackedPlayer { player, damage, .. } => {
                             let mut died = false;
                             if let Ok(mut query) = self.world.query_one::<&mut Health>(player) {
                                 if let Some(health) = query.get() {
                                     health.damage(damage);
                                     died = health.is_dead();
                                 }
+                            }
+                            // Only flash/shake the HOST's own screen when
+                            // the host's own local player was the one
+                            // hit — a remote player taking damage has no
+                            // bearing on what the host is looking at
+                            // (mirrors `check_remote_level_switch_triggers`'s
+                            // same reasoning).
+                            if Some(player) != self.player_entity {
+                                if died {
+                                    // No shared death/respawn flow exists
+                                    // yet for anyone but the host's own
+                                    // local player (see the multiplayer
+                                    // plan's stated simplifications) — a
+                                    // full heal in place is the simplest
+                                    // reasonable outcome, rather than
+                                    // leaving them stuck at 0 HP forever
+                                    // or restarting the level for
+                                    // everyone over one player's death.
+                                    if let Ok(mut health) = self.world.get::<&mut Health>(player) {
+                                        health.current = health.max;
+                                    }
+                                    self.hud.show_toast("A player was knocked out and recovered", 2.0);
+                                }
+                                continue;
                             }
                             self.screen_effects.trigger(ScreenEffectSpec {
                                 color: [0.9, 0.15, 0.1],
@@ -5675,6 +7445,14 @@ impl Game for Sandbox {
                         AiEvent::CharacterDied { entity, position } => {
                             if let Ok(meta) = self.world.get::<&CharacterMeta>(entity) {
                                 self.despawned_since_load.push(meta.name.clone());
+                            }
+                            // Captured before despawn so the next `Snapshot`
+                            // broadcast tells clients to despawn their copy
+                            // too, instead of leaving a dead character's
+                            // cube standing forever (`Networked` only
+                            // exists at all while hosting).
+                            if let Ok(networked) = self.world.get::<&Networked>(entity) {
+                                self.net_removed.push(networked.0);
                             }
                             let _ = self.world.despawn(entity);
                             self.spawn_burst_at(position, ParticleEmitterDef::default(), 16);
@@ -5704,6 +7482,18 @@ impl Game for Sandbox {
                                     state.track_spawned(entity);
                                 }
                             }
+                            // If hosting, this new character needs an
+                            // identity and an announcement — a joined
+                            // client only ever learns about entities that
+                            // existed at `Welcome` time (via
+                            // `named_net_ids`) or arrive afterward through
+                            // an explicit event like this one.
+                            if let Some(net_id) = self.assign_net_id_if_hosting(entity) {
+                                self.broadcast_if_hosting(&ServerMessage::CharacterSpawned {
+                                    net_id,
+                                    instance: request.instance.clone(),
+                                });
+                            }
                         }
                         Err(err) => log::error!("spawner failed to spawn character: {err}"),
                     }
@@ -5732,7 +7522,8 @@ impl Game for Sandbox {
             self.was_grounded = now_grounded;
 
             let current: HashSet<(Entity, Entity)> = overlaps
-                .into_iter()
+                .iter()
+                .copied()
                 .filter(|&(dynamic, _other)| dynamic == player)
                 .collect();
 
@@ -5760,11 +7551,15 @@ impl Game for Sandbox {
                 }
             }
             if !transitioned {
+                transitioned = self.check_remote_level_switch_triggers(gl, &overlaps);
+            }
+            if !transitioned {
                 for trigger in exited {
                     self.on_trigger_exited(trigger);
                 }
                 self.trigger_overlaps = current;
             }
+        }
         }
         Ok(())
     }
@@ -5858,6 +7653,11 @@ impl Game for Sandbox {
                 .world
                 .query::<(&Transform, &Light)>()
                 .iter()
+                // A `Static` light is baked into nearby geometry's vertex
+                // colors instead (see `bake_static_lighting`) — skip it here
+                // so it doesn't consume one of the 4 live dynamic-light
+                // slots that would otherwise go to an actually-moving light.
+                .filter(|(_entity, (_transform, light))| !light.is_static)
                 .filter_map(|(_entity, (transform, light))| match light.kind {
                     LightKind::Point { range } => {
                         Some((transform.position, light.color, light.intensity, range))
@@ -5961,6 +7761,33 @@ impl Game for Sandbox {
         let level_ui_visible = self.level_ui_visible && editing;
         let playing = self.mode == EditorMode::Play;
         let mut pause_menu_action: Option<PauseMenuAction> = None;
+        let mut multiplayer_action: Option<engine::ui::MultiplayerAction> = None;
+        let mut appearance_action: Option<engine::ui::AppearanceAction> = None;
+        // Every currently-loaded rig, by name, for the appearance panel's
+        // picker list; the local player's own chosen appearance (if any),
+        // resolved to that same name for highlighting the current
+        // selection — see `find_rig_asset` for the path-to-name lookup.
+        let appearance_rig_names: Vec<String> = self.rigs.iter().map(|rig| rig.name.clone()).collect();
+        let current_appearance_name: Option<String> =
+            self.local_appearance.as_deref().and_then(|path| self.find_rig_asset(path)).map(|rig| rig.name.clone());
+        let net_status_text = self.net_status_text();
+        let net_connected = matches!(self.net_mode, NetMode::Host(_))
+            || matches!(&self.net_mode, NetMode::Client(client) if client.is_connected());
+        // Host-only roster for the multiplayer panel's player list — a
+        // client sees `&[]` (see `draw_multiplayer_panel`'s doc comment).
+        let net_players: Vec<(NetId, String, bool)> = if let NetMode::Host(host) = &self.net_mode {
+            host.connected_ids()
+                .into_iter()
+                .filter_map(|net_id| {
+                    host.player_name(net_id).map(|name| {
+                        let allowed = self.remote_level_switch_permission.get(&net_id).copied().unwrap_or(false);
+                        (net_id, name.to_string(), allowed)
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut picked_texture: Option<PathBuf> = None;
         let full_output = ui_state.run(drawable_size, |egui_ctx| {
             if profiler_visible {
@@ -6009,6 +7836,20 @@ impl Game for Sandbox {
                 self.draw_dialogue_choices(egui_ctx);
                 if self.paused {
                     pause_menu_action = draw_pause_menu(egui_ctx, editor_available());
+                    multiplayer_action = engine::ui::draw_multiplayer_panel(
+                        egui_ctx,
+                        &net_status_text,
+                        net_connected,
+                        self.net_reconnect_attempts_left > 0,
+                        &mut self.net_join_address,
+                        &mut self.net_player_name,
+                        &net_players,
+                    );
+                    appearance_action = engine::ui::draw_appearance_panel(
+                        egui_ctx,
+                        current_appearance_name.as_deref(),
+                        &appearance_rig_names,
+                    );
                 }
             }
         });
@@ -6039,6 +7880,23 @@ impl Game for Sandbox {
                         class.texture_path = Some(path);
                     }
                 }
+                Some(PendingTexturePick::ForCharacter(entity)) => {
+                    match GpuTexture::load_from_file(gl, &self.asset_root.join(&path), TextureFilter::Nearest) {
+                        Ok(texture) => {
+                            let texture = Arc::new(texture);
+                            if let Ok(mut query) =
+                                self.world.query_one::<(&mut MeshRenderer, &mut CharacterMeta)>(entity)
+                            {
+                                if let Some((renderer, meta)) = query.get() {
+                                    renderer.texture = Some(texture);
+                                    meta.texture_path = Some(path.clone());
+                                }
+                            }
+                            log::info!("assigned character texture {path:?} via asset browser");
+                        }
+                        Err(err) => log::error!("failed to load texture {path:?}: {err}"),
+                    }
+                }
                 None => {}
             }
         }
@@ -6048,6 +7906,24 @@ impl Game for Sandbox {
             Some(PauseMenuAction::ExitToEditor) => self.exit_play_mode(ctx),
             Some(PauseMenuAction::RestartLevel) => self.restart_level(ctx),
             Some(PauseMenuAction::QuitGame) => ctx.should_quit = true,
+            None => {}
+        }
+
+        match multiplayer_action {
+            Some(engine::ui::MultiplayerAction::Host) => self.start_hosting(),
+            Some(engine::ui::MultiplayerAction::Join) => self.join_game(),
+            Some(engine::ui::MultiplayerAction::Disconnect) => self.disconnect_net(),
+            Some(engine::ui::MultiplayerAction::SetLevelSwitchPermission { net_id, allowed }) => {
+                self.set_level_switch_permission(net_id, allowed);
+            }
+            Some(engine::ui::MultiplayerAction::CancelReconnect) => self.cancel_reconnect(),
+            None => {}
+        }
+
+        match appearance_action {
+            Some(engine::ui::AppearanceAction::ImportNewModel) => self.pick_new_appearance_model(),
+            Some(engine::ui::AppearanceAction::SelectExisting(index)) => self.select_appearance(index),
+            Some(engine::ui::AppearanceAction::ResetToDefault) => self.reset_appearance(),
             None => {}
         }
 
