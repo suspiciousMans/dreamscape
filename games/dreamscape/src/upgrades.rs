@@ -599,6 +599,8 @@ pub struct RunUpgrades {
     pub penalty_cards: usize,
     /// Ascension: no free reroll.
     pub no_free_reroll: bool,
+    /// Extra rerolls from loadout-card quirks (SECOND DRAW).
+    pub bonus_rerolls: u32,
     /// A companion's weight, pressing on one stat (`companion::burden`).
     pub burden: Option<crate::lore::Weight>,
 }
@@ -817,10 +819,8 @@ impl RunUpgrades {
     }
 
     pub fn rerolls_left(&self) -> u32 {
-        if self.no_free_reroll {
-            return 0;
-        }
-        REROLLS_PER_RUN.saturating_sub(self.rerolls_used)
+        let free = if self.no_free_reroll { 0 } else { REROLLS_PER_RUN };
+        (free + self.bonus_rerolls).saturating_sub(self.rerolls_used)
     }
 
     /// Cards offered at each pick.

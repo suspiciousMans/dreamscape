@@ -115,7 +115,7 @@ pub fn draw_grid(
         let col = card_frame(c, v.time);
         let inn = marked.contains(&c.number);
         p.rect_filled(r, 3.0, rgba(col, if inn { 0.35 } else { 0.08 }));
-        let w = if i == selected { 3.0 } else { 1.0 };
+        let w = if i == selected { 3.0_f32 } else { 1.0_f32 };
         p.rect_stroke(r, 3.0, Stroke::new(w, rgba(col, 0.9)));
         p.text(
             r.center() - Vec2::new(0.0, 8.0),

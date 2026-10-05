@@ -124,13 +124,29 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         Pos2::new(cx, screen.bottom() - 60.0),
         Align2::CENTER_TOP,
-        format!(
-            "{} dust   ·   {} cards   ·   deepest {}",
-            v.dust, v.cards_owned, v.best_depth
-        ),
+        if v.streak > 1 {
+            format!(
+                "{} dust   ·   {} cards   ·   deepest {}   ·   {} day streak",
+                v.dust, v.cards_owned, v.best_depth, v.streak
+            )
+        } else {
+            format!(
+                "{} dust   ·   {} cards   ·   deepest {}",
+                v.dust, v.cards_owned, v.best_depth
+            )
+        },
         FontId::monospace(20.0),
         rgba([255, 210, 80], 0.85),
     );
+    if !v.goal.is_empty() {
+        p.text(
+            Pos2::new(cx, screen.bottom() - 88.0),
+            Align2::CENTER_TOP,
+            &v.goal,
+            FontId::monospace(18.0),
+            rgba(hue(v.time * 0.15), 0.85),
+        );
+    }
     if !v.perks.is_empty() {
         p.text(
             Pos2::new(cx, screen.bottom() - 32.0),

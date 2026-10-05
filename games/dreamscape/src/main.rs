@@ -38,6 +38,12 @@ mod dream;
 mod ending;
 mod enemy_ai;
 mod eye;
+mod eye_motion;
+mod lottery;
+mod lottery_ui;
+mod retention;
+mod streaks;
+mod worth;
 mod fpv;
 mod fusion;
 mod gameplay;
@@ -344,6 +350,31 @@ pub struct DreamscapeGame {
     player_tex: Option<Arc<GpuTexture>>,
     /// Watching Wallpaper: eyes in the walls.
     watchers: Vec<Entity>,
+    /// Entrance animation: the eye sinks in from above the screen on run start.
+    entrance: eye_motion::Entrance,
+    /// Seconds of play since the run began; drives the 20s objective glance.
+    objective_clock: f32,
+    /// The lid as drawn: eases toward the lucidity-driven opening so the eye
+    /// never snaps shut.
+    eye_lid: f32,
+    /// Summed bonuses of this run's loadout cards (quirks + mastery).
+    card_fx: worth::QuirkEffect,
+    /// Card numbers that went along this run (they earn mastery xp).
+    loadout_numbers: Vec<u32>,
+    /// What the eye should say first next run (a pack, a streak, a level-up).
+    pending_eye: Option<eye::Moment>,
+    /// The run was loaded from a save: its first dream isn't a fresh one.
+    just_continued: bool,
+    /// Lucid Store tab: 0 = the shelves, 1 = the lottery.
+    store_tab: usize,
+    lottery_outcome: Option<lottery_ui::Outcome>,
+    /// Seconds since the last pull (drives the shuffle and reveal).
+    lottery_age: f32,
+    lottery_status: Option<String>,
+    /// Index into `lottery::pullable_themes()` for the spark pick.
+    lottery_pick: usize,
+    /// What the last pressed run did for its cards (shown on the pack screen).
+    last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
     dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
     /// Special kinds met so far this run (each gets a hint the first time).
@@ -654,7 +685,19 @@ impl DreamscapeGame {
             shop_col: 0,
             title_sel: 0,
             store_status: None,
-            perks: Vec::new(),
+            entrance: eye_motion::Entrance::new(),
+            objective_clock: 0.0,
+            eye_lid: eye_motion::LID_SHUT,
+            card_fx: worth::QuirkEffect::default(),
+            loadout_numbers: Vec::new(),
+            pending_eye: None,
+            just_continued: false,
+            store_tab: 0,
+            lottery_outcome: None,
+            lottery_age: 0.0,
+            lottery_status: None,
+            lottery_pick: 0,
+            last_report: None,
             shards_this_run: 0,
             second_wind_used: false,
             transition: transition::Transition::new(
@@ -674,6 +717,7 @@ impl DreamscapeGame {
             },
             run: RunUpgrades::default(),
             twists: Twists::default(),
+            perks: Vec::new(),
             dream_age: 0.0,
             bonus_dust: 0,
             peak_difficulty: 1.0,
@@ -1190,6 +1234,13 @@ impl DreamscapeGame {
             pad: self.using_pad,
             settings_snapshot: self.settings.clone(),
             dream_age: self.dream_age,
+            glance: eye_motion::glance(self.objective_clock),
+            lid: self.eye_lid,
+            entrance_age: if !self.entrance.done {
+                self.entrance.t
+            } else {
+                f32::MAX
+            },
             boss: self.hunter.as_ref().map(|(_, b, _)| {
                 (
                     format!(
@@ -1258,6 +1309,37 @@ impl DreamscapeGame {
                 .map(|&i| self.booklet.stash.state(i))
                 .collect(),
             store_status: self.store_status.clone(),
+            store_tab: self.store_tab,
+            streak: self.booklet.streak.streak,
+            goal: if matches!(
+                self.mode,
+                hud::Mode::Title | hud::Mode::Summary | hud::Mode::Reveal
+            ) {
+                let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
+                streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth))
+            } else {
+                String::new()
+            },
+            report_line: self.last_report.as_ref().map_or_else(String::new, |r| {
+                let mut bits = Vec::new();
+                if r.xp_each > 0 && !self.loadout_numbers.is_empty() {
+                    bits.push(format!("+{} MASTERY XP", r.xp_each));
+                }
+                if r.echoes > 0 {
+                    bits.push(format!("{} FADED DREAMS LEFT ECHOES", r.echoes));
+                }
+                bits.join("  ·  ")
+            }),
+            lottery: if self.mode == hud::Mode::Store && self.store_tab == 1 {
+                self.lottery_view()
+            } else {
+                lottery_ui::LotteryView::default()
+            },
+            mastery_levels: self
+                .booklet
+                .cards()
+                .map(|c| (c.number, self.booklet.mastery.level_of(c.number)))
+                .collect(),
             perks: if self.mode == hud::Mode::Title {
                 self.booklet
                     .stash
@@ -2588,6 +2670,8 @@ impl DreamscapeGame {
                 self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
                 self.run.penalty_cards = self.active_asc.fewer_cards();
                 self.run.no_free_reroll = !self.active_asc.free_rerolls();
+                self.refresh_card_effects();
+                self.just_continued = true;
                 self.director.shard_bonus = self.shard_bonus();
                 self.motif = s.motif.map(|m| m.kind());
                 self.perks = s.perks.clone();
@@ -2710,6 +2794,7 @@ impl DreamscapeGame {
             } else {
                 1.0
             }
+            * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
     }
 
     /// How strange the dream *looks*: CALM MIND takes the edge off.
@@ -2755,7 +2840,7 @@ impl DreamscapeGame {
         let boost = cards::MemoryBoost {
             lucid_wake: true,
             deep_memory: self.has_perk(store::Perk::DeepMemory),
-            extra: self.run.memory_bonus(),
+            extra: self.run.memory_bonus() + self.card_fx.memory_bonus,
         };
         // Dev: DREAMSCAPE_PACK_PREVIEW=40 repeats this run's dreams to 40.
         let mut log = self.run_log.clone();
@@ -2770,6 +2855,7 @@ impl DreamscapeGame {
         let mut pack = cards::recall(&log, boost);
         let owned: Vec<cards::Card> = self.booklet.cards().cloned().collect();
         cards::shape_first_pack(&mut pack, &owned);
+        lottery::apply_pack_pity(&mut self.booklet.lottery, &mut pack);
         self.pack = reveal_ui::PackView {
             pack,
             ..Default::default()
@@ -2815,6 +2901,24 @@ impl DreamscapeGame {
         let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust;
         self.booklet.stash.earn(extra);
         let dust = dust + extra;
+        let deepest = self.pack.pack.iter().map(|r| r.card.depth).max().unwrap_or(0);
+        let report = retention::settle_run(
+            &mut self.booklet,
+            &self.loadout_numbers,
+            &self.pack.pack,
+            deepest,
+            true,
+            self.shards_this_run,
+        );
+        let week = streaks::week_of(today());
+        self.booklet.weekly.record(week, deepest);
+        let weekly = streaks::weekly(week);
+        let weekly_dust = self.booklet.weekly.claim(&weekly);
+        if let Some(d) = weekly_dust {
+            self.booklet.stash.earn(d);
+        }
+        self.after_pack_feelings(&report, weekly_dust);
+        self.last_report = Some(report);
         if self.persist_booklet() {
             log::info!(
                 "Booklet: pressed {added} cards (total {}), +{dust} dust (x{mult:.2}, +{} bonus; now {}) -> {:?}",
@@ -2831,9 +2935,149 @@ impl DreamscapeGame {
         }
     }
 
+    /// Toasts and the eye's next words after a pack is pressed.
+    fn after_pack_feelings(&mut self, report: &retention::RunReport, weekly_dust: Option<u32>) {
+        let remembered = || self.pack.pack.iter().filter(|r| r.remembered);
+        let foil = remembered().any(|r| worth::is_foil(&r.card));
+        let prophetic = remembered().any(|r| r.card.rarity >= cards::Rarity::Prophetic);
+        let near_miss = self.pack.pack.iter().any(reveal_ui::near_miss);
+        self.pending_eye = if foil {
+            Some(eye::Moment::PackFoil)
+        } else if prophetic {
+            Some(eye::Moment::PackProphetic)
+        } else if !report.level_ups.is_empty() {
+            Some(eye::Moment::MasteryLevelUp)
+        } else if near_miss {
+            Some(eye::Moment::PackFaded)
+        } else {
+            self.pending_eye
+        };
+        let mut notes: Vec<String> = Vec::new();
+        for &(n, level) in &report.level_ups {
+            if let Some(c) = self.booklet.card(n) {
+                notes.push(format!("{} GREW TO LEVEL {level}", c.name));
+            }
+        }
+        if let Some(d) = weekly_dust {
+            notes.push(format!("WEEKLY CHALLENGE DONE  +{d} DUST"));
+        }
+        if let Some(first) = notes.into_iter().next() {
+            self.achievement_toast = Some((first, 0.0));
+        }
+    }
+
+    fn lottery_view(&self) -> lottery_ui::LotteryView {
+        let featured = lottery::featured_theme(today());
+        let state = &self.booklet.lottery;
+        let odds = lottery::odds(state, Some(featured));
+        let themes = lottery::pullable_themes();
+        lottery_ui::LotteryView {
+            odds: lottery::display_odds(&odds),
+            since_lucid: state.since_lucid,
+            hard_lucid: lottery::HARD_PITY_LUCID,
+            since_prophetic: state.since_prophetic,
+            hard_prophetic: lottery::HARD_PITY_PROPHETIC,
+            sparks: state.sparks,
+            spark_goal: lottery::SPARKS_FOR_PICK,
+            featured: Some(featured),
+            featured_odds: lottery::FEATURED_WEIGHT as f32 / (themes.len() as f32 - 1.0 + lottery::FEATURED_WEIGHT as f32),
+            pick: themes.get(self.lottery_pick % themes.len().max(1)).copied(),
+            cost: lottery::PULL_COST,
+            total_pulls: state.total_pulls,
+            outcome: self.lottery_outcome.clone(),
+            age: self.lottery_age,
+            status: self.lottery_status.clone(),
+        }
+    }
+
+    /// A fresh seed for each pull (the lottery must not be replayable).
+    fn lottery_seed(&self) -> u64 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        nanos ^ (self.booklet.lottery.total_pulls as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
+    fn show_pull(&mut self, p: retention::Pulled) {
+        let big = p.foil || p.pull.pity || p.card.rarity >= cards::Rarity::Prophetic;
+        self.pending_eye = if p.pull.pity {
+            Some(eye::Moment::LotteryPity)
+        } else if p.foil {
+            Some(eye::Moment::PackFoil)
+        } else if big {
+            Some(eye::Moment::PackProphetic)
+        } else {
+            self.pending_eye.or(Some(eye::Moment::LotteryPull))
+        };
+        self.sfx(if big { Sound::WakeDoor } else { Sound::Pick });
+        self.lottery_outcome = Some(lottery_ui::Outcome {
+            foil: p.foil,
+            pity: p.pull.pity,
+            near_miss: p.pull.near_miss,
+            recurring: p.recurring,
+            card: p.card,
+        });
+        self.lottery_age = 0.0;
+        self.lottery_status = None;
+    }
+
+    /// Dust for a pull: the card goes straight into the booklet.
+    fn lottery_pull(&mut self) {
+        let before = self.booklet.clone();
+        let seed = self.lottery_seed();
+        match retention::pull_card(&mut self.booklet, seed, today()) {
+            Err(retention::PullError::TooPoor { need }) => {
+                self.lottery_status = Some(format!("you need {need} more dust"));
+                self.sfx(Sound::Denied);
+            }
+            Ok(p) => {
+                if self.persist_booklet() {
+                    log::info!(
+                        "Lottery: {:?}{} -> {} (dust now {})",
+                        p.card.rarity,
+                        if p.foil { " FOIL" } else { "" },
+                        p.card.name,
+                        self.booklet.stash.dust
+                    );
+                    self.show_pull(p);
+                } else {
+                    self.booklet = before;
+                    self.lottery_status = Some("the deck couldn't write it down (see log)".into());
+                }
+            }
+        }
+    }
+
+    /// Sparks for a card of your choosing.
+    fn lottery_spark_pick(&mut self) {
+        let themes = lottery::pullable_themes();
+        let Some(&theme) = themes.get(self.lottery_pick % themes.len().max(1)) else {
+            return;
+        };
+        let before = self.booklet.clone();
+        let seed = self.lottery_seed();
+        match retention::spark_pick(&mut self.booklet, theme, seed) {
+            None => {
+                let need = lottery::SPARKS_FOR_PICK.saturating_sub(self.booklet.lottery.sparks);
+                self.lottery_status = Some(format!("{need} more sparks to pick a dream"));
+                self.sfx(Sound::Denied);
+            }
+            Some(p) => {
+                if self.persist_booklet() {
+                    self.show_pull(p);
+                } else {
+                    self.booklet = before;
+                    self.lottery_status = Some("the deck couldn't write it down (see log)".into());
+                }
+            }
+        }
+    }
+
     fn open_store(&mut self) {
         self.booklet_return = self.mode;
         self.store_status = None;
+        self.store_tab = 0;
+        self.lottery_status = None;
         self.mode = hud::Mode::Store;
     }
 
@@ -3016,8 +3260,6 @@ impl DreamscapeGame {
         self.transition.cancel();
         self.begin_run();
         self.load_dream(ctx)?;
-        self.eye_line = None;
-        self.think(eye::Moment::FirstDream, false);
         Ok(())
     }
 
@@ -3040,10 +3282,83 @@ impl DreamscapeGame {
         self.eye_line = Some((text, 0.0));
     }
 
+    /// Reads this run's loadout cards: their quirks and mastery become the
+    /// run's bonuses (speed, calm, grace, dust, memory, rerolls).
+    fn refresh_card_effects(&mut self) {
+        let cards = if self.prologue.is_some() {
+            Vec::new()
+        } else {
+            self.booklet.loadout_cards()
+        };
+        self.card_fx = retention::card_effects(&self.booklet, &cards);
+        self.loadout_numbers = cards.iter().map(|c| c.number).collect();
+        self.run.bonus_rerolls = self.card_fx.free_rerolls;
+        if !self.card_fx.is_zero() {
+            log::info!("Card bonuses: {:?}", self.card_fx);
+        }
+    }
+
+    /// Opening the game: today's visit counts toward the streak.
+    fn on_launch(&mut self) {
+        let Some(v) = retention::visit_today(&mut self.booklet, today()) else {
+            return;
+        };
+        log::info!("Visit: {v:?}");
+        let (moment, text) = match v.event {
+            streaks::StreakEvent::Rested { .. } => (
+                eye::Moment::StreakRested,
+                format!("A REST SAVED YOUR STREAK  DAY {}  +{} DUST", v.streak, v.dust),
+            ),
+            streaks::StreakEvent::Reset { .. } => (
+                eye::Moment::StreakReset,
+                format!("A NEW STREAK BEGINS  +{} DUST", v.dust),
+            ),
+            streaks::StreakEvent::Started => (
+                eye::Moment::Returning,
+                format!("WELCOME BACK  +{} DUST", v.dust),
+            ),
+            _ => (
+                eye::Moment::StreakContinued,
+                match v.milestone {
+                    Some(name) => format!("{name}  DAY {}  +{} DUST", v.streak, v.dust),
+                    None => format!("DREAM STREAK  DAY {}  +{} DUST", v.streak, v.dust),
+                },
+            ),
+        };
+        self.pending_eye = Some(moment);
+        self.achievement_toast = Some((text, 0.0));
+        self.persist_booklet();
+    }
+
+    /// The first line of a run: whatever is pending, else the opening line,
+    /// warmer the longer the two of you have known each other.
+    fn opening_line(&mut self) -> String {
+        let runs = self.booklet.runs.len() as u32;
+        let milestone = matches!(runs, 10 | 25 | 50 | 100) && self.pending_eye.is_none();
+        let moment = if milestone {
+            eye::Moment::RunMilestone
+        } else {
+            self.pending_eye.take().unwrap_or(eye::Moment::FirstDream)
+        };
+        let you = lore::dreamer(self.booklet.lore.save_seed, 0);
+        let seed = self.director.dream_seed() ^ (moment as u64);
+        let stage = eye::relationship(self.booklet.runs.len() as u32);
+        eye::line_for_stage(moment, &you, seed, stage)
+    }
+
     /// Consume armed perks for the run that is starting.
     fn begin_run(&mut self) {
         self.eye_sticky = false;
+        self.entrance.reset();
+        self.objective_clock = 0.0;
         self.shards_this_run = 0;
+
+        // The eye says FirstDream at the start of every run, during the entrance animation
+        let text = self.opening_line();
+        log::info!("Eye: {text}");
+        self.eye_line = Some((text, -eye_motion::SPEECH_DELAY));
+        self.booklet.clean.on_run_start();
+
         // Abilities come from the loadout's cards (none in the prologue),
         // and each card's dream is planned into the run.
         let cards = if self.prologue.is_some() {
@@ -3068,6 +3383,7 @@ impl DreamscapeGame {
             log::info!("Companion: {} ({})", d.name, d.weight.label());
             self.run = std::mem::take(&mut self.run).with_companion(d.weight);
         }
+        self.refresh_card_effects();
         // In co-op the host's dreams are everyone's: no per-kit pressure.
         self.loadout_scale = if self.coop.is_some() {
             1.0
@@ -3165,6 +3481,12 @@ impl DreamscapeGame {
             self.director.shard_this_dream = false;
             self.shards_this_run += 1;
         }
+        // GLIMMER quirks: a card that starts you with a spark of its own.
+        for _ in 0..self.card_fx.start_shards {
+            self.director.collect_shard();
+            self.director.shard_this_dream = false;
+            self.shards_this_run += 1;
+        }
     }
 
     /// Awake: roll the pack (and, for autopilot E2E runs, autosave).
@@ -3239,7 +3561,10 @@ impl DreamscapeGame {
 
     /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
     fn dust_multiplier(&self) -> f32 {
-        self.run.dust() * gameplay::difficulty_reward(self.peak_difficulty)
+        self.run.dust()
+            * gameplay::difficulty_reward(self.peak_difficulty)
+            * (1.0 + self.card_fx.dust_bonus_pct as f32 / 100.0)
+            * streaks::multiplier(self.booklet.clean.current)
     }
 
     fn summary_view(&self) -> summary_ui::SummaryView {
@@ -3763,6 +4088,18 @@ impl DreamscapeGame {
         }
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
+        // The dream just left counts toward the clean streak (a run loaded
+        // from a save has no finished dream to count).
+        if !self.run_log.is_empty() && !std::mem::take(&mut self.just_continued) {
+            if let streaks::CleanEvent::Clean {
+                label: Some(label), ..
+            } = self.booklet.clean.on_dream_end(self.caught_this_dream > 0)
+            {
+                self.achievement_toast = Some((format!("{label}  UNSEEN {}", self.booklet.clean.current), 0.0));
+                self.think(eye::Moment::CleanStreak, false);
+            }
+        }
+        self.just_continued = false;
         self.caught_this_dream = 0;
         self.stare = 0.0;
         if self.run_active {
@@ -4155,6 +4492,7 @@ impl DreamscapeGame {
             * self.twists.enemy_speed()
             * self.run.enemy_speed()
             * self.active_asc.enemy_speed()
+            * (1.0 - self.card_fx.calm_pct.min(50) as f32 / 100.0)
             * if slow_heart {
                 store::SLOW_HEART_ENEMY_SPEED
             } else {
@@ -4408,6 +4746,7 @@ impl DreamscapeGame {
         self.grace = gameplay::RESPAWN_GRACE
             * self.run.grace()
             * self.active_asc.grace()
+            * (1.0 + 0.2 * self.card_fx.grace_bonus as f32)
             * if self.has_perk(store::Perk::SlowHeart) {
                 store::SLOW_HEART_GRACE
             } else {
@@ -4483,6 +4822,7 @@ impl DreamscapeGame {
 impl Game for DreamscapeGame {
     fn init(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         steam::init(&self.booklet.achievements.ids);
+        self.on_launch();
         self.coop_dev_start();
         log::info!("Initializing Dreamscape");
         let gl = ctx.gl();
@@ -4561,6 +4901,16 @@ impl Game for DreamscapeGame {
             Ok("memories") => self.mode = hud::Mode::Memories,
             Ok("loadout") => self.open_loadout(),
             Ok("merge") => self.open_merge(hud::Mode::Title),
+            Ok("store") => self.open_store(),
+            Ok("lottery") | Ok("lottery_pull") => {
+                // Dev only: a fat purse so the screen has something to show.
+                self.booklet.stash.earn(300);
+                self.open_store();
+                self.store_tab = 1;
+                if crate::dev::var("DREAMSCAPE_SCREEN").as_deref() == Ok("lottery_pull") {
+                    self.lottery_pull();
+                }
+            }
             Ok("ending") => {
                 self.ending_age = crate::dev::var("DREAMSCAPE_ENDING_AT")
                     .ok()
@@ -4639,7 +4989,7 @@ impl Game for DreamscapeGame {
             return;
         }
         if down && !repeat {
-            let revealed = reveal_ui::reveal_done(self.pack.pack.len(), self.pack.age);
+            let revealed = reveal_ui::reveal_done_pack(&self.pack.pack, self.pack.age);
             if self.mode == hud::Mode::Summary {
                 if matches!(key, Keycode::Return | Keycode::Space) && self.title_age > 0.5 {
                     self.title_age = 0.0;
@@ -4741,10 +5091,9 @@ impl Game for DreamscapeGame {
                     self.mode = hud::Mode::Playing;
                     return;
                 }
-                (hud::Mode::Paused, Keycode::Q) | (hud::Mode::Reveal, Keycode::Escape)
-                    if self.mode != hud::Mode::Reveal || revealed =>
-                {
-                    ctx.should_quit = true;
+                (hud::Mode::Paused, Keycode::Q) => {
+                    self.dream = None;
+                    self.mode = hud::Mode::Title;
                     return;
                 }
                 (hud::Mode::Reveal, Keycode::Space | Keycode::Return) if !revealed => {
@@ -4771,6 +5120,11 @@ impl Game for DreamscapeGame {
                     self.open_store();
                     return;
                 }
+                (hud::Mode::Reveal, Keycode::Escape) if revealed => {
+                    self.dream = None;
+                    self.mode = hud::Mode::Title;
+                    return;
+                }
                 (hud::Mode::Paused, Keycode::L) => {
                     self.open_store();
                     return;
@@ -4790,6 +5144,34 @@ impl Game for DreamscapeGame {
                 (hud::Mode::Booklet, Keycode::D | Keycode::Right) => {
                     let last = cards::page_count(self.booklet.card_count()) - 1;
                     self.booklet_page = (self.booklet_page + 1).min(last);
+                    return;
+                }
+                (hud::Mode::Store, Keycode::Tab) => {
+                    self.store_tab = 1 - self.store_tab;
+                    self.lottery_status = None;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 1 => {
+                    self.lottery_pull();
+                    return;
+                }
+                (hud::Mode::Store, Keycode::P) if self.store_tab == 1 => {
+                    self.lottery_spark_pick();
+                    return;
+                }
+                (hud::Mode::Store, Keycode::A | Keycode::Left) if self.store_tab == 1 => {
+                    let n = lottery::pullable_themes().len().max(1);
+                    self.lottery_pick = (self.lottery_pick + n - 1) % n;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::D | Keycode::Right) if self.store_tab == 1 => {
+                    let n = lottery::pullable_themes().len().max(1);
+                    self.lottery_pick = (self.lottery_pick + 1) % n;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::W | Keycode::Up | Keycode::S | Keycode::Down)
+                    if self.store_tab == 1 =>
+                {
                     return;
                 }
                 (hud::Mode::Store, Keycode::W | Keycode::Up) => {
@@ -4941,6 +5323,26 @@ impl Game for DreamscapeGame {
             if self.autopilot && ending::can_continue(self.ending_age) {
                 self.finish_ending();
             }
+        }
+        if !self.entrance.done {
+            self.entrance.tick(dt);
+        }
+        if self.mode == hud::Mode::Store {
+            self.lottery_age += dt;
+        }
+        if self.mode == hud::Mode::Playing {
+            let dt = dt.min(gameplay::MAX_DT);
+            self.objective_clock += dt;
+            self.eye_lid = if self.entrance.done {
+                let target = hud::eye_openness(
+                    self.director.lucidity,
+                    self.director.shards_to_wake,
+                );
+                eye_motion::ease_lid(self.eye_lid, target, dt)
+            } else {
+                // The entrance is its own, already-smooth lid curve.
+                self.entrance.lid()
+            };
         }
         if let Some((_, age)) = &mut self.eye_line {
             *age += dt;
@@ -6088,4 +6490,95 @@ fn main() -> anyhow::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+/// Headless smoke tests for the screens: build the real HUD snapshot, paint it
+/// into an egui context, and make sure nothing panics and something is drawn.
+#[cfg(test)]
+mod screen_smoke {
+    use super::*;
+    use engine::ui::egui;
+
+    /// A game on an empty booklet with its own scratch file (tests run in
+    /// parallel and must never touch, or share, a real save).
+    fn game(name: &str) -> DreamscapeGame {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}.ron"));
+        let _ = std::fs::remove_file(&path);
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("DREAMSCAPE_BOOKLET", &path);
+        let mut g = DreamscapeGame::new(7);
+        g.booklet = cards::Booklet::default();
+        g.booklet_path = path;
+        g
+    }
+
+    fn shapes(g: &DreamscapeGame) -> usize {
+        let v = g.hud_view();
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack));
+        out.shapes.len()
+    }
+
+    #[test]
+    fn the_lottery_screen_draws_idle_shuffling_and_revealed() {
+        let mut g = game("lottery");
+        g.booklet.stash.earn(500);
+        g.open_store();
+        g.store_tab = 1;
+        assert!(shapes(&g) > 50, "idle deck and odds");
+        g.lottery_pull();
+        let outcome = g.lottery_outcome.clone().expect("a pull happened");
+        assert_eq!(g.booklet.card_count(), 1);
+        assert_eq!(g.booklet.stash.dust, 500 - lottery::PULL_COST);
+        for age in [0.0, 0.5, lottery_ui::SHUFFLE, lottery_ui::SHUFFLE + 0.3, 5.0] {
+            g.lottery_age = age;
+            assert!(shapes(&g) > 50, "age {age}");
+        }
+        assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
+    }
+
+    #[test]
+    fn a_broke_pull_says_so_and_costs_nothing() {
+        let mut g = game("broke");
+        g.open_store();
+        g.store_tab = 1;
+        g.lottery_pull();
+        assert!(g.lottery_outcome.is_none());
+        assert!(g.lottery_status.as_deref().unwrap().contains("more dust"));
+        assert_eq!(g.booklet.card_count(), 0);
+        assert!(shapes(&g) > 50);
+    }
+
+    #[test]
+    fn the_store_shelves_title_and_summary_still_draw() {
+        let mut g = game("shelves");
+        g.open_store();
+        assert!(shapes(&g) > 50, "store");
+        for mode in [hud::Mode::Title, hud::Mode::Summary] {
+            g.mode = mode;
+            assert!(shapes(&g) > 20, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn pulled_cards_show_their_worth_in_the_booklet() {
+        let mut g = game("worth");
+        g.booklet.stash.earn(lottery::PULL_COST * 5);
+        for _ in 0..5 {
+            g.lottery_pull();
+        }
+        g.mode = hud::Mode::Booklet;
+        g.booklet_page = 0;
+        assert!(shapes(&g) > 100);
+    }
 }

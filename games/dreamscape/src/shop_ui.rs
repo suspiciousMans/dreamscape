@@ -301,6 +301,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         FontId::monospace(22.0),
         rgba([255, 210, 80], 1.0),
     );
+    p.text(
+        Pos2::new(cx, screen.top() + 90.0),
+        Align2::CENTER_TOP,
+        v.k("[tab] the moth's lottery"),
+        FontId::monospace(18.0),
+        rgba(hue(v.time * 0.2), 0.8),
+    );
 
     let selected = cursor_item(v.shop_shelf, v.shop_col);
     let sel_state = state_of(v, selected);

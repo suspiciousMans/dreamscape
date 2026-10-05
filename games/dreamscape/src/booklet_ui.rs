@@ -296,6 +296,55 @@ pub fn card(
         FontId::monospace(18.0 * s),
         rgba(ink(v), 0.55),
     );
+    worth_strip(p, inner, c, v, s, frame);
+    if crate::worth::is_foil(c) {
+        // A foil card shines back: rainbow edge and a second, brighter sheen.
+        let edge = hue(v.time * 0.5 + c.number as f32 * 0.07);
+        p.rect_stroke(r.shrink(2.0), 0.0, Stroke::new(4.0_f32, rgba(edge, 0.85)));
+        foil(p, art_rect, v.time + 0.5);
+        let tag = Rect::from_min_size(
+            art_rect.right_top() - Vec2::new(52.0 * s, 0.0),
+            Vec2::new(52.0, 20.0) * s,
+        );
+        p.rect_filled(tag, 0.0, rgba(edge, 0.95));
+        p.text(
+            tag.center(),
+            Align2::CENTER_CENTER,
+            "FOIL",
+            FontId::monospace(16.0 * s),
+            rgba([10, 5, 20], 1.0),
+        );
+    }
+}
+
+/// The line above the card's foot: its quirk, its worth, its mastery level.
+fn worth_strip(p: &egui::Painter, inner: Rect, c: &Card, v: &HudView, s: f32, frame: [u8; 3]) {
+    let level = v
+        .mastery_levels
+        .iter()
+        .find(|(n, _)| *n == c.number)
+        .map_or(0, |&(_, l)| l);
+    let mut bits: Vec<String> = Vec::new();
+    if let Some(q) = crate::worth::quirk_of(c) {
+        bits.push(crate::worth::label(q).to_string());
+    }
+    bits.push(format!("WORTH {}", crate::worth::worth(c)));
+    if level > 0 {
+        bits.push(format!("LV{level}"));
+    }
+    let y = inner.bottom() - 24.0 * s;
+    let strip = Rect::from_min_max(
+        Pos2::new(inner.left() - 4.0 * s, y - 20.0 * s),
+        Pos2::new(inner.right() + 4.0 * s, y),
+    );
+    p.rect_filled(strip, 0.0, rgba([16, 9, 30], 0.96));
+    p.text(
+        strip.center(),
+        Align2::CENTER_CENTER,
+        bits.join("  ·  "),
+        FontId::monospace(16.0 * s),
+        rgba(if level >= 5 { hue(v.time * 0.4) } else { frame }, 0.95),
+    );
 }
 
 /// A diagonal sheen sweeping across the art (Lucid / Prophetic foil).

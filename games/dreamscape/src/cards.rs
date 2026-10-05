@@ -345,6 +345,21 @@ pub struct Booklet {
     /// Achievements earned (and the counters they need).
     #[serde(default)]
     pub achievements: crate::achievements::Unlocked,
+    /// Pity counters and sparks for the dust lottery.
+    #[serde(default)]
+    pub lottery: crate::lottery::LotteryState,
+    /// Card mastery xp and banked echoes.
+    #[serde(default)]
+    pub mastery: crate::worth::Mastery,
+    /// Daily visit streak (kind: rests, no punishment).
+    #[serde(default)]
+    pub streak: crate::streaks::DailyStreak,
+    /// Best run of unseen dreams.
+    #[serde(default)]
+    pub clean: crate::streaks::CleanStreak,
+    /// This week's challenge progress.
+    #[serde(default)]
+    pub weekly: crate::streaks::WeeklyProgress,
 }
 
 impl Booklet {
@@ -430,6 +445,17 @@ impl Booklet {
         let deepest = records.iter().map(|r| r.depth).max().unwrap_or(0);
         let cards = records.iter().map(card_from).collect();
         self.push_cards(run_seed, deepest, cards)
+    }
+
+    /// Adds one card won outside a run (a lottery pull); returns it numbered.
+    pub fn add_pulled(&mut self, seed: u64, card: Card) -> Card {
+        let depth = card.depth;
+        self.push_cards(seed, depth, vec![card]);
+        self.runs
+            .last()
+            .and_then(|r| r.cards.last())
+            .cloned()
+            .expect("push_cards just added a card")
     }
 
     fn push_cards(&mut self, run_seed: u64, deepest: u32, cards: Vec<Card>) -> usize {

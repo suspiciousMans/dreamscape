@@ -120,6 +120,17 @@ pub struct HudView {
     pub cards_owned: usize,
     pub store_states: Vec<crate::store::State>,
     pub store_status: Option<String>,
+    /// Lucid Store tab: 0 = shelves, 1 = lottery.
+    pub store_tab: usize,
+    /// Days in a row the dreamer has come back.
+    pub streak: u32,
+    /// "ONE MORE DREAM: ..." (title, summary and pack screens).
+    pub goal: String,
+    /// What the run did for the cards that went along (xp, echoes).
+    pub report_line: String,
+    pub lottery: crate::lottery_ui::LotteryView,
+    /// (card number, mastery level) for every card in the booklet.
+    pub mastery_levels: Vec<(u32, u8)>,
     /// Perks active this run (shown small under the depth counter).
     pub perks: Vec<&'static str>,
     /// Run upgrades taken so far ("SWIFT FEET x2").
@@ -150,6 +161,12 @@ pub struct HudView {
     pub settings_snapshot: crate::settings::Settings,
     /// Seconds into this dream (the controls legend shows for the first few).
     pub dream_age: f32,
+    /// Entrance animation age (f32::MAX when done).
+    pub entrance_age: f32,
+    /// 0..1: the eye is glancing at the objective (every 20s, whatever the lucidity).
+    pub glance: f32,
+    /// The eased lid opening (0..1) once the entrance is over.
+    pub lid: f32,
     /// Nightmares: (boss title, sigils taken, sigils total, attack warning).
     pub boss: Option<(String, usize, usize, Option<&'static str>)>,
 }
@@ -381,6 +398,9 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
+        Mode::Store if v.store_tab == 1 => {
+            return crate::lottery_ui::draw(ctx, &p, screen, v, art)
+        }
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),
@@ -414,7 +434,7 @@ pub fn draw(
         px_cells(&p, screen.center(), 2.0, cross, rgba([255, 255, 255], 0.7));
     }
     if let Some(dir) = v.shard_dir {
-        shard_compass(&p, screen, dir, v);
+        shard_compass(&p, screen, dir, eye_look(v).emphasis, v);
     }
     if v.mode == Mode::Paused {
         pause_veil(&p, screen, v);
@@ -675,17 +695,74 @@ pub fn pip_layout(target: u32, room: f32) -> PipLayout {
     PipLayout::Count
 }
 
+/// What the eye is doing this frame: its lid, where the pupil points, and how
+/// strongly the objective marker should be lit.
+struct EyeLook {
+    open: f32,
+    gaze: Option<[f32; 2]>,
+    emphasis: f32,
+}
+
+fn entrance_of(v: &HudView) -> Option<crate::eye_motion::Entrance> {
+    (v.entrance_age < f32::MAX).then(|| crate::eye_motion::Entrance {
+        t: v.entrance_age,
+        done: false,
+    })
+}
+
+/// Pure, so the eye and the compass agree on what is being highlighted.
+///
+/// - Awake enough to see: it looks toward the objective, as it always has.
+/// - Every 20s of play (`v.glance`): whatever the lucidity, the lid lifts, the
+///   pupil locks on the objective and the marker lights up, then lets go.
+/// - Shut and dreaming: REM. Each burst cracks the lid, darts around the
+///   objective's direction and lights the marker faintly.
+fn eye_look(v: &HudView) -> EyeLook {
+    use crate::eye_motion as em;
+    let entrance = entrance_of(v);
+    let base = match entrance {
+        Some(e) => e.lid(),
+        None => v.lid,
+    };
+    let glance = if entrance.is_some() { 0.0 } else { v.glance };
+    let rem = (base < em::REM_LID && glance <= 0.0)
+        .then(|| em::rem(v.dream_age, v.seed, v.settings_snapshot.motion(), v.shard_dir));
+    let crack = rem.map_or(0.0, |r| r.crack);
+    let open = base
+        + (em::GLANCE_LID - base).max(0.0) * glance
+        + (em::CRACK_LID - base).max(0.0) * crack;
+    let gaze = match rem {
+        Some(r) => Some(r.gaze),
+        None => v.shard_dir,
+    };
+    let emphasis = match (v.shard_dir, entrance) {
+        (Some(_), None) => glance.max(0.3 * crack),
+        _ => 0.0,
+    };
+    EyeLook { open, gaze, emphasis }
+}
+
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
-    let c = Pos2::new(screen.center().x, screen.bottom() - 96.0);
+
+    // Entrance: the eye falls from above the screen to its place.
+    let fall = entrance_of(v).map_or(0.0, |e| e.height())
+        * (screen.height() - 96.0 + 8.0 * EYE_PX);
+    let c = Pos2::new(screen.center().x, screen.bottom() - 96.0 - fall);
+
     let lucid = v.lucidity >= v.lucid_target;
-    let open = (eye_openness(v.lucidity, v.lucid_target) * (1.0 + 0.05 * (v.time * 1.7).sin()))
-        .min(1.0)
+    let look = eye_look(v);
+    let gaze = look.gaze;
+
+    // Breath + blink on top of whatever the lid is doing.
+    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0)
         * pixels::blink(v.time);
-    let cells = pixels::eye_pixels(open, v.shard_dir, lucid);
+
+    let cells = pixels::eye_pixels(open, gaze, lucid);
     let iris = iris_color(v, lucid);
     paint_eye(p, c, &cells, iris, v);
     lucid_rays_and_pips(p, c, lucid, screen.width(), v);
+
     if let Some((text, age)) = &v.eye_line {
         let a = crate::eye::alpha(*age);
         if a > 0.0 {
@@ -695,9 +772,13 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
                 text.clone()
             });
             let shown = crate::eye::shown(&text, *age);
+            if shown.is_empty() {
+                return;
+            }
             // Measure the whole line so the plate doesn't grow as it types.
             let font = FontId::proportional(24.0);
             let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
+
             let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
             let plate = Rect::from_center_size(
                 at - Vec2::new(0.0, full.size().y * 0.5),
@@ -873,7 +954,8 @@ fn lucid_rays_and_pips(p: &egui::Painter, c: Pos2, lucid: bool, width: f32, v: &
     }
 }
 
-fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
+/// `emphasis` (0..1) lights the marker up while the eye is looking at it.
+fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], emphasis: f32, v: &HudView) {
     use crate::pixels;
     let f = pixels::snap8(dir);
     let fv = Vec2::new(f[0], f[1]);
@@ -893,6 +975,16 @@ fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
         cells.iter().copied(),
         rgba([0, 0, 0], 0.55),
     );
+    if emphasis > 0.0 {
+        // A soft halo: every cell bordering the arrow, pulsing gently.
+        let pulse = 0.75 + 0.25 * (v.time * 6.0).sin();
+        let halo: std::collections::BTreeSet<(i32, i32)> = cells
+            .iter()
+            .flat_map(|&(x, y)| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
+            .filter(|c| !cells.contains(c))
+            .collect();
+        px_cells(p, at, ARROW_PX, halo, rgba([255, 240, 200], 0.55 * emphasis * pulse));
+    }
     for k in 1..=3 {
         if ((v.time * 8.0) as i32 + k) % 2 == 0 {
             let back = at - fv * (ARROW_PX * (6.0 + 3.0 * k as f32));
@@ -916,6 +1008,8 @@ fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], v: &HudView) {
         } else {
             hue(v.time * 0.6 - (x as f32 * f[0] + y as f32 * f[1]) * 0.06)
         };
+        // Lit: blend toward white.
+        let rgb = rgb.map(|c| (c as f32 + (255.0 - c as f32) * 0.6 * emphasis) as u8);
         px_cells(p, at, ARROW_PX, [(x, y)], rgba(rgb, 0.95));
     }
     if let Some(dist) = v.shard_dist {
@@ -1000,7 +1094,7 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         c + Vec2::new(0.0, 52.0),
         Align2::CENTER_TOP,
-        v.k("[q] wake up for real"),
+        v.k("[q] back to menu"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.5),
     );

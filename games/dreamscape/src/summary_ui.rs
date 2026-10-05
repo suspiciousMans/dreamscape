@@ -107,6 +107,15 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SummaryView) {
         rgba([255, 210, 80], 1.0),
     );
     if n == s.dust.len() {
+        if !v.goal.is_empty() {
+            p.text(
+                Pos2::new(cx, screen.bottom() - 92.0),
+                Align2::CENTER_TOP,
+                &v.goal,
+                FontId::monospace(20.0),
+                rgba(hue(v.time * 0.15), 0.9),
+            );
+        }
         p.text(
             Pos2::new(cx, screen.bottom() - 52.0),
             Align2::CENTER_TOP,
