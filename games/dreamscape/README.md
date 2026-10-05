@@ -95,6 +95,19 @@ Every movement and ability key can be rebound in **settings**, which also has mu
 
 `tools/screenshots.sh OUT_DIR` shoots every dream type, a nightmare and each special enemy under Xvfb and fails on a blank frame. CI runs it on Linux and uploads the images.
 
+## License
+
+Dreamscape is **proprietary** — see [LICENSE](../../LICENSE). Free to play, free to
+build for your own use; not yours to redistribute or to sell a derivative of.
+
+The Jame engine it runs on (`engine/`) is **MIT**, so the engine is reusable
+in your own projects: see [engine/LICENSE](../../engine/LICENSE).
+
+Third-party assets and dependencies keep their own licenses — see
+[THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md). Note in particular that the
+optional `steam` feature pulls in Valve's Steamworks SDK, which restricts
+redistribution to Steam-distributed builds.
+
 ## Credits
 
 - Font: [VT323](https://fonts.google.com/specimen/VT323) by Peter Hull, under the SIL Open Font License (`assets/fonts/OFL.txt`).

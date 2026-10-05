@@ -2,6 +2,9 @@
 name = "dreamscape"
 version = "0.1.0"
 edition = "2021"
+# Proprietary — see ../../LICENSE. Not a crates.io crate.
+license-file = "../../LICENSE"
+publish = false
 
 [dependencies]
 engine = { path = "../../engine" }

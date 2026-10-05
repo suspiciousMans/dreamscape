@@ -65,3 +65,15 @@ ps2-engine/
 
 See **[GUIDE.md](GUIDE.md)** for the full breakdown of every module, how to
 add a new game, and how to export a standalone build.
+
+## License
+
+The **Jame engine** (`engine/`) is MIT — see [engine/LICENSE](engine/LICENSE).
+Use it, fork it, ship commercial games on it.
+
+The **games** in this repository (including Dreamscape) are proprietary and
+separately licensed — see [LICENSE](LICENSE). The `steam` feature depends on
+Valve's Steamworks SDK, which restricts redistribution to Steam-distributed
+builds.
+
+Third-party notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
