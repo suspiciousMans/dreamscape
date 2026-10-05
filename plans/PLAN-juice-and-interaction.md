@@ -71,11 +71,8 @@ draws use their own seeded streams so existing seeds replay. Every item is
 checked on screen before it is called done. "488 tests pass" was true for the
 last commit and the new screens still had a layout bug nobody had seen.
 
-## Open questions for James
+## Decisions (James, 2026-10-05)
 
-1. Is Steam Early Access (single-player first) still the target? It decides
-   whether Wave C or the B-wave comes first.
-2. Ghost runs and shareable seeds are the only two features that could grow
-   into servers later. Keep them file/code-based for now?
-3. Any juice you would rather not have? The dream tone is soft, so hit-stop
-   might need to be gentler than a typical action game.
+1. Steam work (Wave C Steam hooks, co-op lobbies) is deferred. Build the single-player B-wave first.
+2. Everything stays code/file based. No servers: seeds are copyable codes, ghosts are files.
+3. Keep juice soft: short hit-stop (about 40 ms), gentle shake, slow-mo no deeper than 0.75x. Dreamy, not arcade.
