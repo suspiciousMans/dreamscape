@@ -404,9 +404,7 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
-        Mode::Store if v.store_tab == 1 => {
-            return crate::lottery_ui::draw(ctx, &p, screen, v, art)
-        }
+        Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),
@@ -471,23 +469,54 @@ fn pickup_ring(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
 }
 
-/// A warm halo creeping in from the screen edges as the wake door nears.
+/// A warm halo creeping in from the screen edges as the wake door nears: four
+/// vertex-coloured gradient strips, opaque-ish at the edge and fully clear
+/// toward the middle, so it reads as light and never as a frame.
 fn door_glow(p: &egui::Painter, screen: Rect, v: &HudView) {
     if v.door_glow <= 0.01 {
         return;
     }
     let pulse = 0.85 + 0.15 * (v.time * (1.5 + 2.0 * v.door_glow)).sin();
-    for i in 0..6 {
-        let f = i as f32 / 6.0;
-        let inset = screen.width() * 0.10 * f;
-        let a = v.door_glow * 0.05 * (1.0 - f) * pulse;
-        let r = screen.shrink2(Vec2::new(inset, inset * 0.56));
-        p.rect_stroke(
-            r,
-            0.0,
-            egui::Stroke::new(screen.width() * 0.02, rgba([255, 214, 150], a)),
-        );
-    }
+    let edge =
+        egui::Color32::from_rgba_unmultiplied(255, 200, 120, (v.door_glow * 70.0 * pulse) as u8);
+    let clear = egui::Color32::from_rgba_unmultiplied(255, 200, 120, 0);
+    let depth = screen.height() * 0.22;
+    let mut mesh = egui::Mesh::default();
+    let mut strip = |a: Pos2, b: Pos2, c: Pos2, d: Pos2| {
+        // a,b on the edge (bright); c,d inward (clear).
+        let n = mesh.vertices.len() as u32;
+        let uv = egui::epaint::WHITE_UV;
+        for (pos, color) in [(a, edge), (b, edge), (c, clear), (d, clear)] {
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv, color });
+        }
+        mesh.indices.extend([n, n + 1, n + 2, n + 1, n + 3, n + 2]);
+    };
+    let (l, r, t, b) = (screen.left(), screen.right(), screen.top(), screen.bottom());
+    strip(
+        Pos2::new(l, t),
+        Pos2::new(r, t),
+        Pos2::new(l, t + depth),
+        Pos2::new(r, t + depth),
+    );
+    strip(
+        Pos2::new(l, b),
+        Pos2::new(r, b),
+        Pos2::new(l, b - depth),
+        Pos2::new(r, b - depth),
+    );
+    strip(
+        Pos2::new(l, t),
+        Pos2::new(l, b),
+        Pos2::new(l + depth, t),
+        Pos2::new(l + depth, b),
+    );
+    strip(
+        Pos2::new(r, t),
+        Pos2::new(r, b),
+        Pos2::new(r - depth, t),
+        Pos2::new(r - depth, b),
+    );
+    p.add(egui::Shape::mesh(mesh));
 }
 
 /// Nightmares: the boss's name, a bar of sigils, and the attack warning.
@@ -774,12 +803,17 @@ fn eye_look(v: &HudView) -> EyeLook {
         None => v.lid,
     };
     let glance = if entrance.is_some() { 0.0 } else { v.glance };
-    let rem = (base < em::REM_LID && glance <= 0.0)
-        .then(|| em::rem(v.dream_age, v.seed, v.settings_snapshot.motion(), v.shard_dir));
+    let rem = (base < em::REM_LID && glance <= 0.0).then(|| {
+        em::rem(
+            v.dream_age,
+            v.seed,
+            v.settings_snapshot.motion(),
+            v.shard_dir,
+        )
+    });
     let crack = rem.map_or(0.0, |r| r.crack);
-    let open = base
-        + (em::GLANCE_LID - base).max(0.0) * glance
-        + (em::CRACK_LID - base).max(0.0) * crack;
+    let open =
+        base + (em::GLANCE_LID - base).max(0.0) * glance + (em::CRACK_LID - base).max(0.0) * crack;
     let gaze = match rem {
         Some(r) => Some(r.gaze),
         None => v.shard_dir,
@@ -788,15 +822,18 @@ fn eye_look(v: &HudView) -> EyeLook {
         (Some(_), None) => glance.max(0.3 * crack),
         _ => 0.0,
     };
-    EyeLook { open, gaze, emphasis }
+    EyeLook {
+        open,
+        gaze,
+        emphasis,
+    }
 }
 
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
 
     // Entrance: the eye falls from above the screen to its place.
-    let fall = entrance_of(v).map_or(0.0, |e| e.height())
-        * (screen.height() - 96.0 + 8.0 * EYE_PX);
+    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (screen.height() - 96.0 + 8.0 * EYE_PX);
     let c = Pos2::new(screen.center().x, screen.bottom() - 96.0 - fall);
 
     let lucid = v.lucidity >= v.lucid_target;
@@ -804,8 +841,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let gaze = look.gaze;
 
     // Breath + blink on top of whatever the lid is doing.
-    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0)
-        * pixels::blink(v.time);
+    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time);
 
     let cells = pixels::eye_pixels(open, gaze, lucid);
     let iris = iris_color(v, lucid);
@@ -1032,7 +1068,13 @@ fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], emphasis: f32, 
             .flat_map(|&(x, y)| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
             .filter(|c| !cells.contains(c))
             .collect();
-        px_cells(p, at, ARROW_PX, halo, rgba([255, 240, 200], 0.55 * emphasis * pulse));
+        px_cells(
+            p,
+            at,
+            ARROW_PX,
+            halo,
+            rgba([255, 240, 200], 0.55 * emphasis * pulse),
+        );
     }
     for k in 1..=3 {
         if ((v.time * 8.0) as i32 + k) % 2 == 0 {
