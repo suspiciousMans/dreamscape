@@ -69,7 +69,9 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     let cx = screen.center().x;
-    let top = screen.top() + screen.height() * 0.2;
+    // A long menu (host/join/memories...) needs the room: lift the header and keep
+    // the menu clear of the goal/streak lines pinned to the bottom.
+    let top = screen.top() + screen.height() * if v.menu.len() > 8 { 0.1 } else { 0.2 };
     glitch_text(
         p,
         Pos2::new(cx, top),
@@ -90,7 +92,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0), v.eye, v);
 
     let menu_top = top + 236.0;
-    let step = ((screen.bottom() - 80.0 - menu_top) / v.menu.len().max(1) as f32).min(36.0);
+    let step = ((screen.bottom() - 105.0 - menu_top) / v.menu.len().max(1) as f32).min(36.0);
+    let font = (step * 0.9).clamp(16.0, 26.0);
     for (i, (key, label, note)) in v.menu.iter().enumerate() {
         let sel = i == v.shop_col.min(v.menu.len().saturating_sub(1));
         let y = menu_top + i as f32 * step;
@@ -100,7 +103,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 Pos2::new(cx - 230.0, y),
                 Align2::LEFT_TOP,
                 ">",
-                FontId::monospace(26.0),
+                FontId::monospace(font),
                 rgba(col, 1.0),
             );
         }
@@ -108,7 +111,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             Pos2::new(cx - 200.0, y),
             Align2::LEFT_TOP,
             v.k(&format!("[{key}]  {label}")),
-            FontId::monospace(26.0),
+            FontId::monospace(font),
             rgba(col, if sel { 1.0 } else { 0.7 }),
         );
         if sel && !note.is_empty() {
