@@ -21,3 +21,7 @@ pub use panels::{hud_style_editor, render_params_editor};
 pub use pause_menu::{draw_pause_menu, PauseMenuAction};
 pub use profiler::{draw_profiler_overlay, ProfilerStats};
 pub use theme::EditorTheme;
+
+// Games build their own egui panels through this re-export so their egui
+// version always matches the engine's (dungeon_oxide's HUD does).
+pub use egui;
