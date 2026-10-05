@@ -126,6 +126,12 @@ pub struct HudView {
     pub streak: u32,
     /// "ONE MORE DREAM: ..." (title, summary and pack screens).
     pub goal: String,
+    /// 0..1 progress of the pickup ring, if one is rippling out.
+    pub pickup_ring: Option<f32>,
+    /// Chain length of the latest pickup (0 for a lone one).
+    pub pickup_chain: u32,
+    /// 0..1 warm glow as you near the wake door.
+    pub door_glow: f32,
     /// What the run did for the cards that went along (xp, echoes).
     pub report_line: String,
     pub lottery: crate::lottery_ui::LotteryView,
@@ -422,6 +428,8 @@ pub fn draw(
         }
         Mode::Playing | Mode::Paused => {}
     }
+    door_glow(&p, screen, v);
+    pickup_ring(&p, screen, v);
     depth_counter(&p, screen, v);
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
@@ -438,6 +446,47 @@ pub fn draw(
     }
     if v.mode == Mode::Paused {
         pause_veil(&p, screen, v);
+    }
+}
+
+/// A soft ring that ripples out from the middle of the screen when you pick
+/// something up. Longer chains ring a little wider and warmer.
+fn pickup_ring(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let Some(k) = v.pickup_ring else {
+        return;
+    };
+    let ease = 1.0 - (1.0 - k).powi(3);
+    let r = screen.height() * (0.05 + (0.16 + 0.015 * v.pickup_chain.min(6) as f32) * ease);
+    let a = (1.0 - k).powi(2) * 0.55;
+    let warm = (v.pickup_chain as f32 / 6.0).min(1.0);
+    let col = [
+        (120.0 + 135.0 * warm) as u8,
+        (255.0 - 40.0 * warm) as u8,
+        (240.0 - 120.0 * warm) as u8,
+    ];
+    p.circle_stroke(
+        screen.center(),
+        r,
+        egui::Stroke::new(3.0 * (1.0 - k) + 1.0, rgba(col, a)),
+    );
+}
+
+/// A warm halo creeping in from the screen edges as the wake door nears.
+fn door_glow(p: &egui::Painter, screen: Rect, v: &HudView) {
+    if v.door_glow <= 0.01 {
+        return;
+    }
+    let pulse = 0.85 + 0.15 * (v.time * (1.5 + 2.0 * v.door_glow)).sin();
+    for i in 0..6 {
+        let f = i as f32 / 6.0;
+        let inset = screen.width() * 0.10 * f;
+        let a = v.door_glow * 0.05 * (1.0 - f) * pulse;
+        let r = screen.shrink2(Vec2::new(inset, inset * 0.56));
+        p.rect_stroke(
+            r,
+            0.0,
+            egui::Stroke::new(screen.width() * 0.02, rgba([255, 214, 150], a)),
+        );
     }
 }
 

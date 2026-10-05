@@ -33,9 +33,11 @@ pub enum Sound {
     Split,
     Crumble,
     Menu,
+    /// The wake door's soft hum as you walk toward it.
+    DoorHum,
 }
 
-pub const ALL_SOUNDS: [Sound; 24] = [
+pub const ALL_SOUNDS: [Sound; 25] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -60,6 +62,7 @@ pub const ALL_SOUNDS: [Sound; 24] = [
     Sound::Split,
     Sound::Crumble,
     Sound::Menu,
+    Sound::DoorHum,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -253,6 +256,10 @@ pub fn synth(sound: Sound) -> Vec<f32> {
         ],
         Crumble => vec![v(200.0, 80.0, 0.5).noise(0.85).gain(0.4).curve(1.5)],
         Menu => vec![v(1000.0, 1000.0, 0.04).wave(2).gain(0.2)],
+        DoorHum => vec![
+            v(196.0, 196.0, 0.9).wave(2).gain(0.16).attack(0.35).curve(1.4),
+            v(294.0, 294.0, 0.9).gain(0.08).attack(0.4).curve(1.4),
+        ],
     };
     render(&voices, sound as u32 * 7919 + 1)
 }
