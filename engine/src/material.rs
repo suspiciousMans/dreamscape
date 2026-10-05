@@ -18,6 +18,9 @@ impl Default for MaterialVariant {
     }
 }
 
+/// Surface description for a mesh. Attach it as an optional ECS component
+/// alongside `MeshRenderer` (`world.insert_one(entity, material)`);
+/// entities without one render with the profile's standard shader.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Material {
     #[serde(default)]

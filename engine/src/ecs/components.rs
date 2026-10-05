@@ -8,7 +8,6 @@ use crate::level::{LevelTransition, MeshSource};
 use crate::mesh::GpuMesh;
 use crate::screen_effect::ScreenEffectSpec;
 use crate::texture::GpuTexture;
-use crate::material::Material;
 
 /// Converts GUI-edited Euler degrees to the quaternion `Transform::rotation`
 /// actually stores. Kept as one shared function (rather than each caller
@@ -58,7 +57,6 @@ impl Default for Transform {
 pub struct MeshRenderer {
     pub mesh: Arc<GpuMesh>,
     pub texture: Option<Arc<GpuTexture>>,
-    pub material: Option<Material>,
 }
 
 #[derive(Clone, Copy, Debug)]

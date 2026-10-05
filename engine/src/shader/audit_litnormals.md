@@ -191,6 +191,10 @@ for history only.
 - Verified visually with a throwaway dome normal map: bumps light from the
   sun's side on both a +Z cube face and the +Y floor.
 
-Still open: nothing assigns `MeshRenderer.material` yet (all spawn sites
-pass `None`), so the path is only reachable from code — needs a
-`LevelObject.material` field + F2 inspector control.
+`Material` is an optional ECS component next to `MeshRenderer` (not a
+field), so existing `MeshRenderer { mesh, texture }` literals in games keep
+compiling.
+
+Still open: nothing attaches a `Material` from level data yet, so the path
+is only reachable from code — needs a `LevelObject.material` field + F2
+inspector control.

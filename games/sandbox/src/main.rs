@@ -35,7 +35,7 @@ use engine::sdl2::controller::Button as ControllerButton;
 use engine::sdl2::event::Event;
 use engine::sdl2::keyboard::Keycode;
 use engine::sdl2::mouse::MouseButton;
-use engine::material::MaterialVariant;
+use engine::material::{Material, MaterialVariant};
 use engine::shader::{shader_files_for, ShaderVariantCache, AFFINE_UV_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::{draw_hud, draw_pause_menu, hud_style_editor, render_params_editor, EguiState, PauseMenuAction};
@@ -792,12 +792,10 @@ impl MeshUniforms {
 }
 
 /// Whether a mesh should be drawn by the `LitNormals` program rather than
-/// the profile's standard mesh program.
-fn uses_normals_program(mesh_renderer: &MeshRenderer) -> bool {
-    mesh_renderer
-        .material
-        .as_ref()
-        .is_some_and(|material| material.variant == MaterialVariant::LitNormals)
+/// the profile's standard mesh program. `Material` is an optional ECS
+/// component next to `MeshRenderer`; entities without one render as before.
+fn uses_normals_program(material: Option<&Material>) -> bool {
+    material.is_some_and(|material| material.variant == MaterialVariant::LitNormals)
 }
 
 /// Where `assets/` and `profiles/` are read from at runtime.
@@ -1540,7 +1538,6 @@ impl Sandbox {
             MeshRenderer {
                 mesh,
                 texture: Some(texture),
-                material: None,
             },
             LevelObjectMeta {
                 name: obj.name.clone(),
@@ -1677,7 +1674,7 @@ impl Sandbox {
         let position = Vec3::from(instance.position);
         let entity = self.world.spawn((
             Transform { position, rotation: Quat::IDENTITY, scale: Vec3::from(instance.scale) },
-            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))), material: None },
+            MeshRenderer { mesh, texture: Some(Arc::new(solid_color_texture(gl, rgba))) },
             Collider { shape: ColliderShape::Sphere { radius: instance.scale[0] * 0.5 }, is_trigger: false },
             RigidBody::default(),
             CharacterMeta {
@@ -1863,7 +1860,7 @@ impl Sandbox {
                 rotation: local_rotation,
                 scale: Vec3::from(def.scale),
             },
-            MeshRenderer { mesh, texture: Some(texture), material: None },
+            MeshRenderer { mesh, texture: Some(texture) },
             RigPart { parent: None, local_position, local_rotation_euler_deg, local_rotation },
             engine::rig::RigPartMeta { mesh_source: def.mesh.clone(), texture_path: def.texture_path.clone() },
         ));
@@ -5688,10 +5685,10 @@ impl Game for Sandbox {
             // except LitNormals meshes (unless that pass is unavailable).
             gl.use_program(Some(program));
             uniforms.upload_frame(gl, &params, view, proj, camera_pos, &point_lights);
-            for (_entity, (transform, mesh_renderer)) in
-                self.world.query::<(&Transform, &MeshRenderer)>().iter()
+            for (_entity, (transform, mesh_renderer, material)) in
+                self.world.query::<(&Transform, &MeshRenderer, Option<&Material>)>().iter()
             {
-                if normals_pass.is_some() && uses_normals_program(mesh_renderer) {
+                if normals_pass.is_some() && uses_normals_program(material) {
                     continue;
                 }
                 gl.uniform_matrix_4_f32_slice(
@@ -5715,14 +5712,10 @@ impl Game for Sandbox {
                 gl.uniform_1_i32(normals_uniforms.tex.as_ref(), 0);
                 gl.uniform_1_i32(normals_uniforms.normal_map.as_ref(), 1);
 
-                for (_entity, (transform, mesh_renderer)) in
-                    self.world.query::<(&Transform, &MeshRenderer)>().iter()
+                for (_entity, (transform, mesh_renderer, material)) in
+                    self.world.query::<(&Transform, &MeshRenderer, Option<&Material>)>().iter()
                 {
-                    let Some(material) = mesh_renderer
-                        .material
-                        .as_ref()
-                        .filter(|_| uses_normals_program(mesh_renderer))
-                    else {
+                    let Some(material) = material.filter(|m| uses_normals_program(Some(m))) else {
                         continue;
                     };
 
