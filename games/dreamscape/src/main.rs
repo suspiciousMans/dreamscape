@@ -39,6 +39,7 @@ mod ending;
 mod enemy_ai;
 mod eye;
 mod eye_motion;
+mod juice;
 mod lottery;
 mod lottery_ui;
 mod retention;
@@ -429,6 +430,8 @@ pub struct DreamscapeGame {
     autopilot: bool,
     route_index: usize,
     flash: gameplay::Flash,
+    /// Soft run-feel juice: time dip, shake, pickup chain, door hum.
+    juice: juice::Juice,
     /// Seconds of enemy immunity left after a respawn.
     grace: f32,
     /// The shard (or wake door) entity and its beacon.
@@ -627,6 +630,7 @@ impl DreamscapeGame {
             autopilot: crate::dev::var("DREAMSCAPE_AUTOPILOT").is_ok(),
             route_index: 0,
             flash: gameplay::Flash::default(),
+            juice: juice::Juice::new(),
             grace: 0.0,
             shard_entities: Vec::new(),
             shard_tex: None,
@@ -1217,6 +1221,9 @@ impl DreamscapeGame {
             },
             title_age: self.title_age,
             warning_age: self.warning_age,
+            pickup_ring: self.juice.ring(),
+            pickup_chain: self.juice.chain_len(),
+            door_glow: self.juice.door_glow(),
             shard_dir: target.and_then(|t| {
                 if self.first_person_active() {
                     fpv::compass(self.player_position, self.yaw, t, 4.0)
@@ -1749,6 +1756,23 @@ impl DreamscapeGame {
             }
         }
         Ok(())
+    }
+
+    /// The wake door hums more and more as you walk toward it.
+    fn update_door_hum(&mut self, dt: f32) {
+        let door = self
+            .shard_entities
+            .first()
+            .filter(|&&e| self.world.get::<&WakeMarker>(e).is_ok())
+            .and_then(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position));
+        let dist = door.map(|d| {
+            Vec3::new(d.x - self.player_position.x, 0.0, d.z - self.player_position.z).length()
+        });
+        // Real time, not the dipped dt: the hum keeps its own rhythm.
+        let hum = self.juice.door(dt, dist);
+        if let Some(ratio) = hum {
+            self.sfx_pitched(Sound::DoorHum, ratio);
+        }
     }
 
     /// Gates breathe open and shut; shifting tiles sink and rise.
@@ -3714,8 +3738,13 @@ impl DreamscapeGame {
 
     /// A synthesized sound effect (built once, at start-up).
     fn sfx(&self, sound: Sound) {
+        self.sfx_pitched(sound, 1.0);
+    }
+
+    /// Play a sound faster/slower (a ratio: 2.0 is an octave up).
+    fn sfx_pitched(&self, sound: Sound, ratio: f32) {
         if let (Some(audio), Some(samples)) = (&self.audio, self.sounds.get(&sound)) {
-            audio.play_samples(samples, sounds::RATE);
+            audio.play_samples(samples, (sounds::RATE as f32 * ratio) as u32);
         }
     }
 
@@ -3929,7 +3958,9 @@ impl DreamscapeGame {
         self.despawn_shard_slot();
         self.objective = None;
         self.flash.trigger([0.3, 1.0, 1.0], 0.6);
-        self.sfx(Sound::Shard);
+        let pitch = self.juice.chain_pitch();
+        self.juice.hit(juice::Hit::Shard, self.settings.reduced_motion);
+        self.sfx_pitched(Sound::Shard, pitch);
         self.director.collect_shard();
         self.shards_this_run += 1;
         if self.run_active {
@@ -5355,7 +5386,8 @@ impl Game for DreamscapeGame {
                 self.frame_ms = (0.0, 0);
             }
         }
-        let dt = dt.min(gameplay::MAX_DT);
+        // A soft time dip on catches and shards: the world slows, then eases back.
+        let dt = self.juice.step(dt.min(gameplay::MAX_DT));
         // Mouse look owns the cursor only while actually dreaming in first person.
         let want_mouse =
             self.first_person_active() && self.mode == hud::Mode::Playing && !self.autopilot;
@@ -5729,6 +5761,7 @@ impl Game for DreamscapeGame {
             t.position = Vec3::new(under.x, 0.04, under.z);
         }
         self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+        self.update_door_hum(dt);
         self.update_echoes(player, dt)?;
         self.update_bursts(ctx.gl())?;
         if !self.autopilot {
@@ -5784,6 +5817,7 @@ impl Game for DreamscapeGame {
         if caught && self.coop_active() {
             // Co-op: no respawn and no dropped shard, just a ghost.
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
+            self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
             self.sfx(Sound::Caught);
             self.stats.caught += 1;
             self.caught_this_dream += 1;
@@ -5792,6 +5826,7 @@ impl Game for DreamscapeGame {
         }
         if caught {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
+            self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
             self.sfx(Sound::Caught);
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
@@ -5902,7 +5937,9 @@ impl Game for DreamscapeGame {
                             let _ = self.world.despawn(x);
                         }
                     }
-                    self.sfx(Sound::Sigil);
+                    let pitch = self.juice.chain_pitch();
+                    self.juice.hit(juice::Hit::Pickup, self.settings.reduced_motion);
+                    self.sfx_pitched(Sound::Sigil, pitch);
                     if done {
                         self.complete_objective(ctx);
                     }
@@ -5938,7 +5975,9 @@ impl Game for DreamscapeGame {
             let _ = self.world.despawn(e);
             self.sigils_left = self.sigils_left.saturating_sub(1);
             self.flash.trigger([1.0, 0.4, 1.0], 0.5);
-            self.sfx(Sound::Sigil);
+            let pitch = self.juice.chain_pitch();
+            self.juice.hit(juice::Hit::Pickup, self.settings.reduced_motion);
+            self.sfx_pitched(Sound::Sigil, pitch);
             log::info!("Sigil taken ({} left)", self.sigils_left);
             if self.sigils_left == 0 {
                 self.open_portal()?;
@@ -6040,6 +6079,11 @@ impl Game for DreamscapeGame {
         };
         let fp = self.first_person_active();
         let fov = if fp { fpv::FOV_DEG } else { 60.0_f32 };
+        let shake = if self.mode == hud::Mode::Playing {
+            self.juice.shake_offset()
+        } else {
+            Vec3::ZERO
+        };
         let (eye, target) = if self.debug_camera {
             (Vec3::new(0.0, 45.0, -35.0), Vec3::ZERO)
         } else if fp {
@@ -6047,6 +6091,7 @@ impl Game for DreamscapeGame {
         } else {
             (self.camera_pos, self.player_position)
         };
+        let (eye, target) = (eye + shake, target + shake);
         let (Some(renderer), Some(shader_cache), Some(params)) = (
             self.renderer.as_mut(),
             self.shader_cache.as_mut(),
@@ -6545,6 +6590,21 @@ mod screen_smoke {
             assert!(shapes(&g) > 50, "age {age}");
         }
         assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
+    }
+
+    #[test]
+    fn the_pickup_ring_and_door_glow_draw_only_when_active() {
+        let mut g = game("juice");
+        g.mode = hud::Mode::Playing;
+        let calm = shapes(&g);
+        g.juice.hit(juice::Hit::Pickup, false);
+        g.juice.chain_pitch();
+        let ringing = shapes(&g);
+        assert!(ringing > calm, "the ring adds shapes: {ringing} vs {calm}");
+        g.juice.step(juice::RING_SECS + 0.1);
+        assert_eq!(shapes(&g), calm, "ring is gone after its time");
+        g.juice.door(0.01, Some(1.0));
+        assert!(shapes(&g) > calm, "the door glow adds shapes");
     }
 
     #[test]

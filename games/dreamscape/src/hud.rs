@@ -126,6 +126,12 @@ pub struct HudView {
     pub streak: u32,
     /// "ONE MORE DREAM: ..." (title, summary and pack screens).
     pub goal: String,
+    /// 0..1 progress of the pickup ring, if one is rippling out.
+    pub pickup_ring: Option<f32>,
+    /// Chain length of the latest pickup (0 for a lone one).
+    pub pickup_chain: u32,
+    /// 0..1 warm glow as you near the wake door.
+    pub door_glow: f32,
     /// What the run did for the cards that went along (xp, echoes).
     pub report_line: String,
     pub lottery: crate::lottery_ui::LotteryView,
@@ -398,9 +404,7 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
-        Mode::Store if v.store_tab == 1 => {
-            return crate::lottery_ui::draw(ctx, &p, screen, v, art)
-        }
+        Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),
@@ -422,6 +426,8 @@ pub fn draw(
         }
         Mode::Playing | Mode::Paused => {}
     }
+    door_glow(&p, screen, v);
+    pickup_ring(&p, screen, v);
     depth_counter(&p, screen, v);
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
@@ -439,6 +445,78 @@ pub fn draw(
     if v.mode == Mode::Paused {
         pause_veil(&p, screen, v);
     }
+}
+
+/// A soft ring that ripples out from the middle of the screen when you pick
+/// something up. Longer chains ring a little wider and warmer.
+fn pickup_ring(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let Some(k) = v.pickup_ring else {
+        return;
+    };
+    let ease = 1.0 - (1.0 - k).powi(3);
+    let r = screen.height() * (0.05 + (0.16 + 0.015 * v.pickup_chain.min(6) as f32) * ease);
+    let a = (1.0 - k).powi(2) * 0.55;
+    let warm = (v.pickup_chain as f32 / 6.0).min(1.0);
+    let col = [
+        (120.0 + 135.0 * warm) as u8,
+        (255.0 - 40.0 * warm) as u8,
+        (240.0 - 120.0 * warm) as u8,
+    ];
+    p.circle_stroke(
+        screen.center(),
+        r,
+        egui::Stroke::new(3.0 * (1.0 - k) + 1.0, rgba(col, a)),
+    );
+}
+
+/// A warm halo creeping in from the screen edges as the wake door nears: four
+/// vertex-coloured gradient strips, opaque-ish at the edge and fully clear
+/// toward the middle, so it reads as light and never as a frame.
+fn door_glow(p: &egui::Painter, screen: Rect, v: &HudView) {
+    if v.door_glow <= 0.01 {
+        return;
+    }
+    let pulse = 0.85 + 0.15 * (v.time * (1.5 + 2.0 * v.door_glow)).sin();
+    let edge =
+        egui::Color32::from_rgba_unmultiplied(255, 200, 120, (v.door_glow * 70.0 * pulse) as u8);
+    let clear = egui::Color32::from_rgba_unmultiplied(255, 200, 120, 0);
+    let depth = screen.height() * 0.22;
+    let mut mesh = egui::Mesh::default();
+    let mut strip = |a: Pos2, b: Pos2, c: Pos2, d: Pos2| {
+        // a,b on the edge (bright); c,d inward (clear).
+        let n = mesh.vertices.len() as u32;
+        let uv = egui::epaint::WHITE_UV;
+        for (pos, color) in [(a, edge), (b, edge), (c, clear), (d, clear)] {
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv, color });
+        }
+        mesh.indices.extend([n, n + 1, n + 2, n + 1, n + 3, n + 2]);
+    };
+    let (l, r, t, b) = (screen.left(), screen.right(), screen.top(), screen.bottom());
+    strip(
+        Pos2::new(l, t),
+        Pos2::new(r, t),
+        Pos2::new(l, t + depth),
+        Pos2::new(r, t + depth),
+    );
+    strip(
+        Pos2::new(l, b),
+        Pos2::new(r, b),
+        Pos2::new(l, b - depth),
+        Pos2::new(r, b - depth),
+    );
+    strip(
+        Pos2::new(l, t),
+        Pos2::new(l, b),
+        Pos2::new(l + depth, t),
+        Pos2::new(l + depth, b),
+    );
+    strip(
+        Pos2::new(r, t),
+        Pos2::new(r, b),
+        Pos2::new(r - depth, t),
+        Pos2::new(r - depth, b),
+    );
+    p.add(egui::Shape::mesh(mesh));
 }
 
 /// Nightmares: the boss's name, a bar of sigils, and the attack warning.
@@ -725,12 +803,17 @@ fn eye_look(v: &HudView) -> EyeLook {
         None => v.lid,
     };
     let glance = if entrance.is_some() { 0.0 } else { v.glance };
-    let rem = (base < em::REM_LID && glance <= 0.0)
-        .then(|| em::rem(v.dream_age, v.seed, v.settings_snapshot.motion(), v.shard_dir));
+    let rem = (base < em::REM_LID && glance <= 0.0).then(|| {
+        em::rem(
+            v.dream_age,
+            v.seed,
+            v.settings_snapshot.motion(),
+            v.shard_dir,
+        )
+    });
     let crack = rem.map_or(0.0, |r| r.crack);
-    let open = base
-        + (em::GLANCE_LID - base).max(0.0) * glance
-        + (em::CRACK_LID - base).max(0.0) * crack;
+    let open =
+        base + (em::GLANCE_LID - base).max(0.0) * glance + (em::CRACK_LID - base).max(0.0) * crack;
     let gaze = match rem {
         Some(r) => Some(r.gaze),
         None => v.shard_dir,
@@ -739,15 +822,18 @@ fn eye_look(v: &HudView) -> EyeLook {
         (Some(_), None) => glance.max(0.3 * crack),
         _ => 0.0,
     };
-    EyeLook { open, gaze, emphasis }
+    EyeLook {
+        open,
+        gaze,
+        emphasis,
+    }
 }
 
 fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
 
     // Entrance: the eye falls from above the screen to its place.
-    let fall = entrance_of(v).map_or(0.0, |e| e.height())
-        * (screen.height() - 96.0 + 8.0 * EYE_PX);
+    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (screen.height() - 96.0 + 8.0 * EYE_PX);
     let c = Pos2::new(screen.center().x, screen.bottom() - 96.0 - fall);
 
     let lucid = v.lucidity >= v.lucid_target;
@@ -755,8 +841,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let gaze = look.gaze;
 
     // Breath + blink on top of whatever the lid is doing.
-    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0)
-        * pixels::blink(v.time);
+    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time);
 
     let cells = pixels::eye_pixels(open, gaze, lucid);
     let iris = iris_color(v, lucid);
@@ -983,7 +1068,13 @@ fn shard_compass(p: &egui::Painter, screen: Rect, dir: [f32; 2], emphasis: f32, 
             .flat_map(|&(x, y)| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)])
             .filter(|c| !cells.contains(c))
             .collect();
-        px_cells(p, at, ARROW_PX, halo, rgba([255, 240, 200], 0.55 * emphasis * pulse));
+        px_cells(
+            p,
+            at,
+            ARROW_PX,
+            halo,
+            rgba([255, 240, 200], 0.55 * emphasis * pulse),
+        );
     }
     for k in 1..=3 {
         if ((v.time * 8.0) as i32 + k) % 2 == 0 {
