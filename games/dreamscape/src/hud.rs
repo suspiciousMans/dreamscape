@@ -83,6 +83,8 @@ pub struct HudView {
     pub whisper: String,
     /// What the eye is saying, and for how long (seconds).
     pub eye_line: Option<(String, f32)>,
+    /// Every note is found and the eye can be asked for the ending.
+    pub ask_eye: bool,
     /// The note being read: (object, title, body).
     pub note: Option<(String, String, String)>,
     pub memories: crate::memories_ui::MemoriesView,
@@ -847,6 +849,16 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let iris = iris_color(v, lucid);
     paint_eye(p, c, &cells, iris, v);
     lucid_rays_and_pips(p, c, lucid, screen.width(), v);
+
+    if v.ask_eye {
+        p.text(
+            Pos2::new(screen.center().x, screen.bottom() - 28.0),
+            Align2::CENTER_BOTTOM,
+            v.k("[enter] ask the eye"),
+            FontId::monospace(18.0),
+            rgba(ink(v), 0.55 + 0.3 * (v.time * 2.0).sin()),
+        );
+    }
 
     if let Some((text, age)) = &v.eye_line {
         let a = crate::eye::alpha(*age);

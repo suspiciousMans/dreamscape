@@ -13,7 +13,7 @@ pub const LINES: [&str; 6] = [
     "the notes were yours. the others' too. none of you were alone in it.",
     "you don't have to be fixed to wake up. you just have to wake up.",
     "i'll still be here. i'm the part of you that noticed.",
-    "open your eyes. it's morning, or close enough.",
+    "open your eyes. it's time to wake up.",
 ];
 
 /// Seconds each line holds.

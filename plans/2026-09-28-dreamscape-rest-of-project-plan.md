@@ -78,7 +78,7 @@ All 9 abilities reachable; mythics (LucidHeart, WideChoice) excluded. Flavour li
 3. the notes were yours. the others' too. none of you were alone in it.
 4. you don't have to be fixed to wake up. you just have to wake up.
 5. i'll still be here. i'm the part of you that noticed.
-6. open your eyes. it's morning, or close enough.
+6. open your eyes. it's time to wake up.
 
 ## M1 — Stanza 2a: power data + rarities (PR 1)
 - `cards.rs`: add `Rarity::Fused` ("FUSED", base_memory 1.0, dust 30, colour cycles both accents) and `Rarity::Resonant` ("RESONANT", dust 45, `hue(t*0.8)` + white pulse); excluded from `from_score`, `bumped()` no-op. Add `#[serde(default)] fused: Option<DreamTheme>` on `Card`, `blend` on `DreamRecord`; `card_from` → Fused when `blend.is_some()`. Tests: 10k scores never special; RON round-trip; old booklets load.
