@@ -478,6 +478,8 @@ pub struct DreamscapeGame {
     achievement_toast: Option<(String, f32)>,
     /// This run's portal leads to the bottom (the ending plays on arrival).
     to_bottom: bool,
+    /// The eye has said it is waiting to be asked (once per launch).
+    ask_hinted: bool,
     /// The first-time guided dreams, while they run.
     prologue: Option<tutorial::Prologue>,
     /// The eye's line is a tutorial prompt: stays up until the step changes.
@@ -665,6 +667,7 @@ impl DreamscapeGame {
             stare: 0.0,
             achievement_toast: None,
             to_bottom: false,
+            ask_hinted: false,
             prologue: None,
             eye_sticky: false,
             eye_queue: Vec::new(),
@@ -880,6 +883,31 @@ impl DreamscapeGame {
             && !l.ending_seen
             && l.count(0) >= lore::notes_for(0)
             && (!self.autopilot || crate::dev::var("DREAMSCAPE_ENDING").is_ok())
+    }
+
+    /// The ending is yours to ask for: every note found, and nothing in the
+    /// way (a nightmare, a melt, a card pick, the entrance).
+    fn can_ask_eye(&self) -> bool {
+        self.mode == hud::Mode::Playing
+            && self.ending_due()
+            && self.choice.is_none()
+            && !self.director.nightmare
+            && self.director.theme != DreamTheme::Awakening
+            && !self.transition.active()
+            && self.entrance.done
+    }
+
+    /// [enter] while the eye is waiting: go down to the bottom.
+    fn ask_eye(&mut self) {
+        if !self.can_ask_eye() {
+            return;
+        }
+        log::info!("You asked the eye; the way down opens");
+        self.to_bottom = true;
+        self.eye_line = None;
+        self.flash.trigger([0.9, 0.85, 1.0], 0.8);
+        self.sfx(Sound::WakeDoor);
+        self.begin_melt(transition::Pending::Wake);
     }
 
     /// [enter] after the credits: the story is told; the run goes on awake.
@@ -1158,6 +1186,7 @@ impl DreamscapeGame {
             strangeness: self.visual_strangeness(),
             title: self.dream_name.clone(),
             whisper: self.dream_whisper.clone(),
+            ask_eye: self.can_ask_eye(),
             eye_line: self.eye_line.clone().map(|(t, age)| {
                 (
                     t,
@@ -3853,7 +3882,7 @@ impl DreamscapeGame {
         let seed = self.director.dream_seed();
         let lore = &self.booklet.lore;
         let owner = lore::owner(lore.save_seed, seed);
-        let chance = if owner == 0 { 0.45 } else { 0.30 };
+        let chance = if owner == 0 { 0.70 } else { 0.30 };
         let roll = {
             use rand::{rngs::StdRng, Rng, SeedableRng};
             StdRng::seed_from_u64(seed ^ 0x0A7E_5EED).gen::<f32>()
@@ -5317,6 +5346,7 @@ impl Game for DreamscapeGame {
             _ => {}
         }
         match key {
+            Keycode::Return if down && !repeat => self.ask_eye(),
             Keycode::F2 if down && !repeat => {
                 self.tunnel_on = !self.tunnel_on;
                 log::info!("tunnel vision: {}", self.tunnel_on);
@@ -5377,6 +5407,18 @@ impl Game for DreamscapeGame {
         }
         if let Some((_, age)) = &mut self.eye_line {
             *age += dt;
+        }
+        if self.can_ask_eye() {
+            if self.autopilot {
+                // E2E runs ask straight away.
+                self.ask_eye();
+            } else if !self.ask_hinted {
+                self.ask_hinted = true;
+                self.eye_line = Some((
+                    "you found them all. ask me when you're ready.".to_string(),
+                    0.0,
+                ));
+            }
         }
         if crate::dev::var_os("DREAMSCAPE_FPS").is_some() {
             self.frame_ms.0 += dt * 1000.0;
@@ -6023,12 +6065,8 @@ impl Game for DreamscapeGame {
                 self.coop_enter_portal();
                 return Ok(());
             }
-            self.to_bottom = self.ending_due() && !self.director.nightmare;
             self.begin_melt(if self.director.theme == DreamTheme::Awakening {
                 transition::Pending::Finish
-            } else if self.to_bottom {
-                log::info!("The portal leads to the bottom");
-                transition::Pending::Wake
             } else {
                 transition::Pending::Descend
             });

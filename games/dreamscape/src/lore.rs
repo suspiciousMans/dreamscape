@@ -112,10 +112,10 @@ pub fn dreamer(save_seed: u64, id: u32) -> Dreamer {
     }
 }
 
-/// Whose dream this is: you 40% of the time.
+/// Whose dream this is: you 65% of the time.
 pub fn owner(save_seed: u64, dream_seed: u64) -> u32 {
     let h = StdRng::seed_from_u64(save_seed ^ dream_seed ^ 0x0A7E).gen::<u32>();
-    if h % 100 < 40 {
+    if h % 100 < 65 {
         0
     } else {
         1 + (h / 100) % (DREAMERS - 1)
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn dreams_belong_to_someone_and_you_most_often() {
         let mine = (0..1000u64).filter(|&s| owner(9, s) == 0).count();
-        assert!((300..500).contains(&mine), "{mine}");
+        assert!((580..720).contains(&mine), "{mine}");
         assert!((0..1000u64).all(|s| owner(9, s) < DREAMERS));
     }
 
