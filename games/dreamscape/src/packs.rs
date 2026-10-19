@@ -12,7 +12,26 @@ use crate::cards::{
 };
 use crate::dream::{DreamTheme, ALL_THEMES};
 
+/// Packs on the table for a short run (and the least ever offered).
 pub const MAX_OFFERS: usize = 3;
+/// One more pack to open per this many dreams played.
+pub const DREAMS_PER_PICK: usize = 3;
+/// The most packs a run can open.
+pub const MAX_PICKS: usize = 4;
+/// Packs on the table beyond the ones you may open, so there's still a choice.
+pub const EXTRA_OFFERS: usize = 2;
+
+/// How many packs a run of `dreams` dreams may open: 1 for 1-3 dreams, 2 for
+/// 4-6, 3 for 7-9, 4 for 10 or more.
+pub fn picks_for(dreams: usize) -> usize {
+    (1 + dreams.saturating_sub(1) / DREAMS_PER_PICK).clamp(1, MAX_PICKS)
+}
+
+/// How many packs are offered for a run of `dreams` dreams (fewer if the run
+/// visited fewer themes).
+pub fn offer_count(dreams: usize) -> usize {
+    (picks_for(dreams) + EXTRA_OFFERS).max(MAX_OFFERS)
+}
 pub const MAX_PACK_CARDS: usize = 5;
 
 /// Odds (percent weights) that an opened pack gives 1, 2 or 3 cards. One card
@@ -84,7 +103,7 @@ pub fn offer_packs(log: &[DreamRecord], owned: &[Card], boost: MemoryBoost) -> V
     }
     // Deepest first; equal depths keep first-appearance order (stable sort).
     groups.sort_by_key(|(_, v)| std::cmp::Reverse(v.iter().map(|r| r.depth).max().unwrap_or(0)));
-    let mut picked: Vec<usize> = (0..groups.len().min(MAX_OFFERS)).collect();
+    let mut picked: Vec<usize> = (0..groups.len().min(offer_count(log.len()))).collect();
     ensure_playable_pack(&groups, &mut picked, owned);
 
     let mut offers: Vec<PackOffer> = Vec::new();
@@ -240,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn offers_have_distinct_themes_deepest_first_and_cap_at_three() {
+    fn offers_have_distinct_themes_deepest_first_and_are_capped() {
         let log = vec![
             record(Lobby, 1, 1, 0.1, false),
             record(Garden, 2, 5, 0.1, false),
@@ -251,9 +270,9 @@ mod tests {
         ];
         let owned = vec![card_from(&record(Elfworks, 99, 1, 0.1, false))];
         let offers = offer_packs(&log, &owned, boost());
-        assert_eq!(offers.len(), MAX_OFFERS);
+        assert_eq!(offers.len(), offer_count(log.len()));
         let themes: Vec<_> = offers.iter().map(|o| o.theme).collect();
-        assert_eq!(themes, vec![Awakening, Garden, MirrorHall]);
+        assert_eq!(themes, vec![Awakening, Garden, MirrorHall, TheTunnel]);
     }
 
     #[test]
@@ -282,7 +301,7 @@ mod tests {
             .iter()
             .map(|o| o.theme)
             .collect();
-        assert_eq!(themes, vec![Lobby, Garden, TheTunnel]);
+        assert_eq!(themes, vec![Lobby, Garden, TheTunnel, MirrorHall]);
     }
 
     #[test]
@@ -383,8 +402,9 @@ mod tests {
 
     #[test]
     fn empty_booklet_always_offers_the_garden_pack_when_the_run_has_one() {
-        let offers = offer_packs(&run_with_shallow_garden(), &[], boost());
-        assert_eq!(offers.len(), MAX_OFFERS);
+        let run = run_with_shallow_garden();
+        let offers = offer_packs(&run, &[], boost());
+        assert_eq!(offers.len(), offer_count(run.len()));
         assert!(offers.iter().any(|o| o.theme == Garden));
         // Still deepest first after the swap.
         let depths: Vec<_> = offers
@@ -637,5 +657,58 @@ mod tests {
             cards: vec![],
         };
         assert!(open(&none).is_empty());
+    }
+
+    #[test]
+    fn longer_runs_open_and_offer_more_packs() {
+        let picks: Vec<usize> = [0, 1, 3, 4, 6, 7, 9, 10, 99]
+            .iter()
+            .map(|&d| picks_for(d))
+            .collect();
+        assert_eq!(picks, vec![1, 1, 1, 2, 2, 3, 3, 4, 4]);
+        let offered: Vec<usize> = [1, 3, 4, 7, 10, 99]
+            .iter()
+            .map(|&d| offer_count(d))
+            .collect();
+        assert_eq!(offered, vec![3, 3, 4, 5, 6, 6]);
+        // Always more packs on the table than you can open, so there's a choice.
+        for d in 1..40 {
+            assert!(offer_count(d) > picks_for(d));
+        }
+    }
+
+    #[test]
+    fn a_long_run_across_many_themes_offers_more_packs() {
+        let themes = [
+            Garden,
+            CursedForest,
+            MirrorHall,
+            TheTunnel,
+            MeltingClockworks,
+            WatchingWallpaper,
+            Elfworks,
+            VoidPlatforms,
+        ];
+        let log: Vec<DreamRecord> = (0..10)
+            .map(|i| {
+                record(
+                    themes[i % themes.len()],
+                    50 + i as u64,
+                    1 + i as u32,
+                    0.2,
+                    false,
+                )
+            })
+            .collect();
+        let offers = offer_packs(&log, &[], boost());
+        assert_eq!(offers.len(), offer_count(10));
+        assert_eq!(offers.len(), 6);
+        let short = offer_packs(&log[..4], &[], boost());
+        assert_eq!(short.len(), offer_count(4));
+        // Fewer themes than the table allows: fewer packs, never padded.
+        let one_theme: Vec<DreamRecord> = (0..10)
+            .map(|i| record(Garden, 80 + i, 1 + i as u32, 0.2, false))
+            .collect();
+        assert_eq!(offer_packs(&one_theme, &[], boost()).len(), 1);
     }
 }

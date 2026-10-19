@@ -259,6 +259,8 @@ pub struct PackView {
     pub pressed: bool,
     pub dust_earned: u32,
     pub cards_added: usize,
+    /// Packs still to open after this one: [enter] goes back to the pick screen.
+    pub picks_left: usize,
 }
 
 /// The pick screen: up to `packs::MAX_OFFERS` sealed packs, one chosen.
@@ -268,6 +270,8 @@ pub struct PackPickView {
     pub selected: usize,
     /// Seconds the screen has been up (packs slide in; held keys can't pick blind).
     pub age: f32,
+    /// Packs still to open (this run may open several; see `packs::picks_for`).
+    pub picks_left: usize,
 }
 
 /// Seconds before a key can open a pack (a held Return from the summary).
@@ -382,7 +386,12 @@ pub fn draw_pick(
     let u = pick_unit(screen);
     // Reduced motion (settings scale below 1): static title, no slide, no sweep, no tilt.
     let full = v.settings_snapshot.motion() >= 1.0;
-    let title = "CHOOSE A PACK";
+    let title_text = if view.picks_left > 1 {
+        format!("CHOOSE A PACK  ·  {} TO OPEN", view.picks_left)
+    } else {
+        "CHOOSE A PACK".to_string()
+    };
+    let title = title_text.as_str();
     let title_at = Pos2::new(cx, screen.top() + 22.0 * u);
     if full {
         glitch_text(
@@ -633,6 +642,12 @@ pub fn draw_reveal(
     let kept = pk.pack.iter().filter(|r| r.remembered).count();
     let msg = if !done {
         v.k("remembering...    [space] skip")
+    } else if pk.picks_left > 0 {
+        format!(
+            "{kept} of {} dreams stayed with you   [enter] next pack ({} left)",
+            pk.pack.len(),
+            pk.picks_left
+        )
     } else if pk.pressed {
         format!(
             "pressed {} cards · +{} dust · you hold {} dust",
