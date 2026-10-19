@@ -76,9 +76,18 @@ fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha
     }
 }
 
-/// The shopkeeper: a hunched pixel moth with one huge sleepy eye that
-/// follows your cursor, and a speech line under it.
-fn shopkeeper(p: &egui::Painter, at: Pos2, v: &HudView, look_x: f32) {
+/// The moth's pixel sprite: 18x14 cells with `o` as its top-left corner, one
+/// huge sleepy eye whose pupil looks toward `look_x` (-1..1). Shared by the
+/// shopkeeper and the pack wrappers.
+pub(crate) fn paint_moth(
+    p: &egui::Painter,
+    o: Pos2,
+    px: f32,
+    ink: [u8; 3],
+    wing: [u8; 3],
+    time: f32,
+    look_x: f32,
+) {
     const BODY: [&str; 14] = [
         "....##......##....",
         ".....#......#.....",
@@ -95,14 +104,10 @@ fn shopkeeper(p: &egui::Painter, at: Pos2, v: &HudView, look_x: f32) {
         "...############...",
         "..##############..",
     ];
-    let px = 6.0;
-    let bob = (v.time * 1.3).sin() * 2.0;
-    let o = at + Vec2::new(-9.0 * px, bob);
-    let wing = hue(0.78 + 0.05 * (v.time * 0.5).sin());
     for (y, row) in BODY.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             let col = match ch {
-                '#' => ink(v),
+                '#' => ink,
                 '+' => wing,
                 _ => continue,
             };
@@ -115,7 +120,7 @@ fn shopkeeper(p: &egui::Painter, at: Pos2, v: &HudView, look_x: f32) {
     }
     // The eye: a 4x4 socket inside the head, with a pupil that follows.
     let eye_c = o + Vec2::new(9.0 * px, 5.5 * px);
-    let open = if (v.time % 5.3) < 0.15 { 0.2 } else { 1.0 };
+    let open = if (time % 5.3) < 0.15 { 0.2 } else { 1.0 };
     p.rect_filled(
         Rect::from_center_size(eye_c, Vec2::new(4.0 * px, 3.0 * px * open)),
         0.0,
@@ -129,6 +134,16 @@ fn shopkeeper(p: &egui::Painter, at: Pos2, v: &HudView, look_x: f32) {
             rgba([255, 210, 80], 1.0),
         );
     }
+}
+
+/// The shopkeeper: a hunched pixel moth with one huge sleepy eye that
+/// follows your cursor, and a speech line under it.
+fn shopkeeper(p: &egui::Painter, at: Pos2, v: &HudView, look_x: f32) {
+    let px = 6.0;
+    let bob = (v.time * 1.3).sin() * 2.0;
+    let o = at + Vec2::new(-9.0 * px, bob);
+    let wing = hue(0.78 + 0.05 * (v.time * 0.5).sin());
+    paint_moth(p, o, px, ink(v), wing, v.time, look_x);
     // Counter.
     let counter = Rect::from_min_size(
         o + Vec2::new(-2.0 * px, 14.0 * px),
