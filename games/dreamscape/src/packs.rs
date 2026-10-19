@@ -12,8 +12,31 @@ use crate::cards::{
 };
 use crate::dream::{DreamTheme, ALL_THEMES};
 
+/// Packs on the table for a short run (and the least ever offered).
 pub const MAX_OFFERS: usize = 3;
+/// One more pack to open per this many dreams played.
+pub const DREAMS_PER_PICK: usize = 3;
+/// The most packs a run can open.
+pub const MAX_PICKS: usize = 4;
+/// Packs on the table beyond the ones you may open, so there's still a choice.
+pub const EXTRA_OFFERS: usize = 2;
+
+/// How many packs a run of `dreams` dreams may open: 1 for 1-3 dreams, 2 for
+/// 4-6, 3 for 7-9, 4 for 10 or more.
+pub fn picks_for(dreams: usize) -> usize {
+    (1 + dreams.saturating_sub(1) / DREAMS_PER_PICK).clamp(1, MAX_PICKS)
+}
+
+/// How many packs are offered for a run of `dreams` dreams (fewer if the run
+/// visited fewer themes).
+pub fn offer_count(dreams: usize) -> usize {
+    (picks_for(dreams) + EXTRA_OFFERS).max(MAX_OFFERS)
+}
 pub const MAX_PACK_CARDS: usize = 5;
+
+/// Odds (percent weights) that an opened pack gives 1, 2 or 3 cards. One card
+/// is the most likely; three is rare.
+pub const TAKE_WEIGHTS: [u32; 3] = [60, 30, 10];
 
 /// The centre glyph on a pack wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,7 +103,7 @@ pub fn offer_packs(log: &[DreamRecord], owned: &[Card], boost: MemoryBoost) -> V
     }
     // Deepest first; equal depths keep first-appearance order (stable sort).
     groups.sort_by_key(|(_, v)| std::cmp::Reverse(v.iter().map(|r| r.depth).max().unwrap_or(0)));
-    let mut picked: Vec<usize> = (0..groups.len().min(MAX_OFFERS)).collect();
+    let mut picked: Vec<usize> = (0..groups.len().min(offer_count(log.len()))).collect();
     ensure_playable_pack(&groups, &mut picked, owned);
 
     let mut offers: Vec<PackOffer> = Vec::new();
@@ -178,6 +201,47 @@ fn pick_emblem(theme: DreamTheme, seed: u64, taken: &[PackOffer]) -> (u64, Emble
     (seed, Emblem::for_theme(theme, seed))
 }
 
+/// Chance of getting 1, 2, 3 cards out of a pack with `candidates` dreams in
+/// it (index 0 = one card). A pack can't give more cards than it holds, so the
+/// weights are cut to what fits and renormalised. Sums to 1.
+pub fn take_odds(candidates: usize) -> Vec<f32> {
+    let n = candidates.clamp(1, TAKE_WEIGHTS.len());
+    let total: u32 = TAKE_WEIGHTS[..n].iter().sum();
+    TAKE_WEIGHTS[..n]
+        .iter()
+        .map(|&w| w as f32 / total as f32)
+        .collect()
+}
+
+/// Open a pack: roll how many cards it gives (`take_odds`), then which of the
+/// run's dreams of this theme they are. Deterministic per offer, so the reveal
+/// replays exactly. Cards keep run order. Nothing here can add a rarity: the
+/// cards are the offer's own, so Fused/Resonant only appear if the dream was
+/// already blended.
+pub fn open(offer: &PackOffer) -> Vec<Recalled> {
+    use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+    if offer.cards.is_empty() {
+        return Vec::new();
+    }
+    let mut rng = StdRng::seed_from_u64(offer.seed ^ 0x7A4B_E5C1_0D1E_55ED);
+    let odds = take_odds(offer.cards.len());
+    let roll: f32 = rng.gen();
+    let mut acc = 0.0;
+    let mut take = odds.len();
+    for (i, p) in odds.iter().enumerate() {
+        acc += p;
+        if roll < acc {
+            take = i + 1;
+            break;
+        }
+    }
+    let mut picks: Vec<usize> = (0..offer.cards.len()).collect();
+    picks.shuffle(&mut rng);
+    picks.truncate(take);
+    picks.sort_unstable();
+    picks.into_iter().map(|i| offer.cards[i].clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn offers_have_distinct_themes_deepest_first_and_cap_at_three() {
+    fn offers_have_distinct_themes_deepest_first_and_are_capped() {
         let log = vec![
             record(Lobby, 1, 1, 0.1, false),
             record(Garden, 2, 5, 0.1, false),
@@ -206,9 +270,9 @@ mod tests {
         ];
         let owned = vec![card_from(&record(Elfworks, 99, 1, 0.1, false))];
         let offers = offer_packs(&log, &owned, boost());
-        assert_eq!(offers.len(), MAX_OFFERS);
+        assert_eq!(offers.len(), offer_count(log.len()));
         let themes: Vec<_> = offers.iter().map(|o| o.theme).collect();
-        assert_eq!(themes, vec![Awakening, Garden, MirrorHall]);
+        assert_eq!(themes, vec![Awakening, Garden, MirrorHall, TheTunnel]);
     }
 
     #[test]
@@ -237,7 +301,7 @@ mod tests {
             .iter()
             .map(|o| o.theme)
             .collect();
-        assert_eq!(themes, vec![Lobby, Garden, TheTunnel]);
+        assert_eq!(themes, vec![Lobby, Garden, TheTunnel, MirrorHall]);
     }
 
     #[test]
@@ -338,8 +402,9 @@ mod tests {
 
     #[test]
     fn empty_booklet_always_offers_the_garden_pack_when_the_run_has_one() {
-        let offers = offer_packs(&run_with_shallow_garden(), &[], boost());
-        assert_eq!(offers.len(), MAX_OFFERS);
+        let run = run_with_shallow_garden();
+        let offers = offer_packs(&run, &[], boost());
+        assert_eq!(offers.len(), offer_count(run.len()));
         assert!(offers.iter().any(|o| o.theme == Garden));
         // Still deepest first after the swap.
         let depths: Vec<_> = offers
@@ -498,5 +563,152 @@ mod tests {
             cards > 10_000 && blended > 0,
             "{cards} cards, {blended} blended"
         );
+    }
+
+    #[test]
+    fn take_odds_sum_to_one_and_one_card_is_most_likely() {
+        for n in 1..=6 {
+            let o = take_odds(n);
+            assert_eq!(o.len(), n.min(3));
+            assert!((o.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            assert!(
+                o.windows(2).all(|w| w[0] > w[1]),
+                "fewer cards is likelier: {o:?}"
+            );
+        }
+        assert_eq!(take_odds(1), vec![1.0]);
+        assert_eq!(take_odds(3), vec![0.6, 0.3, 0.1]);
+    }
+
+    #[test]
+    fn opening_gives_a_few_cards_not_all_and_is_deterministic() {
+        let mut counts = [0usize; 4];
+        for seed in 0..4000u64 {
+            let cards: Vec<Recalled> = (0..5)
+                .map(|i| Recalled {
+                    card: crate::cards::card_from(&crate::cards::tests::record(
+                        DreamTheme::Garden,
+                        seed * 10 + i,
+                        1 + i as u32,
+                        0.2,
+                        false,
+                    )),
+                    remembered: true,
+                })
+                .collect();
+            let offer = PackOffer {
+                theme: DreamTheme::Garden,
+                emblem: Emblem::Eye,
+                seed,
+                memory_chances: vec![0.5; 5],
+                cards,
+            };
+            let got = open(&offer);
+            assert_eq!(got, open(&offer), "same offer, same cards");
+            assert!((1..=3).contains(&got.len()), "never all five");
+            assert!(got.iter().all(|r| offer.cards.contains(r)));
+            // Run order is kept.
+            let pos: Vec<usize> = got
+                .iter()
+                .map(|r| offer.cards.iter().position(|c| c == r).unwrap())
+                .collect();
+            assert!(pos.windows(2).all(|w| w[0] < w[1]));
+            counts[got.len()] += 1;
+        }
+        // About 60 / 30 / 10 percent of 4000.
+        assert!((2200..2600).contains(&counts[1]), "{counts:?}");
+        assert!((1000..1400).contains(&counts[2]), "{counts:?}");
+        assert!((250..550).contains(&counts[3]), "{counts:?}");
+    }
+
+    #[test]
+    fn a_small_pack_never_gives_more_than_it_holds() {
+        let rec = |s| Recalled {
+            card: crate::cards::card_from(&crate::cards::tests::record(
+                DreamTheme::Garden,
+                s,
+                1,
+                0.2,
+                false,
+            )),
+            remembered: true,
+        };
+        for seed in 0..200 {
+            let one = PackOffer {
+                theme: DreamTheme::Garden,
+                emblem: Emblem::Eye,
+                seed,
+                memory_chances: vec![0.5],
+                cards: vec![rec(seed)],
+            };
+            assert_eq!(open(&one).len(), 1);
+            let two = PackOffer {
+                cards: vec![rec(seed), rec(seed + 1)],
+                memory_chances: vec![0.5; 2],
+                ..one.clone()
+            };
+            assert!((1..=2).contains(&open(&two).len()));
+        }
+        let none = PackOffer {
+            theme: DreamTheme::Garden,
+            emblem: Emblem::Eye,
+            seed: 1,
+            memory_chances: vec![],
+            cards: vec![],
+        };
+        assert!(open(&none).is_empty());
+    }
+
+    #[test]
+    fn longer_runs_open_and_offer_more_packs() {
+        let picks: Vec<usize> = [0, 1, 3, 4, 6, 7, 9, 10, 99]
+            .iter()
+            .map(|&d| picks_for(d))
+            .collect();
+        assert_eq!(picks, vec![1, 1, 1, 2, 2, 3, 3, 4, 4]);
+        let offered: Vec<usize> = [1, 3, 4, 7, 10, 99]
+            .iter()
+            .map(|&d| offer_count(d))
+            .collect();
+        assert_eq!(offered, vec![3, 3, 4, 5, 6, 6]);
+        // Always more packs on the table than you can open, so there's a choice.
+        for d in 1..40 {
+            assert!(offer_count(d) > picks_for(d));
+        }
+    }
+
+    #[test]
+    fn a_long_run_across_many_themes_offers_more_packs() {
+        let themes = [
+            Garden,
+            CursedForest,
+            MirrorHall,
+            TheTunnel,
+            MeltingClockworks,
+            WatchingWallpaper,
+            Elfworks,
+            VoidPlatforms,
+        ];
+        let log: Vec<DreamRecord> = (0..10)
+            .map(|i| {
+                record(
+                    themes[i % themes.len()],
+                    50 + i as u64,
+                    1 + i as u32,
+                    0.2,
+                    false,
+                )
+            })
+            .collect();
+        let offers = offer_packs(&log, &[], boost());
+        assert_eq!(offers.len(), offer_count(10));
+        assert_eq!(offers.len(), 6);
+        let short = offer_packs(&log[..4], &[], boost());
+        assert_eq!(short.len(), offer_count(4));
+        // Fewer themes than the table allows: fewer packs, never padded.
+        let one_theme: Vec<DreamRecord> = (0..10)
+            .map(|i| record(Garden, 80 + i, 1 + i as u32, 0.2, false))
+            .collect();
+        assert_eq!(offer_packs(&one_theme, &[], boost()).len(), 1);
     }
 }

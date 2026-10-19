@@ -499,6 +499,8 @@ pub struct DreamscapeGame {
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
     pack: reveal_ui::PackView,
+    /// Every card the run's opened packs gave so far; pressed together at the end.
+    haul: Vec<cards::Recalled>,
     /// The sealed packs on offer after waking (empty outside `Mode::PackPick`).
     pick: reveal_ui::PackPickView,
     packs_art: pack_art::PackArt,
@@ -695,6 +697,7 @@ impl DreamscapeGame {
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
             pack: reveal_ui::PackView::default(),
+            haul: Vec::new(),
             pick: reveal_ui::PackPickView::default(),
             packs_art: pack_art::PackArt::default(),
             screen_size: (1280.0, 720.0),
@@ -2926,15 +2929,18 @@ impl DreamscapeGame {
     /// straight to the reveal with an empty pack, as an empty run always did.
     fn begin_pick(&mut self, offers: Vec<packs::PackOffer>) {
         self.pack = reveal_ui::PackView::default();
+        self.haul.clear();
         if offers.is_empty() {
             self.pick = reveal_ui::PackPickView::default();
             self.reveal_pack(Vec::new());
             return;
         }
+        let picks_left = packs::picks_for(self.run_log.len()).min(offers.len());
         self.pick = reveal_ui::PackPickView {
             offers,
             selected: 0,
             age: 0.0,
+            picks_left,
         };
         self.mode = hud::Mode::PackPick;
     }
@@ -2958,6 +2964,9 @@ impl DreamscapeGame {
             Keycode::Num1 => self.pick_select(0),
             Keycode::Num2 => self.pick_select(1),
             Keycode::Num3 => self.pick_select(2),
+            Keycode::Num4 => self.pick_select(3),
+            Keycode::Num5 => self.pick_select(4),
+            Keycode::Num6 => self.pick_select(5),
             // Packs slide in first, so a held key can't open one blind.
             Keycode::Return | Keycode::Space if self.pick.age > reveal_ui::PICK_LOCKOUT => {
                 self.pick_open();
@@ -2978,11 +2987,24 @@ impl DreamscapeGame {
         if self.mode != hud::Mode::PackPick || self.pick.offers.is_empty() {
             return;
         }
-        let view = std::mem::take(&mut self.pick);
+        let mut view = std::mem::take(&mut self.pick);
         let at = view.selected.min(view.offers.len() - 1);
-        let kept = view.offers.into_iter().nth(at).expect("selection is in range");
-        log::info!("Pack picked: {:?} ({} cards)", kept.theme, kept.cards.len());
-        self.reveal_pack(kept.cards);
+        let kept = view.offers.remove(at);
+        let cards = packs::open(&kept);
+        log::info!(
+            "Pack picked: {:?}, {} of {} dreams",
+            kept.theme,
+            cards.len(),
+            kept.cards.len()
+        );
+        // More packs to open: the rest stay on the table for the next pick.
+        view.picks_left = view.picks_left.saturating_sub(1);
+        if view.picks_left > 0 && !view.offers.is_empty() {
+            view.selected = 0;
+            view.age = 0.0;
+            self.pick = view;
+        }
+        self.reveal_pack(cards);
     }
 
     /// The pointer moved over (or clicked) the pick screen.
@@ -3003,14 +3025,18 @@ impl DreamscapeGame {
     /// Autopilot / dev shortcut: offer the packs and take the first.
     fn open_pack(&mut self) {
         self.start_pack_pick();
-        self.pick_open();
+        while self.mode == hud::Mode::PackPick {
+            self.pick_open();
+        }
     }
 
     /// The chosen pack goes to the reveal. Pack pity runs on this pack only.
     fn reveal_pack(&mut self, mut pack: Vec<cards::Recalled>) {
         lottery::apply_pack_pity(&mut self.booklet.lottery, &mut pack);
+        self.haul.extend(pack.iter().cloned());
         self.pack = reveal_ui::PackView {
             pack,
+            picks_left: self.pick.picks_left,
             ..Default::default()
         };
         let kept = self.pack.pack.iter().filter(|r| r.remembered).count();
@@ -3042,10 +3068,16 @@ impl DreamscapeGame {
             log::info!("Booklet: preview pack, not pressed");
             return;
         }
+        // Every pack the run opened, pressed together.
+        let haul = if self.haul.is_empty() {
+            self.pack.pack.clone()
+        } else {
+            self.haul.clone()
+        };
         let before = self.booklet.clone();
         let (added, dust) = self.booklet.press(
             self.run_seed,
-            &self.pack.pack,
+            &haul,
             self.shards_this_run,
             self.has_perk(store::Perk::DustMagnet),
         );
@@ -3054,11 +3086,11 @@ impl DreamscapeGame {
         let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust;
         self.booklet.stash.earn(extra);
         let dust = dust + extra;
-        let deepest = self.pack.pack.iter().map(|r| r.card.depth).max().unwrap_or(0);
+        let deepest = haul.iter().map(|r| r.card.depth).max().unwrap_or(0);
         let report = retention::settle_run(
             &mut self.booklet,
             &self.loadout_numbers,
-            &self.pack.pack,
+            &haul,
             deepest,
             true,
             self.shards_this_run,
@@ -3070,7 +3102,7 @@ impl DreamscapeGame {
         if let Some(d) = weekly_dust {
             self.booklet.stash.earn(d);
         }
-        self.after_pack_feelings(&report, weekly_dust);
+        self.after_pack_feelings(&haul, &report, weekly_dust);
         self.last_report = Some(report);
         if self.persist_booklet() {
             log::info!(
@@ -3089,11 +3121,16 @@ impl DreamscapeGame {
     }
 
     /// Toasts and the eye's next words after a pack is pressed.
-    fn after_pack_feelings(&mut self, report: &retention::RunReport, weekly_dust: Option<u32>) {
-        let remembered = || self.pack.pack.iter().filter(|r| r.remembered);
+    fn after_pack_feelings(
+        &mut self,
+        pack: &[cards::Recalled],
+        report: &retention::RunReport,
+        weekly_dust: Option<u32>,
+    ) {
+        let remembered = || pack.iter().filter(|r| r.remembered);
         let foil = remembered().any(|r| worth::is_foil(&r.card));
         let prophetic = remembered().any(|r| r.card.rarity >= cards::Rarity::Prophetic);
-        let near_miss = self.pack.pack.iter().any(reveal_ui::near_miss);
+        let near_miss = pack.iter().any(reveal_ui::near_miss);
         self.pending_eye = if foil {
             Some(eye::Moment::PackFoil)
         } else if prophetic {
@@ -5299,11 +5336,29 @@ impl Game for DreamscapeGame {
                     self.pack.age = f32::MAX;
                     return;
                 }
+                // More packs to open: back to the table for the next one.
+                (hud::Mode::Reveal, Keycode::Space | Keycode::Return)
+                    if self.pick.picks_left > 0 =>
+                {
+                    self.pick.age = 0.0;
+                    self.mode = hud::Mode::PackPick;
+                    return;
+                }
+                (hud::Mode::Reveal, Keycode::R | Keycode::B | Keycode::L | Keycode::Escape)
+                    if self.pick.picks_left > 0 =>
+                {
+                    return;
+                }
+                (hud::Mode::Reveal, Keycode::S) if self.pick.picks_left > 0 => {
+                    return;
+                }
                 (hud::Mode::Reveal, Keycode::R) if revealed => {
                     self.restart_requested = true;
                     return;
                 }
-                (hud::Mode::Reveal, Keycode::S) if revealed => {
+                (hud::Mode::Reveal, Keycode::S) => {
+                    // Not waiting for the flips: S skips them and presses.
+                    self.pack.age = f32::MAX;
                     self.save_journal();
                     return;
                 }
@@ -6946,7 +7001,7 @@ mod screen_smoke {
         g.pick.age = 1.0;
         g.pick_key(pad_key(B::A).unwrap());
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, offers(3)[1].cards);
+        assert_eq!(g.pack.pack, packs::open(&offers(3)[1]));
     }
 
     #[test]
@@ -6960,12 +7015,60 @@ mod screen_smoke {
         g.pick.age = reveal_ui::PICK_LOCKOUT + 0.01;
         g.pick_key(Keycode::Space);
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, all[2].cards, "the pack is exactly the chosen offer's cards");
+        assert_eq!(g.pack.pack, packs::open(&all[2]), "the pack is what the chosen offer opens to");
         assert!(g.pick.offers.is_empty(), "the other offers are gone");
         assert_eq!(g.pick, reveal_ui::PackPickView::default());
         // Opening again (a second Return on a stale screen) does nothing.
         g.pick_open();
-        assert_eq!(g.pack.pack, all[2].cards);
+        assert_eq!(g.pack.pack, packs::open(&all[2]));
+    }
+
+    #[test]
+    fn a_longer_run_opens_several_packs_and_presses_them_together() {
+        let mut g = game("pick_many");
+        // Seven dreams played: three packs to open.
+        for i in 0..7 {
+            g.run_log
+                .push(cards::tests::record(dream::DreamTheme::Garden, 900 + i, 1 + i as u32, 0.2, false));
+        }
+        assert_eq!(packs::picks_for(g.run_log.len()), 3);
+        g.begin_pick(offers(3));
+        assert_eq!(g.pick.picks_left, 3);
+        let mut seen = 0;
+        for left in (0..3).rev() {
+            assert_eq!(g.mode, hud::Mode::PackPick);
+            g.pick_open();
+            assert_eq!(g.mode, hud::Mode::Reveal);
+            assert_eq!(g.pack.picks_left, left, "the reveal knows how many are left");
+            assert_eq!(g.pick.picks_left, left);
+            seen += g.pack.pack.len();
+            assert_eq!(g.haul.len(), seen, "every opened card joins the haul");
+            if left > 0 {
+                assert_eq!(g.pick.offers.len(), left, "the rest stay on the table");
+                g.pick.age = 0.0;
+                g.mode = hud::Mode::PackPick; // what [enter] does on the reveal
+            }
+        }
+        assert_eq!(g.pick, reveal_ui::PackPickView::default(), "done: nothing left to pick");
+        g.run_seed = 5151;
+        g.save_journal();
+        assert!(g.pack.pressed);
+        let remembered: std::collections::HashSet<u64> =
+            g.haul.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
+        let held: std::collections::HashSet<u64> = g.booklet.cards().map(|c| c.seed).collect();
+        assert_eq!(held, remembered, "all three packs pressed, nothing else");
+    }
+
+    #[test]
+    fn you_cannot_open_more_packs_than_are_on_the_table() {
+        let mut g = game("pick_clamp");
+        for i in 0..12 {
+            g.run_log
+                .push(cards::tests::record(dream::DreamTheme::Garden, 700 + i, 1, 0.2, false));
+        }
+        assert_eq!(packs::picks_for(12), 4);
+        g.begin_pick(offers(2));
+        assert_eq!(g.pick.picks_left, 2);
     }
 
     #[test]
@@ -6979,8 +7082,10 @@ mod screen_smoke {
         g.save_journal();
         assert!(g.pack.pressed);
         let held: Vec<u64> = g.booklet.cards().map(|c| c.seed).collect();
-        let chosen: Vec<u64> = all[1].cards.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
-        assert!(!chosen.is_empty());
+        let opened = packs::open(&all[1]);
+        assert!(!opened.is_empty() && opened.len() <= all[1].cards.len());
+        assert_eq!(g.pack.pack, opened);
+        let chosen: Vec<u64> = opened.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
         for seed in &chosen {
             assert!(held.contains(seed), "chosen card {seed} pressed");
         }
@@ -7060,22 +7165,18 @@ mod screen_smoke {
         g.pick.age = 1.0;
         g.pick_pointer(c(1).0, c(1).1, true);
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, offers(3)[1].cards);
+        assert_eq!(g.pack.pack, packs::open(&offers(3)[1]));
     }
 
     #[test]
-    fn the_pick_screen_shows_memory_chances_verbatim() {
-        let o = offers(3);
-        assert_eq!(o[0].memory_chances, vec![0.6, 0.5, 0.4]);
-        assert_eq!(reveal_ui::odds_lines(&[0.6, 0.4]), vec!["REMEMBERED 60% / 40%"]);
-        assert_eq!(
-            reveal_ui::odds_lines(&[0.55, 0.7, 0.82, 0.31, 0.4]),
-            vec!["REMEMBERED 55% / 70% / 82%", "31% / 40%"]
-        );
-        assert!(reveal_ui::odds_lines(&[]).is_empty());
-        let lines = |chances: &[f32]| reveal_ui::odds_lines(chances).join(" ");
-        for p in [0.0_f32, 0.05, 0.333, 0.6, 0.99, 1.0] {
-            assert!(lines(&[p]).contains(&format!("{:.0}%", p * 100.0)));
-        }
+    fn the_pick_screen_shows_the_real_odds() {
+        // Card counts: the same numbers `packs::open` rolls with.
+        assert_eq!(reveal_ui::take_lines(1), vec!["1 CARD", "100%"]);
+        assert_eq!(reveal_ui::take_lines(2), vec!["1-2 CARDS", "67% / 33%"]);
+        assert_eq!(reveal_ui::take_lines(5), vec!["1-3 CARDS", "60% / 30% / 10%"]);
+        // Memory chances, as a range of the real `memory_chance` values.
+        assert_eq!(reveal_ui::memory_line(&[0.6, 0.4]).as_deref(), Some("REMEMBERED 40-60% EACH"));
+        assert_eq!(reveal_ui::memory_line(&[0.43, 0.43]).as_deref(), Some("REMEMBERED 43% EACH"));
+        assert_eq!(reveal_ui::memory_line(&[]), None);
     }
 }
