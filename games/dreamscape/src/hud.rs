@@ -948,13 +948,26 @@ fn paint_eye(
     iris: [u8; 3],
     v: &HudView,
 ) {
+    paint_eye_at(p, c, cells, iris, ink(v), EYE_PX);
+}
+
+/// The pixel eye at any cell size and ink colour (the HUD's `paint_eye` at
+/// `EYE_PX`; pack emblems at their own size). `c` is the cell (0, 0) centre.
+pub(crate) fn paint_eye_at(
+    p: &egui::Painter,
+    c: Pos2,
+    cells: &[(i32, i32, crate::pixels::EyePx)],
+    iris: [u8; 3],
+    ink: [u8; 3],
+    px: f32,
+) {
     use crate::pixels::EyePx;
     let rim = [iris[0] / 2, iris[1] / 2, iris[2] / 2];
     // Pixel drop shadow, one cell down.
     px_cells(
         p,
-        c + Vec2::new(0.0, EYE_PX),
-        EYE_PX,
+        c + Vec2::new(0.0, px),
+        px,
         cells
             .iter()
             .filter(|q| q.2 != EyePx::Lash)
@@ -963,15 +976,15 @@ fn paint_eye(
     );
     for &(x, y, kind) in cells {
         let color = match kind {
-            EyePx::Lid => rgba(ink(v), 0.95),
-            EyePx::Lash => rgba(ink(v), 0.75),
+            EyePx::Lid => rgba(ink, 0.95),
+            EyePx::Lash => rgba(ink, 0.75),
             EyePx::Sclera => rgba([30, 18, 52], 0.92),
             EyePx::Iris => rgba(iris, 1.0),
             EyePx::IrisRim => rgba(rim, 1.0),
             EyePx::Pupil => rgba([6, 0, 12], 1.0),
             EyePx::Glint => rgba([255, 255, 255], 0.95),
         };
-        px_cells(p, c, EYE_PX, [(x, y)], color);
+        px_cells(p, c, px, [(x, y)], color);
     }
 }
 
