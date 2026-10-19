@@ -18,6 +18,8 @@ pub enum Mode {
     Paused,
     Journal,
     Reveal,
+    /// Choosing one of the run's sealed packs to open.
+    PackPick,
     Store,
     Booklet,
     /// Picking a run upgrade, or WAKE / GO DEEPER at the wake door.
@@ -137,6 +139,8 @@ pub struct HudView {
     /// What the run did for the cards that went along (xp, echoes).
     pub report_line: String,
     pub lottery: crate::lottery_ui::LotteryView,
+    /// Runs of packs opened without a remembered Lucid card (pack pity, read-only).
+    pub pack_dry: u32,
     /// (card number, mastery level) for every card in the booklet.
     pub mastery_levels: Vec<(u32, u8)>,
     /// Perks active this run (shown small under the depth counter).
@@ -380,6 +384,8 @@ pub fn draw(
     v: &HudView,
     art: &mut crate::booklet_ui::CardArt,
     pack: &crate::reveal_ui::PackView,
+    pick: &crate::reveal_ui::PackPickView,
+    packs_art: &mut crate::pack_art::PackArt,
 ) {
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -406,6 +412,9 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
+        Mode::PackPick => {
+            return crate::reveal_ui::draw_pick(ctx, &p, screen, v, pick, packs_art, art)
+        }
         Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
