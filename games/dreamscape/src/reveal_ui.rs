@@ -4,6 +4,8 @@
 use crate::booklet_ui::{card, CardArt, CARD_SIZE};
 use crate::cards::Recalled;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
+use crate::pack_art::{self, PackArt, PACK_SIZE};
+use crate::packs::PackOffer;
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
 
 /// Seconds per card in the reveal.
@@ -256,6 +258,223 @@ pub struct PackView {
     pub cards_added: usize,
 }
 
+/// The pick screen: up to `packs::MAX_OFFERS` sealed packs, one chosen.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PackPickView {
+    pub offers: Vec<PackOffer>,
+    pub selected: usize,
+    /// Seconds the screen has been up (packs slide in; held keys can't pick blind).
+    pub age: f32,
+}
+
+/// Seconds before a key can open a pack (a held Return from the summary).
+pub const PICK_LOCKOUT: f32 = 0.4;
+/// Seconds the packs take to slide in (full motion only).
+const PICK_SLIDE: f32 = 0.5;
+/// Selected pack: how much bigger, and how far it lifts (at scale 1).
+const PICK_GROW: f32 = 1.06;
+const PICK_LIFT: f32 = 14.0;
+const PICK_GAP: f32 = 36.0;
+const PICK_TOP: f32 = 92.0;
+const PICK_INFO_H: f32 = 118.0;
+const PICK_FOOT: f32 = 70.0;
+
+/// Chrome scale: text and spacing shrink on small windows.
+fn pick_unit(screen: Rect) -> f32 {
+    (screen.height() / 720.0).clamp(0.55, 1.0)
+}
+
+/// Where each of `n` packs sits (unselected size), side by side and centred.
+/// Shared by drawing and mouse hit-testing, so what you see is what you hit.
+pub fn pick_rects(screen: Rect, n: usize) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let u = pick_unit(screen);
+    let avail_h = (screen.height() - (PICK_TOP + PICK_INFO_H + PICK_FOOT) * u).max(60.0);
+    let gap = PICK_GAP * u;
+    let n_f = n as f32;
+    let scale_h = avail_h / (PACK_SIZE.y * PICK_GROW);
+    let scale_w = (screen.width() - 60.0)
+        / (n_f * PACK_SIZE.x * PICK_GROW + (n_f - 1.0) * (gap / PICK_GROW.max(1.0)));
+    let scale = scale_h.min(scale_w).min(1.0).max(0.2);
+    let size = PACK_SIZE * scale;
+    let total = n_f * size.x + (n_f - 1.0) * gap;
+    let x0 = screen.center().x - total * 0.5;
+    let y0 = screen.top() + PICK_TOP * u + (avail_h - size.y * PICK_GROW).max(0.0) * 0.5
+        + size.y * (PICK_GROW - 1.0) * 0.5;
+    (0..n)
+        .map(|i| Rect::from_min_size(Pos2::new(x0 + i as f32 * (size.x + gap), y0), size))
+        .collect()
+}
+
+/// Which pack a pointer is over, if any.
+pub fn pick_hit(screen: Rect, n: usize, at: Pos2) -> Option<usize> {
+    pick_rects(screen, n).iter().position(|r| r.contains(at))
+}
+
+/// "REMEMBERED 60% / 40%": each card's `memory_chance`, verbatim, three to a line.
+pub fn odds_lines(chances: &[f32]) -> Vec<String> {
+    chances
+        .chunks(3)
+        .enumerate()
+        .map(|(i, c)| {
+            let pct: Vec<String> = c.iter().map(|p| format!("{:.0}%", p * 100.0)).collect();
+            let row = pct.join(" / ");
+            if i == 0 {
+                format!("REMEMBERED {row}")
+            } else {
+                row
+            }
+        })
+        .collect()
+}
+
+/// The pack pity counter, read-only.
+pub fn pity_line(dry: u32) -> String {
+    let need = crate::lottery::PACK_PITY;
+    if dry >= need {
+        format!("PACK PITY {dry}/{need}: the pack you open will hold a Lucid card")
+    } else {
+        format!("PACK PITY {dry}/{need}: packs opened without a remembered Lucid card")
+    }
+}
+
+/// "CursedForest" -> "CURSED FOREST".
+pub fn theme_title(t: crate::dream::DreamTheme) -> String {
+    let mut out = String::new();
+    for (i, ch) in format!("{t:?}").chars().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_pick(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    screen: Rect,
+    v: &HudView,
+    view: &PackPickView,
+    packs_art: &mut PackArt,
+    _card_art: &mut CardArt,
+) {
+    p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.95));
+    let cx = screen.center().x;
+    let u = pick_unit(screen);
+    // Reduced motion (settings scale below 1): static title, no slide, no sweep, no tilt.
+    let full = v.settings_snapshot.motion() >= 1.0;
+    let title = "CHOOSE A PACK";
+    let title_at = Pos2::new(cx, screen.top() + 22.0 * u);
+    if full {
+        glitch_text(p, title_at, true, title, 40.0 * u, hue(v.time * 0.1), 1.0, v);
+    } else {
+        p.text(
+            title_at,
+            Align2::CENTER_TOP,
+            title,
+            FontId::monospace(40.0 * u),
+            rgba(ink(v), 1.0),
+        );
+    }
+    let n = view.offers.len();
+    let sel = view.selected.min(n.saturating_sub(1));
+    let rects = pick_rects(screen, n);
+    let slide = if full {
+        let e = (view.age / PICK_SLIDE).clamp(0.0, 1.0);
+        (1.0 - e) * (1.0 - e) * 40.0 * u
+    } else {
+        0.0
+    };
+    let pointer = ctx.pointer_hover_pos();
+    let (art_time, art_motion) = if full { (v.time, 1.0) } else { (0.0, 0.0) };
+    for (i, (offer, base)) in view.offers.iter().zip(&rects).enumerate() {
+        let chosen = i == sel;
+        let mut r = *base;
+        if chosen {
+            let grown = Rect::from_center_size(r.center(), r.size() * PICK_GROW);
+            r = grown.translate(Vec2::new(0.0, -PICK_LIFT * u));
+        }
+        r = r.translate(Vec2::new(0.0, slide));
+        let tilt = if !full {
+            Vec2::ZERO
+        } else if chosen {
+            match pointer {
+                Some(at) => Vec2::new(
+                    ((at.x - r.center().x) / r.width()).clamp(-1.0, 1.0),
+                    ((at.y - r.center().y) / r.height()).clamp(-1.0, 1.0),
+                ),
+                None => Vec2::new(0.25 * (v.time * 0.9).sin(), 0.15 * (v.time * 0.7).cos()),
+            }
+        } else {
+            // The others lean toward the chosen one.
+            Vec2::new(0.2 * (sel as f32 - i as f32).signum(), 0.0)
+        };
+        if chosen {
+            for ring in 1..=3 {
+                p.rect_filled(
+                    r.expand(ring as f32 * 6.0 * u),
+                    6.0 * ring as f32,
+                    rgba(hue(0.75), 0.07 / ring as f32),
+                );
+            }
+        }
+        pack_art::draw_pack(
+            ctx,
+            p,
+            r,
+            offer.theme,
+            offer.emblem,
+            offer.seed,
+            offer.cards.len(),
+            art_time,
+            art_motion,
+            tilt,
+            packs_art,
+        );
+        if chosen {
+            p.rect_stroke(r.expand(3.0), 8.0, Stroke::new(2.0_f32, rgba(ink(v), 0.9)));
+        }
+        // Honest facts under the pack: theme, size, how likely each card is kept.
+        let dim = if chosen { 1.0 } else { 0.6 };
+        let mut y = base.bottom() + 20.0 * u + slide;
+        let line = |p: &egui::Painter, y: &mut f32, text: String, size: f32, a: f32| {
+            p.text(
+                Pos2::new(base.center().x, *y),
+                Align2::CENTER_TOP,
+                text,
+                FontId::monospace(size * u),
+                rgba(ink(v), a * dim),
+            );
+            *y += (size + 4.0) * u;
+        };
+        line(p, &mut y, theme_title(offer.theme), 22.0, 1.0);
+        let k = offer.cards.len();
+        line(p, &mut y, format!("{k} {}", if k == 1 { "CARD" } else { "CARDS" }), 18.0, 0.9);
+        for l in odds_lines(&offer.memory_chances) {
+            line(p, &mut y, l, 16.0, 0.75);
+        }
+    }
+    let foot = screen.bottom() - 30.0 * u;
+    p.text(
+        Pos2::new(cx, foot - 26.0 * u),
+        Align2::CENTER_BOTTOM,
+        pity_line(v.pack_dry),
+        FontId::monospace(16.0 * u),
+        rgba(ink(v), 0.6),
+    );
+    p.text(
+        Pos2::new(cx, foot),
+        Align2::CENTER_BOTTOM,
+        v.k("[a/d] choose  [enter] open"),
+        FontId::monospace(20.0 * u),
+        rgba(ink(v), 0.85),
+    );
+}
+
 pub fn draw_reveal(
     ctx: &egui::Context,
     p: &egui::Painter,
@@ -280,7 +499,7 @@ pub fn draw_reveal(
     let n = pk.pack.len();
     let l = pack_layout(n, pack_area(screen.size()));
     let scale = l.size.x / CARD_SIZE.x;
-    let overflow = n - l.shown;
+    let overflow = n.saturating_sub(l.shown);
     let order = reveal_order(&pk.pack);
     let times = reveal_times(&pk.pack);
     let motion = v.settings_snapshot.motion();

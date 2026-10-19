@@ -66,6 +66,12 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::B => Some(Keycode::Escape),
             _ => None,
         },
+        // Left/right pick a pack, A opens it. No B: unpicked packs are lost,
+        // so there is no way to back out by accident.
+        Mode::PackPick => match button {
+            P::A => Some(Keycode::Return),
+            _ => dpad.filter(|&k| k == Keycode::Left || k == Keycode::Right),
+        },
         Mode::Booklet => match button {
             P::LeftShoulder => Some(Keycode::Left),
             P::RightShoulder => Some(Keycode::Right),
@@ -294,6 +300,7 @@ mod tests {
             "[a/d] choose   [enter] take it   [r] reroll (1 left)   [x] skip (+5 dust)",
         ),
         (Mode::Choice, "[a/d] choose   [enter] decide"),
+        (Mode::PackPick, "[a/d] choose  [enter] open"),
         (Mode::Reveal, "remembering...    [space] skip"),
         (
             Mode::Reveal,
