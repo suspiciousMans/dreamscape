@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use crate::cards::{
-    memory_chance, recall, Card, DreamRecord, MemoryBoost, Recalled,
+    memory_chance, recall, shape_first_pack, Card, DreamRecord, MemoryBoost, Recalled,
 };
 use crate::dream::{DreamTheme, ALL_THEMES};
 
@@ -80,7 +80,10 @@ pub fn offer_packs(log: &[DreamRecord], owned: &[Card], boost: MemoryBoost) -> V
     for &gi in &picked {
         let (theme, recs) = &groups[gi];
         let records = pack_records(recs);
-        let cards = recall(&records, boost);
+        let mut cards = recall(&records, boost);
+        // A new player's first cards: today's shaping, applied per pack so
+        // the guarantee holds whichever pack they open.
+        shape_first_pack(&mut cards, owned);
         let memory_chances = cards
             .iter()
             .map(|r| memory_chance(r.card.rarity, r.card.depth, boost))
@@ -107,11 +110,34 @@ fn pack_records(recs: &[&DreamRecord]) -> Vec<DreamRecord> {
     idx.into_iter().map(|i| recs[i].clone()).collect()
 }
 
+/// First-run safety across the offer. With nothing owned the offer must hold
+/// a pack the player can build a loadout from: the Garden's if the run had
+/// one (even when it was too shallow to rank), else the first playable theme.
+/// It replaces the shallowest pick; `picked` stays in rank order.
 fn ensure_playable_pack(
-    _groups: &[(DreamTheme, Vec<&DreamRecord>)],
-    _picked: &mut Vec<usize>,
-    _owned: &[Card],
+    groups: &[(DreamTheme, Vec<&DreamRecord>)],
+    picked: &mut Vec<usize>,
+    owned: &[Card],
 ) {
+    let playable = |gi: usize| groups[gi].0 != DreamTheme::Awakening;
+    if !owned.is_empty() || picked.is_empty() {
+        return;
+    }
+    let want = groups
+        .iter()
+        .position(|(t, _)| *t == DreamTheme::Garden)
+        .or_else(|| (0..groups.len()).find(|&gi| playable(gi)));
+    let Some(want) = want else { return };
+    let has_garden = groups.iter().any(|(t, _)| *t == DreamTheme::Garden);
+    let satisfied = if has_garden {
+        picked.contains(&want)
+    } else {
+        picked.iter().any(|&gi| playable(gi))
+    };
+    if !satisfied {
+        *picked.last_mut().expect("non-empty") = want;
+        picked.sort_unstable();
+    }
 }
 
 fn mix(mut x: u64) -> u64 {
@@ -214,8 +240,16 @@ mod tests {
         assert_eq!(want.len(), MAX_PACK_CARDS);
         let got: Vec<_> = garden.cards.iter().map(|r| r.card.seed).collect();
         assert_eq!(got, want.iter().map(|r| r.seed).collect::<Vec<_>>());
-        // Same card + roll as today's recall over that slice.
-        assert_eq!(garden.cards, crate::cards::recall(&want, boost()));
+        // Same card + roll as today's recall over that slice (then the same
+        // first-pack shaping `open_pack` applies today).
+        let mut today = crate::cards::recall(&want, boost());
+        crate::cards::shape_first_pack(&mut today, &owned);
+        assert_eq!(garden.cards, today);
+        // Rarity and the raw roll are untouched by shaping.
+        let raw = crate::cards::recall(&want, boost());
+        for (a, b) in garden.cards.iter().zip(&raw) {
+            assert_eq!(a.card, b.card);
+        }
         // Fewer than five: all of them, nothing from other themes.
         let small = vec![record(Lobby, 1, 1, 0.1, false), record(Lobby, 2, 2, 0.1, false)];
         let o = offer_packs(&small, &owned, boost());
@@ -253,5 +287,83 @@ mod tests {
         assert_eq!(a, offer_packs(&log, &owned, boost()));
         assert_ne!(a[0].seed, a[1].seed);
         assert_ne!(a[1].seed, a[2].seed);
+    }
+
+    /// A run whose Garden is too shallow to rank in the top three.
+    fn run_with_shallow_garden() -> Vec<DreamRecord> {
+        vec![
+            record(Garden, 1, 0, 0.1, false),
+            record(Lobby, 2, 3, 0.1, false),
+            record(TheTunnel, 3, 4, 0.1, false),
+            record(MirrorHall, 4, 5, 0.1, false),
+            record(Awakening, 5, 6, 0.1, false),
+        ]
+    }
+
+    fn playable_remembered(o: &PackOffer) -> bool {
+        o.cards
+            .iter()
+            .any(|r| r.remembered && r.card.theme != Awakening)
+    }
+
+    #[test]
+    fn empty_booklet_always_offers_the_garden_pack_when_the_run_has_one() {
+        let offers = offer_packs(&run_with_shallow_garden(), &[], boost());
+        assert_eq!(offers.len(), MAX_OFFERS);
+        assert!(offers.iter().any(|o| o.theme == Garden));
+        // Still deepest first after the swap.
+        let depths: Vec<_> = offers
+            .iter()
+            .map(|o| o.cards.iter().map(|r| r.card.depth).max().unwrap())
+            .collect();
+        assert!(depths.windows(2).all(|w| w[0] >= w[1]), "{depths:?}");
+        // A non-empty booklet gets no such favour.
+        let owned = vec![card_from(&record(Elfworks, 99, 1, 0.1, false))];
+        let offers = offer_packs(&run_with_shallow_garden(), &owned, boost());
+        assert!(!offers.iter().any(|o| o.theme == Garden));
+    }
+
+    #[test]
+    fn empty_booklet_offers_a_playable_remembered_card_without_a_garden() {
+        let log = vec![
+            record(Awakening, 1, 5, 0.1, false),
+            record(Lobby, 2, 1, 0.1, false),
+        ];
+        let offers = offer_packs(&log, &[], boost());
+        assert!(offers.iter().any(playable_remembered));
+        // The Awakening pack stays remembered as today.
+        let awake = offers.iter().find(|o| o.theme == Awakening).unwrap();
+        assert!(awake.cards.iter().all(|r| r.remembered));
+    }
+
+    #[test]
+    fn first_run_guarantee_holds_over_random_runs() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(31);
+        for n in 0..2_000u64 {
+            let len = rng.gen_range(1..=14usize);
+            let log: Vec<_> = (0..len as u64)
+                .map(|i| {
+                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    record(t, n * 100 + i, rng.gen_range(0..9), rng.gen(), rng.gen())
+                })
+                .collect();
+            let offers = offer_packs(&log, &[], boost());
+            assert!(!offers.is_empty());
+            let has_playable = log.iter().any(|r| r.theme != Awakening);
+            if has_playable {
+                assert!(offers.iter().any(playable_remembered), "run {n}: {log:?}");
+                // Opening ANY playable offered pack leaves something to build with.
+                for o in offers.iter().filter(|o| o.theme != Awakening) {
+                    assert!(playable_remembered(o), "run {n}: {:?}", o.theme);
+                }
+            }
+            if log.iter().any(|r| r.theme == Garden) {
+                assert!(offers.iter().any(|o| o.theme == Garden), "run {n}");
+            }
+            let mut themes: Vec<_> = offers.iter().map(|o| o.theme).collect();
+            themes.dedup();
+            assert_eq!(themes.len(), offers.len());
+        }
     }
 }
