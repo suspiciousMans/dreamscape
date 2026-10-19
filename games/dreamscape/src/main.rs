@@ -56,6 +56,8 @@ mod memories_ui;
 mod merge_ui;
 mod music;
 mod objective;
+mod pack_art;
+mod packs;
 mod pad;
 mod paths;
 mod pixels;
