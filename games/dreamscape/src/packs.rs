@@ -35,9 +35,16 @@ impl Emblem {
     ];
 
     /// Deterministic: the same theme and seed always get the same emblem.
+    ///
+    /// The Awakening and the Lobby always wear the Eye (the thing that
+    /// watches you wake / the first room). Every other theme draws from all
+    /// five by hash, so each emblem is reachable and wrappers vary by seed.
     pub fn for_theme(theme: DreamTheme, seed: u64) -> Emblem {
-        let _ = (theme, seed);
-        Emblem::Eye
+        if matches!(theme, DreamTheme::Awakening | DreamTheme::Lobby) {
+            return Emblem::Eye;
+        }
+        let t = ALL_THEMES.iter().position(|&a| a == theme).unwrap_or(0) as u64;
+        Emblem::ALL[(mix(seed ^ mix(t ^ 0xE3B1_E3B1)) % Emblem::ALL.len() as u64) as usize]
     }
 }
 
@@ -155,7 +162,19 @@ fn pack_seed(theme: DreamTheme, records: &[DreamRecord]) -> u64 {
         .fold(mix(t ^ 0x9AC4_5EED), |h, r| mix(h ^ r.seed))
 }
 
-fn pick_emblem(theme: DreamTheme, seed: u64, _taken: &[PackOffer]) -> (u64, Emblem) {
+/// The wrapper seed and emblem for a pack. Packs on one table should look
+/// different, so if an earlier pack already wears this emblem the seed is
+/// re-mixed (deterministically) until a free one comes up. Themes with a
+/// fixed emblem keep it.
+fn pick_emblem(theme: DreamTheme, seed: u64, taken: &[PackOffer]) -> (u64, Emblem) {
+    let mut s = seed;
+    for k in 1..=32u64 {
+        let e = Emblem::for_theme(theme, s);
+        if !taken.iter().any(|o| o.emblem == e) {
+            return (s, e);
+        }
+        s = mix(seed ^ k);
+    }
     (seed, Emblem::for_theme(theme, seed))
 }
 
@@ -365,5 +384,95 @@ mod tests {
             themes.dedup();
             assert_eq!(themes.len(), offers.len());
         }
+    }
+
+    #[test]
+    fn emblems_are_deterministic_and_all_reachable() {
+        use std::collections::HashSet;
+        for t in crate::dream::ALL_THEMES {
+            for seed in 0..40u64 {
+                assert_eq!(Emblem::for_theme(t, seed), Emblem::for_theme(t, seed));
+            }
+        }
+        for seed in 0..200u64 {
+            assert_eq!(Emblem::for_theme(Awakening, seed), Emblem::Eye);
+            assert_eq!(Emblem::for_theme(Lobby, seed), Emblem::Eye);
+        }
+        let seen: HashSet<Emblem> = crate::dream::ALL_THEMES
+            .iter()
+            .flat_map(|&t| (0..40u64).map(move |s| Emblem::for_theme(t, s)))
+            .collect();
+        for e in Emblem::ALL {
+            assert!(seen.contains(&e), "{e:?} is never chosen");
+        }
+    }
+
+    #[test]
+    fn an_offers_emblem_is_for_theme_of_its_own_seed_and_packs_differ() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(5);
+        for n in 0..500u64 {
+            let log: Vec<_> = (0..rng.gen_range(1..10u64))
+                .map(|i| {
+                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    record(t, n * 100 + i, rng.gen_range(0..9), 0.3, false)
+                })
+                .collect();
+            let offers = offer_packs(&log, &[card_from(&log[0])], boost());
+            assert_eq!(offers, offer_packs(&log, &[card_from(&log[0])], boost()));
+            for o in &offers {
+                assert_eq!(o.emblem, Emblem::for_theme(o.theme, o.seed));
+            }
+            // Different wrappers on the table whenever the themes allow it.
+            let free: Vec<_> = offers
+                .iter()
+                .filter(|o| !matches!(o.theme, Awakening | Lobby))
+                .map(|o| o.emblem)
+                .collect();
+            let mut uniq = free.clone();
+            uniq.sort_by_key(|e| *e as u8);
+            uniq.dedup();
+            assert_eq!(uniq.len(), free.len(), "run {n}: {free:?}");
+        }
+    }
+
+    #[test]
+    fn random_runs_never_yield_fused_or_resonant_unless_blended() {
+        use crate::cards::Rarity;
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(77);
+        let (mut cards, mut blended) = (0usize, 0usize);
+        for n in 0..10_000u64 {
+            let log: Vec<_> = (0..rng.gen_range(1..=12u64))
+                .map(|i| {
+                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    let mut r = record(t, n * 100 + i, rng.gen_range(0..12), rng.gen(), rng.gen());
+                    r.enemies = rng.gen_range(0..6);
+                    if rng.gen_ratio(1, 12) {
+                        r.blend = Some(crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())]);
+                    }
+                    r
+                })
+                .collect();
+            let owned: Vec<Card> = if n % 2 == 0 { vec![] } else { vec![card_from(&log[0])] };
+            for o in offer_packs(&log, &owned, boost()) {
+                for r in &o.cards {
+                    let src = log.iter().find(|x| x.seed == r.card.seed).unwrap();
+                    cards += 1;
+                    if src.blend.is_some() {
+                        blended += 1;
+                        assert_eq!(r.card.rarity, Rarity::Fused);
+                    } else {
+                        assert!(
+                            !matches!(r.card.rarity, Rarity::Fused | Rarity::Resonant),
+                            "run {n}: {:?}",
+                            r.card
+                        );
+                        assert_eq!(r.card.fused, None);
+                    }
+                }
+            }
+        }
+        assert!(cards > 10_000 && blended > 0, "{cards} cards, {blended} blended");
     }
 }
