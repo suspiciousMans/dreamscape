@@ -5079,6 +5079,28 @@ impl Game for DreamscapeGame {
                     .unwrap_or(0.0);
                 self.mode = hud::Mode::Ending;
             }
+            Ok("pick") => {
+                // Dev only: a made-up run across five themes, then the pick screen.
+                self.run_log.clear();
+                for (i, &theme) in dream::ALL_THEMES.iter().take(5).enumerate() {
+                    for k in 0..(1 + i % 2) as u64 {
+                        let seed = 100 + i as u64 * 7 + k;
+                        self.run_log.push(cards::DreamRecord {
+                            theme,
+                            seed,
+                            depth: i as u32 + 1,
+                            name: dream::dream_name(theme, seed),
+                            whisper: dream::whisper(theme, seed),
+                            strangeness: 0.3,
+                            enemies: 2,
+                            shard_taken: true,
+                            art: pack_art::body_spec(theme, seed),
+                            blend: None,
+                        });
+                    }
+                }
+                self.start_pack_pick();
+            }
             Ok("note") => {
                 let d = lore::dreamer(self.booklet.lore.save_seed, 3);
                 self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
