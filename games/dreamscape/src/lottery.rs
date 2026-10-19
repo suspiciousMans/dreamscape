@@ -349,6 +349,18 @@ pub fn apply_pack_pity(state: &mut LotteryState, pack: &mut [Recalled]) {
     state.pack_dry = state.pack_dry.saturating_add(1);
 }
 
+/// `apply_pack_pity` for a pick-a-pack offer: acts on `offer.cards` only.
+///
+/// Call this ONLY for the pack the player OPENED, exactly once. Unopened
+/// packs are lost and must never reach it: the dry-pack counter advances per
+/// opened pack, not per offered pack (`packs::offer_packs` is pure and never
+/// touches `LotteryState`). `memory_chances` is not changed, so the odds
+/// shown on the pick screen stay what was displayed; pity is applied after
+/// the player chose.
+pub fn apply_pack_pity_to_offer(state: &mut LotteryState, offer: &mut crate::packs::PackOffer) {
+    apply_pack_pity(state, &mut offer.cards);
+}
+
 /// Strangeness used for a pulled card's stats: rarer cards are stranger.
 fn pull_strangeness(r: Rarity) -> f32 {
     match r {
@@ -855,5 +867,55 @@ mod tests {
             foils += p.foil as u32;
         }
         assert!(foils > 0, "the sweep should include some foils");
+    }
+
+    #[test]
+    fn offering_packs_never_moves_pity_only_the_wrapper_does() {
+        use crate::cards::tests::record;
+        use crate::cards::{card_from, MemoryBoost};
+        use crate::dream::DreamTheme::*;
+        let log = vec![
+            record(Garden, 1, 1, 0.1, false),
+            record(Lobby, 2, 2, 0.1, false),
+            record(TheTunnel, 3, 3, 0.1, false),
+        ];
+        let owned = vec![card_from(&log[0])];
+        let s = LotteryState {
+            pack_dry: PACK_PITY,
+            ..Default::default()
+        };
+        // Building the offer (any number of times) leaves no trace on the state.
+        let mut offers = crate::packs::offer_packs(&log, &owned, MemoryBoost::default());
+        let _ = crate::packs::offer_packs(&log, &owned, MemoryBoost::default());
+        assert_eq!(offers.len(), 3);
+        assert_eq!(s.pack_dry, PACK_PITY);
+        // Make the offers dry so the counter has something to do.
+        for o in &mut offers {
+            for r in &mut o.cards {
+                r.card.rarity = Rarity::Hazy;
+                r.remembered = true;
+            }
+        }
+        // Opening ONE pack: the wrapper acts on that pack's cards, once.
+        let mut st = s.clone();
+        let mut opened = offers[1].clone();
+        let others = (offers[0].clone(), offers[2].clone());
+        apply_pack_pity_to_offer(&mut st, &mut opened);
+        assert_eq!(st.pack_dry, 0, "pity fired for the opened pack");
+        assert!(opened.cards.iter().any(|r| r.card.rarity == Rarity::Lucid));
+        // Same effect as the underlying fn on the same cards.
+        let mut st2 = s.clone();
+        let mut direct = offers[1].cards.clone();
+        apply_pack_pity(&mut st2, &mut direct);
+        assert_eq!(st2, st);
+        assert_eq!(direct, opened.cards);
+        // Unopened packs are untouched.
+        assert_eq!((offers[0].clone(), offers[2].clone()), others);
+        // A dry pack below the threshold just advances the count by one.
+        let mut st3 = LotteryState::default();
+        let mut o = offers[0].clone();
+        apply_pack_pity_to_offer(&mut st3, &mut o);
+        assert_eq!(st3.pack_dry, 1);
+        assert_eq!(o, offers[0], "no pity yet: cards unchanged");
     }
 }

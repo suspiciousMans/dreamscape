@@ -18,6 +18,8 @@ pub enum Mode {
     Paused,
     Journal,
     Reveal,
+    /// Choosing one of the run's sealed packs to open.
+    PackPick,
     Store,
     Booklet,
     /// Picking a run upgrade, or WAKE / GO DEEPER at the wake door.
@@ -137,6 +139,8 @@ pub struct HudView {
     /// What the run did for the cards that went along (xp, echoes).
     pub report_line: String,
     pub lottery: crate::lottery_ui::LotteryView,
+    /// Runs of packs opened without a remembered Lucid card (pack pity, read-only).
+    pub pack_dry: u32,
     /// (card number, mastery level) for every card in the booklet.
     pub mastery_levels: Vec<(u32, u8)>,
     /// Perks active this run (shown small under the depth counter).
@@ -380,6 +384,8 @@ pub fn draw(
     v: &HudView,
     art: &mut crate::booklet_ui::CardArt,
     pack: &crate::reveal_ui::PackView,
+    pick: &crate::reveal_ui::PackPickView,
+    packs_art: &mut crate::pack_art::PackArt,
 ) {
     let p = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -406,6 +412,9 @@ pub fn draw(
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
+        Mode::PackPick => {
+            return crate::reveal_ui::draw_pick(ctx, &p, screen, v, pick, packs_art, art)
+        }
         Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
@@ -939,13 +948,26 @@ fn paint_eye(
     iris: [u8; 3],
     v: &HudView,
 ) {
+    paint_eye_at(p, c, cells, iris, ink(v), EYE_PX);
+}
+
+/// The pixel eye at any cell size and ink colour (the HUD's `paint_eye` at
+/// `EYE_PX`; pack emblems at their own size). `c` is the cell (0, 0) centre.
+pub(crate) fn paint_eye_at(
+    p: &egui::Painter,
+    c: Pos2,
+    cells: &[(i32, i32, crate::pixels::EyePx)],
+    iris: [u8; 3],
+    ink: [u8; 3],
+    px: f32,
+) {
     use crate::pixels::EyePx;
     let rim = [iris[0] / 2, iris[1] / 2, iris[2] / 2];
     // Pixel drop shadow, one cell down.
     px_cells(
         p,
-        c + Vec2::new(0.0, EYE_PX),
-        EYE_PX,
+        c + Vec2::new(0.0, px),
+        px,
         cells
             .iter()
             .filter(|q| q.2 != EyePx::Lash)
@@ -954,15 +976,15 @@ fn paint_eye(
     );
     for &(x, y, kind) in cells {
         let color = match kind {
-            EyePx::Lid => rgba(ink(v), 0.95),
-            EyePx::Lash => rgba(ink(v), 0.75),
+            EyePx::Lid => rgba(ink, 0.95),
+            EyePx::Lash => rgba(ink, 0.75),
             EyePx::Sclera => rgba([30, 18, 52], 0.92),
             EyePx::Iris => rgba(iris, 1.0),
             EyePx::IrisRim => rgba(rim, 1.0),
             EyePx::Pupil => rgba([6, 0, 12], 1.0),
             EyePx::Glint => rgba([255, 255, 255], 0.95),
         };
-        px_cells(p, c, EYE_PX, [(x, y)], color);
+        px_cells(p, c, px, [(x, y)], color);
     }
 }
 

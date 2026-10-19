@@ -56,6 +56,8 @@ mod memories_ui;
 mod merge_ui;
 mod music;
 mod objective;
+mod pack_art;
+mod packs;
 mod pad;
 mod paths;
 mod pixels;
@@ -497,6 +499,11 @@ pub struct DreamscapeGame {
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
     pack: reveal_ui::PackView,
+    /// The sealed packs on offer after waking (empty outside `Mode::PackPick`).
+    pick: reveal_ui::PackPickView,
+    packs_art: pack_art::PackArt,
+    /// Drawable size last frame, for mouse hit-testing on the pick screen.
+    screen_size: (f32, f32),
     shop_shelf: usize,
     shop_col: usize,
     /// Title menu selection.
@@ -688,6 +695,9 @@ impl DreamscapeGame {
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
             pack: reveal_ui::PackView::default(),
+            pick: reveal_ui::PackPickView::default(),
+            packs_art: pack_art::PackArt::default(),
+            screen_size: (1280.0, 720.0),
             shop_shelf: 0,
             shop_col: 0,
             title_sel: 0,
@@ -1178,6 +1188,7 @@ impl DreamscapeGame {
         hud::HudView {
             mode: self.mode,
             time: self.time,
+            pack_dry: self.booklet.lottery.pack_dry,
             depth: self.director.depth,
             best: self.best_depth,
             lucidity: self.director.lucidity,
@@ -2745,6 +2756,7 @@ impl DreamscapeGame {
                 };
                 self.run_active = true;
                 self.pack = reveal_ui::PackView::default();
+                self.pick = reveal_ui::PackPickView::default();
                 self.choice = None;
                 self.offer_upgrade = false;
                 // The dream is regenerated; don't log it twice.
@@ -2888,8 +2900,8 @@ impl DreamscapeGame {
         }
     }
 
-    /// Wake up: roll which dreams stayed with you and start the pack opening.
-    fn open_pack(&mut self) {
+    /// Wake up: roll the run's sealed packs and let the player choose one.
+    fn start_pack_pick(&mut self) {
         let boost = cards::MemoryBoost {
             lucid_wake: true,
             deep_memory: self.has_perk(store::Perk::DeepMemory),
@@ -2905,9 +2917,97 @@ impl DreamscapeGame {
                 log.push(log[log.len() % self.run_log.len()].clone());
             }
         }
-        let mut pack = cards::recall(&log, boost);
         let owned: Vec<cards::Card> = self.booklet.cards().cloned().collect();
-        cards::shape_first_pack(&mut pack, &owned);
+        let offers = packs::offer_packs(&log, &owned, boost);
+        self.begin_pick(offers);
+    }
+
+    /// Show `offers` on the pick screen. Nothing on offer (an empty log):
+    /// straight to the reveal with an empty pack, as an empty run always did.
+    fn begin_pick(&mut self, offers: Vec<packs::PackOffer>) {
+        self.pack = reveal_ui::PackView::default();
+        if offers.is_empty() {
+            self.pick = reveal_ui::PackPickView::default();
+            self.reveal_pack(Vec::new());
+            return;
+        }
+        self.pick = reveal_ui::PackPickView {
+            offers,
+            selected: 0,
+            age: 0.0,
+        };
+        self.mode = hud::Mode::PackPick;
+    }
+
+    /// Move the selection by `delta`, wrapping round.
+    fn pick_move(&mut self, delta: i32) {
+        let n = self.pick.offers.len();
+        if n == 0 {
+            return;
+        }
+        let at = self.pick.selected.min(n - 1) as i32;
+        self.pick.selected = (at + delta).rem_euclid(n as i32) as usize;
+    }
+
+    /// A key on the pick screen. Escape does nothing: unpicked packs are lost,
+    /// so there is no way to back out by accident.
+    fn pick_key(&mut self, key: Keycode) {
+        match key {
+            Keycode::A | Keycode::Left => self.pick_move(-1),
+            Keycode::D | Keycode::Right => self.pick_move(1),
+            Keycode::Num1 => self.pick_select(0),
+            Keycode::Num2 => self.pick_select(1),
+            Keycode::Num3 => self.pick_select(2),
+            // Packs slide in first, so a held key can't open one blind.
+            Keycode::Return | Keycode::Space if self.pick.age > reveal_ui::PICK_LOCKOUT => {
+                self.pick_open();
+            }
+            _ => {}
+        }
+    }
+
+    /// Select pack `i`; an index with no pack behind it is ignored.
+    fn pick_select(&mut self, i: usize) {
+        if i < self.pick.offers.len() {
+            self.pick.selected = i;
+        }
+    }
+
+    /// Open the selected pack; the others are dropped for good.
+    fn pick_open(&mut self) {
+        if self.mode != hud::Mode::PackPick || self.pick.offers.is_empty() {
+            return;
+        }
+        let view = std::mem::take(&mut self.pick);
+        let at = view.selected.min(view.offers.len() - 1);
+        let kept = view.offers.into_iter().nth(at).expect("selection is in range");
+        log::info!("Pack picked: {:?} ({} cards)", kept.theme, kept.cards.len());
+        self.reveal_pack(kept.cards);
+    }
+
+    /// The pointer moved over (or clicked) the pick screen.
+    fn pick_pointer(&mut self, x: i32, y: i32, click: bool) {
+        let screen = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(self.screen_size.0, self.screen_size.1),
+        );
+        let at = egui::Pos2::new(x as f32, y as f32);
+        if let Some(i) = reveal_ui::pick_hit(screen, self.pick.offers.len(), at) {
+            self.pick_select(i);
+            if click && self.pick.age > 0.2 {
+                self.pick_open();
+            }
+        }
+    }
+
+    /// Autopilot / dev shortcut: offer the packs and take the first.
+    fn open_pack(&mut self) {
+        self.start_pack_pick();
+        self.pick_open();
+    }
+
+    /// The chosen pack goes to the reveal. Pack pity runs on this pack only.
+    fn reveal_pack(&mut self, mut pack: Vec<cards::Recalled>) {
         lottery::apply_pack_pity(&mut self.booklet.lottery, &mut pack);
         self.pack = reveal_ui::PackView {
             pack,
@@ -3520,6 +3620,7 @@ impl DreamscapeGame {
             self.director.shards_to_wake
         );
         self.pack = reveal_ui::PackView::default();
+        self.pick = reveal_ui::PackPickView::default();
         self.perks = if self.autopilot || self.prologue.is_some() {
             Vec::new()
         } else {
@@ -4978,6 +5079,28 @@ impl Game for DreamscapeGame {
                     .unwrap_or(0.0);
                 self.mode = hud::Mode::Ending;
             }
+            Ok("pick") => {
+                // Dev only: a made-up run across five themes, then the pick screen.
+                self.run_log.clear();
+                for (i, &theme) in dream::ALL_THEMES.iter().take(5).enumerate() {
+                    for k in 0..(1 + i % 2) as u64 {
+                        let seed = 100 + i as u64 * 7 + k;
+                        self.run_log.push(cards::DreamRecord {
+                            theme,
+                            seed,
+                            depth: i as u32 + 1,
+                            name: dream::dream_name(theme, seed),
+                            whisper: dream::whisper(theme, seed),
+                            strangeness: 0.3,
+                            enemies: 2,
+                            shard_taken: true,
+                            art: pack_art::body_spec(theme, seed),
+                            blend: None,
+                        });
+                    }
+                }
+                self.start_pack_pick();
+            }
             Ok("note") => {
                 let d = lore::dreamer(self.booklet.lore.save_seed, 3);
                 self.note_view = Some(lore::note(&d, 2, DreamTheme::Garden));
@@ -5031,9 +5154,21 @@ impl Game for DreamscapeGame {
                 }
                 return;
             }
+            Event::MouseButtonDown {
+                mouse_btn: engine::sdl2::mouse::MouseButton::Left,
+                x,
+                y,
+                ..
+            } if self.mode == hud::Mode::PackPick => {
+                self.pick_pointer(*x, *y, true);
+                return;
+            }
             // A real nudge of the mouse (not the synthetic event a window
             // gets when it opens under the cursor) switches back to keys.
-            Event::MouseMotion { xrel, yrel, .. } => {
+            Event::MouseMotion { x, y, xrel, yrel, .. } => {
+                if self.mode == hud::Mode::PackPick {
+                    self.pick_pointer(*x, *y, false);
+                }
                 if !self.mouse_captured && xrel.abs() + yrel.abs() > 6 {
                     self.using_pad = false;
                 }
@@ -5053,8 +5188,12 @@ impl Game for DreamscapeGame {
             if self.mode == hud::Mode::Summary {
                 if matches!(key, Keycode::Return | Keycode::Space) && self.title_age > 0.5 {
                     self.title_age = 0.0;
-                    self.open_pack();
+                    self.start_pack_pick();
                 }
+                return;
+            }
+            if self.mode == hud::Mode::PackPick {
+                self.pick_key(key);
                 return;
             }
             if self.mode == hud::Mode::Choice {
@@ -5450,7 +5589,14 @@ impl Game for DreamscapeGame {
         self.title_age += dt;
         if self.mode == hud::Mode::Summary && self.autopilot && self.title_age > 1.5 {
             self.title_age = 0.0;
-            self.open_pack();
+            self.start_pack_pick();
+        }
+        if self.mode == hud::Mode::PackPick {
+            self.pick.age += dt;
+            // E2E runs: take the first pack after a beat.
+            if self.autopilot && self.pick.age > 0.6 {
+                self.pick_open();
+            }
         }
         if self.mode == hud::Mode::Choice {
             self.choice_view.age += dt;
@@ -6395,8 +6541,11 @@ impl Game for DreamscapeGame {
         );
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
+        self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
         let card_art = &mut self.card_art;
         let pack = &self.pack;
+        let pick = &self.pick;
+        let packs_art = &mut self.packs_art;
         let grain = &mut self.grain;
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
         let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
@@ -6446,7 +6595,7 @@ impl Game for DreamscapeGame {
                         vignette_strength,
                     );
                 }
-                hud::draw(egui_ctx, &hud_view, card_art, pack);
+                hud::draw(egui_ctx, &hud_view, card_art, pack, pick, packs_art);
             });
             ui.paint(drawable_size, output);
         }
@@ -6597,19 +6746,85 @@ mod screen_smoke {
     }
 
     fn shapes(g: &DreamscapeGame) -> usize {
+        frame(g, 1280.0, 720.0).len()
+    }
+
+    /// One drawn frame of the current screen at the given size.
+    fn frame(g: &DreamscapeGame, w: f32, h: f32) -> Vec<egui::epaint::ClippedShape> {
         let v = g.hud_view();
         let ctx = egui::Context::default();
         hud::install_font(&ctx);
         let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::Vec2::new(1280.0, 720.0),
+                egui::Vec2::new(w, h),
             )),
             ..Default::default()
         };
-        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack));
-        out.shapes.len()
+        let out = ctx.run(input, |ctx| {
+            hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art)
+        });
+        out.shapes
+    }
+
+    /// A hand-built offer (never calls `offer_packs`).
+    fn offer(theme: dream::DreamTheme, cards: usize, seed: u64) -> packs::PackOffer {
+        let cards: Vec<cards::Recalled> = (0..cards)
+            .map(|i| cards::Recalled {
+                card: cards::card_from(&cards::tests::record(theme, seed + i as u64, 1 + i as u32, 0.2, false)),
+                remembered: i % 2 == 0,
+            })
+            .collect();
+        packs::PackOffer {
+            theme,
+            emblem: packs::Emblem::ALL[seed as usize % packs::Emblem::ALL.len()],
+            seed,
+            memory_chances: [0.6, 0.5, 0.4, 0.3, 0.2][..cards.len()].to_vec(),
+            cards,
+        }
+    }
+
+    fn offers(n: usize) -> Vec<packs::PackOffer> {
+        use dream::DreamTheme::*;
+        [(Garden, 3), (CursedForest, 1), (MirrorHall, 5)]
+            .into_iter()
+            .take(n)
+            .enumerate()
+            .map(|(i, (t, k))| offer(t, k, 100 + i as u64 * 7))
+            .collect()
+    }
+
+    #[test]
+    fn the_pick_screen_draws_one_two_and_three_packs_at_two_sizes() {
+        for n in 1..=3 {
+            let mut g = game(&format!("pick{n}"));
+            g.begin_pick(offers(n));
+            assert_eq!(g.mode, hud::Mode::PackPick);
+            for (w, h) in [(1280.0, 720.0), (640.0, 360.0)] {
+                let shapes = frame(&g, w, h).len();
+                assert!(shapes > 20 + 5 * n, "{n} offers at {w}x{h}: {shapes} shapes");
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_motion_makes_the_pick_screen_static() {
+        let mut g = game("pick_reduced");
+        g.settings.reduced_motion = true;
+        g.begin_pick(offers(3));
+        let a = frame(&g, 1280.0, 720.0);
+        g.time += 3.3;
+        g.pick.age += 3.3;
+        let b = frame(&g, 1280.0, 720.0);
+        assert!(a == b, "reduced motion: frames differ over time");
+        // Full motion does animate (so the test above is not vacuous).
+        g.settings.reduced_motion = false;
+        let c = frame(&g, 1280.0, 720.0);
+        g.time += 0.7;
+        let d = frame(&g, 1280.0, 720.0);
+        assert!(c != d, "full motion should animate");
     }
 
     #[test]
@@ -6678,5 +6893,189 @@ mod screen_smoke {
         g.mode = hud::Mode::Booklet;
         g.booklet_page = 0;
         assert!(shapes(&g) > 100);
+    }
+
+    // ---- pick-a-pack flow ----
+
+    fn pad_key(b: engine::sdl2::controller::Button) -> Option<Keycode> {
+        pad::key_for(b, hud::Mode::PackPick, &settings::Settings::default())
+    }
+
+    #[test]
+    fn selection_wraps_with_the_keys_and_clamps_with_numbers() {
+        let mut g = game("pick_sel");
+        g.begin_pick(offers(3));
+        assert_eq!(g.pick.selected, 0);
+        g.pick_key(Keycode::A);
+        assert_eq!(g.pick.selected, 2, "left of the first wraps to the last");
+        g.pick_key(Keycode::D);
+        assert_eq!(g.pick.selected, 0, "right of the last wraps to the first");
+        g.pick_key(Keycode::Right);
+        g.pick_key(Keycode::Right);
+        g.pick_key(Keycode::Left);
+        assert_eq!(g.pick.selected, 1);
+        g.pick_key(Keycode::Num3);
+        assert_eq!(g.pick.selected, 2);
+        g.pick_key(Keycode::Num1);
+        assert_eq!(g.pick.selected, 0);
+
+        // Two offers: 3 means nothing, and 1..2 land where they say.
+        let mut g = game("pick_sel2");
+        g.begin_pick(offers(2));
+        g.pick_key(Keycode::Num2);
+        g.pick_key(Keycode::Num3);
+        assert_eq!(g.pick.selected, 1, "no third pack to select");
+        g.pick.selected = 9; // stale index
+        g.pick_move(1);
+        assert_eq!(g.pick.selected, 0, "a stale index clamps before it moves");
+        g.pick.selected = 9;
+        g.pick_open();
+        assert_eq!(g.pack.pack, offers(2)[1].cards, "a stale index opens the last pack");
+    }
+
+    #[test]
+    fn the_pad_moves_and_opens() {
+        use engine::sdl2::controller::Button as B;
+        assert_eq!(pad_key(B::DPadLeft), Some(Keycode::Left));
+        assert_eq!(pad_key(B::DPadRight), Some(Keycode::Right));
+        assert_eq!(pad_key(B::A), Some(Keycode::Return));
+        assert_eq!(pad_key(B::B), None, "no backing out of the pick");
+        let mut g = game("pick_pad");
+        g.begin_pick(offers(3));
+        g.pick_key(pad_key(B::DPadRight).unwrap());
+        g.pick.age = 1.0;
+        g.pick_key(pad_key(B::A).unwrap());
+        assert_eq!(g.mode, hud::Mode::Reveal);
+        assert_eq!(g.pack.pack, offers(3)[1].cards);
+    }
+
+    #[test]
+    fn return_opens_the_selected_pack_and_drops_the_others() {
+        let mut g = game("pick_open");
+        let all = offers(3);
+        g.begin_pick(all.clone());
+        g.pick_key(Keycode::Num3);
+        g.pick_key(Keycode::Return);
+        assert_eq!(g.mode, hud::Mode::PackPick, "a held key can't open blind");
+        g.pick.age = reveal_ui::PICK_LOCKOUT + 0.01;
+        g.pick_key(Keycode::Space);
+        assert_eq!(g.mode, hud::Mode::Reveal);
+        assert_eq!(g.pack.pack, all[2].cards, "the pack is exactly the chosen offer's cards");
+        assert!(g.pick.offers.is_empty(), "the other offers are gone");
+        assert_eq!(g.pick, reveal_ui::PackPickView::default());
+        // Opening again (a second Return on a stale screen) does nothing.
+        g.pick_open();
+        assert_eq!(g.pack.pack, all[2].cards);
+    }
+
+    #[test]
+    fn unchosen_cards_never_reach_the_booklet() {
+        let mut g = game("pick_press");
+        let all = offers(3);
+        g.begin_pick(all.clone());
+        g.pick_select(1);
+        g.pick_open();
+        g.run_seed = 4242;
+        g.save_journal();
+        assert!(g.pack.pressed);
+        let held: Vec<u64> = g.booklet.cards().map(|c| c.seed).collect();
+        let chosen: Vec<u64> = all[1].cards.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
+        assert!(!chosen.is_empty());
+        for seed in &chosen {
+            assert!(held.contains(seed), "chosen card {seed} pressed");
+        }
+        for (i, o) in all.iter().enumerate().filter(|(i, _)| *i != 1) {
+            for r in &o.cards {
+                assert!(!held.contains(&r.card.seed), "offer {i} card {} leaked", r.card.seed);
+            }
+        }
+    }
+
+    /// A pack of one faded Faint dream: pity counts it as dry.
+    fn dry_offer(seed: u64) -> packs::PackOffer {
+        let mut o = offer(dream::DreamTheme::Garden, 1, seed);
+        o.cards[0].card.rarity = cards::Rarity::Faint;
+        o.cards[0].remembered = false;
+        o
+    }
+
+    #[test]
+    fn pity_advances_only_on_the_opened_pack() {
+        let mut g = game("pick_pity");
+        g.begin_pick(vec![dry_offer(1), dry_offer(2), dry_offer(3)]);
+        assert_eq!(g.booklet.lottery.pack_dry, 0, "offering touches nothing");
+        g.pick_move(1);
+        g.pick_move(-1);
+        g.pick_select(2);
+        assert_eq!(g.booklet.lottery.pack_dry, 0, "browsing touches nothing");
+        g.pick_open();
+        assert_eq!(g.booklet.lottery.pack_dry, 1, "one opened pack, one dry count");
+
+        // At the threshold the opened pack is upgraded; the unopened never are.
+        let mut g = game("pick_pity2");
+        g.booklet.lottery.pack_dry = lottery::PACK_PITY;
+        let mut a = dry_offer(10);
+        a.cards.push(dry_offer(11).cards.remove(0));
+        let b = dry_offer(12);
+        g.begin_pick(vec![a.clone(), b.clone()]);
+        assert_eq!(g.pick.offers[0], a, "pity is not applied while browsing");
+        assert_eq!(g.pick.offers[1], b);
+        g.pick_open();
+        assert!(g.pack.pack.iter().any(|r| r.remembered && r.card.rarity >= cards::Rarity::Lucid));
+        assert_eq!(g.booklet.lottery.pack_dry, 0);
+    }
+
+    #[test]
+    fn an_empty_offer_goes_straight_to_an_empty_reveal() {
+        let mut g = game("pick_empty");
+        g.begin_pick(Vec::new());
+        assert_eq!(g.mode, hud::Mode::Reveal);
+        assert!(g.pack.pack.is_empty());
+        assert_eq!(g.pick, reveal_ui::PackPickView::default());
+        assert_eq!(g.booklet.lottery.pack_dry, 0);
+        assert!(shapes(&g) > 10, "the empty reveal still draws");
+        // Keys on a pick screen that isn't up do nothing.
+        g.pick_open();
+        assert_eq!(g.mode, hud::Mode::Reveal);
+    }
+
+    #[test]
+    fn the_mouse_hovers_selects_and_clicks_opens() {
+        let mut g = game("pick_mouse");
+        g.begin_pick(offers(3));
+        g.screen_size = (1280.0, 720.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let rects = reveal_ui::pick_rects(screen, 3);
+        assert_eq!(rects.len(), 3);
+        assert!(rects.windows(2).all(|w| w[0].right() < w[1].left()), "side by side");
+        let c = |i: usize| (rects[i].center().x as i32, rects[i].center().y as i32);
+        g.pick_pointer(c(2).0, c(2).1, false);
+        assert_eq!(g.pick.selected, 2, "hover selects");
+        assert_eq!(g.mode, hud::Mode::PackPick, "hover does not open");
+        g.pick_pointer(1, 1, false);
+        assert_eq!(g.pick.selected, 2, "off the packs, nothing changes");
+        g.pick_pointer(c(1).0, c(1).1, true);
+        assert_eq!(g.pick.selected, 1);
+        assert_eq!(g.mode, hud::Mode::PackPick, "too early: the screen is still sliding in");
+        g.pick.age = 1.0;
+        g.pick_pointer(c(1).0, c(1).1, true);
+        assert_eq!(g.mode, hud::Mode::Reveal);
+        assert_eq!(g.pack.pack, offers(3)[1].cards);
+    }
+
+    #[test]
+    fn the_pick_screen_shows_memory_chances_verbatim() {
+        let o = offers(3);
+        assert_eq!(o[0].memory_chances, vec![0.6, 0.5, 0.4]);
+        assert_eq!(reveal_ui::odds_lines(&[0.6, 0.4]), vec!["REMEMBERED 60% / 40%"]);
+        assert_eq!(
+            reveal_ui::odds_lines(&[0.55, 0.7, 0.82, 0.31, 0.4]),
+            vec!["REMEMBERED 55% / 70% / 82%", "31% / 40%"]
+        );
+        assert!(reveal_ui::odds_lines(&[]).is_empty());
+        let lines = |chances: &[f32]| reveal_ui::odds_lines(chances).join(" ");
+        for p in [0.0_f32, 0.05, 0.333, 0.6, 0.99, 1.0] {
+            assert!(lines(&[p]).contains(&format!("{:.0}%", p * 100.0)));
+        }
     }
 }
