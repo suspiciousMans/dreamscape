@@ -270,7 +270,10 @@ mod tests {
             assert_eq!(a.card, b.card);
         }
         // Fewer than five: all of them, nothing from other themes.
-        let small = vec![record(Lobby, 1, 1, 0.1, false), record(Lobby, 2, 2, 0.1, false)];
+        let small = vec![
+            record(Lobby, 1, 1, 0.1, false),
+            record(Lobby, 2, 2, 0.1, false),
+        ];
         let o = offer_packs(&small, &owned, boost());
         assert_eq!(o[0].cards.len(), 2);
         assert!(o[0].cards.iter().all(|r| r.card.theme == Lobby));
@@ -284,7 +287,15 @@ mod tests {
             extra: 0.07,
         };
         let log: Vec<_> = (0..12u64)
-            .map(|i| record(crate::dream::ALL_THEMES[(i % 6) as usize], i, i as u32, 0.1 * (i % 9) as f32, i % 3 == 0))
+            .map(|i| {
+                record(
+                    crate::dream::ALL_THEMES[(i % 6) as usize],
+                    i,
+                    i as u32,
+                    0.1 * (i % 9) as f32,
+                    i % 3 == 0,
+                )
+            })
             .collect();
         for o in offer_packs(&log, &[card_from(&log[0])], b) {
             assert_eq!(o.memory_chances.len(), o.cards.len());
@@ -363,7 +374,8 @@ mod tests {
             let len = rng.gen_range(1..=14usize);
             let log: Vec<_> = (0..len as u64)
                 .map(|i| {
-                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    let t =
+                        crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
                     record(t, n * 100 + i, rng.gen_range(0..9), rng.gen(), rng.gen())
                 })
                 .collect();
@@ -414,7 +426,8 @@ mod tests {
         for n in 0..500u64 {
             let log: Vec<_> = (0..rng.gen_range(1..10u64))
                 .map(|i| {
-                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    let t =
+                        crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
                     record(t, n * 100 + i, rng.gen_range(0..9), 0.3, false)
                 })
                 .collect();
@@ -445,16 +458,24 @@ mod tests {
         for n in 0..10_000u64 {
             let log: Vec<_> = (0..rng.gen_range(1..=12u64))
                 .map(|i| {
-                    let t = crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
+                    let t =
+                        crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())];
                     let mut r = record(t, n * 100 + i, rng.gen_range(0..12), rng.gen(), rng.gen());
                     r.enemies = rng.gen_range(0..6);
                     if rng.gen_ratio(1, 12) {
-                        r.blend = Some(crate::dream::ALL_THEMES[rng.gen_range(0..crate::dream::ALL_THEMES.len())]);
+                        r.blend = Some(
+                            crate::dream::ALL_THEMES
+                                [rng.gen_range(0..crate::dream::ALL_THEMES.len())],
+                        );
                     }
                     r
                 })
                 .collect();
-            let owned: Vec<Card> = if n % 2 == 0 { vec![] } else { vec![card_from(&log[0])] };
+            let owned: Vec<Card> = if n % 2 == 0 {
+                vec![]
+            } else {
+                vec![card_from(&log[0])]
+            };
             for o in offer_packs(&log, &owned, boost()) {
                 for r in &o.cards {
                     let src = log.iter().find(|x| x.seed == r.card.seed).unwrap();
@@ -473,6 +494,9 @@ mod tests {
                 }
             }
         }
-        assert!(cards > 10_000 && blended > 0, "{cards} cards, {blended} blended");
+        assert!(
+            cards > 10_000 && blended > 0,
+            "{cards} cards, {blended} blended"
+        );
     }
 }
