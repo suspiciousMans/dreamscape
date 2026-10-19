@@ -99,7 +99,10 @@ pub fn reveal_times(pack: &[Recalled]) -> Vec<f32> {
     let n = pack.len();
     let order = reveal_order(pack);
     let step = reveal_step(n);
-    let mut holds: Vec<f32> = order.iter().map(|&i| beat(&pack[i]).hold.max(0.0)).collect();
+    let mut holds: Vec<f32> = order
+        .iter()
+        .map(|&i| beat(&pack[i]).hold.max(0.0))
+        .collect();
     if let Some(last) = holds.last_mut() {
         *last += FINAL_LINGER;
     }
@@ -301,7 +304,9 @@ pub fn pick_rects(screen: Rect, n: usize) -> Vec<Rect> {
     let size = PACK_SIZE * scale;
     let total = n_f * size.x + (n_f - 1.0) * gap;
     let x0 = screen.center().x - total * 0.5;
-    let y0 = screen.top() + PICK_TOP * u + (avail_h - size.y * PICK_GROW).max(0.0) * 0.5
+    let y0 = screen.top()
+        + PICK_TOP * u
+        + (avail_h - size.y * PICK_GROW).max(0.0) * 0.5
         + size.y * (PICK_GROW - 1.0) * 0.5;
     (0..n)
         .map(|i| Rect::from_min_size(Pos2::new(x0 + i as f32 * (size.x + gap), y0), size))
@@ -313,21 +318,31 @@ pub fn pick_hit(screen: Rect, n: usize, at: Pos2) -> Option<usize> {
     pick_rects(screen, n).iter().position(|r| r.contains(at))
 }
 
-/// "REMEMBERED 60% / 40%": each card's `memory_chance`, verbatim, three to a line.
-pub fn odds_lines(chances: &[f32]) -> Vec<String> {
-    chances
-        .chunks(3)
-        .enumerate()
-        .map(|(i, c)| {
-            let pct: Vec<String> = c.iter().map(|p| format!("{:.0}%", p * 100.0)).collect();
-            let row = pct.join(" / ");
-            if i == 0 {
-                format!("REMEMBERED {row}")
-            } else {
-                row
-            }
-        })
-        .collect()
+/// What a pack gives: "1-3 CARDS", then the odds in order ("60% / 30% / 10%").
+pub fn take_lines(candidates: usize) -> Vec<String> {
+    let odds = crate::packs::take_odds(candidates);
+    let head = if odds.len() == 1 {
+        "1 CARD".to_string()
+    } else {
+        format!("1-{} CARDS", odds.len())
+    };
+    let pct: Vec<String> = odds.iter().map(|p| format!("{:.0}%", p * 100.0)).collect();
+    vec![head, pct.join(" / ")]
+}
+
+/// How likely each dream is to be remembered when it opens, as a range.
+pub fn memory_line(chances: &[f32]) -> Option<String> {
+    let lo = chances.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = chances.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if chances.is_empty() {
+        return None;
+    }
+    let (lo, hi) = (lo * 100.0, hi * 100.0);
+    Some(if (lo.round() - hi.round()).abs() < 0.5 {
+        format!("REMEMBERED {hi:.0}% EACH")
+    } else {
+        format!("REMEMBERED {lo:.0}-{hi:.0}% EACH")
+    })
 }
 
 /// The pack pity counter, read-only.
@@ -370,7 +385,16 @@ pub fn draw_pick(
     let title = "CHOOSE A PACK";
     let title_at = Pos2::new(cx, screen.top() + 22.0 * u);
     if full {
-        glitch_text(p, title_at, true, title, 40.0 * u, hue(v.time * 0.1), 1.0, v);
+        glitch_text(
+            p,
+            title_at,
+            true,
+            title,
+            40.0 * u,
+            hue(v.time * 0.1),
+            1.0,
+            v,
+        );
     } else {
         p.text(
             title_at,
@@ -429,7 +453,7 @@ pub fn draw_pick(
             offer.theme,
             offer.emblem,
             offer.seed,
-            offer.cards.len(),
+            crate::packs::take_odds(offer.cards.len()).len(),
             art_time,
             art_motion,
             tilt,
@@ -452,10 +476,11 @@ pub fn draw_pick(
             *y += (size + 4.0) * u;
         };
         line(p, &mut y, theme_title(offer.theme), 22.0, 1.0);
-        let k = offer.cards.len();
-        line(p, &mut y, format!("{k} {}", if k == 1 { "CARD" } else { "CARDS" }), 18.0, 0.9);
-        for l in odds_lines(&offer.memory_chances) {
-            line(p, &mut y, l, 16.0, 0.75);
+        let l = take_lines(offer.cards.len());
+        line(p, &mut y, l[0].clone(), 18.0, 0.9);
+        line(p, &mut y, l[1].clone(), 16.0, 0.75);
+        if let Some(m) = memory_line(&offer.memory_chances) {
+            line(p, &mut y, m, 16.0, 0.75);
         }
     }
     let foot = screen.bottom() - 30.0 * u;
@@ -669,7 +694,11 @@ fn near_miss_flicker(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView, e:
     let on = crate::hud::hash01(tick, rec.card.seed as u32) > frac * 0.9;
     if on {
         p.rect_filled(r, 0.0, rgba(frame, 0.85 * (1.0 - frac * 0.5)));
-        p.rect_stroke(r.shrink(3.0), 0.0, Stroke::new(2.0_f32, rgba([255, 255, 255], 0.8)));
+        p.rect_stroke(
+            r.shrink(3.0),
+            0.0,
+            Stroke::new(2.0_f32, rgba([255, 255, 255], 0.8)),
+        );
         let f = (r.width() / (CARD_SIZE.x * 0.62)).min(1.0);
         p.text(
             r.center(),
@@ -915,7 +944,11 @@ mod tests {
 
     #[test]
     fn order_is_stable_and_handles_tiny_packs() {
-        let pack = vec![rec(Vivid, true, 1), rec(Vivid, true, 2), rec(Vivid, true, 3)];
+        let pack = vec![
+            rec(Vivid, true, 1),
+            rec(Vivid, true, 2),
+            rec(Vivid, true, 3),
+        ];
         assert_eq!(reveal_order(&pack), vec![0, 1, 2]);
         assert!(reveal_order(&[]).is_empty());
         assert_eq!(reveal_order(&pack[..1]), vec![0]);
@@ -972,7 +1005,10 @@ mod tests {
         }
         assert!(b.iter().all(|x| x.flash <= 1.0 && x.glow <= 1.0));
         let dim = beat(&rec(Prophetic, false, 1));
-        assert_eq!((dim.tier, dim.flash, dim.shake, dim.glow), (0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            (dim.tier, dim.flash, dim.shake, dim.glow),
+            (0, 0.0, 0.0, 0.0)
+        );
         assert!(dim.flash < b[0].flash);
     }
 

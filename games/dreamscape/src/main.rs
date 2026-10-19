@@ -2981,8 +2981,14 @@ impl DreamscapeGame {
         let view = std::mem::take(&mut self.pick);
         let at = view.selected.min(view.offers.len() - 1);
         let kept = view.offers.into_iter().nth(at).expect("selection is in range");
-        log::info!("Pack picked: {:?} ({} cards)", kept.theme, kept.cards.len());
-        self.reveal_pack(kept.cards);
+        let cards = packs::open(&kept);
+        log::info!(
+            "Pack picked: {:?}, {} of {} dreams",
+            kept.theme,
+            cards.len(),
+            kept.cards.len()
+        );
+        self.reveal_pack(cards);
     }
 
     /// The pointer moved over (or clicked) the pick screen.
@@ -5303,7 +5309,9 @@ impl Game for DreamscapeGame {
                     self.restart_requested = true;
                     return;
                 }
-                (hud::Mode::Reveal, Keycode::S) if revealed => {
+                (hud::Mode::Reveal, Keycode::S) => {
+                    // Not waiting for the flips: S skips them and presses.
+                    self.pack.age = f32::MAX;
                     self.save_journal();
                     return;
                 }
@@ -6946,7 +6954,7 @@ mod screen_smoke {
         g.pick.age = 1.0;
         g.pick_key(pad_key(B::A).unwrap());
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, offers(3)[1].cards);
+        assert_eq!(g.pack.pack, packs::open(&offers(3)[1]));
     }
 
     #[test]
@@ -6960,12 +6968,12 @@ mod screen_smoke {
         g.pick.age = reveal_ui::PICK_LOCKOUT + 0.01;
         g.pick_key(Keycode::Space);
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, all[2].cards, "the pack is exactly the chosen offer's cards");
+        assert_eq!(g.pack.pack, packs::open(&all[2]), "the pack is what the chosen offer opens to");
         assert!(g.pick.offers.is_empty(), "the other offers are gone");
         assert_eq!(g.pick, reveal_ui::PackPickView::default());
         // Opening again (a second Return on a stale screen) does nothing.
         g.pick_open();
-        assert_eq!(g.pack.pack, all[2].cards);
+        assert_eq!(g.pack.pack, packs::open(&all[2]));
     }
 
     #[test]
@@ -6979,8 +6987,10 @@ mod screen_smoke {
         g.save_journal();
         assert!(g.pack.pressed);
         let held: Vec<u64> = g.booklet.cards().map(|c| c.seed).collect();
-        let chosen: Vec<u64> = all[1].cards.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
-        assert!(!chosen.is_empty());
+        let opened = packs::open(&all[1]);
+        assert!(!opened.is_empty() && opened.len() <= all[1].cards.len());
+        assert_eq!(g.pack.pack, opened);
+        let chosen: Vec<u64> = opened.iter().filter(|r| r.remembered).map(|r| r.card.seed).collect();
         for seed in &chosen {
             assert!(held.contains(seed), "chosen card {seed} pressed");
         }
@@ -7060,22 +7070,18 @@ mod screen_smoke {
         g.pick.age = 1.0;
         g.pick_pointer(c(1).0, c(1).1, true);
         assert_eq!(g.mode, hud::Mode::Reveal);
-        assert_eq!(g.pack.pack, offers(3)[1].cards);
+        assert_eq!(g.pack.pack, packs::open(&offers(3)[1]));
     }
 
     #[test]
-    fn the_pick_screen_shows_memory_chances_verbatim() {
-        let o = offers(3);
-        assert_eq!(o[0].memory_chances, vec![0.6, 0.5, 0.4]);
-        assert_eq!(reveal_ui::odds_lines(&[0.6, 0.4]), vec!["REMEMBERED 60% / 40%"]);
-        assert_eq!(
-            reveal_ui::odds_lines(&[0.55, 0.7, 0.82, 0.31, 0.4]),
-            vec!["REMEMBERED 55% / 70% / 82%", "31% / 40%"]
-        );
-        assert!(reveal_ui::odds_lines(&[]).is_empty());
-        let lines = |chances: &[f32]| reveal_ui::odds_lines(chances).join(" ");
-        for p in [0.0_f32, 0.05, 0.333, 0.6, 0.99, 1.0] {
-            assert!(lines(&[p]).contains(&format!("{:.0}%", p * 100.0)));
-        }
+    fn the_pick_screen_shows_the_real_odds() {
+        // Card counts: the same numbers `packs::open` rolls with.
+        assert_eq!(reveal_ui::take_lines(1), vec!["1 CARD", "100%"]);
+        assert_eq!(reveal_ui::take_lines(2), vec!["1-2 CARDS", "67% / 33%"]);
+        assert_eq!(reveal_ui::take_lines(5), vec!["1-3 CARDS", "60% / 30% / 10%"]);
+        // Memory chances, as a range of the real `memory_chance` values.
+        assert_eq!(reveal_ui::memory_line(&[0.6, 0.4]).as_deref(), Some("REMEMBERED 40-60% EACH"));
+        assert_eq!(reveal_ui::memory_line(&[0.43, 0.43]).as_deref(), Some("REMEMBERED 43% EACH"));
+        assert_eq!(reveal_ui::memory_line(&[]), None);
     }
 }

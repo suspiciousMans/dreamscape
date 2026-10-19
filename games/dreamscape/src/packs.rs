@@ -15,6 +15,10 @@ use crate::dream::{DreamTheme, ALL_THEMES};
 pub const MAX_OFFERS: usize = 3;
 pub const MAX_PACK_CARDS: usize = 5;
 
+/// Odds (percent weights) that an opened pack gives 1, 2 or 3 cards. One card
+/// is the most likely; three is rare.
+pub const TAKE_WEIGHTS: [u32; 3] = [60, 30, 10];
+
 /// The centre glyph on a pack wrapper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Emblem {
@@ -176,6 +180,47 @@ fn pick_emblem(theme: DreamTheme, seed: u64, taken: &[PackOffer]) -> (u64, Emble
         s = mix(seed ^ k);
     }
     (seed, Emblem::for_theme(theme, seed))
+}
+
+/// Chance of getting 1, 2, 3 cards out of a pack with `candidates` dreams in
+/// it (index 0 = one card). A pack can't give more cards than it holds, so the
+/// weights are cut to what fits and renormalised. Sums to 1.
+pub fn take_odds(candidates: usize) -> Vec<f32> {
+    let n = candidates.clamp(1, TAKE_WEIGHTS.len());
+    let total: u32 = TAKE_WEIGHTS[..n].iter().sum();
+    TAKE_WEIGHTS[..n]
+        .iter()
+        .map(|&w| w as f32 / total as f32)
+        .collect()
+}
+
+/// Open a pack: roll how many cards it gives (`take_odds`), then which of the
+/// run's dreams of this theme they are. Deterministic per offer, so the reveal
+/// replays exactly. Cards keep run order. Nothing here can add a rarity: the
+/// cards are the offer's own, so Fused/Resonant only appear if the dream was
+/// already blended.
+pub fn open(offer: &PackOffer) -> Vec<Recalled> {
+    use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+    if offer.cards.is_empty() {
+        return Vec::new();
+    }
+    let mut rng = StdRng::seed_from_u64(offer.seed ^ 0x7A4B_E5C1_0D1E_55ED);
+    let odds = take_odds(offer.cards.len());
+    let roll: f32 = rng.gen();
+    let mut acc = 0.0;
+    let mut take = odds.len();
+    for (i, p) in odds.iter().enumerate() {
+        acc += p;
+        if roll < acc {
+            take = i + 1;
+            break;
+        }
+    }
+    let mut picks: Vec<usize> = (0..offer.cards.len()).collect();
+    picks.shuffle(&mut rng);
+    picks.truncate(take);
+    picks.sort_unstable();
+    picks.into_iter().map(|i| offer.cards[i].clone()).collect()
 }
 
 #[cfg(test)]
@@ -498,5 +543,99 @@ mod tests {
             cards > 10_000 && blended > 0,
             "{cards} cards, {blended} blended"
         );
+    }
+
+    #[test]
+    fn take_odds_sum_to_one_and_one_card_is_most_likely() {
+        for n in 1..=6 {
+            let o = take_odds(n);
+            assert_eq!(o.len(), n.min(3));
+            assert!((o.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            assert!(
+                o.windows(2).all(|w| w[0] > w[1]),
+                "fewer cards is likelier: {o:?}"
+            );
+        }
+        assert_eq!(take_odds(1), vec![1.0]);
+        assert_eq!(take_odds(3), vec![0.6, 0.3, 0.1]);
+    }
+
+    #[test]
+    fn opening_gives_a_few_cards_not_all_and_is_deterministic() {
+        let mut counts = [0usize; 4];
+        for seed in 0..4000u64 {
+            let cards: Vec<Recalled> = (0..5)
+                .map(|i| Recalled {
+                    card: crate::cards::card_from(&crate::cards::tests::record(
+                        DreamTheme::Garden,
+                        seed * 10 + i,
+                        1 + i as u32,
+                        0.2,
+                        false,
+                    )),
+                    remembered: true,
+                })
+                .collect();
+            let offer = PackOffer {
+                theme: DreamTheme::Garden,
+                emblem: Emblem::Eye,
+                seed,
+                memory_chances: vec![0.5; 5],
+                cards,
+            };
+            let got = open(&offer);
+            assert_eq!(got, open(&offer), "same offer, same cards");
+            assert!((1..=3).contains(&got.len()), "never all five");
+            assert!(got.iter().all(|r| offer.cards.contains(r)));
+            // Run order is kept.
+            let pos: Vec<usize> = got
+                .iter()
+                .map(|r| offer.cards.iter().position(|c| c == r).unwrap())
+                .collect();
+            assert!(pos.windows(2).all(|w| w[0] < w[1]));
+            counts[got.len()] += 1;
+        }
+        // About 60 / 30 / 10 percent of 4000.
+        assert!((2200..2600).contains(&counts[1]), "{counts:?}");
+        assert!((1000..1400).contains(&counts[2]), "{counts:?}");
+        assert!((250..550).contains(&counts[3]), "{counts:?}");
+    }
+
+    #[test]
+    fn a_small_pack_never_gives_more_than_it_holds() {
+        let rec = |s| Recalled {
+            card: crate::cards::card_from(&crate::cards::tests::record(
+                DreamTheme::Garden,
+                s,
+                1,
+                0.2,
+                false,
+            )),
+            remembered: true,
+        };
+        for seed in 0..200 {
+            let one = PackOffer {
+                theme: DreamTheme::Garden,
+                emblem: Emblem::Eye,
+                seed,
+                memory_chances: vec![0.5],
+                cards: vec![rec(seed)],
+            };
+            assert_eq!(open(&one).len(), 1);
+            let two = PackOffer {
+                cards: vec![rec(seed), rec(seed + 1)],
+                memory_chances: vec![0.5; 2],
+                ..one.clone()
+            };
+            assert!((1..=2).contains(&open(&two).len()));
+        }
+        let none = PackOffer {
+            theme: DreamTheme::Garden,
+            emblem: Emblem::Eye,
+            seed: 1,
+            memory_chances: vec![],
+            cards: vec![],
+        };
+        assert!(open(&none).is_empty());
     }
 }
