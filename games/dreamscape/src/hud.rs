@@ -411,7 +411,9 @@ pub fn draw(
     }
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
-        Mode::Reveal => return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art),
+        Mode::Reveal => {
+            return crate::reveal_ui::draw_reveal(ctx, &p, screen, v, pack, art, packs_art)
+        }
         Mode::PackPick => {
             return crate::reveal_ui::draw_pick(ctx, &p, screen, v, pick, packs_art, art)
         }

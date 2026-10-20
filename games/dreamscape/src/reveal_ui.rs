@@ -261,6 +261,8 @@ pub struct PackView {
     pub cards_added: usize,
     /// Packs still to open after this one: [enter] goes back to the pick screen.
     pub picks_left: usize,
+    /// The wrapper being torn off while `age` is negative (full motion only).
+    pub wrapper: Option<pack_art::Wrapper>,
 }
 
 /// The pick screen: up to `packs::MAX_OFFERS` sealed packs, one chosen.
@@ -516,9 +518,25 @@ pub fn draw_reveal(
     v: &HudView,
     pk: &PackView,
     art: &mut CardArt,
+    packs_art: &mut PackArt,
 ) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.95));
     let cx = screen.center().x;
+    // The pack tears open first; the cards wait face down behind it.
+    if let (Some(w), true) = (&pk.wrapper, pk.age < 0.0) {
+        // Solid backdrop, so the pack can fade into it cleanly.
+        p.rect_filled(screen, 0.0, rgba([6, 3, 16], 1.0));
+        let t = 1.0 - (-pk.age / pack_art::TEAR_TIME).clamp(0.0, 1.0);
+        pack_art::draw_tear(ctx, p, screen, w, t, v.time, true, packs_art);
+        p.text(
+            Pos2::new(cx, screen.bottom() - 54.0),
+            Align2::CENTER_TOP,
+            v.k("[space] skip"),
+            FontId::monospace(20.0),
+            rgba(ink(v), 0.5),
+        );
+        return;
+    }
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 22.0),

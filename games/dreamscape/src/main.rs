@@ -2989,6 +2989,14 @@ impl DreamscapeGame {
         }
         let mut view = std::mem::take(&mut self.pick);
         let at = view.selected.min(view.offers.len() - 1);
+        let screen = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(self.screen_size.0, self.screen_size.1),
+        );
+        let from_rect = reveal_ui::pick_rects(screen, view.offers.len())
+            .get(at)
+            .copied()
+            .unwrap_or(screen);
         let kept = view.offers.remove(at);
         let cards = packs::open(&kept);
         log::info!(
@@ -3005,6 +3013,22 @@ impl DreamscapeGame {
             self.pick = view;
         }
         self.reveal_pack(cards);
+        // Full motion: the pack tears open first (a negative age counts it down).
+        // Dev: DREAMSCAPE_TEAR_FREEZE=0.5 holds the tear half way (for screenshots).
+        let freeze = crate::dev::var("DREAMSCAPE_TEAR_FREEZE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        if self.settings.motion() >= 1.0 && (!self.autopilot || freeze.is_some()) {
+            self.pack.wrapper = Some(pack_art::Wrapper {
+                theme: kept.theme,
+                emblem: kept.emblem,
+                seed: kept.seed,
+                pips: packs::take_odds(kept.cards.len()).len(),
+                from: from_rect,
+            });
+            let held = freeze.unwrap_or(0.0).clamp(0.0, 1.0);
+            self.pack.age = -pack_art::TEAR_TIME * (1.0 - held);
+        }
     }
 
     /// The pointer moved over (or clicked) the pick screen.
@@ -5662,7 +5686,16 @@ impl Game for DreamscapeGame {
             return Ok(());
         }
         if self.mode == hud::Mode::Reveal && self.pack.age < f32::MAX {
-            self.pack.age += dt;
+            let before = self.pack.age;
+            let frozen = before < 0.0 && crate::dev::var("DREAMSCAPE_TEAR_FREEZE").is_ok();
+            if !frozen {
+                self.pack.age += dt;
+            }
+            // The foil lets go: ripping sound.
+            let rip = -pack_art::TEAR_TIME * (1.0 - pack_art::TEAR_RIP_AT);
+            if before < rip && self.pack.age >= rip {
+                self.sfx(Sound::Tear);
+            }
         }
         if std::mem::take(&mut self.restart_requested) {
             return self.restart(ctx);

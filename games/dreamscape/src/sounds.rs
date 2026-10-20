@@ -35,9 +35,11 @@ pub enum Sound {
     Menu,
     /// The wake door's soft hum as you walk toward it.
     DoorHum,
+    /// A pack's foil ripping open.
+    Tear,
 }
 
-pub const ALL_SOUNDS: [Sound; 25] = [
+pub const ALL_SOUNDS: [Sound; 26] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -63,6 +65,7 @@ pub const ALL_SOUNDS: [Sound; 25] = [
     Sound::Crumble,
     Sound::Menu,
     Sound::DoorHum,
+    Sound::Tear,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -259,6 +262,12 @@ pub fn synth(sound: Sound) -> Vec<f32> {
         DoorHum => vec![
             v(196.0, 196.0, 0.9).wave(2).gain(0.16).attack(0.35).curve(1.4),
             v(294.0, 294.0, 0.9).gain(0.08).attack(0.4).curve(1.4),
+        ],
+        // Foil ripping (a fast hissy noise sweep), then a soft shimmer as the light spills out.
+        Tear => vec![
+            v(3200.0, 900.0, 0.32).noise(0.92).gain(0.4).curve(0.8),
+            v(5000.0, 2200.0, 0.2).noise(0.7).gain(0.18).at(0.05),
+            v(1568.0, 2093.0, 0.5).wave(2).gain(0.14).attack(0.1).at(0.32),
         ],
     };
     render(&voices, sound as u32 * 7919 + 1)
