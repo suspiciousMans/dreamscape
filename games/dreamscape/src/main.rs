@@ -4651,9 +4651,10 @@ impl DreamscapeGame {
         });
         log::info!("Dream name: {} — {}", self.dream_name, self.dream_whisper);
         log::info!(
-            "Dream depth={} {:?} seed={} strangeness={:.2} lucidity={}/{} blocks={} enemies={} route={} shard={:?} portal={:?} motif={:?} wake_door={} next={:?} patterns=({:?},{:?},{:?})",
+            "Dream depth={} {:?} terrain={:?} seed={} strangeness={:.2} lucidity={}/{} blocks={} enemies={} route={} shard={:?} portal={:?} motif={:?} wake_door={} next={:?} patterns=({:?},{:?},{:?})",
             dream.depth,
             dream.theme,
+            dream.terrain,
             dream.seed,
             dream.strangeness,
             self.director.lucidity,

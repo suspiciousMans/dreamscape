@@ -187,6 +187,8 @@ pub enum LayoutKind {
     Corridor,
     /// Square rooms nested inside each other, a door in each.
     Recursive,
+    /// Tiered ground: a pyramid to climb or a crater that caves in.
+    Terraces,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

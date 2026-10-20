@@ -6,6 +6,23 @@ use std::collections::VecDeque;
 
 pub type P = (i32, i32);
 
+/// How high one terrace level is (world units). A plain jump (apex ~1.8,
+/// and still ~0.85 on a bad day) always clears one level; three levels
+/// (2.1) is a cliff that needs an ability, a double jump or a spring.
+pub const LEVEL_H: f32 = 0.7;
+/// The tallest step you can walk up with a plain jump, in levels.
+pub const MAX_STEP: i32 = 1;
+
+/// The shape of a dream's ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Terrain {
+    Flat,
+    /// Climb tier by tier to a summit.
+    Pyramid,
+    /// A bowl that caves in: down tier by tier to the pit.
+    Crater,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cell {
     Void,
@@ -18,6 +35,9 @@ pub struct Grid {
     pub w: i32,
     pub h: i32,
     cells: Vec<Cell>,
+    /// Terrace level of each cell (0 everywhere on a flat dream). One level
+    /// per cell, so nothing is ever stacked above or below anything else.
+    levels: Vec<i8>,
 }
 
 impl Grid {
@@ -26,6 +46,31 @@ impl Grid {
             w,
             h,
             cells: vec![fill; (w * h) as usize],
+            levels: vec![0; (w * h) as usize],
+        }
+    }
+
+    pub fn level(&self, p: P) -> i32 {
+        self.index(p).map_or(0, |i| self.levels[i] as i32)
+    }
+
+    pub fn set_level(&mut self, p: P, level: i32) {
+        if let Some(i) = self.index(p) {
+            self.levels[i] = level as i8;
+        }
+    }
+
+    pub fn max_level(&self) -> i32 {
+        self.levels.iter().copied().max().unwrap_or(0) as i32
+    }
+
+    /// Flat, or which way the ground rises.
+    pub fn terrain(&self) -> Terrain {
+        let (centre, corner) = (self.level((self.w / 2, self.h / 2)), self.level((0, 0)));
+        match self.max_level() {
+            0 => Terrain::Flat,
+            _ if centre > corner => Terrain::Pyramid,
+            _ => Terrain::Crater,
         }
     }
 
@@ -51,26 +96,32 @@ impl Grid {
             .collect()
     }
 
-    /// Centre of a cell on the floor plane (y = 0); the grid is centred on the origin.
+    /// Centre of a cell's floor surface (y = its terrace height); the grid is
+    /// centred on the origin.
     pub fn world(&self, (x, y): P) -> Vec3 {
         Vec3::new(
             (x as f32 - (self.w - 1) as f32 * 0.5) * CELL,
-            0.0,
+            self.level((x, y)) as f32 * LEVEL_H,
             (y as f32 - (self.h - 1) as f32 * 0.5) * CELL,
         )
     }
 
     /// Legal moves: one step onto Floor, or a jump over exactly one Void onto
-    /// Floor (never over a Wall). The bool is "this move is a jump".
+    /// Floor (never over a Wall). The bool is "this move is a jump" (also set
+    /// for any step up or down a terrace). Terraces more than `MAX_STEP`
+    /// levels apart are a cliff: no move.
     pub fn moves(&self, (x, y): P) -> Vec<(P, bool)> {
         let mut out = Vec::new();
+        let here = self.level((x, y));
+        let near = |p: P| (self.level(p) - here).abs() <= MAX_STEP;
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let step = (x + dx, y + dy);
             match self.get(step) {
-                Cell::Floor => out.push((step, false)),
+                Cell::Floor if near(step) => out.push((step, self.level(step) != here)),
+                Cell::Floor => {}
                 Cell::Void => {
                     let land = (x + 2 * dx, y + 2 * dy);
-                    if self.get(land) == Cell::Floor {
+                    if self.get(land) == Cell::Floor && near(land) {
                         out.push((land, true));
                     }
                 }

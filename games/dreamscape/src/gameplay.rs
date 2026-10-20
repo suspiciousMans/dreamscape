@@ -79,8 +79,13 @@ pub fn advance_waypoint(
 }
 
 pub fn follow_camera(current: Vec3, player: Vec3, dt: f32) -> Vec3 {
+    // Dev: DREAMSCAPE_CAM_ZOOM=3 pulls the camera back (for terrain screenshots).
+    let zoom = crate::dev::var("DREAMSCAPE_CAM_ZOOM")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0);
     current.lerp(
-        player + CAMERA_OFFSET,
+        player + CAMERA_OFFSET * zoom,
         (CAMERA_LERP_PER_SEC * dt).clamp(0.0, 1.0),
     )
 }
@@ -149,31 +154,44 @@ pub fn blink_target(
         let h = b.size * 0.5;
         (to.x - b.pos.x).abs() < h.x + margin && (to.z - b.pos.z).abs() < h.z + margin
     };
-    // The whole footprint must be over floor (it may straddle two slabs).
-    let on_floor = |p: Vec3| {
-        blocks.iter().any(|b| {
-            let h = b.size * 0.5;
-            b.kind == BlockKind::Floor
-                && (p.x - b.pos.x).abs() <= h.x + 1e-3
-                && (p.z - b.pos.z).abs() <= h.z + 1e-3
-        })
-    };
     let r = PLAYER_RADIUS * 0.5;
-    let floor = [
-        Vec3::ZERO,
-        Vec3::X * r,
-        -Vec3::X * r,
-        Vec3::Z * r,
-        -Vec3::Z * r,
-    ]
-    .iter()
-    .all(|&o| on_floor(to + o));
+    // The floor under each footprint point, as the tops of the slabs there.
+    let tops_at = |p: Vec3| {
+        blocks
+            .iter()
+            .filter(|b| {
+                let h = b.size * 0.5;
+                b.kind == BlockKind::Floor
+                    && (p.x - b.pos.x).abs() <= h.x + 1e-3
+                    && (p.z - b.pos.z).abs() <= h.z + 1e-3
+            })
+            .map(|b| b.pos.y + b.size.y * 0.5)
+            .collect::<Vec<f32>>()
+    };
+    // You land on the highest floor you can step up to from where you stand
+    // (the player's centre is 1.0 above their feet).
+    let feet = from.y - 1.0;
+    let landing = tops_at(to)
+        .into_iter()
+        .filter(|&t| t <= feet + 1.0)
+        .fold(f32::MIN, f32::max);
+    let floor = landing > f32::MIN
+        && [
+            Vec3::ZERO,
+            Vec3::X * r,
+            -Vec3::X * r,
+            Vec3::Z * r,
+            -Vec3::Z * r,
+        ]
+        .iter()
+        .all(|&o| tops_at(to + o).iter().any(|&t| (t - landing).abs() < 0.5));
     let blocked = blocks.iter().any(|b| {
         matches!(b.kind, BlockKind::Wall | BlockKind::Prop)
-            && b.pos.y - b.size.y * 0.5 < 2.0
+            && b.pos.y - b.size.y * 0.5 < landing + 2.0
+            && b.pos.y + b.size.y * 0.5 > landing
             && covers(b, PLAYER_RADIUS)
     });
-    (floor && !blocked).then(|| Vec3::new(to.x, 1.0, to.z))
+    (floor && !blocked).then(|| Vec3::new(to.x, landing + 1.0, to.z))
 }
 
 /// Seed for "dream again": a fresh, reproducible run derived from the last one.
