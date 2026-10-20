@@ -5,9 +5,11 @@
 use crate::booklet_ui::{card, card_frame, CardArt, CARD_SIZE};
 use crate::cards::Card;
 use crate::hud::{glitch_text, ink, rgba, HudView};
+use crate::pixel_ui;
+use crate::pixels::icons;
 use crate::powers::power;
 use crate::upgrades::{ABILITY_SLOTS, SLOT_KEYS};
-use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
+use engine::ui::egui::{self, Align2, Color32, FontId, Pos2, Rect, Vec2};
 
 /// Cards per row in the grid.
 pub const COLS: usize = 6;
@@ -88,148 +90,472 @@ pub fn slot_of(chosen: &[&Card], number: u32) -> Option<usize> {
     None
 }
 
-/// The booklet's cards as small tiles, `COLS` wide, scrolling with the
-/// cursor; `marked` cards are filled in.
+/// How the grid marks cards: filled in (in the loadout / the first merge
+/// card), a letter badge, and cards that can't be picked right now.
+#[derive(Default)]
+pub struct GridMarks<'a> {
+    pub marked: &'a [u32],
+    /// A card that wears a letter, like the first card of a merge: ("A").
+    pub badge: Option<(u32, &'static str)>,
+    /// Cards of this dream are dimmed (they can't merge with the first card).
+    pub dim_theme: Option<crate::dream::DreamTheme>,
+}
+
+/// The tile size for a grid `width` wide.
+fn tile_size(width: f32, u: f32) -> Vec2 {
+    let gap = 8.0 * u;
+    let w = ((width - gap * (COLS as f32 - 1.0)) / COLS as f32).clamp(40.0, 120.0 * u);
+    Vec2::new(w, (w * 0.66).max(28.0))
+}
+
+/// Where the grid's tile `i` sits (row `row` of the visible window).
+fn tile_rect(left: f32, top: f32, tile: Vec2, gap: f32, i: usize, first_row: usize) -> Rect {
+    let row = i / COLS;
+    Rect::from_min_size(
+        Pos2::new(
+            left + (i % COLS) as f32 * (tile.x + gap),
+            top + (row - first_row) as f32 * (tile.y + gap),
+        ),
+        tile,
+    )
+}
+
+/// The booklet's cards as small pixel tiles, `COLS` wide, scrolling with the
+/// cursor. Each shows its number, attribute and what its active ability is.
+/// Returns the bottom of the grid.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_grid(
     p: &egui::Painter,
     screen: Rect,
     v: &HudView,
     cards: &[Card],
     selected: usize,
-    marked: &[u32],
+    marks: &GridMarks,
     grid_top: f32,
-) {
+    width: f32,
+) -> f32 {
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
     let left = screen.left() + screen.width() * 0.05;
-    let tile = Vec2::new(92.0, 48.0);
+    let gap = 8.0 * u;
+    let tile = tile_size(width, u);
     let first_row = (selected / COLS).saturating_sub(ROWS - 1);
-    for (i, c) in cards.iter().enumerate() {
+    let shown = (cards.len().div_ceil(COLS) - first_row.min(cards.len().div_ceil(COLS))).min(ROWS);
+    for (i, card) in cards.iter().enumerate() {
         let row = i / COLS;
         if row < first_row || row >= first_row + ROWS {
             continue;
         }
-        let at = Pos2::new(
-            left + (i % COLS) as f32 * (tile.x + 8.0),
-            grid_top + (row - first_row) as f32 * (tile.y + 8.0),
+        let r = tile_rect(left, grid_top, tile, gap, i, first_row);
+        let col = card_frame(card, v.time);
+        let power = power(card.theme);
+        let on = marks.marked.contains(&card.number);
+        let dim = marks.dim_theme == Some(card.theme);
+        let sel = i == selected;
+        let a = if dim { 0.35 } else { 1.0 };
+        pixel_ui::panel(
+            p,
+            r,
+            col,
+            rgba(
+                if on { col } else { [14, 8, 28] },
+                if on { 0.38 } else { 0.9 },
+            ),
+            c.min(tile.y / 8.0).max(2.0),
+            if sel { 1.0 } else { 0.7 * a },
         );
-        let r = Rect::from_min_size(at, tile);
-        let col = card_frame(c, v.time);
-        let inn = marked.contains(&c.number);
-        p.rect_filled(r, 3.0, rgba(col, if inn { 0.35 } else { 0.08 }));
-        let w = if i == selected { 3.0_f32 } else { 1.0_f32 };
-        p.rect_stroke(r, 3.0, Stroke::new(w, rgba(col, 0.9)));
-        p.text(
-            r.center() - Vec2::new(0.0, 8.0),
-            Align2::CENTER_CENTER,
-            format!("#{}", c.number),
-            FontId::monospace(12.0),
-            rgba(ink(v), 0.8),
+        // A band of the rarity colour along the top.
+        p.rect_filled(
+            Rect::from_min_size(
+                r.left_top() + Vec2::new(c * 2.0, c * 2.0),
+                Vec2::new(tile.x - c * 4.0, c),
+            ),
+            0.0,
+            rgba(col, 0.55 * a),
         );
+        // The ability this card teaches.
+        let ipx = (c * 0.67).max(2.0);
+        pixel_ui::icon(
+            p,
+            r.left_center() + Vec2::new(c * 2.0 + ipx * 4.5, c * 0.7),
+            icons::ability(power.active),
+            ipx,
+            power.tint,
+            pixel_ui::lighter(power.tint),
+            a,
+        );
+        let text_x = r.left() + c * 3.0 + ipx * 9.0;
         p.text(
-            r.center() + Vec2::new(0.0, 10.0),
-            Align2::CENTER_CENTER,
-            c.attribute.label(),
-            FontId::monospace(12.0),
-            rgba(col, 1.0),
+            Pos2::new(text_x, r.top() + tile.y * 0.34),
+            Align2::LEFT_CENTER,
+            format!("#{}", card.number),
+            FontId::monospace((tile.y * 0.24).max(9.0)),
+            rgba(ink(v), 0.9 * a),
+        );
+        let attr = card.attribute.label();
+        let size = pixel_ui::fit(attr, tile.y * 0.24, r.right() - text_x - c * 2.0, 7.0);
+        p.text(
+            Pos2::new(text_x, r.top() + tile.y * 0.7),
+            Align2::LEFT_CENTER,
+            attr,
+            FontId::monospace(size),
+            rgba(col, a),
+        );
+        if on && marks.badge.is_none() {
+            pixel_ui::check(
+                p,
+                r.right_top() + Vec2::new(-c * 4.0, c * 4.5),
+                (c * 0.67).max(2.0),
+                rgba([255, 255, 255], 0.95),
+            );
+        }
+        if let Some((n, letter)) = marks.badge {
+            if n == card.number {
+                let b = Rect::from_center_size(
+                    r.right_top() + Vec2::new(-c * 4.0, c * 4.5),
+                    Vec2::splat(c * 4.5),
+                );
+                p.rect_filled(b, 0.0, rgba([255, 240, 150], 1.0));
+                p.text(
+                    b.center(),
+                    Align2::CENTER_CENTER,
+                    letter,
+                    FontId::monospace(c * 4.0),
+                    rgba([20, 10, 0], 1.0),
+                );
+            }
+        }
+        if sel {
+            // The cursor: brackets that breathe a cell in and out.
+            let bob = if v.settings_snapshot.motion() >= 1.0 {
+                ((v.time * 4.0).sin() * 0.5 + 0.5).round() * c
+            } else {
+                0.0
+            };
+            pixel_ui::brackets(p, r.expand(c * 0.5 + bob), c, rgba(ink(v), 1.0));
+        }
+    }
+    // Where you are in a long booklet: a thin track beside the grid.
+    let rows_total = cards.len().div_ceil(COLS);
+    let height = shown as f32 * (tile.y + gap) - gap;
+    if rows_total > ROWS {
+        let x = left + COLS as f32 * (tile.x + gap) - gap + c * 2.0;
+        let track = Rect::from_min_size(Pos2::new(x, grid_top), Vec2::new(c, height));
+        p.rect_filled(track, 0.0, rgba(ink(v), 0.12));
+        let thumb_h = (height * ROWS as f32 / rows_total as f32).max(c * 3.0);
+        let thumb_y = grid_top + (height - thumb_h) * first_row as f32 / (rows_total - ROWS) as f32;
+        p.rect_filled(
+            Rect::from_min_size(Pos2::new(x, thumb_y), Vec2::new(c, thumb_h)),
+            0.0,
+            rgba(ink(v), 0.7),
         );
     }
+    p.text(
+        Pos2::new(left, grid_top + height + 6.0 * u),
+        Align2::LEFT_TOP,
+        format!("{} / {}", (selected + 1).min(cards.len()), cards.len()),
+        FontId::monospace(13.0 * u),
+        rgba(ink(v), 0.5),
+    );
+    grid_top + height
+}
+
+/// A card's ability and passive as icon lines, for the detail panels.
+/// Returns the height used.
+pub fn power_lines(
+    p: &egui::Painter,
+    at: Pos2,
+    width: f32,
+    c: &Card,
+    slot: Option<usize>,
+    u: f32,
+    time: f32,
+) -> f32 {
+    let pw = power(c.theme);
+    let (active, passive) = describe(c, slot);
+    let ipx = (3.0 * u).round().max(2.0);
+    let row_h = ipx * 9.0 + 8.0 * u;
+    // The ability.
+    pixel_ui::icon(
+        p,
+        at + Vec2::new(ipx * 4.5, ipx * 4.5),
+        icons::ability(pw.active),
+        ipx,
+        pw.tint,
+        pixel_ui::lighter(pw.tint),
+        1.0,
+    );
+    let tx = at.x + ipx * 10.5;
+    p.text(
+        Pos2::new(tx, at.y),
+        Align2::LEFT_TOP,
+        &active,
+        FontId::monospace(pixel_ui::fit(&active, 17.0 * u, width - ipx * 10.5, 9.0)),
+        rgba([255, 200, 255], 0.95),
+    );
+    p.text(
+        Pos2::new(tx, at.y + 20.0 * u),
+        Align2::LEFT_TOP,
+        pw.active.desc(),
+        FontId::monospace(pixel_ui::fit(
+            pw.active.desc(),
+            12.0 * u,
+            width - ipx * 10.5,
+            7.0,
+        )),
+        rgba([200, 180, 225], 0.75),
+    );
+    // The passive.
+    let y2 = at.y + row_h + 6.0 * u;
+    let info = pw.passive.info();
+    pixel_ui::icon(
+        p,
+        Pos2::new(at.x + ipx * 4.5, y2 + ipx * 4.5),
+        crate::upgrade_ui::icon_rows(info.icon),
+        ipx,
+        info.color,
+        pixel_ui::lighter(info.color),
+        1.0,
+    );
+    p.text(
+        Pos2::new(tx, y2),
+        Align2::LEFT_TOP,
+        &passive,
+        FontId::monospace(pixel_ui::fit(&passive, 15.0 * u, width - ipx * 10.5, 8.0)),
+        rgba([170, 255, 200], 0.95),
+    );
+    p.text(
+        Pos2::new(tx, y2 + 20.0 * u),
+        Align2::LEFT_TOP,
+        info.desc,
+        FontId::monospace(pixel_ui::fit(info.desc, 12.0 * u, width - ipx * 10.5, 7.0)),
+        rgba([160, 220, 190], 0.7),
+    );
+    // The flavour, a little glitchy.
+    let y3 = y2 + row_h + 6.0 * u;
+    let wob = if (time * 0.7).fract() < 0.04 {
+        1.0
+    } else {
+        0.0
+    };
+    pixel_ui::split_text(
+        p,
+        Pos2::new(at.x + wob, y3),
+        Align2::LEFT_TOP,
+        pw.flavour,
+        pixel_ui::fit(pw.flavour, 13.0 * u, width, 7.0),
+        rgba([190, 180, 220], 0.9),
+        1.0,
+        0.5,
+    );
+    y3 + 18.0 * u - at.y
+}
+
+/// The bottom hint line, in a pixel strip.
+pub fn hint_bar(p: &egui::Painter, screen: Rect, v: &HudView, text: &str) {
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
+    let text = v.k(text);
+    let size = pixel_ui::fit(&text, 19.0 * u, screen.width() - 60.0, 9.0);
+    let w = (text.chars().count() as f32 * size * 0.6 + c * 8.0).min(screen.width() - 20.0);
+    let r = Rect::from_center_size(
+        Pos2::new(screen.center().x, screen.bottom() - 34.0 * u),
+        Vec2::new(w, size + c * 4.0),
+    );
+    pixel_ui::panel(p, r, [120, 100, 170], rgba([10, 5, 24], 0.85), c, 0.6);
+    p.text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        text,
+        FontId::monospace(size),
+        rgba(ink(v), 0.6 + 0.3 * (v.time * 2.0).sin()),
+    );
 }
 
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     let m = &v.loadout;
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.95));
     let cx = screen.center().x;
-    let top = screen.top() + 24.0;
-    glitch_text(p, Pos2::new(cx, top), true, "LOADOUT", 44.0, ink(v), 1.0, v);
+    let top = screen.top() + 22.0 * u;
+    glitch_text(
+        p,
+        Pos2::new(cx, top),
+        true,
+        "LOADOUT",
+        44.0 * u,
+        ink(v),
+        1.0,
+        v,
+    );
     let chosen: Vec<&Card> = m
         .chosen
         .iter()
         .filter_map(|&n| m.cards.iter().find(|c| c.number == n))
         .collect();
 
-    // The slots.
-    let slot_w = 170.0;
-    let row_y = top + 64.0;
-    let total = crate::lore::MAX_SLOTS as f32 * (slot_w + 12.0) - 12.0;
+    // The slots: each shows the card in it and the ability it brings.
+    let gap = 10.0 * u;
+    let slot_w = ((screen.width() * 0.9 - gap * (crate::lore::MAX_SLOTS as f32 - 1.0))
+        / crate::lore::MAX_SLOTS as f32)
+        .min(190.0 * u);
+    let slot_h = 64.0 * u;
+    let row_y = top + 62.0 * u;
+    let total = crate::lore::MAX_SLOTS as f32 * (slot_w + gap) - gap;
     for i in 0..crate::lore::MAX_SLOTS {
         let r = Rect::from_min_size(
-            Pos2::new(cx - total * 0.5 + i as f32 * (slot_w + 12.0), row_y),
-            Vec2::new(slot_w, 40.0),
+            Pos2::new(cx - total * 0.5 + i as f32 * (slot_w + gap), row_y),
+            Vec2::new(slot_w, slot_h),
         );
         let open = i < m.slots;
-        let (text, col) = match chosen.get(i) {
-            Some(c) => (c.name.clone(), card_frame(c, v.time)),
-            None if open => ("empty".into(), [120, 110, 150]),
-            None => ("locked".into(), [60, 55, 80]),
-        };
-        p.rect_stroke(
-            r,
-            3.0,
-            Stroke::new(2.0_f32, rgba(col, if open { 0.9 } else { 0.4 })),
-        );
-        p.text(
-            r.center(),
-            Align2::CENTER_CENTER,
-            text,
-            FontId::monospace(13.0),
-            rgba(col, if open { 0.95 } else { 0.5 }),
-        );
+        match chosen.get(i) {
+            Some(card) => {
+                let col = card_frame(card, v.time);
+                pixel_ui::panel(p, r, col, rgba(col, 0.16), c, 1.0);
+                let pw = power(card.theme);
+                pixel_ui::icon(
+                    p,
+                    r.left_center() + Vec2::new(c * 2.0 + c * 6.0, 0.0),
+                    icons::ability(pw.active),
+                    c * 0.67,
+                    pw.tint,
+                    pixel_ui::lighter(pw.tint),
+                    1.0,
+                );
+                let tx = r.left() + c * 3.0 + c * 0.67 * 9.0 + c;
+                let text_w = r.right() - tx - c * 2.0;
+                let galley = p.layout(
+                    card.name.clone(),
+                    FontId::monospace((12.0 * u).max(8.0)),
+                    rgba(col, 0.95),
+                    text_w,
+                );
+                // Two lines at most; anything longer is cut off with a tilde.
+                let line_h = galley.size().y / galley.rows.len().max(1) as f32;
+                let rows = galley.rows.len().min(2);
+                let mut shown: String = String::new();
+                for (k, row) in galley.rows.iter().take(rows).enumerate() {
+                    if k > 0 {
+                        shown.push('\n');
+                    }
+                    shown.push_str(row.text().trim_end());
+                }
+                if galley.rows.len() > 2 {
+                    shown.pop();
+                    shown.push('~');
+                }
+                p.text(
+                    Pos2::new(tx, r.top() + c * 2.0),
+                    Align2::LEFT_TOP,
+                    shown,
+                    FontId::monospace((12.0 * u).max(8.0)),
+                    rgba(col, 0.95),
+                );
+                let _ = line_h;
+                let key = slot_of(&chosen, card.number)
+                    .map(|k| SLOT_KEYS[k].to_uppercase())
+                    .unwrap_or_else(|| "PASSIVE".to_string());
+                p.text(
+                    Pos2::new(tx, r.bottom() - c * 2.0),
+                    Align2::LEFT_BOTTOM,
+                    key,
+                    FontId::monospace((10.0 * u).max(7.0)),
+                    rgba(ink(v), 0.6),
+                );
+            }
+            None if open => {
+                pixel_ui::panel(p, r, [120, 110, 150], rgba([14, 8, 28], 0.6), c, 0.8);
+                p.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    "empty",
+                    FontId::monospace(13.0 * u),
+                    rgba([150, 140, 180], 0.7),
+                );
+            }
+            None => {
+                pixel_ui::panel(p, r, [60, 55, 80], rgba([10, 6, 20], 0.6), c, 0.6);
+                pixel_ui::hatch(p, r.shrink(c * 2.0), c, Color32::from_white_alpha(10));
+                pixel_ui::icon(
+                    p,
+                    r.center(),
+                    &icons::LOCK,
+                    (c * 0.67).max(2.0),
+                    [90, 80, 120],
+                    [120, 110, 150],
+                    0.9,
+                );
+            }
+        }
     }
 
     if let Some(line) = &m.companion {
         p.text(
-            Pos2::new(cx, row_y + 50.0),
+            Pos2::new(cx, row_y + slot_h + 10.0 * u),
             Align2::CENTER_TOP,
             v.k(line),
-            FontId::monospace(15.0),
+            FontId::monospace(15.0 * u),
             rgba([200, 170, 230], 0.9),
         );
     }
 
-    // The grid (scrolls with the cursor).
-    let grid_top = row_y + 76.0;
-    draw_grid(p, screen, v, &m.cards, m.selected, &m.chosen, grid_top);
+    // The grid (scrolls with the cursor) on the left; the card and its powers on the right.
+    let grid_top = row_y + slot_h + 38.0 * u;
+    let left = screen.left() + screen.width() * 0.05;
+    let detail_w = CARD_SIZE.x * 1.0 + 24.0 * u;
+    let grid_w = (screen.right() - screen.width() * 0.05 - detail_w - 24.0 * u - left).max(300.0);
+    let marks = GridMarks {
+        marked: &m.chosen,
+        ..Default::default()
+    };
+    draw_grid(p, screen, v, &m.cards, m.selected, &marks, grid_top, grid_w);
 
-    // The selected card, big, and what it does.
-    if let Some(c) = m.cards.get(m.selected) {
-        let right = screen.right() - screen.width() * 0.05 - CARD_SIZE.x;
-        let r = Rect::from_min_size(Pos2::new(right, grid_top), CARD_SIZE);
-        card(ctx, p, r, c, v, art, 1.0);
-        let pw = power(c.theme);
-        let slot = if m.chosen.contains(&c.number) {
-            slot_of(&chosen, c.number).or(Some(usize::MAX))
+    if let Some(card_sel) = m.cards.get(m.selected) {
+        let avail = screen.bottom() - 64.0 * u - grid_top;
+        let sc = ((avail - 150.0 * u) / CARD_SIZE.y).clamp(0.45, 1.0);
+        let size = CARD_SIZE * sc;
+        let right = screen.right() - screen.width() * 0.05 - size.x;
+        let r = Rect::from_min_size(Pos2::new(right, grid_top), size);
+        let col = card_frame(card_sel, v.time);
+        // A panel behind the card, so it sits on something.
+        let back = r.expand2(Vec2::new(10.0 * u, 10.0 * u));
+        pixel_ui::panel(p, back, col, rgba([12, 6, 26], 0.8), c, 0.5);
+        card(ctx, p, r, card_sel, v, art, sc);
+        let slot = if m.chosen.contains(&card_sel.number) {
+            slot_of(&chosen, card_sel.number).or(Some(usize::MAX))
         } else {
             None
         };
-        let (active, passive) = describe(c, slot);
-        let mut y = r.bottom() + 14.0;
-        for (text, col, size) in [
-            (
-                format!("{} · {}", c.name, c.attribute.label()),
-                card_frame(c, v.time),
-                16.0,
-            ),
-            (active, [255, 200, 255], 18.0),
-            (passive, [170, 255, 200], 16.0),
-            (pw.flavour.to_string(), [190, 180, 220], 15.0),
-        ] {
-            p.text(
-                Pos2::new(r.left(), y),
-                Align2::LEFT_TOP,
-                text,
-                FontId::monospace(size),
-                rgba(col, 0.95),
-            );
-            y += size + 10.0;
-        }
+        let at = Pos2::new(r.left(), back.bottom() + 12.0 * u);
+        pixel_ui::split_text(
+            p,
+            at,
+            Align2::LEFT_TOP,
+            &card_sel.name,
+            pixel_ui::fit(&card_sel.name, 15.0 * u, size.x, 8.0),
+            rgba(col, 1.0),
+            1.0,
+            0.5,
+        );
+        power_lines(
+            p,
+            at + Vec2::new(0.0, 22.0 * u),
+            size.x,
+            card_sel,
+            slot,
+            u,
+            v.time,
+        );
     }
 
-    p.text(
-        Pos2::new(cx, screen.bottom() - 40.0),
-        Align2::CENTER_TOP,
-        v.k("[a/d/w/s] browse   [enter] add/remove   [space] fall asleep   [esc] back"),
-        FontId::monospace(20.0),
-        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
+    hint_bar(
+        p,
+        screen,
+        v,
+        "[a/d/w/s] browse   [enter] add/remove   [space] fall asleep   [esc] back",
     );
+    pixel_ui::scanlines(p, screen, c, 10);
 }
 
 #[cfg(test)]

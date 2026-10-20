@@ -711,40 +711,114 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     for (k, &(name, key, charge, active)) in v.abilities.iter().enumerate() {
-        let r = Rect::from_min_size(
-            screen.left_bottom() + Vec2::new(28.0 + k as f32 * 150.0, -84.0),
-            Vec2::new(136.0, 56.0),
+        ability_box(p, screen, v, k, name, key, charge, active);
+    }
+}
+
+/// One held ability, bottom left: its icon, key, name, and a segmented
+/// recharge bar. Pixel panel, chipped corners, like a card.
+#[allow(clippy::too_many_arguments)]
+fn ability_box(
+    p: &egui::Painter,
+    screen: Rect,
+    v: &HudView,
+    k: usize,
+    name: &str,
+    key: &str,
+    charge: f32,
+    active: bool,
+) {
+    let r = Rect::from_min_size(
+        screen.left_bottom() + Vec2::new(28.0 + k as f32 * 150.0, -84.0),
+        Vec2::new(136.0, 56.0),
+    );
+    let ready = charge >= 1.0;
+    let rgb = if active {
+        hue(v.time * 0.8)
+    } else if ready {
+        [255, 150, 255]
+    } else {
+        [120, 100, 150]
+    };
+    let c = 3.0;
+    crate::pixel_ui::panel(
+        p,
+        r,
+        rgb,
+        rgba([12, 6, 28], 0.78),
+        c,
+        if ready || active { 1.0 } else { 0.7 },
+    );
+    // The ability's icon, tinted like its card; dim while recharging.
+    let ability = crate::upgrades::ALL_ABILITIES
+        .iter()
+        .find(|a| a.name() == name);
+    let centre = r.left_top() + Vec2::new(c * 2.0 + 15.0, 22.0);
+    if let Some(&a) = ability {
+        let tone = if ready || active { rgb } else { [150, 130, 180] };
+        crate::pixel_ui::icon(
+            p,
+            centre,
+            crate::pixels::icons::ability(a),
+            3.0,
+            tone,
+            crate::pixel_ui::lighter(tone),
+            if ready || active { 1.0 } else { 0.6 },
         );
-        let ready = charge >= 1.0;
-        let rgb = if active {
-            hue(v.time * 0.8)
-        } else if ready {
-            [255, 150, 255]
-        } else {
-            [120, 100, 150]
-        };
-        p.rect_filled(r, 4.0, rgba([12, 6, 28], 0.7));
-        // Recharge fills from the bottom.
-        let fill = Rect::from_min_max(
-            Pos2::new(r.left(), r.bottom() - r.height() * charge),
-            r.right_bottom(),
-        );
-        p.rect_filled(fill, 4.0, rgba(rgb, if ready { 0.25 } else { 0.15 }));
-        p.rect_stroke(r, 4.0, egui::Stroke::new(2.0_f32, rgba(rgb, 0.9)));
-        p.text(
-            r.left_top() + Vec2::new(8.0, 5.0),
-            Align2::LEFT_TOP,
-            v.k(&format!("[{key}]")),
-            FontId::monospace(16.0),
-            rgba(ink(v), 0.7),
-        );
-        p.text(
-            r.left_top() + Vec2::new(8.0, 24.0),
+    }
+    // Name, and the key on a little cap.
+    let tx = r.left() + c * 2.0 + 33.0;
+    let size = crate::pixel_ui::fit(name, 14.0, r.right() - tx - c * 2.0, 8.0);
+    if active {
+        crate::pixel_ui::split_text(
+            p,
+            Pos2::new(tx, r.top() + 10.0),
             Align2::LEFT_TOP,
             name,
-            FontId::monospace(22.0),
+            size,
+            rgba(rgb, 1.0),
+            1.0,
+            1.0,
+        );
+    } else {
+        p.text(
+            Pos2::new(tx, r.top() + 10.0),
+            Align2::LEFT_TOP,
+            name,
+            FontId::monospace(size),
             rgba(rgb, 1.0),
         );
+    }
+    let key_text = v.k(&format!("[{key}]"));
+    let key_w = key_text.chars().count() as f32 * 11.0 * 0.6;
+    crate::pixel_ui::keycap(
+        p,
+        Pos2::new(tx + key_w * 0.5 + 4.0, r.top() + 33.0),
+        &key_text,
+        11.0,
+        2.0,
+        rgb,
+        if ready || active { 1.0 } else { 0.7 },
+    );
+    // Recharge: ten cells fill left to right; ready ones pulse.
+    let cells = 10;
+    let lit = (charge.clamp(0.0, 1.0) * cells as f32).floor() as i32;
+    let cw = (r.width() - c * 4.0) / cells as f32;
+    for i in 0..cells {
+        let cell = Rect::from_min_size(
+            Pos2::new(r.left() + c * 2.0 + i as f32 * cw, r.bottom() - c * 2.0 - 5.0),
+            Vec2::new(cw - 1.0, 5.0),
+        );
+        if i < lit || ready {
+            let pulse = if ready { 0.7 + 0.3 * (v.time * 5.0 + i as f32 * 0.5).sin() } else { 0.9 };
+            p.rect_filled(cell, 0.0, rgba(rgb, pulse));
+        } else {
+            p.rect_filled(cell, 0.0, rgba(rgb, 0.15));
+        }
+    }
+    // Just became ready: a sparkle on the icon.
+    if ready && !active && (v.time * 2.0).fract() < 0.5 {
+        crate::pixel_ui::sparkle(p, centre + Vec2::new(14.0, -14.0), 2.0, rgba([255, 255, 255], 0.9));
     }
 }
 

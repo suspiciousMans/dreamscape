@@ -242,6 +242,64 @@ pub mod icons {
         "#+++++++#", "#+++++++#", ".#+++++#.", "..#####..",
     ];
 
+    // Ability icons: what the card teaches, drawn the same 9x9 way.
+    pub const DASH: [&str; SIZE] = [
+        "#...+....", ".#...+...", "..#...+..", "...#...+.", "....#...+",
+        "...#...+.", "..#...+..", ".#...+...", "#...+....",
+    ];
+    pub const REWIND: [&str; SIZE] = [
+        "....+...#", "...+...#.", "..+...#..", ".+...#...", "+...#....",
+        ".+...#...", "..+...#..", "...+...#.", "....+...#",
+    ];
+    pub const BLINK: [&str; SIZE] = [
+        ".........", ".........", "......#..", ".....#+#.", "#.#.#+++#",
+        ".....#+#.", "......#..", ".........", ".........",
+    ];
+    pub const STILLNESS: [&str; SIZE] = [
+        "..#####..", ".#.....#.", "#..+.+..#", "#..+.+..#", "#..+.+..#",
+        "#..+.+..#", ".#.....#.", "..#####..", ".........",
+    ];
+    pub const PHASE: [&str; SIZE] = [
+        "..#####..", ".#+++++#.", "#++#+#++#", "#+++++++#", "#+++++++#",
+        "#+++++++#", "#+++++++#", "#+#+#+#+#", ".#.#.#.#.",
+    ];
+    pub const SHARD_CALL: [&str; SIZE] = [
+        "+.......+", ".+.....+.", "....#....", "...#+#...", "..#+++#..",
+        "...#+#...", "....#....", ".+.....+.", "+.......+",
+    ];
+    pub const DECOY: [&str; SIZE] = [
+        ".........", ".##...++.", ".##...++.", "####.++++", "####.++++",
+        ".##...++.", ".##...++.", ".........", ".........",
+    ];
+    pub const FLOAT: [&str; SIZE] = [
+        "....#....", "...###...", "..#.#.#..", "....#....", "....#....",
+        "+.+...+.+", ".+.....+.", "...+.+...", ".........",
+    ];
+    pub const FLARE: [&str; SIZE] = [
+        "....#....", ".#.....#.", "..#+++#..", "..+++++..", "#.+++++.#",
+        "..+++++..", "..#+++#..", ".#.....#.", "....#....",
+    ];
+    pub const LOCK: [&str; SIZE] = [
+        "..#####..", ".#.....#.", ".#.....#.", "#########", "#+++#+++#",
+        "#+++#+++#", "#+++++++#", "#+++++++#", "#########",
+    ];
+
+    /// The icon for what a card's active ability does.
+    pub fn ability(a: crate::upgrades::Ability) -> &'static [&'static str; SIZE] {
+        use crate::upgrades::Ability::*;
+        match a {
+            Dash => &DASH,
+            Blink => &BLINK,
+            Stillness => &STILLNESS,
+            Phase => &PHASE,
+            ShardCall => &SHARD_CALL,
+            Decoy => &DECOY,
+            Float => &FLOAT,
+            Flare => &FLARE,
+            Rewind => &REWIND,
+        }
+    }
+
     /// (x, y, accent?) for every filled pixel, centred on (0, 0).
     pub fn cells(icon: &[&str; SIZE]) -> Vec<(i32, i32, bool)> {
         let h = (SIZE / 2) as i32;
@@ -258,8 +316,9 @@ pub mod icons {
     }
 
     #[cfg(test)]
-    pub const ALL: [&[&str; SIZE]; 11] = [
-        &SHARD, &HEART, &BRAIN, &LID, &WIND, &MAGNET, &BOOT, &EYE, &GEM, &CARD, &INK,
+    pub const ALL: [&[&str; SIZE]; 21] = [
+        &SHARD, &HEART, &BRAIN, &LID, &WIND, &MAGNET, &BOOT, &EYE, &GEM, &CARD, &INK, &DASH,
+        &REWIND, &BLINK, &STILLNESS, &PHASE, &SHARD_CALL, &DECOY, &FLOAT, &FLARE, &LOCK,
     ];
 }
 
@@ -427,6 +486,16 @@ mod tests {
             let cells = icons::cells(icon);
             assert!(cells.len() >= 12, "icon {n} is nearly empty");
             assert!(cells.iter().all(|&(x, y, _)| x.abs() <= 4 && y.abs() <= 4));
+        }
+    }
+
+    #[test]
+    fn every_ability_has_its_own_icon() {
+        use crate::upgrades::ALL_ABILITIES;
+        for (i, a) in ALL_ABILITIES.iter().enumerate() {
+            for b in &ALL_ABILITIES[i + 1..] {
+                assert_ne!(icons::ability(*a), icons::ability(*b), "{a:?} vs {b:?}");
+            }
         }
     }
 }
