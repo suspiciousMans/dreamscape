@@ -2,7 +2,8 @@
 //! memories screen (every dreamer, their notes in order).
 
 use crate::hud::{glitch_text, ink, rgba, HudView};
-use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
+use crate::pixel_ui;
+use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Vec2};
 
 /// One dreamer's row on the memories screen.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -33,114 +34,196 @@ const PAPER_INK: [u8; 3] = [48, 38, 58];
 pub fn draw_note(p: &egui::Painter, screen: Rect, v: &HudView, note: &(String, String, String)) {
     let (object, title, body) = note;
     p.rect_filled(screen, 0.0, rgba([4, 2, 10], 0.72));
-    let size = Vec2::new(640.0_f32.min(screen.width() * 0.9), 360.0);
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
+    let size = Vec2::new(640.0_f32.min(screen.width() * 0.9), 360.0 * u.max(0.8));
     let r = Rect::from_center_size(screen.center(), size);
-    p.rect_filled(r, 2.0, rgba(PAPER, 0.97));
-    p.rect_stroke(r, 2.0, Stroke::new(3.0_f32, rgba(PAPER_INK, 0.8)));
+    // The page: paper, a hard shadow, chipped corners, a pixel pin at the top.
+    p.rect_filled(r.translate(Vec2::splat(c)), 0.0, rgba([2, 1, 6], 0.7));
+    pixel_ui::panel(p, r, PAPER_INK, rgba(PAPER, 0.98), c, 0.85);
+    let pin = Rect::from_center_size(
+        Pos2::new(r.center().x, r.top() + c * 1.5),
+        Vec2::splat(c * 2.0),
+    );
+    p.rect_filled(pin, 0.0, rgba([200, 70, 90], 1.0));
+    p.rect_filled(
+        Rect::from_min_size(pin.min, Vec2::splat(c * 0.7)),
+        0.0,
+        rgba([255, 190, 200], 1.0),
+    );
+    // Faint ruled lines, like a page torn from a pad.
+    let mut y = r.top() + 96.0 * u;
+    while y < r.bottom() - 56.0 * u {
+        p.line_segment(
+            [
+                Pos2::new(r.left() + c * 3.0, y + 30.0 * u),
+                Pos2::new(r.right() - c * 3.0, y + 30.0 * u),
+            ],
+            egui::Stroke::new(1.0_f32, rgba(PAPER_INK, 0.08)),
+        );
+        y += 34.0 * u;
+    }
     p.text(
-        r.left_top() + Vec2::new(28.0, 22.0),
+        r.left_top() + Vec2::new(28.0, 22.0 * u),
         Align2::LEFT_TOP,
         object.to_uppercase(),
-        FontId::monospace(16.0),
+        FontId::monospace(16.0 * u.max(0.8)),
         rgba(PAPER_INK, 0.6),
     );
     p.text(
-        r.left_top() + Vec2::new(28.0, 46.0),
+        r.left_top() + Vec2::new(28.0, 46.0 * u),
         Align2::LEFT_TOP,
         title,
-        FontId::monospace(22.0),
+        FontId::monospace(22.0 * u.max(0.8)),
         rgba(PAPER_INK, 0.95),
     );
     let g = p.layout(
         body.clone(),
-        FontId::proportional(26.0),
+        FontId::proportional(26.0 * u.max(0.8)),
         rgba(PAPER_INK, 1.0),
         size.x - 56.0,
     );
     p.galley(
-        r.left_top() + Vec2::new(28.0, 96.0),
+        r.left_top() + Vec2::new(28.0, 96.0 * u),
         g,
         rgba(PAPER_INK, 1.0),
     );
     p.text(
-        Pos2::new(r.center().x, r.bottom() - 30.0),
+        Pos2::new(r.center().x, r.bottom() - 30.0 * u),
         Align2::CENTER_CENTER,
         v.k("[enter] keep it"),
-        FontId::monospace(18.0),
+        FontId::monospace(18.0 * u.max(0.8)),
         rgba(PAPER_INK, 0.7),
     );
 }
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, m: &MemoriesView) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
     let cx = screen.center().x;
-    let top = screen.top() + screen.height() * 0.06;
+    let top = screen.top() + screen.height() * 0.05;
     glitch_text(
         p,
         Pos2::new(cx, top),
         true,
         "MEMORIES",
-        48.0,
+        48.0 * u,
         ink(v),
         1.0,
         v,
     );
-    let left = screen.left() + screen.width() * 0.07;
-    let right = screen.left() + screen.width() * 0.38;
+    let margin = screen.width() * 0.06;
+    let gap = 24.0 * u;
+    let area_top = top + 84.0 * u;
+    let area_bottom = screen.bottom() - 118.0 * u;
+    let left_w = (screen.width() * 0.34).min(420.0);
+    let left_panel = Rect::from_min_max(
+        Pos2::new(screen.left() + margin, area_top),
+        Pos2::new(screen.left() + margin + left_w, area_bottom),
+    );
+    let right_panel = Rect::from_min_max(
+        Pos2::new(left_panel.right() + gap, area_top),
+        Pos2::new(screen.right() - margin, area_bottom),
+    );
+    pixel_ui::titled_panel(
+        p,
+        left_panel,
+        "DREAMERS",
+        [200, 170, 230],
+        rgba([8, 4, 20], 0.85),
+        c,
+        16.0 * u.max(0.8),
+    );
+    pixel_ui::titled_panel(
+        p,
+        right_panel,
+        "THEIR NOTES",
+        [255, 220, 140],
+        rgba([8, 4, 20], 0.85),
+        c,
+        16.0 * u.max(0.8),
+    );
+    let row_h =
+        ((left_panel.height() - c * 6.0) / m.rows.len().max(1) as f32).min(48.0 * u.max(0.8));
     for (i, row) in m.rows.iter().enumerate() {
-        let y = top + 70.0 + i as f32 * 34.0;
+        let y = left_panel.top() + c * 4.0 + i as f32 * row_h;
         let sel = i == m.selected;
-        let text = format!(
-            "{} {:<10} {}/{}",
-            if sel { ">" } else { " " },
-            row.name,
-            row.found,
-            row.total
-        );
+        let tone = if sel { [255, 220, 140] } else { ink(v) };
+        if sel {
+            pixel_ui::selected_row(
+                p,
+                Rect::from_min_size(
+                    Pos2::new(left_panel.left() + c * 2.0, y),
+                    Vec2::new(left_panel.width() - c * 4.0, row_h - 2.0),
+                ),
+                tone,
+                c,
+            );
+        }
+        let a = if row.found > 0 { 0.95 } else { 0.5 };
+        let font = (row_h * 0.42).clamp(11.0, 21.0);
         p.text(
-            Pos2::new(left, y),
+            Pos2::new(left_panel.left() + c * 9.0, y + 3.0 * u),
             Align2::LEFT_TOP,
-            text,
-            FontId::monospace(22.0),
-            rgba(
-                if sel { [255, 220, 140] } else { ink(v) },
-                if row.found > 0 { 0.95 } else { 0.5 },
-            ),
+            &row.name,
+            FontId::monospace(font),
+            rgba(tone, a),
         );
+        // Found notes as a row of pixel pips.
+        let pip = (c * 0.8).max(3.0);
+        for k in 0..row.total {
+            let r = Rect::from_min_size(
+                Pos2::new(
+                    left_panel.right() - c * 4.0 - (row.total - k) as f32 * (pip + 2.0),
+                    y + 5.0 * u,
+                ),
+                egui::Vec2::splat(pip),
+            );
+            if k < row.found {
+                p.rect_filled(r, 0.0, rgba(tone, a));
+            } else {
+                p.rect_stroke(r, 0.0, egui::Stroke::new(1.0_f32, rgba(tone, 0.3)));
+            }
+        }
         if let Some(w) = &row.weight {
             p.text(
-                Pos2::new(left + 24.0, y + 22.0),
+                Pos2::new(left_panel.left() + c * 9.0, y + font + 5.0 * u),
                 Align2::LEFT_TOP,
                 w,
-                FontId::monospace(13.0),
+                FontId::monospace((font * 0.62).max(9.0)),
                 rgba([200, 170, 230], 0.8),
             );
         }
     }
-    let mut y = top + 70.0;
-    let width = screen.right() - right - screen.width() * 0.05;
+    let mut y = right_panel.top() + c * 4.0;
+    let width = right_panel.width() - c * 8.0;
     for (k, n) in m.notes.iter().enumerate() {
         let (text, a) = match n {
             Some(t) => (format!("{}. {t}", k + 1), 0.92),
             None => (format!("{}. …", k + 1), 0.4),
         };
-        let g = p.layout(text, FontId::proportional(19.0), rgba(ink(v), a), width);
+        let g = p.layout(
+            text,
+            FontId::proportional(19.0 * u.max(0.8)),
+            rgba(ink(v), a),
+            width,
+        );
         let h = g.size().y;
-        p.galley(Pos2::new(right, y), g, rgba(ink(v), a));
-        y += h + 10.0;
+        p.galley(
+            Pos2::new(right_panel.left() + c * 4.0, y),
+            g,
+            rgba(ink(v), a),
+        );
+        y += h + 10.0 * u;
     }
     p.text(
-        Pos2::new(cx, screen.bottom() - 70.0),
-        Align2::CENTER_TOP,
+        Pos2::new(cx, screen.bottom() - 72.0 * u),
+        Align2::CENTER_BOTTOM,
         HELP_LINE,
-        FontId::monospace(15.0),
+        FontId::monospace(15.0 * u.max(0.8)),
         rgba([190, 180, 220], 0.75),
     );
-    p.text(
-        Pos2::new(cx, screen.bottom() - 40.0),
-        Align2::CENTER_TOP,
-        v.k("[w/s] choose  [esc] back"),
-        FontId::monospace(18.0),
-        rgba(ink(v), 0.7),
-    );
+    crate::loadout_ui::hint_bar(p, screen, v, "[w/s] choose  [esc] back");
+    pixel_ui::scanlines(p, screen, c, 8);
 }

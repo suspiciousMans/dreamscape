@@ -112,51 +112,107 @@ pub fn card_rects(screen: Rect, n: usize) -> Vec<Rect> {
 
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.94));
+    let u = crate::pixel_ui::scale(screen);
+    let cell = crate::pixel_ui::cell(u);
     let cx = screen.center().x;
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 24.0),
         true,
         "DREAM BOOKLET",
-        44.0,
+        44.0 * u,
         hue(v.time * 0.1),
         1.0,
         v,
     );
+    // Page indicator: a pixel pip per page when there are few, else a count.
+    let label = format!(
+        "page {} / {}  ·  {} cards",
+        v.booklet_page + 1,
+        v.booklet_pages,
+        v.booklet_total
+    );
     p.text(
-        Pos2::new(cx, screen.top() + 78.0),
+        Pos2::new(cx, screen.top() + 78.0 * u),
         Align2::CENTER_TOP,
-        format!(
-            "page {} / {}  ·  {} cards",
-            v.booklet_page + 1,
-            v.booklet_pages,
-            v.booklet_total
-        ),
-        FontId::monospace(20.0),
+        label,
+        FontId::monospace(20.0 * u.max(0.8)),
         rgba(ink(v), 0.6),
     );
+    if (2..=24).contains(&v.booklet_pages) {
+        let pip = cell;
+        let gap = pip * 1.6;
+        let total = v.booklet_pages as f32 * gap;
+        for i in 0..v.booklet_pages {
+            let r = Rect::from_min_size(
+                Pos2::new(cx - total * 0.5 + i as f32 * gap, screen.top() + 104.0 * u),
+                Vec2::splat(pip),
+            );
+            if i == v.booklet_page {
+                p.rect_filled(r, 0.0, rgba(ink(v), 0.95));
+            } else {
+                p.rect_filled(r, 0.0, rgba(ink(v), 0.2));
+            }
+        }
+    }
     if v.booklet_cards.is_empty() {
         p.text(
             screen.center(),
             Align2::CENTER_CENTER,
             "your booklet is empty. wake up, then press [s].",
-            FontId::monospace(24.0),
+            FontId::monospace(24.0 * u.max(0.8)),
             rgba(ink(v), 0.8),
         );
     }
-    for (c, r) in v
-        .booklet_cards
-        .iter()
-        .zip(card_rects(screen, v.booklet_cards.len()))
-    {
-        card(ctx, p, r, c, v, art, 1.0);
+    let rects = card_rects(screen, v.booklet_cards.len());
+    // A shelf behind the cards, so the page reads as a page.
+    if let (Some(first), Some(last)) = (rects.first(), rects.last()) {
+        let shelf =
+            Rect::from_min_max(first.min, last.max).expand2(Vec2::new(cell * 4.0, cell * 3.0));
+        crate::pixel_ui::panel(p, shelf, [90, 70, 150], rgba([10, 5, 24], 0.6), cell, 0.6);
     }
-    p.text(
-        Pos2::new(cx, screen.bottom() - 40.0),
-        Align2::CENTER_TOP,
-        v.k("[a/d] turn page      [p] save these cards as images      [esc] back"),
-        FontId::monospace(22.0),
-        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
+    for (c, r) in v.booklet_cards.iter().zip(&rects) {
+        card(ctx, p, *r, c, v, art, 1.0);
+    }
+    // Turn-page arrows, dim when there's no page that way.
+    for (dir, ok) in [
+        (-1.0_f32, v.booklet_page > 0),
+        (1.0, v.booklet_page + 1 < v.booklet_pages),
+    ] {
+        let at = Pos2::new(
+            cx + dir * (screen.width() * 0.5 - 40.0 * u),
+            screen.center().y,
+        );
+        let col = rgba(ink(v), if ok { 0.8 } else { 0.15 });
+        if dir > 0.0 {
+            crate::pixel_ui::arrow(p, at, cell, col);
+        } else {
+            // Mirrored: a left-pointing arrow.
+            for (i, h) in [5.0_f32, 3.0, 1.0].into_iter().enumerate() {
+                p.rect_filled(
+                    Rect::from_min_size(
+                        at + Vec2::new(-1.5 * cell - i as f32 * cell, -h * 0.5 * cell),
+                        Vec2::new(cell, h * cell),
+                    ),
+                    0.0,
+                    col,
+                );
+            }
+            p.rect_filled(
+                Rect::from_min_size(
+                    at + Vec2::new(-0.5 * cell, -0.5 * cell),
+                    Vec2::new(4.0 * cell, cell),
+                ),
+                0.0,
+                col,
+            );
+        }
+    }
+    crate::loadout_ui::hint_bar(
+        p,
+        screen,
+        v,
+        "[a/d] turn page      [p] save these cards as images      [esc] back",
     );
 }
 

@@ -368,7 +368,14 @@ pub fn hint_bar(p: &egui::Painter, screen: Rect, v: &HudView, text: &str) {
         Align2::CENTER_CENTER,
         text,
         FontId::monospace(size),
-        rgba(ink(v), 0.6 + 0.3 * (v.time * 2.0).sin()),
+        rgba(
+            ink(v),
+            if v.settings_snapshot.motion() >= 1.0 {
+                0.6 + 0.3 * (v.time * 2.0).sin()
+            } else {
+                0.7
+            },
+        ),
     );
 }
 

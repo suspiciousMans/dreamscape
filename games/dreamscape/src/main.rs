@@ -5964,6 +5964,24 @@ impl Game for DreamscapeGame {
                 self.dev_opened = true;
                 match which.as_str() {
                     "loadout" => self.open_loadout(),
+                    "title" => self.mode = hud::Mode::Title,
+                    "memories" => {
+                        self.memories_sel = 0;
+                        self.mode = hud::Mode::Memories;
+                    }
+                    "settings" => self.open_settings(),
+                    "codex" => self.open_codex(),
+                    "booklet" => self.open_booklet(),
+                    "store" => self.open_store(),
+                    "lottery" => {
+                        self.open_store();
+                        self.store_tab = 1;
+                    }
+                    "summary" => {
+                        self.title_age = 0.0;
+                        self.mode = hud::Mode::Summary;
+                    }
+                    "pick" => self.start_pack_pick(),
                     "merge" => self.open_merge(hud::Mode::Title),
                     // The first card picked, the cursor on one that can merge with it.
                     "merge2" => {

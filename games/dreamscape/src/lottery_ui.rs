@@ -6,6 +6,7 @@ use crate::booklet_ui::{card, rarity_color, CardArt, CARD_SIZE};
 use crate::cards::{Attribute, Card, Rarity, Recalled};
 use crate::dream::DreamTheme;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
+use crate::pixel_ui;
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
 
 /// Seconds the deck shudders before the card turns over.
@@ -86,7 +87,8 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         let h1 = crate::hud::hash01(k, 7);
         let h2 = crate::hud::hash01(k, 8);
         let x = screen.left() + h1 * screen.width();
-        let y = screen.bottom() - ((h2 * screen.height() + v.time * (8.0 + 10.0 * h1)) % screen.height());
+        let y = screen.bottom()
+            - ((h2 * screen.height() + v.time * (8.0 + 10.0 * h1)) % screen.height());
         p.rect_filled(
             Rect::from_center_size(Pos2::new(x, y), Vec2::splat(2.0 + 2.0 * h2)),
             0.0,
@@ -107,7 +109,10 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     p.text(
         Pos2::new(cx, screen.top() + 62.0),
         Align2::CENTER_TOP,
-        format!("{} dream dust   ·   a pull costs {}   ·   {} pulls so far", v.dust, l.cost, l.total_pulls),
+        format!(
+            "{} dream dust   ·   a pull costs {}   ·   {} pulls so far",
+            v.dust, l.cost, l.total_pulls
+        ),
         FontId::monospace(22.0),
         rgba([255, 210, 80], 1.0),
     );
@@ -116,66 +121,116 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     stage(ctx, p, screen, v, art);
 
     // Controls and status, bottom.
+    let u = pixel_ui::scale(screen);
     let can_pull = v.dust >= l.cost;
-    p.text(
-        Pos2::new(cx, screen.bottom() - 62.0),
-        Align2::CENTER_BOTTOM,
-        v.k(&format!(
-            "[enter] pull ({} dust)   [a/d] pick a dream   [p] spark pick ({}/{})",
-            l.cost, l.sparks, l.spark_goal
-        )),
-        FontId::monospace(22.0),
-        rgba(ink(v), if can_pull { 0.9 } else { 0.45 }),
-    );
-    p.text(
-        Pos2::new(cx, screen.bottom() - 34.0),
-        Align2::CENTER_BOTTOM,
-        v.k("[tab] back to the store   [esc] leave"),
-        FontId::monospace(20.0),
-        rgba(ink(v), 0.5),
-    );
     if let Some(s) = &l.status {
         p.text(
-            Pos2::new(cx, screen.bottom() - 90.0),
+            Pos2::new(cx, screen.bottom() - 112.0 * u),
             Align2::CENTER_BOTTOM,
             s,
-            FontId::monospace(22.0),
+            FontId::monospace(22.0 * u.max(0.8)),
             rgba([255, 210, 80], 0.95),
         );
     }
+    let pull = v.k(&format!(
+        "[enter] pull ({} dust)   [a/d] pick a dream   [p] spark pick ({}/{})",
+        l.cost, l.sparks, l.spark_goal
+    ));
+    let c = pixel_ui::cell(u);
+    let size = pixel_ui::fit(&pull, 22.0 * u, screen.width() - 60.0, 10.0);
+    let strip = Rect::from_center_size(
+        Pos2::new(cx, screen.bottom() - 82.0 * u),
+        Vec2::new(
+            (pull.chars().count() as f32 * size * 0.6 + c * 8.0).min(screen.width() - 20.0),
+            size + c * 4.0,
+        ),
+    );
+    let tone = if can_pull {
+        [255, 210, 80]
+    } else {
+        [120, 110, 150]
+    };
+    pixel_ui::panel(
+        p,
+        strip,
+        tone,
+        rgba([14, 10, 4], 0.85),
+        c,
+        if can_pull { 0.9 } else { 0.5 },
+    );
+    p.text(
+        strip.center(),
+        Align2::CENTER_CENTER,
+        pull,
+        FontId::monospace(size),
+        rgba(ink(v), if can_pull { 0.95 } else { 0.45 }),
+    );
+    crate::loadout_ui::hint_bar(p, screen, v, "[tab] back to the store   [esc] leave");
+    pixel_ui::scanlines(p, screen, c, 8);
 }
 
 /// The honest numbers: exact odds, pity, sparks, tonight's featured dream.
 fn odds_panel(p: &egui::Painter, screen: Rect, v: &HudView) {
     let l = &v.lottery;
-    let left = screen.left() + 36.0;
-    let mut y = screen.top() + 110.0;
-    p.text(Pos2::new(left, y), Align2::LEFT_TOP, "ODDS RIGHT NOW", FontId::monospace(20.0), rgba(ink(v), 0.85));
-    y += 28.0;
-    let bar_w = 150.0;
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
+    let left = screen.left() + 36.0 * u;
+    let top = screen.top() + 110.0 * u;
+    let width = (screen.width() * 0.34).clamp(320.0, 420.0);
+    let panel = Rect::from_min_size(
+        Pos2::new(left - c * 2.0, top - c * 2.0),
+        Vec2::new(width, 392.0 * u),
+    );
+    pixel_ui::titled_panel(
+        p,
+        panel,
+        "ODDS RIGHT NOW",
+        [200, 170, 230],
+        rgba([8, 4, 20], 0.85),
+        c,
+        16.0 * u.max(0.8),
+    );
+    let inner_l = panel.left() + c * 3.0;
+    let inner_w = panel.width() - c * 6.0;
+    let mut y = top + 18.0 * u;
+    let bar_w = inner_w - 110.0 * u - 70.0 * u;
     for &(r, share) in &l.odds {
         let col = rarity_color(r, v.time);
-        p.text(Pos2::new(left, y), Align2::LEFT_TOP, r.label(), FontId::monospace(18.0), rgba(col, 1.0));
-        let bar = Rect::from_min_size(Pos2::new(left + 110.0, y + 3.0), Vec2::new(bar_w, 12.0));
-        p.rect_stroke(bar, 0.0, Stroke::new(1.0_f32, rgba(ink(v), 0.3)));
-        p.rect_filled(
-            Rect::from_min_size(bar.min, Vec2::new(bar_w * share.clamp(0.0, 1.0), 12.0)),
-            0.0,
-            rgba(col, 0.85),
-        );
         p.text(
-            Pos2::new(left + 110.0 + bar_w + 10.0, y),
+            Pos2::new(inner_l, y),
             Align2::LEFT_TOP,
+            r.label(),
+            FontId::monospace(17.0 * u.max(0.8)),
+            rgba(col, 1.0),
+        );
+        let bar = Rect::from_min_size(
+            Pos2::new(inner_l + 100.0 * u, y + 3.0 * u),
+            Vec2::new(bar_w, 12.0 * u),
+        );
+        pixel_ui::bar(p, bar, share, col, 1.0);
+        p.text(
+            Pos2::new(panel.right() - c * 3.0, y),
+            Align2::RIGHT_TOP,
             format!("{:.1}%", share * 100.0),
-            FontId::monospace(18.0),
+            FontId::monospace(17.0 * u.max(0.8)),
             rgba(ink(v), 0.8),
         );
-        y += 24.0;
+        y += 24.0 * u;
     }
-    y += 14.0;
+    y += 12.0 * u;
     for (label, have, need, col) in [
-        ("LUCID GUARANTEED", l.since_lucid, l.hard_lucid, rarity_color(Rarity::Lucid, v.time)),
-        ("PROPHETIC GUARANTEED", l.since_prophetic, l.hard_prophetic, rarity_color(Rarity::Prophetic, v.time)),
+        (
+            "LUCID GUARANTEED",
+            l.since_lucid,
+            l.hard_lucid,
+            rarity_color(Rarity::Lucid, v.time),
+        ),
+        (
+            "PROPHETIC GUARANTEED",
+            l.since_prophetic,
+            l.hard_prophetic,
+            rarity_color(Rarity::Prophetic, v.time),
+        ),
         ("SPARKS", l.sparks, l.spark_goal, [255, 210, 80]),
     ] {
         let left_to_go = need.saturating_sub(have);
@@ -184,31 +239,63 @@ fn odds_panel(p: &egui::Painter, screen: Rect, v: &HudView) {
         } else {
             format!("in {left_to_go} pulls")
         };
-        p.text(Pos2::new(left, y), Align2::LEFT_TOP, label, FontId::monospace(16.0), rgba(ink(v), 0.7));
-        p.text(Pos2::new(left + 270.0, y), Align2::RIGHT_TOP, note, FontId::monospace(16.0), rgba(ink(v), 0.7));
-        let bar = Rect::from_min_size(Pos2::new(left, y + 18.0), Vec2::new(270.0, 8.0));
-        p.rect_stroke(bar, 0.0, Stroke::new(1.0_f32, rgba(ink(v), 0.3)));
-        let f = if need == 0 { 0.0 } else { (have as f32 / need as f32).clamp(0.0, 1.0) };
-        p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(270.0 * f, 8.0)), 0.0, rgba(col, 0.9));
-        y += 38.0;
+        p.text(
+            Pos2::new(inner_l, y),
+            Align2::LEFT_TOP,
+            label,
+            FontId::monospace(15.0 * u.max(0.8)),
+            rgba(ink(v), 0.7),
+        );
+        p.text(
+            Pos2::new(panel.right() - c * 3.0, y),
+            Align2::RIGHT_TOP,
+            note,
+            FontId::monospace(15.0 * u.max(0.8)),
+            rgba(ink(v), 0.7),
+        );
+        let bar = Rect::from_min_size(
+            Pos2::new(inner_l, y + 19.0 * u),
+            Vec2::new(inner_w, 8.0 * u),
+        );
+        let f = if need == 0 {
+            0.0
+        } else {
+            (have as f32 / need as f32).clamp(0.0, 1.0)
+        };
+        pixel_ui::bar(p, bar, f, col, 1.0);
+        y += 38.0 * u;
     }
-    y += 6.0;
+    y += 4.0 * u;
     if let Some(t) = l.featured {
         p.text(
-            Pos2::new(left, y),
+            Pos2::new(inner_l, y),
             Align2::LEFT_TOP,
-            format!("TONIGHT'S DREAM: {}  ({:.0}% of pulls)", theme_name(t), l.featured_odds * 100.0),
-            FontId::monospace(18.0),
+            format!(
+                "TONIGHT'S DREAM: {}  ({:.0}% of pulls)",
+                theme_name(t),
+                l.featured_odds * 100.0
+            ),
+            FontId::monospace(pixel_ui::fit(
+                "TONIGHT'S DREAM: XXXXXXXX  (14% of pulls)",
+                16.0 * u,
+                inner_w,
+                9.0,
+            )),
             rgba(hue(v.time * 0.2), 0.95),
         );
-        y += 24.0;
+        y += 24.0 * u;
     }
     if let Some(t) = l.pick {
         p.text(
-            Pos2::new(left, y),
+            Pos2::new(inner_l, y),
             Align2::LEFT_TOP,
             format!("SPARK PICK WOULD CHOOSE: < {} >", theme_name(t)),
-            FontId::monospace(18.0),
+            FontId::monospace(pixel_ui::fit(
+                "SPARK PICK WOULD CHOOSE: < XXXXXXX >",
+                16.0 * u,
+                inner_w,
+                9.0,
+            )),
             rgba(ink(v), 0.8),
         );
     }
@@ -219,7 +306,10 @@ fn stage(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art:
     let l = &v.lottery;
     let scale = ((screen.height() - 300.0) / CARD_SIZE.y).clamp(0.4, 0.9);
     let size = CARD_SIZE * scale;
-    let centre = Pos2::new(screen.center().x + 150.0, screen.top() + 110.0 + size.y * 0.5 + 10.0);
+    let centre = Pos2::new(
+        screen.center().x + 150.0,
+        screen.top() + 110.0 + size.y * 0.5 + 10.0,
+    );
     let mut rect = Rect::from_center_size(centre, size);
 
     let Some(o) = &l.outcome else {
@@ -246,10 +336,19 @@ fn stage(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art:
         return;
     }
 
-    let r = Recalled { card: o.card.clone(), remembered: true };
+    let r = Recalled {
+        card: o.card.clone(),
+        remembered: true,
+    };
     let beat = crate::reveal_ui::beat(&r);
     let calm = settle(l.age);
-    let shake = beat.shake * calm * if v.settings_snapshot.motion() < 1.0 { 0.0 } else { 1.0 };
+    let shake = beat.shake
+        * calm
+        * if v.settings_snapshot.motion() < 1.0 {
+            0.0
+        } else {
+            1.0
+        };
     rect = rect.translate(Vec2::new((v.time * 83.0).sin(), (v.time * 71.0).cos()) * shake);
 
     if beat.glow > 0.0 {
@@ -264,29 +363,58 @@ fn stage(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art:
     }
     card(ctx, p, rect, &o.card, v, art, scale);
     if beat.flash * calm > 0.0 && v.settings_snapshot.motion() >= 1.0 {
-        p.rect_filled(screen, 0.0, rgba([255, 255, 255], (beat.flash * calm * 0.8).min(0.8)));
+        p.rect_filled(
+            screen,
+            0.0,
+            rgba([255, 255, 255], (beat.flash * calm * 0.8).min(0.8)),
+        );
     }
     p.text(
         Pos2::new(centre.x, rect.bottom() + 12.0),
         Align2::CENTER_TOP,
         headline(o),
         FontId::monospace(22.0),
-        rgba(if o.foil { hue(v.time * 0.6) } else { rarity_color(o.card.rarity, v.time) }, 1.0),
+        rgba(
+            if o.foil {
+                hue(v.time * 0.6)
+            } else {
+                rarity_color(o.card.rarity, v.time)
+            },
+            1.0,
+        ),
     );
 }
 
-/// A face-down card.
+/// A face-down card: a chipped panel with a pixel question mark.
 fn deck(p: &egui::Painter, rect: Rect, v: &HudView, excite: f32) {
     let frame = hue(v.time * (0.1 + 0.8 * excite));
-    p.rect_filled(rect, 0.0, rgba([16, 9, 30], 1.0));
-    p.rect_stroke(rect.shrink(2.0), 0.0, Stroke::new(4.0_f32, rgba(frame, 0.6 + 0.4 * excite)));
-    p.rect_stroke(rect.shrink(12.0), 0.0, Stroke::new(1.0_f32, rgba(frame, 0.35)));
-    p.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
+    let c = (rect.width() / 70.0).round().max(3.0);
+    pixel_ui::panel(
+        p,
+        rect,
+        frame,
+        rgba([16, 9, 30], 1.0),
+        c,
+        0.6 + 0.4 * excite,
+    );
+    pixel_ui::hatch(
+        p,
+        rect.shrink(c * 4.0),
+        c,
+        egui::Color32::from_white_alpha(7),
+    );
+    pixel_ui::split_text(
+        p,
+        rect.center() - Vec2::new(0.0, rect.width() * 0.22),
+        Align2::CENTER_TOP,
         "?",
-        FontId::monospace(rect.width() * 0.5),
-        rgba(frame, 0.55 + 0.4 * (v.time * 3.0).sin().abs() * (0.4 + excite)),
+        rect.width() * 0.5,
+        rgba(
+            frame,
+            0.55 + 0.4 * (v.time * 3.0).sin().abs() * (0.4 + excite),
+        ),
+        (c * 0.5).max(1.0),
+        0.8,
     );
 }
 
@@ -294,7 +422,13 @@ fn deck(p: &egui::Painter, rect: Rect, v: &HudView, excite: f32) {
 mod tests {
     use super::*;
 
-    fn outcome(rarity: Rarity, foil: bool, pity: bool, near: Option<Rarity>, recurring: bool) -> Outcome {
+    fn outcome(
+        rarity: Rarity,
+        foil: bool,
+        pity: bool,
+        near: Option<Rarity>,
+        recurring: bool,
+    ) -> Outcome {
         let rec = crate::cards::DreamRecord {
             theme: DreamTheme::Garden,
             seed: 1,
@@ -309,7 +443,13 @@ mod tests {
         };
         let mut card = crate::cards::card_from(&rec);
         card.rarity = rarity;
-        Outcome { card, foil, pity, near_miss: near, recurring }
+        Outcome {
+            card,
+            foil,
+            pity,
+            near_miss: near,
+            recurring,
+        }
     }
 
     #[test]
@@ -332,9 +472,22 @@ mod tests {
     fn the_headline_names_the_most_exciting_thing_first() {
         assert!(headline(&outcome(Rarity::Prophetic, true, true, None, false)).starts_with("FOIL"));
         assert!(headline(&outcome(Rarity::Lucid, false, true, None, false)).contains("PROMISE"));
-        assert!(headline(&outcome(Rarity::Prophetic, false, false, None, false)).starts_with("PROPHETIC"));
-        assert!(headline(&outcome(Rarity::Hazy, false, false, Some(Rarity::Vivid), false)).contains("VIVID"));
+        assert!(
+            headline(&outcome(Rarity::Prophetic, false, false, None, false))
+                .starts_with("PROPHETIC")
+        );
+        assert!(headline(&outcome(
+            Rarity::Hazy,
+            false,
+            false,
+            Some(Rarity::Vivid),
+            false
+        ))
+        .contains("VIVID"));
         assert!(headline(&outcome(Rarity::Hazy, false, false, None, true)).contains("BEFORE"));
-        assert_eq!(headline(&outcome(Rarity::Hazy, false, false, None, false)), "A NEW DREAM");
+        assert_eq!(
+            headline(&outcome(Rarity::Hazy, false, false, None, false)),
+            "A NEW DREAM"
+        );
     }
 }

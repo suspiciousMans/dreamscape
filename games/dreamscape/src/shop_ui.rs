@@ -195,8 +195,7 @@ fn price_tag(state: State, dust: u32) -> (String, [u8; 3]) {
 
 /// The preview panel: the selected cosmetic applied, or the perk's effect.
 fn preview(p: &egui::Painter, r: Rect, item: Item, v: &HudView) {
-    p.rect_filled(r, 0.0, rgba([14, 8, 28], 1.0));
-    p.rect_stroke(r, 0.0, Stroke::new(2.0_f32, rgba(ink(v), 0.4)));
+    crate::pixel_ui::panel(p, r, [150, 130, 210], rgba([14, 8, 28], 1.0), 3.0, 0.8);
     let c = r.center() - Vec2::new(0.0, 20.0);
     match item {
         Item::Eye(e) => {
@@ -332,12 +331,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let look = (v.shop_col as f32 - 2.0) / 3.0;
     shopkeeper(p, keeper_at, v, look);
     let say = v.k(patter(selected, sel_state, v.dust));
-    let bubble = p.layout(say, FontId::monospace(18.0), rgba(ink(v), 0.9), 220.0);
-    p.galley(
-        Pos2::new(screen.left() + 40.0, screen.top() + 290.0),
-        bubble,
-        rgba(ink(v), 0.9),
-    );
+    let bubble = p.layout(say, FontId::monospace(18.0), rgba(ink(v), 0.9), 200.0);
+    let bubble_at = Pos2::new(screen.left() + 40.0, screen.top() + 296.0);
+    let box_r = Rect::from_min_size(bubble_at - Vec2::new(9.0, 9.0), bubble.size() + Vec2::splat(18.0));
+    crate::pixel_ui::panel(p, box_r, [200, 100, 220], rgba([20, 8, 30], 0.9), 3.0, 0.8);
+    // The tail points up at the moth.
+    p.rect_filled(Rect::from_min_size(Pos2::new(box_r.center().x - 3.0, box_r.top() - 6.0), Vec2::new(6.0, 6.0)), 0.0, rgba([200, 100, 220], 0.9));
+    p.galley(bubble_at, bubble, rgba(ink(v), 0.9));
 
     // Shelves, middle.
     let left = screen.left() + 300.0;
@@ -361,6 +361,14 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             0.0,
             rgba([70, 40, 60], 1.0),
         );
+        p.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(left - 6.0, row_y + slot - 8.0),
+                Vec2::new(7.0 * slot + 12.0, 2.0),
+            ),
+            0.0,
+            rgba([120, 80, 100], 1.0),
+        );
         for (ci, item) in shelf.items().into_iter().enumerate() {
             let c = Pos2::new(left + ci as f32 * slot + slot * 0.5, row_y + slot * 0.45);
             let is_sel = si == v.shop_shelf && ci == v.shop_col;
@@ -372,7 +380,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             if is_sel {
                 let r = Rect::from_center_size(c, Vec2::splat(slot - 6.0));
                 p.rect_filled(r, 0.0, rgba(hue(v.time * 0.2), 0.18));
-                p.rect_stroke(r, 0.0, Stroke::new(2.0_f32, rgba(hue(v.time * 0.2), 0.9)));
+                crate::pixel_ui::brackets(p, r.expand(2.0), 3.0, rgba(hue(v.time * 0.2), 1.0));
             }
             let lift = if is_sel {
                 (v.time * 4.0).sin() * 2.0 - 2.0
@@ -442,20 +450,20 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
 
     if let Some(msg) = &v.store_status {
         p.text(
-            Pos2::new(cx, screen.bottom() - 80.0),
-            Align2::CENTER_TOP,
+            Pos2::new(cx, screen.bottom() - 84.0),
+            Align2::CENTER_BOTTOM,
             msg,
             FontId::monospace(22.0),
             rgba([255, 210, 80], 0.95),
         );
     }
-    p.text(
-        Pos2::new(cx, screen.bottom() - 44.0),
-        Align2::CENTER_TOP,
-        v.k("[w/s] shelf   [a/d] item   [enter] buy / equip   [m] merge cards   [esc] back"),
-        FontId::monospace(20.0),
-        rgba(ink(v), 0.5 + 0.3 * (v.time * 2.0).sin()),
+    crate::loadout_ui::hint_bar(
+        p,
+        screen,
+        v,
+        "[w/s] shelf   [a/d] item   [enter] buy / equip   [m] merge cards   [esc] back",
     );
+    crate::pixel_ui::scanlines(p, screen, 3.0, 8);
 }
 
 fn state_of(v: &HudView, item: Item) -> State {
