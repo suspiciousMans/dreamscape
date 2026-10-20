@@ -511,6 +511,17 @@ pub fn draw_pick(
     );
 }
 
+/// The pack the pick screen shows for choice `i` of `n`: grown and lifted. The
+/// tear starts from exactly this rect, so there is no pop between the screens.
+pub fn pick_selected_rect(screen: Rect, n: usize, i: usize) -> Option<Rect> {
+    let base = *pick_rects(screen, n).get(i)?;
+    let u = pick_unit(screen);
+    Some(
+        Rect::from_center_size(base.center(), base.size() * PICK_GROW)
+            .translate(Vec2::new(0.0, -PICK_LIFT * u)),
+    )
+}
+
 pub fn draw_reveal(
     ctx: &egui::Context,
     p: &egui::Painter,
@@ -521,22 +532,42 @@ pub fn draw_reveal(
     packs_art: &mut PackArt,
 ) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.95));
-    let cx = screen.center().x;
-    // The pack tears open first; the cards wait face down behind it.
+    // The pack tears open first; the cards wait face down behind it, and
+    // rise into place while the torn pack drops away.
     if let (Some(w), true) = (&pk.wrapper, pk.age < 0.0) {
-        // Solid backdrop, so the pack can fade into it cleanly.
         p.rect_filled(screen, 0.0, rgba([6, 3, 16], 1.0));
         let t = 1.0 - (-pk.age / pack_art::TEAR_TIME).clamp(0.0, 1.0);
+        let k = pack_art::cards_in(t);
+        if k > 0.0 {
+            let mut scene = p.clone();
+            scene.set_opacity(k);
+            let rise = (1.0 - k) * 36.0;
+            draw_reveal_scene(ctx, &scene, screen.translate(Vec2::new(0.0, rise)), v, pk, art);
+        }
         pack_art::draw_tear(ctx, p, screen, w, t, v.time, true, packs_art);
-        p.text(
-            Pos2::new(cx, screen.bottom() - 54.0),
-            Align2::CENTER_TOP,
-            v.k("[space] skip"),
-            FontId::monospace(20.0),
-            rgba(ink(v), 0.5),
-        );
+        if k <= 0.0 {
+            p.text(
+                Pos2::new(screen.center().x, screen.bottom() - 54.0),
+                Align2::CENTER_TOP,
+                v.k("[space] skip"),
+                FontId::monospace(20.0),
+                rgba(ink(v), 0.5),
+            );
+        }
         return;
     }
+    draw_reveal_scene(ctx, p, screen, v, pk, art);
+}
+
+fn draw_reveal_scene(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    screen: Rect,
+    v: &HudView,
+    pk: &PackView,
+    art: &mut CardArt,
+) {
+    let cx = screen.center().x;
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 22.0),

@@ -513,24 +513,57 @@ fn paint_ribbon(p: &egui::Painter, g: &Grid, theme: DreamTheme, rgb: [u8; 3], mc
     }
 }
 
-/// Seconds the whole tear takes (pull, rip, light, drop).
-pub const TEAR_TIME: f32 = 1.5;
+/// Seconds the whole tear takes (slide, pull, rip, light, drop).
+pub const TEAR_TIME: f32 = 1.8;
 /// When (as a fraction of the tear) the foil lets go: the sound plays here.
-pub const TEAR_RIP_AT: f32 = 0.34;
+pub const TEAR_RIP_AT: f32 = 0.44;
 
+/// Easing: fast start, soft landing.
+fn ease_out(x: f32) -> f32 {
+    let t = 1.0 - x.clamp(0.0, 1.0);
+    1.0 - t * t * t
+}
+
+/// Easing: slow start, then speeding up (a drop).
+fn ease_in(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    t * t
+}
+
+/// Easing: both ends soft.
 fn smooth(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Where the pack sits while it is torn open: big, centred.
-pub fn tear_rect(screen: Rect) -> Rect {
-    let h = (screen.height() * 0.62).min(PACK_SIZE.y * 1.5);
-    let w = h * PACK_SIZE.x / PACK_SIZE.y;
+/// 0..1: how far the face-down cards have come into view behind the pack.
+/// They start fading in as the torn pack begins to drop.
+pub fn cards_in(t: f32) -> f32 {
+    ease_out((t - 0.62) / 0.38)
+}
+
+/// Where the pack sits while it is torn open: the same size as on the pick
+/// screen (so its cells never change size mid-motion), in the middle.
+pub fn tear_rect(screen: Rect, from: Rect) -> Rect {
     Rect::from_center_size(
         Pos2::new(screen.center().x, screen.center().y - 10.0),
-        Vec2::new(w, h),
+        from.size(),
     )
+}
+
+/// Where the pack is at `t`: sliding to the middle, then trembling and
+/// leaning back as the pull builds. Pure, so the motion can be tested.
+pub fn pack_rect(screen: Rect, from: Rect, t: f32) -> Rect {
+    let slide = smooth(t / 0.26);
+    let home = tear_rect(screen, from);
+    let rect = from.translate((home.center() - from.center()) * slide);
+    let pull = smooth((t - 0.26) / 0.18);
+    let release = 1.0 - smooth((t - TEAR_RIP_AT) / 0.06);
+    let amp = rect.width() * 0.006 * pull * release;
+    rect.translate(Vec2::new(
+        amp * (t * 71.0).sin(),
+        amp * 0.7 * (t * 59.0 + 1.3).cos() - pull * rect.height() * 0.012,
+    ))
 }
 
 /// The ragged line the strip tears along, one point per cell across `rect`,
@@ -587,10 +620,16 @@ fn band_mesh(
     Shape::mesh(m)
 }
 
-/// The pack being torn open: it slides to the middle, shakes, the top
-/// crimp rips off along a ragged line and flies away, light spills out, and
-/// the body drops. `t` runs 0..1 over `TEAR_TIME`. `flashes` = false keeps
-/// the white flash out for people who asked for less of it.
+/// The pack being torn open. `t` runs 0..1 over `TEAR_TIME`:
+///
+/// - 0.00-0.26  it eases from the pick screen to the middle (same size)
+/// - 0.26-0.44  the pull: a steady tremble that builds, a slow lean back
+/// - 0.44       the foil lets go: a flash, a recoil, the crimp flies off
+/// - 0.44-0.70  light and sparks pour out; the body settles
+/// - 0.62-1.00  the body drops and fades while the cards rise in behind it
+///
+/// Everything moves continuously (no cell-sized jumps); only the art itself
+/// stays on its pixel grid. `flashes` = false keeps the white flash out.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_tear(
     ctx: &egui::Context,
@@ -605,62 +644,71 @@ pub fn draw_tear(
     let t = t.clamp(0.0, 1.0);
     let rgb = accent(w.theme);
     let bright = rgb.map(|v| v.saturating_add(80));
-    // 0.00-0.20 slide to the middle, 0.20-0.34 pull (shake), 0.34 rip,
-    // 0.34-0.62 strip flies, 0.50-1.00 light + body drops.
-    let slide = smooth(t / 0.2);
-    let mut rect = Rect::from_min_max(
-        w.from.min.lerp(tear_rect(screen).min, slide),
-        w.from.max.lerp(tear_rect(screen).max, slide),
-    );
-    let pull = smooth((t - 0.2) / 0.14);
-    let shake = pull * (1.0 - smooth((t - 0.34) / 0.05));
-    let g = Grid::new(rect);
-    // The shake moves in whole cells, like everything else here.
-    let kick = |a: f32| (shake * 1.4 * a.sin()).round() * g.c;
-    rect = g
-        .rect
-        .translate(Vec2::new(kick(t * 97.0), kick(t * 83.0 + 1.0)));
-    let drop = smooth((t - 0.62) / 0.38);
-    let body_rect = rect.translate(Vec2::new(
-        0.0,
-        (drop * rect.height() * 0.45 / g.c).round() * g.c,
-    ));
-    let fade = ((t - 0.66) / 0.3).clamp(0.0, 1.0);
+    let after = ((t - TEAR_RIP_AT) / (1.0 - TEAR_RIP_AT)).max(0.0); // 0..1 since the rip
 
+    let rect = pack_rect(screen, w.from, t);
+    let pull = smooth((t - 0.26) / 0.18);
+    let release = 1.0 - smooth((t - TEAR_RIP_AT) / 0.06);
+    // Recoil when the foil lets go: a short damped bounce, then the drop.
+    let recoil = if after > 0.0 {
+        (-after * 14.0).exp() * (after * 38.0).sin() * rect.height() * 0.018
+    } else {
+        0.0
+    };
+    let drop = ease_in((t - 0.62) / 0.38);
+    let body_rect = rect.translate(Vec2::new(0.0, recoil + drop * rect.height() * 0.55));
+    let fade = smooth((t - 0.68) / 0.3);
+
+    let g = Grid::new(rect);
     let n = g.cols as usize;
     let edge = tear_edge(rect, w.seed);
     let top_line: Vec<Pos2> = edge.iter().map(|q| Pos2::new(q.x, rect.top())).collect();
     let tex = art.texture(ctx, w.theme, w.seed);
-    let bg = rgba([6, 3, 16], 1.0);
 
-    // Light spilling out of the opening, behind everything else: stacked
-    // posterized beams, hard-edged, narrowing as they rise.
-    let spill = smooth((t - 0.34) / 0.2) * (1.0 - 0.35 * smooth((t - 0.8) / 0.2));
+    // A soft ring of light behind the pack as the pull builds, so the eye
+    // goes to it.
+    if pull > 0.0 {
+        for ring in 1..=4 {
+            p.rect_filled(
+                rect.expand(ring as f32 * g.c * 1.2 * (0.5 + pull)),
+                0.0,
+                rgba(bright, 0.035 * pull * release / ring as f32),
+            );
+        }
+    }
+
+    // Light spilling out of the opening, behind the pack: stacked beams that
+    // widen and rise, then ebb.
+    // It ebbs away before the pack finishes dropping, so no beam ever hangs in mid-air.
+    let spill = ease_out(after / 0.35) * (1.0 - smooth((t - 0.6) / 0.15));
     if spill > 0.0 {
         let ty = rect.top() + 4.0 * g.c;
         let layers = 9;
         for k in 0..layers {
             let f = k as f32 / (layers - 1) as f32;
             let half = rect.width() * (0.62 - 0.42 * f) * (0.5 + 0.5 * spill);
-            let ht = rect.height() * (0.35 + 0.65 * (1.0 - f)) * spill;
-            let ht = (ht / g.c).round() * g.c;
-            let half = (half / g.c).round() * g.c;
+            let ht = rect.height() * (0.12 + 0.4 * (1.0 - f)) * spill;
+            // Whole pixels, not whole cells: smooth growth, crisp edges.
+            let (half, ht) = (half.round(), ht.round());
             p.rect_filled(
                 Rect::from_min_max(
-                    Pos2::new(rect.center().x - half, ty - ht),
-                    Pos2::new(rect.center().x + half, ty),
+                    Pos2::new((rect.center().x - half).round(), ty - ht),
+                    Pos2::new((rect.center().x + half).round(), ty),
                 ),
                 0.0,
-                rgba(bright, 0.07 * spill),
+                rgba(bright, 0.07 * spill * (1.0 - fade)),
             );
         }
     }
 
-    // Before the rip the wrapper is whole; after it, a body and a loose strip.
+    // The pack fades by opacity, so it dissolves into what is behind it.
+    let mut body_p = p.clone();
+    body_p.set_opacity(1.0 - fade);
+
     if t < TEAR_RIP_AT {
         paint_wrapper(
             ctx,
-            p,
+            &body_p,
             rect,
             None,
             w.theme,
@@ -672,54 +720,52 @@ pub fn draw_tear(
             Vec2::ZERO,
             art,
         );
-    } else {
+    } else if fade < 1.0 {
         // The body: the wrapper below the tear line, plus the ragged lip.
         let off = Vec2::new(0.0, body_rect.top() - rect.top());
         let clip_top = lip_bottom(rect) + off.y;
-        if fade < 1.0 {
-            let visible = Rect::from_min_max(
-                Pos2::new(body_rect.left() - 20.0, clip_top),
-                Pos2::new(body_rect.right() + 20.0, body_rect.bottom() + 20.0),
-            );
-            paint_wrapper(
-                ctx,
-                p,
-                body_rect,
-                Some(visible),
-                w.theme,
-                w.emblem,
-                w.seed,
-                w.pips,
-                time,
-                1.0,
-                Vec2::ZERO,
-                art,
-            );
-            // Ragged lip: the foil between the tear line and the straight clip.
-            let lip_top: Vec<Pos2> = edge.iter().map(|q| *q + off).collect();
-            let lip_bot: Vec<Pos2> = edge
-                .iter()
-                .map(|q| Pos2::new(q.x, clip_top + 1.0))
-                .collect();
-            p.add(band_mesh(tex, body_rect, &lip_top, &lip_bot, &|q| q, 1.0));
-            p.add(Shape::line(
-                lip_top,
-                Stroke::new(g.c.max(1.0) * 0.4, Color32::from_white_alpha(170)),
-            ));
-            if fade > 0.0 {
-                p.rect_filled(body_rect.expand(g.c * 4.0), 0.0, rgba([6, 3, 16], fade));
-            }
-        }
+        let visible = Rect::from_min_max(
+            Pos2::new(body_rect.left() - 20.0, clip_top),
+            Pos2::new(body_rect.right() + 20.0, body_rect.bottom() + 20.0),
+        );
+        paint_wrapper(
+            ctx,
+            &body_p,
+            body_rect,
+            Some(visible),
+            w.theme,
+            w.emblem,
+            w.seed,
+            w.pips,
+            time,
+            1.0,
+            Vec2::ZERO,
+            art,
+        );
+        let lip_top: Vec<Pos2> = edge.iter().map(|q| *q + off).collect();
+        let lip_bot: Vec<Pos2> = edge
+            .iter()
+            .map(|q| Pos2::new(q.x, clip_top + 1.0))
+            .collect();
+        body_p.add(band_mesh(tex, body_rect, &lip_top, &lip_bot, &|q| q, 1.0));
+        body_p.add(Shape::line(
+            lip_top,
+            Stroke::new(g.c.max(1.0) * 0.4, Color32::from_white_alpha(170)),
+        ));
+    }
 
-        // The strip: the top crimp, hinged at the right end, then thrown off.
-        let rip = 0.18 + smooth((t - TEAR_RIP_AT) / 0.28) * 1.2;
-        let fly = smooth((t - TEAR_RIP_AT) / 0.3);
-        let alpha = 1.0 - smooth((t - 0.5) / 0.14);
+    // The strip: the top crimp, hinged at the right end, then thrown off in
+    // an arc. It tumbles faster the further it goes and fades near the end.
+    if t >= TEAR_RIP_AT {
+        let swing = ease_out(after / 0.35);
+        let rip = 0.12 + swing * 1.1 + after * 0.9;
+        let fly = ease_out(after / 0.5);
+        let alpha = 1.0 - smooth((after - 0.12) / 0.22);
         if alpha > 0.0 {
             let pivot = Pos2::new(rect.right(), rect.top() + g.c * 2.0);
             let throw = Vec2::new(
-                fly * rect.width() * 0.5,
-                -fly * rect.height() * 0.5 + fly * fly * rect.height() * 0.12,
+                fly * rect.width() * 0.55,
+                -fly * rect.height() * 0.5 + after * after * rect.height() * 0.35,
             );
             let (sa, ca) = (-rip).sin_cos();
             let xf = move |q: Pos2| {
@@ -765,35 +811,37 @@ pub fn draw_tear(
         }
     }
 
-    // Sparks: square cells flying out of the opening once it lets go.
-    let burst = (t - TEAR_RIP_AT) / (1.0 - TEAR_RIP_AT);
-    if burst > 0.0 {
-        let origin = Pos2::new(rect.center().x, rect.top() + 4.0 * g.c);
-        for k in 0..28u32 {
-            let ang = -std::f32::consts::PI * (0.08 + 0.84 * h01(k, w.seed ^ 0x5A));
-            let spd = 0.4 + 0.9 * h01(k + 50, w.seed);
-            let d = (burst * 1.4).min(1.0);
+    // Sparks: little squares thrown out of the opening on arcs, with gravity,
+    // each born a touch later than the last so they stream, not burst.
+    if after > 0.0 {
+        let origin = Pos2::new(rect.center().x, body_rect.top() + 4.0 * g.c);
+        for k in 0..32u32 {
+            let born = 0.12 * h01(k + 7, w.seed);
+            let life = ((after - born) / 0.7).clamp(0.0, 1.0);
+            if life <= 0.0 || life >= 1.0 {
+                continue;
+            }
+            let ang = -std::f32::consts::PI * (0.1 + 0.8 * h01(k, w.seed ^ 0x5A));
+            let spd = 0.5 + 0.9 * h01(k + 50, w.seed);
+            let d = ease_out(life);
             let at = origin
-                + Vec2::new(ang.cos(), ang.sin()) * rect.height() * 0.7 * spd * d
-                + Vec2::new(0.0, d * d * rect.height() * 0.2);
-            let a = (1.0 - burst).clamp(0.0, 1.0);
-            let cell = g.c * (1.0 + (h01(k + 90, w.seed) * 1.5).floor());
-            let snapped = Pos2::new((at.x / g.c).round() * g.c, (at.y / g.c).round() * g.c);
+                + Vec2::new(ang.cos(), ang.sin()) * rect.height() * 0.62 * spd * d
+                + Vec2::new(0.0, life * life * rect.height() * 0.32);
+            let size = (g.c * (0.6 + 1.2 * h01(k + 90, w.seed))).round().max(2.0);
+            let a = (1.0 - life).clamp(0.0, 1.0);
             p.rect_filled(
-                Rect::from_center_size(snapped, Vec2::splat(cell)),
+                Rect::from_center_size(Pos2::new(at.x.round(), at.y.round()), Vec2::splat(size)),
                 0.0,
                 rgba(bright, a * 0.9),
             );
         }
     }
-    if flashes {
-        let f =
-            ((t - TEAR_RIP_AT) / 0.1).clamp(0.0, 1.0) * (1.0 - ((t - 0.44) / 0.2).clamp(0.0, 1.0));
-        if f > 0.0 {
-            p.rect_filled(screen, 0.0, rgba([255, 244, 220], f * 0.25));
-        }
+    // The flash: a hard attack on the rip (it hides the whole-to-torn swap),
+    // then an exponential fade.
+    if flashes && after > 0.0 {
+        let f = (-after * 11.0).exp();
+        p.rect_filled(screen, 0.0, rgba([255, 244, 220], f * 0.3));
     }
-    let _ = bg;
 }
 
 /// Fill a small cell sprite centred on `c`. `f(x, y)` gives 0 = nothing,
@@ -1088,7 +1136,11 @@ mod tests {
 
     #[test]
     fn the_torn_halves_share_one_edge_and_the_pack_ends_clear() {
-        let rect = tear_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)));
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let rect = tear_rect(
+            screen,
+            Rect::from_min_size(Pos2::new(50.0, 90.0), PACK_SIZE),
+        );
         let g = Grid::new(rect);
         let e = tear_edge(rect, 5);
         assert_eq!(e.len(), g.cols as usize + 1, "one point per cell");
@@ -1101,10 +1153,10 @@ mod tests {
             assert!(q.y < lip_bottom(rect));
         }
         assert!(e.windows(2).any(|w| w[0].y != w[1].y), "not flat");
-        assert_eq!(TEAR_TIME, 1.5);
-        assert!(
-            tear_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 360.0))).height() < 360.0
-        );
+        assert!(TEAR_TIME > 1.0 && TEAR_TIME < 2.5);
+        // The pack keeps its size all the way (so its cells never change size mid-move).
+        assert!((rect.size() - PACK_SIZE).length() < 1e-2);
+        assert!(screen.contains_rect(rect));
     }
 
     #[test]
@@ -1149,6 +1201,48 @@ mod tests {
                     "{title} {size:?}: text taller than ribbon"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_pack_moves_smoothly_and_never_changes_size() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0));
+        let from = Rect::from_min_size(Pos2::new(300.0, 160.0), PACK_SIZE);
+        let steps = 600;
+        let mut last = pack_rect(screen, from, 0.0);
+        assert_eq!(last, from, "starts exactly where the pick screen left it");
+        let mut worst = 0.0_f32;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let r = pack_rect(screen, from, t);
+            assert!(
+                (r.size() - from.size()).length() < 1e-2,
+                "size changes at t={t}"
+            );
+            worst = worst.max((r.center() - last.center()).length());
+            last = r;
+        }
+        // 600 steps over 1.8s is ~2.8ms a step: even the fastest part of the
+        // slide is a few pixels a step, never a jump.
+        assert!(worst < 6.0, "pack jumps {worst}px in one step");
+        // It ends in the middle.
+        assert!((last.center().x - screen.center().x).abs() < 3.0);
+    }
+
+    #[test]
+    fn the_cards_come_in_after_the_rip_and_finish_fully_visible() {
+        assert_eq!(cards_in(0.0), 0.0);
+        assert_eq!(
+            cards_in(TEAR_RIP_AT),
+            0.0,
+            "nothing shows through before the rip"
+        );
+        assert_eq!(cards_in(1.0), 1.0);
+        let mut prev = 0.0;
+        for i in 0..=100 {
+            let k = cards_in(i as f32 / 100.0);
+            assert!(k >= prev - 1e-6 && (0.0..=1.0).contains(&k));
+            prev = k;
         }
     }
 }

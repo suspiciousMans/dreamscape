@@ -3242,10 +3242,7 @@ impl DreamscapeGame {
             egui::Pos2::ZERO,
             egui::Vec2::new(self.screen_size.0, self.screen_size.1),
         );
-        let from_rect = reveal_ui::pick_rects(screen, view.offers.len())
-            .get(at)
-            .copied()
-            .unwrap_or(screen);
+        let from_rect = reveal_ui::pick_selected_rect(screen, view.offers.len(), at).unwrap_or(screen);
         let kept = view.offers.remove(at);
         let cards = packs::open(&kept);
         log::info!(
