@@ -11,6 +11,7 @@ mod theme;
 mod variant;
 mod vocab;
 
+pub use grid::{Terrain, LEVEL_H};
 pub use build::{
     blend_surfaces, generate_nightmare, generate_with, portal_surface, Atmosphere, Block,
     BlockKind, Dream, Goals, Pressure, TexSpec, SIGILS,

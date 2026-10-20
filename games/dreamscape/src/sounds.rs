@@ -37,9 +37,33 @@ pub enum Sound {
     DoorHum,
     /// A pack's foil ripping open.
     Tear,
+    /// LEAP: a rushing launch.
+    Leap,
+    /// SLAM: the landing thud.
+    SlamLand,
+    /// ANCHOR: the marker drops, and you snap back to it.
+    AnchorDrop,
+    AnchorBack,
+    /// WARD: it rises, and it breaks.
+    WardUp,
+    WardBreak,
+    /// STEP: a stair of air, three notes climbing.
+    StepRise,
+    /// HUSH: a falling drone as the world slows.
+    HushOn,
+    /// GUST: a whoosh.
+    Gust,
+    /// Two abilities chained into a combo.
+    Combo,
+    /// A high cache picked up.
+    CacheGet,
+    /// Climbing onto a higher terrace (played pitched up with each tier).
+    Climb,
+    /// The shard hops away from you.
+    Flinch,
 }
 
-pub const ALL_SOUNDS: [Sound; 26] = [
+pub const ALL_SOUNDS: [Sound; 39] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -66,6 +90,19 @@ pub const ALL_SOUNDS: [Sound; 26] = [
     Sound::Menu,
     Sound::DoorHum,
     Sound::Tear,
+    Sound::Leap,
+    Sound::SlamLand,
+    Sound::AnchorDrop,
+    Sound::AnchorBack,
+    Sound::WardUp,
+    Sound::WardBreak,
+    Sound::StepRise,
+    Sound::HushOn,
+    Sound::Gust,
+    Sound::Combo,
+    Sound::CacheGet,
+    Sound::Climb,
+    Sound::Flinch,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -260,14 +297,86 @@ pub fn synth(sound: Sound) -> Vec<f32> {
         Crumble => vec![v(200.0, 80.0, 0.5).noise(0.85).gain(0.4).curve(1.5)],
         Menu => vec![v(1000.0, 1000.0, 0.04).wave(2).gain(0.2)],
         DoorHum => vec![
-            v(196.0, 196.0, 0.9).wave(2).gain(0.16).attack(0.35).curve(1.4),
+            v(196.0, 196.0, 0.9)
+                .wave(2)
+                .gain(0.16)
+                .attack(0.35)
+                .curve(1.4),
             v(294.0, 294.0, 0.9).gain(0.08).attack(0.4).curve(1.4),
         ],
         // Foil ripping (a fast hissy noise sweep), then a soft shimmer as the light spills out.
         Tear => vec![
             v(3200.0, 900.0, 0.32).noise(0.92).gain(0.4).curve(0.8),
             v(5000.0, 2200.0, 0.2).noise(0.7).gain(0.18).at(0.05),
-            v(1568.0, 2093.0, 0.5).wave(2).gain(0.14).attack(0.1).at(0.32),
+            v(1568.0, 2093.0, 0.5)
+                .wave(2)
+                .gain(0.14)
+                .attack(0.1)
+                .at(0.32),
+        ],
+        // A rising rush with a bright tail.
+        Leap => vec![
+            v(220.0, 880.0, 0.28).wave(2).gain(0.32).curve(0.8),
+            v(440.0, 1320.0, 0.22).gain(0.2).at(0.04),
+            v(2400.0, 900.0, 0.18).noise(0.6).gain(0.12),
+        ],
+        // A low thud and a crack of debris.
+        SlamLand => vec![
+            v(130.0, 38.0, 0.5).wave(1).gain(0.5).curve(1.2),
+            v(320.0, 70.0, 0.3).noise(0.85).gain(0.4),
+            v(60.0, 40.0, 0.4).wave(1).gain(0.3).at(0.05),
+        ],
+        AnchorDrop => vec![
+            v(880.0, 880.0, 0.12).wave(2).gain(0.24),
+            v(1320.0, 1320.0, 0.3).wave(2).gain(0.2).at(0.07),
+        ],
+        AnchorBack => vec![
+            v(1320.0, 440.0, 0.3).wave(2).gain(0.3),
+            v(880.0, 220.0, 0.25).gain(0.2).at(0.05),
+        ],
+        WardUp => vec![
+            v(392.0, 784.0, 0.5).gain(0.24).attack(0.1),
+            v(588.0, 1176.0, 0.5).gain(0.14).attack(0.1).at(0.05),
+        ],
+        WardBreak => vec![
+            v(1568.0, 300.0, 0.4).noise(0.5).gain(0.34),
+            v(2093.0, 523.0, 0.35).wave(2).gain(0.24).at(0.02),
+            v(130.0, 60.0, 0.25).wave(1).gain(0.3).at(0.04),
+        ],
+        StepRise => vec![
+            v(330.0, 495.0, 0.12).wave(2).gain(0.24),
+            v(495.0, 740.0, 0.12).wave(2).gain(0.24).at(0.1),
+            v(740.0, 1100.0, 0.25).wave(2).gain(0.24).at(0.2),
+        ],
+        HushOn => vec![
+            v(600.0, 150.0, 0.9)
+                .wave(2)
+                .gain(0.2)
+                .attack(0.2)
+                .curve(1.2),
+            v(300.0, 75.0, 0.9).gain(0.12).attack(0.3).curve(1.2),
+        ],
+        Gust => vec![
+            v(400.0, 1800.0, 0.35).noise(0.9).gain(0.34).curve(0.7),
+            v(900.0, 200.0, 0.3).noise(0.7).gain(0.2).at(0.12),
+        ],
+        Combo => vec![
+            v(523.0, 523.0, 0.1).wave(2).gain(0.22),
+            v(659.0, 659.0, 0.1).wave(2).gain(0.22).at(0.07),
+            v(784.0, 784.0, 0.1).wave(2).gain(0.22).at(0.14),
+            v(1047.0, 1047.0, 0.45).wave(2).gain(0.26).at(0.21),
+            v(2093.0, 2093.0, 0.3).gain(0.1).at(0.25),
+        ],
+        CacheGet => vec![
+            v(988.0, 988.0, 0.1).gain(0.26),
+            v(1319.0, 1319.0, 0.1).gain(0.26).at(0.08),
+            v(1976.0, 1976.0, 0.35).gain(0.28).at(0.16),
+            v(3951.0, 3951.0, 0.25).gain(0.1).at(0.2),
+        ],
+        Climb => vec![v(262.0, 330.0, 0.09).wave(2).gain(0.2)],
+        Flinch => vec![
+            v(1760.0, 880.0, 0.16).gain(0.26),
+            v(880.0, 1760.0, 0.2).gain(0.24).at(0.1),
         ],
     };
     render(&voices, sound as u32 * 7919 + 1)

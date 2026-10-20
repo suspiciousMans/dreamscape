@@ -60,6 +60,24 @@ impl Grid {
         }
     }
 
+    /// Cells that stand at least two levels above every floor beside them: a
+    /// pillar no plain jump climbs (a cache sits on top).
+    pub fn pillars(&self) -> Vec<P> {
+        self.cells_of(Cell::Floor)
+            .into_iter()
+            .filter(|&(x, y)| {
+                let here = self.level((x, y));
+                let around: Vec<i32> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .map(|&(dx, dy)| (x + dx, y + dy))
+                    .filter(|&p| self.get(p) == Cell::Floor)
+                    .map(|p| self.level(p))
+                    .collect();
+                !around.is_empty() && around.iter().all(|&l| here - l > MAX_STEP)
+            })
+            .collect()
+    }
+
     pub fn max_level(&self) -> i32 {
         self.levels.iter().copied().max().unwrap_or(0) as i32
     }

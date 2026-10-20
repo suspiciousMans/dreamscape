@@ -29,6 +29,30 @@ pub fn roll(seed: u64, depth: u32, note_due: bool) -> Kind {
     }
 }
 
+/// A skittish shard hops away when you get this close (world units, flat).
+pub const FLINCH_RANGE: f32 = 4.0;
+/// How many times it hops, and how long each hop takes (seconds).
+pub const FLINCH_HOPS: u8 = 2;
+pub const FLINCH_TIME: f32 = 0.45;
+
+/// Whether this dream's shard is skittish: some shards, deeper than the first few dreams.
+pub fn is_skittish(seed: u64, depth: u32) -> bool {
+    depth >= 3 && StdRng::seed_from_u64(seed ^ 0x5C17_71A5).gen_bool(0.25)
+}
+
+/// Where a spooked shard hops to: a route cell 9-22 units from you and at
+/// least 6 from where it was, so it stays reachable and never lands on you.
+/// `pick` chooses among the candidates.
+pub fn flinch_dest(route: &[Vec3], player: Vec3, shard: Vec3, pick: u32) -> Option<Vec3> {
+    let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
+    let ok: Vec<Vec3> = route
+        .iter()
+        .copied()
+        .filter(|&w| (9.0..=22.0).contains(&flat(w, player)) && flat(w, shard) >= 6.0)
+        .collect();
+    (!ok.is_empty()).then(|| ok[pick as usize % ok.len()])
+}
+
 pub const HOLD_CATCH_COST: f32 = 5.0;
 /// Enemies are called to you this often while you hold on.
 pub const HOLD_CALL_EVERY: f32 = 6.0;
@@ -246,5 +270,30 @@ mod tests {
         f.take();
         f.take();
         assert!(f.done());
+    }
+
+    #[test]
+    fn some_shards_are_skittish_but_never_the_first_dreams() {
+        assert!((0..50).all(|s| !is_skittish(s, 2)));
+        let n = (0..2000).filter(|&s| is_skittish(s, 5)).count();
+        assert!((400..600).contains(&n), "about a quarter: {n}");
+    }
+
+    #[test]
+    fn a_spooked_shard_lands_on_the_route_away_from_you() {
+        let route: Vec<Vec3> = (0..40)
+            .map(|i| Vec3::new(i as f32 * 3.0, 0.0, 0.0))
+            .collect();
+        let player = Vec3::new(30.0, 0.0, 0.0);
+        let shard = Vec3::new(33.0, 0.0, 0.0);
+        for pick in 0..30 {
+            let d = flinch_dest(&route, player, shard, pick).expect("a destination");
+            let flat = |a: Vec3, b: Vec3| (a - b).length();
+            assert!(route.contains(&d));
+            assert!((9.0..=22.0).contains(&flat(d, player)), "{d:?}");
+            assert!(flat(d, shard) >= 6.0);
+        }
+        // Nowhere to go: it stays put.
+        assert!(flinch_dest(&route[..3], player, shard, 0).is_none());
     }
 }
