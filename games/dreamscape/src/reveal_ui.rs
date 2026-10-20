@@ -452,7 +452,7 @@ pub fn draw_pick(
             for ring in 1..=3 {
                 p.rect_filled(
                     r.expand(ring as f32 * 6.0 * u),
-                    6.0 * ring as f32,
+                    0.0,
                     rgba(hue(0.75), 0.07 / ring as f32),
                 );
             }
@@ -471,7 +471,7 @@ pub fn draw_pick(
             packs_art,
         );
         if chosen {
-            p.rect_stroke(r.expand(3.0), 8.0, Stroke::new(2.0_f32, rgba(ink(v), 0.9)));
+            p.rect_stroke(r.expand(3.0), 0.0, Stroke::new(2.0_f32, rgba(ink(v), 0.9)));
         }
         // Honest facts under the pack: theme, size, how likely each card is kept.
         let dim = if chosen { 1.0 } else { 0.6 };
