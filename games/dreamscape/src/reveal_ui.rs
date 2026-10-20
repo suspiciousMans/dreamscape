@@ -494,21 +494,26 @@ pub fn draw_pick(
             line(p, &mut y, m, 16.0, 0.75);
         }
     }
-    let foot = screen.bottom() - 30.0 * u;
-    p.text(
-        Pos2::new(cx, foot - 26.0 * u),
-        Align2::CENTER_BOTTOM,
-        pity_line(v.pack_dry),
-        FontId::monospace(16.0 * u),
-        rgba(ink(v), 0.6),
+    let c = crate::pixel_ui::cell(u);
+    let pity = pity_line(v.pack_dry);
+    let size = crate::pixel_ui::fit(&pity, 16.0 * u, screen.width() - 60.0, 9.0);
+    let strip = Rect::from_center_size(
+        Pos2::new(cx, screen.bottom() - 74.0 * u),
+        Vec2::new(
+            (pity.chars().count() as f32 * size * 0.6 + c * 8.0).min(screen.width() - 20.0),
+            size + c * 4.0,
+        ),
     );
+    crate::pixel_ui::panel(p, strip, [200, 170, 230], rgba([10, 5, 24], 0.85), c, 0.6);
     p.text(
-        Pos2::new(cx, foot),
-        Align2::CENTER_BOTTOM,
-        v.k("[a/d] choose  [enter] open"),
-        FontId::monospace(20.0 * u),
-        rgba(ink(v), 0.85),
+        strip.center(),
+        Align2::CENTER_CENTER,
+        pity,
+        FontId::monospace(size),
+        rgba(ink(v), 0.7),
     );
+    crate::loadout_ui::hint_bar(p, screen, v, "[a/d] choose  [enter] open");
+    crate::pixel_ui::scanlines(p, screen, c, 8);
 }
 
 /// The pack the pick screen shows for choice `i` of `n`: grown and lifted. The
@@ -542,7 +547,14 @@ pub fn draw_reveal(
             let mut scene = p.clone();
             scene.set_opacity(k);
             let rise = (1.0 - k) * 36.0;
-            draw_reveal_scene(ctx, &scene, screen.translate(Vec2::new(0.0, rise)), v, pk, art);
+            draw_reveal_scene(
+                ctx,
+                &scene,
+                screen.translate(Vec2::new(0.0, rise)),
+                v,
+                pk,
+                art,
+            );
         }
         pack_art::draw_tear(ctx, p, screen, w, t, v.time, true, packs_art);
         if k <= 0.0 {

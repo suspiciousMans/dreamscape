@@ -185,6 +185,55 @@ pub fn keycap(
     );
 }
 
+/// A right-pointing selection marker, 3 cells wide and 5 tall, centred.
+pub fn pointer(p: &egui::Painter, centre: Pos2, c: f32, color: Color32) {
+    for (i, h) in [5.0_f32, 3.0, 1.0].into_iter().enumerate() {
+        p.rect_filled(
+            Rect::from_min_size(
+                centre + Vec2::new((i as f32 - 1.5) * c, -h * 0.5 * c),
+                Vec2::new(c, h * c),
+            ),
+            0.0,
+            color,
+        );
+    }
+}
+
+/// A highlighted row: a tinted bar with a marker at its left end.
+pub fn selected_row(p: &egui::Painter, r: Rect, rgb: [u8; 3], c: f32) {
+    p.rect_filled(r, 0.0, rgba(rgb, 0.14));
+    p.rect_filled(
+        Rect::from_min_size(r.min, Vec2::new(c, r.height())),
+        0.0,
+        rgba(rgb, 0.9),
+    );
+    pointer(
+        p,
+        Pos2::new(r.left() + c * 3.0, r.center().y),
+        c,
+        rgba(rgb, 1.0),
+    );
+}
+
+/// A segmented pixel bar, `frac` 0..1 filled, one cell high per segment.
+pub fn bar(p: &egui::Painter, r: Rect, frac: f32, rgb: [u8; 3], alpha: f32) {
+    let seg = (r.height() * 1.2).max(3.0);
+    let n = ((r.width() / seg).floor() as i32).max(1);
+    let w = r.width() / n as f32;
+    let lit = (frac.clamp(0.0, 1.0) * n as f32).round() as i32;
+    for i in 0..n {
+        let cell = Rect::from_min_size(
+            Pos2::new(r.left() + i as f32 * w, r.top()),
+            Vec2::new((w - 1.0).max(1.0), r.height()),
+        );
+        if i < lit {
+            p.rect_filled(cell, 0.0, rgba(rgb, 0.9 * alpha));
+        } else {
+            p.rect_filled(cell, 0.0, rgba(rgb, 0.12 * alpha));
+        }
+    }
+}
+
 /// A plus sign, 5x5 cells, centred.
 pub fn plus(p: &egui::Painter, centre: Pos2, c: f32, color: Color32) {
     p.rect_filled(
@@ -246,6 +295,33 @@ pub fn check(p: &egui::Painter, centre: Pos2, c: f32, color: Color32) {
             color,
         );
     }
+}
+
+/// A panel with a title tab on its top edge.
+pub fn titled_panel(
+    p: &egui::Painter,
+    r: Rect,
+    title: &str,
+    edge: [u8; 3],
+    fill: Color32,
+    c: f32,
+    size: f32,
+) {
+    panel(p, r, edge, fill, c, 0.9);
+    let galley = p.layout_no_wrap(title.to_string(), FontId::monospace(size), Color32::WHITE);
+    let tab = Rect::from_min_size(
+        r.left_top() + Vec2::new(c * 3.0, -galley.size().y * 0.5 - c * 0.5),
+        Vec2::new(galley.size().x + c * 3.0, galley.size().y + c),
+    );
+    p.rect_filled(tab, 0.0, rgba([8, 4, 20], 1.0));
+    p.rect_stroke(tab, 0.0, Stroke::new(1.0_f32, rgba(edge, 0.9)));
+    p.text(
+        tab.center(),
+        Align2::CENTER_CENTER,
+        title,
+        FontId::monospace(size),
+        rgba(edge, 1.0),
+    );
 }
 
 /// Shrinks `size` until `text` (monospace) fits in `width`, never below `min`.
