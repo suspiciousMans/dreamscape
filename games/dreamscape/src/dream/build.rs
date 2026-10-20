@@ -1,7 +1,7 @@
 //! Turns a layout + theme into concrete blocks (every block is a coloured cube).
 
 use super::detail;
-use super::grid::{Cell, Grid, P};
+use super::grid::{Cell, Grid, Terrain, LEVEL_H, P};
 use super::layout;
 use super::meshes::Shape;
 use super::texture::{self as tex, Pattern};
@@ -108,6 +108,8 @@ pub struct Dream {
     pub watchers: Vec<(Vec3, Vec3)>,
     /// White Dissolve: route cells (each its own slab) that dissolve behind you.
     pub dissolve: Vec<Vec3>,
+    /// The shape of the ground: flat, a pyramid to climb, or a crater.
+    pub terrain: Terrain,
 }
 
 /// One special enemy. `at` is where it starts; `a`/`b` are its two ends
@@ -250,6 +252,19 @@ pub struct Goals {
     pub fragments: bool,
 }
 
+/// Dreams that can come as a pyramid or a crater: the open, airy ones.
+pub const TERRACED_THEMES: [DreamTheme; 4] = [
+    DreamTheme::VoidPlatforms,
+    DreamTheme::SkyStairs,
+    DreamTheme::FractalCathedral,
+    DreamTheme::DrownedLibrary,
+];
+
+/// Whether this dream's ground is tiered: half the time, in the themes above.
+pub fn is_terraced(theme: DreamTheme, seed: u64) -> bool {
+    TERRACED_THEMES.contains(&theme) && StdRng::seed_from_u64(seed ^ 0x7E44_ACE5).gen_bool(0.5)
+}
+
 #[cfg(test)]
 pub fn generate(
     theme: DreamTheme,
@@ -280,6 +295,10 @@ pub fn generate_with(
 ) -> Dream {
     let mut spec = theme.spec();
     spec.strangeness = strangeness(theme, depth);
+    // A few dreams are tiered (its own RNG stream, so other seeds replay as before).
+    if is_terraced(theme, seed) {
+        spec.layout = LayoutKind::Terraces;
+    }
     let mut rng = StdRng::seed_from_u64(seed);
     let layout = layout::generate(
         spec.layout,
@@ -497,6 +516,7 @@ pub fn generate_with(
             Vec::new()
         },
         dissolve: dissolve_cells.iter().map(|&c| grid.world(c)).collect(),
+        terrain: grid.terrain(),
     }
 }
 
@@ -721,6 +741,7 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         beat_tiles: Vec::new(),
         watchers: Vec::new(),
         dissolve: Vec::new(),
+        terrain: Terrain::Flat,
     }
 }
 
@@ -811,18 +832,27 @@ fn floor_slabs(
                 continue;
             }
             let start = x;
+            let level = grid.level((start, y));
             x += 1;
+            // A run stays on one terrace level.
             if !single.contains(&(start, y)) {
-                while x < grid.w && grid.get((x, y)) == Cell::Floor && !single.contains(&(x, y)) {
+                while x < grid.w
+                    && grid.get((x, y)) == Cell::Floor
+                    && grid.level((x, y)) == level
+                    && !single.contains(&(x, y))
+                {
                     x += 1;
                 }
             }
             let centre = (grid.world((start, y)) + grid.world((x - 1, y))) * 0.5;
+            // On terraced ground the slab is a solid column down to the base,
+            // so a pyramid or crater reads as one mass, not floating plates.
+            let thick = SLAB + level as f32 * LEVEL_H;
             out.push(Block {
                 kind: BlockKind::Floor,
                 shape: Shape::Cube,
-                pos: centre - Vec3::Y * SLAB * 0.5,
-                size: Vec3::new((x - start) as f32 * CELL, SLAB, CELL),
+                pos: centre - Vec3::Y * thick * 0.5,
+                size: Vec3::new((x - start) as f32 * CELL, thick, CELL),
                 rotation: Quat::IDENTITY,
                 color: tint(pick(spec.floor_colors, rng), spec.strangeness, rng),
             });
@@ -1363,8 +1393,10 @@ mod tests {
                 assert_eq!(d.route.first().unwrap().pos, d.spawn);
                 assert_eq!(d.route.last().unwrap().pos, d.portal);
                 for hop in d.route.windows(2) {
-                    let dist = hop[0].pos.distance(hop[1].pos);
-                    let want = if hop[1].jump { 2.0 * CELL } else { CELL };
+                    // Flat distance: a terrace step also rises a little.
+                    let dist = flat_dist(hop[0].pos, hop[1].pos);
+                    let climb = (hop[0].pos.y - hop[1].pos.y).abs() > 1e-3;
+                    let want = if hop[1].jump && !climb { 2.0 * CELL } else { CELL };
                     assert!(
                         (dist - want).abs() < 1e-3,
                         "{theme:?}/{seed}: hop of {dist}"
@@ -1978,8 +2010,9 @@ mod tests {
                 assert_eq!(d.lucid_route.first().unwrap().pos, d.spawn);
                 assert_eq!(d.lucid_route.last().unwrap().pos, d.portal);
                 for hop in d.lucid_route.windows(2) {
-                    let dist = hop[0].pos.distance(hop[1].pos);
-                    let want = if hop[1].jump { 2.0 * CELL } else { CELL };
+                    let dist = flat_dist(hop[0].pos, hop[1].pos);
+                    let climb = (hop[0].pos.y - hop[1].pos.y).abs() > 1e-3;
+                    let want = if hop[1].jump && !climb { 2.0 * CELL } else { CELL };
                     assert!((dist - want).abs() < 1e-3, "{theme:?}/{seed}: hop {dist}");
                 }
                 for prop in d.blocks.iter().filter(|b| b.kind == BlockKind::Prop) {
@@ -2161,6 +2194,9 @@ mod tests {
         let mut found = 0;
         for seed in 0..30 {
             let d = with_special(DreamTheme::VoidPlatforms, seed, 6, Some(EnemyKind::Drifter));
+            if d.terrain != Terrain::Flat {
+                continue; // tiered ground has no gaps to swing across
+            }
             for sp in &d.specials {
                 found += 1;
                 // Its swing is perpendicular to the jump and centred on it...
@@ -2391,6 +2427,103 @@ mod tests {
                         "{t:?} {seed}: route jumps"
                     );
                 }
+            }
+        }
+    }
+
+    fn tiered_dreams() -> Vec<Dream> {
+        let mut out = Vec::new();
+        for theme in TERRACED_THEMES {
+            for seed in 0..120u64 {
+                if is_terraced(theme, seed) {
+                    out.push(generate(theme, seed, (seed % 6) as u32 + 1, None, seed % 2 == 0));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn only_the_open_dreams_are_tiered_and_only_some_of_the_time() {
+        let (mut tiered, mut total) = (0, 0);
+        for theme in ALL_THEMES {
+            for seed in 0..200u64 {
+                total += 1;
+                let t = is_terraced(theme, seed);
+                if !TERRACED_THEMES.contains(&theme) {
+                    assert!(!t, "{theme:?} must stay flat");
+                    assert_eq!(generate(theme, seed, 3, None, true).terrain, Terrain::Flat);
+                } else {
+                    tiered += t as u32;
+                }
+            }
+        }
+        let share = tiered as f32 / (total as f32 * TERRACED_THEMES.len() as f32 / ALL_THEMES.len() as f32);
+        assert!((0.4..0.6).contains(&share), "about half: {share}");
+    }
+
+    #[test]
+    fn no_floor_is_ever_above_or_below_another() {
+        let dreams = tiered_dreams();
+        assert!(dreams.len() > 100);
+        for d in &dreams {
+            assert_ne!(d.terrain, Terrain::Flat, "{:?} {}", d.theme, d.seed);
+            let floors: Vec<&Block> = d.blocks.iter().filter(|b| b.kind == BlockKind::Floor).collect();
+            for (i, a) in floors.iter().enumerate() {
+                for b in &floors[i + 1..] {
+                    let overlap_x = (a.pos.x - b.pos.x).abs() < (a.size.x + b.size.x) * 0.5 - 1e-3;
+                    let overlap_z = (a.pos.z - b.pos.z).abs() < (a.size.z + b.size.z) * 0.5 - 1e-3;
+                    assert!(
+                        !(overlap_x && overlap_z),
+                        "{:?} {}: floors stacked at ({}, {})",
+                        d.theme, d.seed, a.pos.x, a.pos.z
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_route_climbs_in_plain_jumps_and_ends_at_the_portal() {
+        for d in tiered_dreams() {
+            for w in d.route.windows(2) {
+                let rise = w[1].pos.y - w[0].pos.y;
+                assert!(rise.abs() <= LEVEL_H + 1e-3, "{:?} {}: {rise} step", d.theme, d.seed);
+                assert_eq!(w[1].jump, rise.abs() > 1e-3 || w[1].jump);
+            }
+            let last = d.route.last().expect("route").pos;
+            assert!((last - d.portal).length() < 1e-3);
+            assert!(d.route[0].pos.y >= 0.0 && d.portal.y >= 0.0, "ground starts at zero");
+            // The portal stands on its tile, and the spawn does.
+            let top_at = |p: Vec3| {
+                d.blocks.iter().filter(|b| b.kind == BlockKind::Floor
+                    && (p.x - b.pos.x).abs() <= b.size.x * 0.5
+                    && (p.z - b.pos.z).abs() <= b.size.z * 0.5)
+                    .map(|b| b.pos.y + b.size.y * 0.5).fold(f32::MIN, f32::max)
+            };
+            assert!((top_at(d.portal) - d.portal.y).abs() < 1e-3, "portal floats");
+            assert!((top_at(d.spawn) - d.spawn.y).abs() < 1e-3, "spawn floats");
+        }
+    }
+
+    #[test]
+    fn enemies_pace_one_flat_terrace() {
+        for d in tiered_dreams() {
+            for (a, b) in &d.patrols {
+                assert!((a.y - b.y).abs() < 1e-3, "{:?} {}: patrol changes level", d.theme, d.seed);
+            }
+        }
+    }
+
+    #[test]
+    fn a_blink_lands_on_the_terrace_it_reaches() {
+        let d = tiered_dreams().into_iter().next().expect("tiered dream");
+        // Standing on the spawn, blinking toward each side: wherever it lands
+        // the dreamer is standing 1.0 above a floor top that is a step away.
+        let from = d.spawn + Vec3::Y;
+        for dir in [Vec3::X, -Vec3::X, Vec3::Z, -Vec3::Z] {
+            if let Some(at) = crate::gameplay::blink_target(&d.blocks, from, dir, 1.5) {
+                assert!(at.y - 1.0 <= d.spawn.y + 1.0 + 1e-3, "blinked up a cliff: {at:?}");
             }
         }
     }
