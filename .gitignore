@@ -11,3 +11,6 @@ games/dreamscape/saved_run.ron
 games/dreamscape/cards/
 dist/
 target/
+
+# crash reports written by crash.rs
+crash-*.txt
