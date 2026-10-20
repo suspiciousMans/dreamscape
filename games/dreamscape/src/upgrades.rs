@@ -28,9 +28,23 @@ pub enum Ability {
     Flare,
     /// Snap back to where you stood a few seconds ago.
     Rewind,
+    /// A huge upward jump, even in mid-air.
+    Leap,
+    /// Hop, then smash down: the landing stuns every enemy close by.
+    Slam,
+    /// Drop a marker; use it again to snap back to it.
+    Anchor,
+    /// The next thing that would catch you breaks the ward instead.
+    Ward,
+    /// Two floating steps rise ahead of you, a stair into the air.
+    Step,
+    /// Everything chasing you slows to a crawl.
+    Hush,
+    /// A blast that throws nearby enemies back.
+    Gust,
 }
 
-pub const ALL_ABILITIES: [Ability; 9] = [
+pub const ALL_ABILITIES: [Ability; 16] = [
     Ability::Dash,
     Ability::Blink,
     Ability::Stillness,
@@ -40,6 +54,13 @@ pub const ALL_ABILITIES: [Ability; 9] = [
     Ability::Float,
     Ability::Flare,
     Ability::Rewind,
+    Ability::Leap,
+    Ability::Slam,
+    Ability::Anchor,
+    Ability::Ward,
+    Ability::Step,
+    Ability::Hush,
+    Ability::Gust,
 ];
 
 /// Shift and E.
@@ -57,6 +78,26 @@ pub const FLOAT_GRAVITY: f32 = 0.33;
 pub const FLARE_SIGHT: f32 = 2.0;
 /// REWIND: how far back it takes you.
 pub const REWIND_SECONDS: f32 = 3.0;
+/// LEAP: how much higher than a jump it throws you.
+pub const LEAP_MULT: f32 = 1.7;
+/// SLAM: the smash's speed (units / second), how far the shockwave reaches
+/// (world units), and how long it stuns.
+pub const SLAM_FALL_SPEED: f32 = 24.0;
+pub const SLAM_RADIUS: f32 = 9.0;
+pub const SLAM_STUN: f32 = 2.5;
+/// ANCHOR: how long the marker waits for you.
+pub const ANCHOR_SECONDS: f32 = 30.0;
+/// WARD: the breathing room after it breaks.
+pub const WARD_GRACE: f32 = 1.5;
+/// STEP: how high each step rises above the last, and how many there are.
+pub const STEP_RISE: f32 = 1.3;
+pub const STEP_COUNT: usize = 2;
+/// HUSH: what's left of an enemy's speed.
+pub const HUSH_SLOW: f32 = 0.35;
+/// GUST: how far it reaches, how far it throws, how long they reel.
+pub const GUST_RADIUS: f32 = 8.0;
+pub const GUST_PUSH: f32 = 6.0;
+pub const GUST_STUN: f32 = 1.2;
 
 /// Where enemies are heading: the decoy while it's up, otherwise you.
 pub fn lure_target(player: Vec3, decoy: Option<Vec3>, active: bool) -> Vec3 {
@@ -109,6 +150,13 @@ impl Ability {
             Ability::Float => "FLOAT",
             Ability::Flare => "FLARE",
             Ability::Rewind => "REWIND",
+            Ability::Leap => "LEAP",
+            Ability::Slam => "SLAM",
+            Ability::Anchor => "ANCHOR",
+            Ability::Ward => "WARD",
+            Ability::Step => "STEP",
+            Ability::Hush => "HUSH",
+            Ability::Gust => "GUST",
         }
     }
 
@@ -123,6 +171,13 @@ impl Ability {
             Ability::Float => "fall slowly for 3s; drift over gaps",
             Ability::Flare => "the dark pulls back for 5s",
             Ability::Rewind => "snap back to where you stood 3s ago",
+            Ability::Leap => "launch far above a normal jump",
+            Ability::Slam => "hop, smash down, stun what's near",
+            Ability::Anchor => "drop a marker; use again to return",
+            Ability::Ward => "the next catch breaks the ward instead",
+            Ability::Step => "two steps of air rise ahead of you",
+            Ability::Hush => "chasers crawl at a third speed for 6s",
+            Ability::Gust => "throw nearby enemies back and dizzy them",
         }
     }
 
@@ -138,6 +193,13 @@ impl Ability {
             Ability::Float => 10.0,
             Ability::Flare => 16.0,
             Ability::Rewind => 12.0,
+            Ability::Leap => 6.0,
+            Ability::Slam => 9.0,
+            Ability::Anchor => 14.0,
+            Ability::Ward => 24.0,
+            Ability::Step => 18.0,
+            Ability::Hush => 14.0,
+            Ability::Gust => 11.0,
         }
     }
 
@@ -153,6 +215,13 @@ impl Ability {
             Ability::Float => 3.0,
             Ability::Flare => 5.0,
             Ability::Rewind => 0.0,
+            Ability::Leap => 0.0,
+            Ability::Slam => 1.8,
+            Ability::Anchor => 0.0,
+            Ability::Ward => 10.0,
+            Ability::Step => 8.0,
+            Ability::Hush => 6.0,
+            Ability::Gust => 0.0,
         }
     }
 }
@@ -1463,10 +1532,10 @@ mod tests {
     #[test]
     fn a_shared_active_is_learned_once() {
         use crate::dream::DreamTheme::*;
-        // Both teach DASH: the second fills no slot, the third does.
-        let r = RunUpgrades::from_loadout(&[card(TheTunnel), card(SynesthesiaHall), card(Garden)]);
+        // Both teach STILLNESS: the second fills no slot, the third does.
+        let r = RunUpgrades::from_loadout(&[card(Lobby), card(WatchingWallpaper), card(Garden)]);
         let actives: Vec<Ability> = r.abilities.iter().map(|a| a.ability).collect();
-        assert_eq!(actives, vec![Ability::Dash, Ability::ShardCall]);
+        assert_eq!(actives, vec![Ability::Stillness, Ability::ShardCall]);
     }
 
     #[test]

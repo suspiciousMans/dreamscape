@@ -348,6 +348,15 @@ pub struct DreamscapeGame {
     music_loop: f32,
     /// DECOY: where it stands and its marker.
     decoy: Option<(Vec3, Entity)>,
+    /// ANCHOR: where it was dropped, its marker, and how long it has waited.
+    anchor: Option<(Vec3, Entity, f32)>,
+    /// Enemies reeling from a SLAM or GUST: seconds left.
+    stunned: HashMap<Entity, f32>,
+    /// SLAM: 0 = not slamming, 1 = rising from the hop, 2 = smashing down.
+    slam: u8,
+    /// STEP: where the next steps go (spawned with the GL context in hand), and the live ones.
+    step_pending: Option<Vec<Vec3>>,
+    steps: Vec<Entity>,
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
     echo_timer: f32,
@@ -494,6 +503,8 @@ pub struct DreamscapeGame {
     run_log: Vec<cards::DreamRecord>,
     /// Dev: `DREAMSCAPE_OPEN` has already opened its screen.
     dev_opened: bool,
+    /// Dev: `DREAMSCAPE_FIRE` has already fired its ability.
+    dev_fired: bool,
     booklet: cards::Booklet,
     booklet_path: std::path::PathBuf,
     booklet_page: usize,
@@ -603,6 +614,11 @@ impl DreamscapeGame {
             music_job: None,
             music_loop: 1.0,
             decoy: None,
+            anchor: None,
+            stunned: HashMap::new(),
+            slam: 0,
+            step_pending: None,
+            steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
             player_tex: None,
@@ -687,6 +703,7 @@ impl DreamscapeGame {
             dream_whisper: String::new(),
             run_log: Vec::new(),
             dev_opened: false,
+            dev_fired: false,
             booklet: {
                 let mut b = cards::load(&cards::booklet_path());
                 b.stash.migrate();
@@ -1432,7 +1449,8 @@ impl DreamscapeGame {
                         a.ability.name(),
                         upgrades::SLOT_KEYS[k],
                         a.charge(self.run.cooldown_for(a.ability)),
-                        a.is_active(),
+                        a.is_active()
+                            || (a.ability == Ability::Anchor && self.anchor.is_some()),
                     )
                 })
                 .collect(),
@@ -1567,6 +1585,43 @@ impl DreamscapeGame {
                     Hero,
                 ));
                 self.bursts.push((e, now, i, at));
+            }
+        }
+        // STEP: the stair of air, and its end.
+        if let Some(spots) = self.step_pending.take() {
+            let cube = self.mesh(Shape::Cube)?;
+            let tint = self
+                .ability_tints
+                .iter()
+                .find(|t| t.0 == Ability::Step)
+                .map_or([150, 200, 255], |&(_, a, _)| a);
+            let tex = self.texture(gl, [tint[0], tint[1], tint[2], 255]);
+            let size = Vec3::new(2.6, 0.3, 2.6);
+            for at in spots {
+                let e = self.world.spawn((
+                    Transform {
+                        position: at,
+                        rotation: Quat::IDENTITY,
+                        scale: size,
+                    },
+                    MeshRenderer {
+                        mesh: cube.clone(),
+                        texture: Some(tex.clone()),
+                    },
+                    Lit,
+                    Collider {
+                        shape: ColliderShape::Aabb {
+                            half_extents: size * 0.5,
+                        },
+                        is_trigger: false,
+                    },
+                ));
+                self.steps.push(e);
+            }
+        }
+        if !self.run.active(Ability::Step) {
+            for e in self.steps.drain(..) {
+                let _ = self.world.despawn(e);
             }
         }
         let world = &mut self.world;
@@ -2352,6 +2407,104 @@ impl DreamscapeGame {
         self.player_position = at;
     }
 
+    /// The vertical speed of a plain jump right now.
+    fn jump_speed(&self) -> f32 {
+        let feature = self
+            .dream
+            .as_ref()
+            .map_or(dream::Feature::None, |d| d.theme.spec().feature);
+        gameplay::JUMP_SPEED * self.run.jump() * self.twists.jump() * feature.jump()
+    }
+
+    fn set_player_vy(&mut self, vy: f32) {
+        if let Some(p) = self.player {
+            if let Ok(mut b) = self.world.get::<&mut RigidBody>(p) {
+                b.velocity.y = vy;
+            }
+        }
+    }
+
+    /// The facing, flat on the ground (forward if you've not moved yet).
+    fn flat_facing(&self) -> Vec3 {
+        let f = Vec3::new(self.facing.x, 0.0, self.facing.z).normalize_or_zero();
+        if f == Vec3::ZERO {
+            Vec3::Z
+        } else {
+            f
+        }
+    }
+
+    /// Knocks every enemy within `radius` back `push` units and stuns it.
+    fn rattle_enemies(&mut self, radius: f32, push: f32, stun: f32) {
+        let player = self.player_position;
+        for p in &self.enemies {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(p.entity) {
+                let d = t.position - player;
+                let flat = Vec3::new(d.x, 0.0, d.z);
+                if flat.length() < radius {
+                    t.position += flat.normalize_or_zero() * push;
+                    self.stunned.insert(p.entity, stun);
+                }
+            }
+        }
+    }
+
+    /// WARD: it takes the hit meant for you.
+    fn break_ward(&mut self) {
+        for a in &mut self.run.abilities {
+            if a.ability == Ability::Ward {
+                a.active = 0.0;
+            }
+        }
+        self.grace = self.grace.max(upgrades::WARD_GRACE);
+        self.flash.trigger([1.0, 0.9, 0.5], 0.5);
+        self.burst_pending = Some((self.player_position, [255, 230, 140], [255, 255, 255]));
+        self.sfx(Sound::Sigil);
+        log::info!("The ward broke");
+    }
+
+    /// SLAM, once the hop is over: smash down, then a shockwave on landing.
+    fn update_slam(&mut self) {
+        if self.slam == 0 {
+            return;
+        }
+        if !self.run.active(Ability::Slam) {
+            self.slam = 0;
+            return;
+        }
+        let Some(p) = self.player else {
+            return;
+        };
+        let Some((grounded, vy)) = self
+            .world
+            .get::<&RigidBody>(p)
+            .ok()
+            .map(|b| (b.grounded, b.velocity.y))
+        else {
+            return;
+        };
+        if self.slam == 1 && vy <= 0.0 {
+            self.slam = 2;
+        }
+        if self.slam == 2 {
+            if grounded {
+                self.slam = 0;
+                self.rattle_enemies(upgrades::SLAM_RADIUS, 0.0, upgrades::SLAM_STUN);
+                self.flash.trigger([1.0, 0.8, 0.4], 0.45);
+                self.burst_pending = Some((self.player_position, [255, 190, 90], [255, 240, 200]));
+                self.sfx(Sound::Crumble);
+                // The smash is over: let the recharge run.
+                for a in &mut self.run.abilities {
+                    if a.ability == Ability::Slam {
+                        a.active = 0.0;
+                    }
+                }
+            } else {
+                self.set_player_vy(-upgrades::SLAM_FALL_SPEED);
+            }
+        }
+    }
+
     fn use_ability(&mut self, slot: usize) {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
@@ -2376,6 +2529,80 @@ impl DreamscapeGame {
                 return;
             };
             self.teleport_player(at);
+        }
+        // ANCHOR is two-stage: the first use drops the marker (almost no
+        // recharge), the second snaps you back and starts the real recharge.
+        if state.ability == Ability::Anchor {
+            match self.anchor.take() {
+                None => {
+                    if let (Some(tex), Ok(mesh)) =
+                        (self.player_tex.clone(), self.mesh(Shape::Octahedron))
+                    {
+                        let at = self.player_position;
+                        let e = self.world.spawn((
+                            Transform {
+                                position: at - Vec3::Y * 0.4,
+                                rotation: Quat::IDENTITY,
+                                scale: Vec3::new(0.5, 0.8, 0.5),
+                            },
+                            MeshRenderer {
+                                mesh,
+                                texture: Some(tex),
+                            },
+                            Spin(-2.0),
+                            Lit,
+                            Hero,
+                        ));
+                        self.anchor = Some((at, e, 0.0));
+                        self.run.abilities[slot].cooldown = 0.8;
+                        self.flash.trigger([0.6, 0.9, 1.0], 0.25);
+                        self.sfx(Sound::Sigil);
+                        log::info!("Anchor dropped");
+                    }
+                    return;
+                }
+                Some((at, e, _)) => {
+                    let _ = self.world.despawn(e);
+                    self.teleport_player(at);
+                }
+            }
+        }
+        match state.ability {
+            Ability::Leap => {
+                let vy = self.jump_speed() * upgrades::LEAP_MULT;
+                self.set_player_vy(vy);
+                self.air_jumps_used = 0;
+            }
+            Ability::Slam => {
+                if self.player_grounded {
+                    let hop = self.jump_speed() * 0.7;
+                    self.set_player_vy(hop);
+                    self.slam = 1;
+                } else {
+                    self.slam = 2;
+                    self.set_player_vy(-upgrades::SLAM_FALL_SPEED);
+                }
+            }
+            Ability::Gust => {
+                self.rattle_enemies(
+                    upgrades::GUST_RADIUS,
+                    upgrades::GUST_PUSH,
+                    upgrades::GUST_STUN,
+                );
+            }
+            Ability::Step => {
+                let dir = self.flat_facing();
+                let feet = self.player_position.y - 1.0;
+                let spots: Vec<Vec3> = (1..=upgrades::STEP_COUNT)
+                    .map(|i| {
+                        let top = feet + upgrades::STEP_RISE * i as f32;
+                        let flat = self.player_position + dir * gameplay::CELL * i as f32;
+                        Vec3::new(flat.x, top - 0.15, flat.z)
+                    })
+                    .collect();
+                self.step_pending = Some(spots);
+            }
+            _ => {}
         }
         if state.ability == Ability::Rewind {
             let Some(at) = self.rewind_trail.rewind(self.dream_age) else {
@@ -2441,6 +2668,13 @@ impl DreamscapeGame {
                 Ability::Float => [0.7, 1.0, 0.8],
                 Ability::Flare => [1.0, 0.95, 0.6],
                 Ability::Rewind => [0.6, 0.6, 1.0],
+                Ability::Leap => [1.0, 0.9, 0.5],
+                Ability::Slam => [1.0, 0.7, 0.3],
+                Ability::Anchor => [0.6, 0.9, 1.0],
+                Ability::Ward => [1.0, 0.9, 0.6],
+                Ability::Step => [0.6, 0.8, 1.0],
+                Ability::Hush => [0.7, 0.6, 1.0],
+                Ability::Gust => [0.8, 1.0, 0.9],
             };
             let tint = self
                 .ability_tints
@@ -2462,6 +2696,13 @@ impl DreamscapeGame {
                 Ability::Float => Sound::AirJump,
                 Ability::Flare => Sound::PortalOpen,
                 Ability::Rewind => Sound::Blink,
+                Ability::Leap => Sound::AirJump,
+                Ability::Slam => Sound::Deeper,
+                Ability::Anchor => Sound::Blink,
+                Ability::Ward => Sound::Sigil,
+                Ability::Step => Sound::PortalOpen,
+                Ability::Hush => Sound::Stillness,
+                Ability::Gust => Sound::Dash,
             });
         }
     }
@@ -4455,6 +4696,11 @@ impl DreamscapeGame {
         self.bursts.clear();
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
+        self.anchor = None;
+        self.stunned.clear();
+        self.slam = 0;
+        self.step_pending = None;
+        self.steps.clear();
         self.rewind_trail.clear();
         self.echo_timer = 0.0;
         self.watchers.clear();
@@ -5807,6 +6053,23 @@ impl Game for DreamscapeGame {
         for (slot, _) in requests.iter().enumerate().filter(|(_, &r)| r) {
             self.use_ability(slot);
         }
+        // Dev: DREAMSCAPE_FIRE=<slot> with the autopilot uses that ability at
+        // DREAMSCAPE_FIRE_AT seconds (and again each second after), for screenshots.
+        if self.autopilot {
+            if let Some(slot) = crate::dev::var("DREAMSCAPE_FIRE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                let at: f32 = crate::dev::var("DREAMSCAPE_FIRE_AT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2.0);
+                if self.dream_age >= at && !self.dev_fired {
+                    self.dev_fired = true;
+                    self.use_ability(slot);
+                }
+            }
+        }
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
@@ -5936,8 +6199,22 @@ impl Game for DreamscapeGame {
         }
         let mut splits = Vec::new();
         let mut noticed = false;
+        let hush = if self.run.active(Ability::Hush) {
+            upgrades::HUSH_SLOW
+        } else {
+            1.0
+        };
         for (k, p) in self.enemies.iter_mut().enumerate() {
             if held || puppet {
+                continue;
+            }
+            // Reeling from a SLAM or GUST.
+            if let Some(&left) = self.stunned.get(&p.entity) {
+                if left - dt <= 0.0 {
+                    self.stunned.remove(&p.entity);
+                } else {
+                    self.stunned.insert(p.entity, left - dt);
+                }
                 continue;
             }
             if let Ok(mut t) = self.world.get::<&mut Transform>(p.entity) {
@@ -5947,7 +6224,7 @@ impl Game for DreamscapeGame {
                 } else {
                     nearest(&hunted, t.position)
                 };
-                p.ai.update(&mut t.position, target, dt);
+                p.ai.update(&mut t.position, target, dt * hush);
                 // Swell when they notice you: the tell that you've been seen.
                 let size = if p.ai.chasing { 1.25 } else { 0.9 }
                     * match p.elite {
@@ -6009,6 +6286,14 @@ impl Game for DreamscapeGame {
                 let _ = self.world.despawn(e);
             }
         }
+        // An anchor left too long fades; so does one whose card is gone.
+        if let Some((_, e, age)) = self.anchor.as_mut().map(|a| (a.0, a.1, &mut a.2)) {
+            *age += dt;
+            if *age > upgrades::ANCHOR_SECONDS {
+                let _ = self.world.despawn(e);
+                self.anchor = None;
+            }
+        }
         self.update_specials(dt, held)?;
         self.update_features();
         let mut boss_events = Vec::new();
@@ -6057,6 +6342,7 @@ impl Game for DreamscapeGame {
             ..PhysicsParams::default()
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
+        self.update_slam();
         if let Some(p) = self.player {
             if self.world.get::<&RigidBody>(p).is_ok_and(|b| b.grounded) {
                 self.rewind_trail.push(self.dream_age, self.player_position);
@@ -6111,6 +6397,13 @@ impl Game for DreamscapeGame {
             } else {
                 None
             };
+        // WARD takes the hit meant for you.
+        let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
+            self.break_ward();
+            None
+        } else {
+            caught_by
+        };
         let caught = caught_by.is_some();
         if let Some(by) = caught_by {
             log::info!(
