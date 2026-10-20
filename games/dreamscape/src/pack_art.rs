@@ -11,7 +11,7 @@
 use crate::dream::{DreamTheme, TexSpec, TEX_SIZE};
 use crate::hud::rgba;
 use crate::packs::Emblem;
-use engine::ui::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
+use engine::ui::egui::{self, Align2, Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use std::collections::HashMap;
 
 /// Wrapper textures, uploaded to egui on first sight and kept.
@@ -153,11 +153,7 @@ pub struct Wrapper {
     pub from: Rect,
 }
 
-/// The HUD's chromatic ghosts (cyan / magenta), for split text.
-const GHOST_A: [u8; 3] = [90, 255, 255];
-const GHOST_B: [u8; 3] = [255, 70, 200];
-/// The card frame's chipped-corner dark.
-const CHIP: [u8; 3] = [8, 4, 20];
+use crate::pixel_ui::CHIP;
 
 /// Deterministic 0..1 noise for creases and jagged edges.
 fn h01(k: u32, seed: u64) -> f32 {
@@ -235,7 +231,7 @@ fn part_color(part: Part, rgb: [u8; 3]) -> Color32 {
     }
 }
 
-/// Text with the HUD's chromatic split: two ghosts either side of the core.
+/// Chromatic-split text, centred under `at`.
 fn split_text(
     p: &egui::Painter,
     at: Pos2,
@@ -245,17 +241,7 @@ fn split_text(
     split: f32,
     alpha: f32,
 ) {
-    let font = FontId::monospace(size);
-    for (dx, rgb) in [(-split, GHOST_A), (split, GHOST_B)] {
-        p.text(
-            at + Vec2::new(dx, 0.0),
-            Align2::CENTER_TOP,
-            text,
-            font.clone(),
-            rgba(rgb, 0.55 * alpha),
-        );
-    }
-    p.text(at, Align2::CENTER_TOP, text, font, core);
+    crate::pixel_ui::split_text(p, at, Align2::CENTER_TOP, text, size, core, split, alpha);
 }
 
 /// The wrapper, optionally only the part inside `visible` (a half-torn pack).

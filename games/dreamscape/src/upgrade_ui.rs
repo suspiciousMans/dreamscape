@@ -5,7 +5,7 @@
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use crate::pixels::icons;
 use crate::upgrades::Icon;
-use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
+use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Vec2};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChoiceCard {
@@ -98,12 +98,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
         };
         let r = r.translate(Vec2::new(0.0, (1.0 - t) * 60.0 + lift));
         let frame = if sel { hue(v.time * 0.2) } else { card.frame };
-        p.rect_filled(r, 6.0, rgba([18, 10, 40], 0.95 * t));
-        p.rect_stroke(
-            r,
-            6.0,
-            Stroke::new(if sel { 4.0_f32 } else { 2.0 }, rgba(frame, t)),
-        );
+        let c = crate::pixel_ui::cell(crate::pixel_ui::scale(screen));
+        crate::pixel_ui::panel(p, r, frame, rgba([18, 10, 40], 0.95 * t), c, t);
+        if sel {
+            crate::pixel_ui::brackets(p, r.expand(c), c, rgba(frame, t));
+        }
         // Key hint in the corner.
         p.text(
             r.left_top() + Vec2::new(10.0, 6.0),

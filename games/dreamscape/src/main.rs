@@ -60,6 +60,7 @@ mod pack_art;
 mod packs;
 mod pad;
 mod paths;
+mod pixel_ui;
 mod pixels;
 mod powers;
 mod progress;
@@ -491,6 +492,8 @@ pub struct DreamscapeGame {
     dream_name: String,
     dream_whisper: String,
     run_log: Vec<cards::DreamRecord>,
+    /// Dev: `DREAMSCAPE_OPEN` has already opened its screen.
+    dev_opened: bool,
     booklet: cards::Booklet,
     booklet_path: std::path::PathBuf,
     booklet_page: usize,
@@ -683,6 +686,7 @@ impl DreamscapeGame {
             dream_name: String::new(),
             dream_whisper: String::new(),
             run_log: Vec::new(),
+            dev_opened: false,
             booklet: {
                 let mut b = cards::load(&cards::booklet_path());
                 b.stash.migrate();
@@ -1250,6 +1254,10 @@ impl DreamscapeGame {
                     selected: self.merge_sel,
                     first: self.merge_first,
                     status: self.merge_status.clone(),
+                    resonant_found: fusion::RESONANT
+                        .iter()
+                        .map(|&(a, b)| self.booklet.lore.recipes.contains(&fusion::recipe(a, b)))
+                        .collect(),
                 }
             } else {
                 merge_ui::MergeView::default()
@@ -5702,6 +5710,31 @@ impl Game for DreamscapeGame {
         }
         if let Some(kind) = self.pending_start.take() {
             return self.start_pending(ctx, kind);
+        }
+        // Dev: DREAMSCAPE_OPEN=loadout|merge opens that screen once, for screenshots.
+        if matches!(self.mode, hud::Mode::Title | hud::Mode::Warning)
+            && self.time > 0.8
+            && !self.dev_opened
+        {
+            if let Ok(which) = crate::dev::var("DREAMSCAPE_OPEN") {
+                self.dev_opened = true;
+                match which.as_str() {
+                    "loadout" => self.open_loadout(),
+                    "merge" => self.open_merge(hud::Mode::Title),
+                    // The first card picked, the cursor on one that can merge with it.
+                    "merge2" => {
+                        self.open_merge(hud::Mode::Title);
+                        let cards: Vec<&cards::Card> = self.booklet.cards().collect();
+                        if let Some(a) = cards.first() {
+                            self.merge_first = Some(a.number);
+                            if let Some(i) = cards.iter().position(|b| fusion::can_merge(a, b)) {
+                                self.merge_sel = i;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         // E2E runs: show the journal briefly (for screenshots), then exit.
         if self.autopilot
