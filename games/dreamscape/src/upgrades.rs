@@ -99,6 +99,80 @@ pub const GUST_RADIUS: f32 = 8.0;
 pub const GUST_PUSH: f32 = 6.0;
 pub const GUST_STUN: f32 = 1.2;
 
+/// How soon after one ability the next must be used to chain a combo.
+pub const COMBO_WINDOW: f32 = 4.0;
+/// Combo strengths.
+pub const METEOR_MULT: f32 = 1.6;
+pub const SHOCKWAVE_PUSH_MULT: f32 = 2.5;
+pub const SHOCKWAVE_STUN_MULT: f32 = 2.0;
+pub const BAIT_STUN_MULT: f32 = 2.0;
+pub const SANCTUARY_EXTRA: f32 = 6.0;
+pub const RISE_MULT: f32 = 1.35;
+/// How far the noise of a loud ability carries (world units).
+pub const DASH_NOISE: f32 = 9.0;
+pub const SLAM_NOISE: f32 = 20.0;
+pub const GUST_NOISE: f32 = 16.0;
+
+/// Two abilities used one after the other, in time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Combo {
+    /// LEAP then SLAM: a bigger, longer smash.
+    Meteor,
+    /// SLAM then GUST: stunned enemies are thrown far.
+    Shockwave,
+    /// WARD then HUSH: the ward holds longer.
+    Sanctuary,
+    /// DECOY then GUST: enemies drawn to the double are rattled hard.
+    Bait,
+    /// STEP then LEAP: the launch off the stair goes higher.
+    Rise,
+}
+
+impl Combo {
+    pub fn name(self) -> &'static str {
+        match self {
+            Combo::Meteor => "METEOR",
+            Combo::Shockwave => "SHOCKWAVE",
+            Combo::Sanctuary => "SANCTUARY",
+            Combo::Bait => "BAIT",
+            Combo::Rise => "RISE",
+        }
+    }
+    pub fn desc(self) -> &'static str {
+        match self {
+            Combo::Meteor => "a bigger, longer smash",
+            Combo::Shockwave => "enemies are thrown far",
+            Combo::Sanctuary => "the ward holds longer",
+            Combo::Bait => "the lured are rattled hard",
+            Combo::Rise => "a higher launch",
+        }
+    }
+}
+
+/// The combo (if any) made by using `next` soon after `prev`.
+pub fn combo(prev: Ability, next: Ability) -> Option<Combo> {
+    use Ability::*;
+    match (prev, next) {
+        (Leap, Slam) => Some(Combo::Meteor),
+        (Slam, Gust) => Some(Combo::Shockwave),
+        (Ward, Hush) => Some(Combo::Sanctuary),
+        (Decoy, Gust) => Some(Combo::Bait),
+        (Step, Leap) => Some(Combo::Rise),
+        _ => None,
+    }
+}
+
+/// A SLAM's shockwave (radius, stun seconds) after falling `height` units:
+/// the higher the hop, the bigger the wave. `meteor` is the LEAP combo.
+pub fn slam_power(height: f32, meteor: bool) -> (f32, f32) {
+    let h = height.max(0.0);
+    let k = if meteor { METEOR_MULT } else { 1.0 };
+    (
+        SLAM_RADIUS * (1.0 + 0.1 * h).min(2.0) * k,
+        SLAM_STUN * (1.0 + 0.12 * h).min(2.0) * k,
+    )
+}
+
 /// Where enemies are heading: the decoy while it's up, otherwise you.
 pub fn lure_target(player: Vec3, decoy: Option<Vec3>, active: bool) -> Vec3 {
     match decoy {
@@ -1628,5 +1702,36 @@ mod tests {
         // The best kit is about what ten good picks would give, never more.
         assert!(strongest <= 22.0, "strongest kit {strongest}");
         assert!(weakest >= 7.0, "weakest 5-card kit {weakest}");
+    }
+
+    #[test]
+    fn combos_pair_two_different_held_abilities() {
+        let mut seen = std::collections::HashSet::new();
+        for &a in &ALL_ABILITIES {
+            for &b in &ALL_ABILITIES {
+                if let Some(c) = combo(a, b) {
+                    assert_ne!(a, b, "{c:?} needs two abilities");
+                    assert!(seen.insert(c), "{c:?} made twice");
+                    assert!(combo(b, a) != Some(c), "{c:?} works either way round");
+                    assert!(!c.name().is_empty() && !c.desc().is_empty());
+                }
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        assert_eq!(combo(Ability::Leap, Ability::Slam), Some(Combo::Meteor));
+        assert_eq!(combo(Ability::Dash, Ability::Slam), None);
+    }
+
+    #[test]
+    fn a_higher_slam_hits_wider_and_longer_up_to_a_cap() {
+        let (r0, s0) = slam_power(0.0, false);
+        let (r3, s3) = slam_power(3.0, false);
+        let (rmax, smax) = slam_power(500.0, false);
+        assert_eq!((r0, s0), (SLAM_RADIUS, SLAM_STUN));
+        assert!(r3 > r0 && s3 > s0);
+        assert!(rmax <= SLAM_RADIUS * 2.0 + 1e-3 && smax <= SLAM_STUN * 2.0 + 1e-3);
+        let (rm, sm) = slam_power(3.0, true);
+        assert!((rm - r3 * METEOR_MULT).abs() < 1e-3 && (sm - s3 * METEOR_MULT).abs() < 1e-3);
+        assert_eq!(slam_power(-4.0, false), (r0, s0));
     }
 }

@@ -110,6 +110,8 @@ pub struct Dream {
     pub dissolve: Vec<Vec3>,
     /// The shape of the ground: flat, a pyramid to climb, or a crater.
     pub terrain: Terrain,
+    /// High caches on pillars (floor level at the top): a plain jump can't reach them.
+    pub caches: Vec<Vec3>,
 }
 
 /// One special enemy. `at` is where it starts; `a`/`b` are its two ends
@@ -253,11 +255,13 @@ pub struct Goals {
 }
 
 /// Dreams that can come as a pyramid or a crater: the open, airy ones.
-pub const TERRACED_THEMES: [DreamTheme; 4] = [
+pub const TERRACED_THEMES: [DreamTheme; 6] = [
     DreamTheme::VoidPlatforms,
     DreamTheme::SkyStairs,
     DreamTheme::FractalCathedral,
     DreamTheme::DrownedLibrary,
+    DreamTheme::MyceliumGrove,
+    DreamTheme::JellyfishSky,
 ];
 
 /// Whether this dream's ground is tiered: half the time, in the themes above.
@@ -517,6 +521,7 @@ pub fn generate_with(
         },
         dissolve: dissolve_cells.iter().map(|&c| grid.world(c)).collect(),
         terrain: grid.terrain(),
+        caches: grid.pillars().iter().map(|&p| grid.world(p)).collect(),
     }
 }
 
@@ -742,6 +747,7 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         watchers: Vec::new(),
         dissolve: Vec::new(),
         terrain: Terrain::Flat,
+        caches: Vec::new(),
     }
 }
 
@@ -2524,6 +2530,42 @@ mod tests {
         for dir in [Vec3::X, -Vec3::X, Vec3::Z, -Vec3::Z] {
             if let Some(at) = crate::gameplay::blink_target(&d.blocks, from, dir, 1.5) {
                 assert!(at.y - 1.0 <= d.spawn.y + 1.0 + 1e-3, "blinked up a cliff: {at:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn caches_sit_on_pillars_in_tiered_dreams_only() {
+        let mut with = 0;
+        for d in tiered_dreams() {
+            assert!(!d.caches.is_empty() && d.caches.len() <= 2, "{:?} {}", d.theme, d.seed);
+            with += 1;
+            for c in &d.caches {
+                // On a floor top, high above the tier next to it.
+                let top = |p: Vec3| {
+                    d.blocks
+                        .iter()
+                        .filter(|b| {
+                            b.kind == BlockKind::Floor
+                                && (p.x - b.pos.x).abs() <= b.size.x * 0.5
+                                && (p.z - b.pos.z).abs() <= b.size.z * 0.5
+                        })
+                        .map(|b| b.pos.y + b.size.y * 0.5)
+                        .fold(f32::MIN, f32::max)
+                };
+                assert!((top(*c) - c.y).abs() < 1e-3, "cache floats");
+                for dir in [Vec3::X, -Vec3::X, Vec3::Z, -Vec3::Z] {
+                    let next = top(*c + dir * CELL);
+                    if next > f32::MIN {
+                        assert!(c.y - next > 2.0 * LEVEL_H - 1e-3, "{:?} {}: cache not on a pillar", d.theme, d.seed);
+                    }
+                }
+            }
+        }
+        assert!(with > 100);
+        for theme in ALL_THEMES {
+            if !TERRACED_THEMES.contains(&theme) {
+                assert!(generate(theme, 5, 3, None, true).caches.is_empty());
             }
         }
     }

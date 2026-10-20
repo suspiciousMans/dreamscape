@@ -459,6 +459,9 @@ fn recursive(side: i32, rng: &mut StdRng) -> Layout {
 /// How many levels one tier climbs: three (2.1 units) is more than a plain
 /// jump clears, so you take the stairs unless you have a way up.
 pub const TIER_LEVELS: i32 = 3;
+/// How much higher than its tier a pillar stands: 3.5 units, past a plain
+/// jump (1.8) and a double jump's comfortable reach.
+pub const PILLAR_LEVELS: i32 = 5;
 
 /// A square, tiered pyramid (spawn on the outside, portal on the summit) or
 /// a crater (spawn on the rim, portal in the pit). Every tier is a two-cell
@@ -516,6 +519,51 @@ pub fn terraces(side: i32, rng: &mut StdRng) -> Layout {
         let off = rng.gen_range(-limit..=limit);
         g.set_level(at(s, a_d, off), tier_level(low) + 1);
         g.set_level(at(s, b_d, off), tier_level(low) + 2);
+    }
+    // One or two pillars: a single cell raised well above its tier, a cliff on
+    // every side, with a cache on top. Only a big jump (Leap, Step, a double
+    // jump) gets there. Kept clear of the stairs, the edges and the middle.
+    let stairs: Vec<P> = {
+        let mut v = Vec::new();
+        for y in 0..side {
+            for x in 0..side {
+                let p = (x, y);
+                let n = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|&(dx, dy)| (g.level((x + dx, y + dy)) - g.level(p)).abs() == 1);
+                if n {
+                    v.push(p);
+                }
+            }
+        }
+        v
+    };
+    let mut spots: Vec<P> = (0..side)
+        .flat_map(|y| (0..side).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let r = ring(x, y);
+            (2..=c - 2).contains(&r)
+                && stairs
+                    .iter()
+                    .all(|&(sx, sy)| (sx - x).abs().max((sy - y).abs()) >= 3)
+        })
+        .collect();
+    spots.shuffle(rng);
+    let mut pillars: Vec<P> = Vec::new();
+    let want = rng.gen_range(1..=2);
+    for p in spots {
+        if pillars.len() >= want {
+            break;
+        }
+        if pillars
+            .iter()
+            .all(|&(qx, qy)| (qx - p.0).abs().max((qy - p.1).abs()) >= 4)
+        {
+            pillars.push(p);
+        }
+    }
+    for &p in &pillars {
+        g.set_level(p, g.level(p) + PILLAR_LEVELS);
     }
     // Spawn on the outside, away from the outermost staircase; portal at the heart.
     let outer = stair_side[(tiers - 1) as usize];
@@ -696,11 +744,14 @@ mod tests {
                 Terrain::Flat => panic!("seed {seed}: flat"),
             }
             let tiers = (l.grid.w / 2 - 1) / 2;
-            assert_eq!(
-                l.grid.max_level(),
-                TIER_LEVELS * tiers,
-                "seed {seed}: full height"
-            );
+            let pillars = l.grid.pillars();
+            let ground_max = (0..l.grid.w)
+                .flat_map(|x| (0..l.grid.h).map(move |y| (x, y)))
+                .filter(|p| !pillars.contains(p))
+                .map(|p| l.grid.level(p))
+                .max()
+                .unwrap();
+            assert_eq!(ground_max, TIER_LEVELS * tiers, "seed {seed}: full height");
             // Ground starts at zero so the kill plane is always well below it.
             let min = (0..l.grid.w)
                 .flat_map(|x| (0..l.grid.h).map(move |y| (x, y)))
@@ -745,5 +796,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pillars_stand_alone_out_of_plain_reach_and_never_block_the_way() {
+        let mut total = 0;
+        for seed in 0..200 {
+            let l = terraced(seed);
+            let pillars = l.grid.pillars();
+            assert!(
+                (1..=2).contains(&pillars.len()),
+                "seed {seed}: {} pillars",
+                pillars.len()
+            );
+            total += pillars.len();
+            for &p in &pillars {
+                assert!(
+                    l.grid.path(l.spawn, p).is_none(),
+                    "seed {seed}: plain jumps reach {p:?}"
+                );
+                assert_ne!(p, l.spawn);
+                assert_ne!(p, l.portal);
+                assert!(
+                    l.grid.moves(p).is_empty(),
+                    "{p:?} has no plain way on or off"
+                );
+            }
+            assert!(
+                l.grid.path(l.spawn, l.portal).is_some(),
+                "seed {seed}: way blocked"
+            );
+        }
+        assert!(total > 250, "most dreams have a couple: {total}");
     }
 }

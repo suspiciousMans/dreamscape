@@ -155,6 +155,16 @@ struct Bob {
 }
 
 /// A pacing enemy, maybe an elite.
+/// A shard that hops away when you come near (some shards, deeper down).
+struct Skittish {
+    hops_left: u8,
+    /// Where the shard is (floor level), or is heading.
+    home: Vec3,
+    /// Where it is drawn right now, and the hop in the air: (from, to, 0..1).
+    drawn: Vec3,
+    flight: Option<(Vec3, Vec3, f32)>,
+}
+
 struct Pacer {
     entity: Entity,
     ai: EnemyAI,
@@ -350,6 +360,16 @@ pub struct DreamscapeGame {
     decoy: Option<(Vec3, Entity)>,
     /// ANCHOR: where it was dropped, its marker, and how long it has waited.
     anchor: Option<(Vec3, Entity, f32)>,
+    /// The last ability used and when (dream seconds), for combos.
+    last_ability: Option<(Ability, f32)>,
+    /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
+    slam_apex: f32,
+    slam_meteor: bool,
+    /// High caches (floor spot, glow, beam) still to be picked up.
+    caches: Vec<(Vec3, Entity, Entity)>,
+    skittish: Option<Skittish>,
+    /// Height of the ground you last stood on (for the climbing sound).
+    ground_y: f32,
     /// Enemies reeling from a SLAM or GUST: seconds left.
     stunned: HashMap<Entity, f32>,
     /// SLAM: 0 = not slamming, 1 = rising from the hop, 2 = smashing down.
@@ -615,6 +635,12 @@ impl DreamscapeGame {
             music_loop: 1.0,
             decoy: None,
             anchor: None,
+            last_ability: None,
+            slam_apex: 0.0,
+            slam_meteor: false,
+            caches: Vec::new(),
+            skittish: None,
+            ground_y: f32::MIN,
             stunned: HashMap::new(),
             slam: 0,
             step_pending: None,
@@ -2449,6 +2475,23 @@ impl DreamscapeGame {
         }
     }
 
+    /// Loud abilities carry: every enemy within `radius` that isn't reeling
+    /// turns toward you.
+    fn alert_enemies(&mut self, radius: f32) {
+        let player = self.player_position;
+        for p in &mut self.enemies {
+            if self.stunned.contains_key(&p.entity) {
+                continue;
+            }
+            if let Ok(t) = self.world.get::<&Transform>(p.entity) {
+                let d = t.position - player;
+                if Vec3::new(d.x, 0.0, d.z).length() < radius {
+                    p.ai.alert();
+                }
+            }
+        }
+    }
+
     /// WARD: it takes the hit meant for you.
     fn break_ward(&mut self) {
         for a in &mut self.run.abilities {
@@ -2459,7 +2502,7 @@ impl DreamscapeGame {
         self.grace = self.grace.max(upgrades::WARD_GRACE);
         self.flash.trigger([1.0, 0.9, 0.5], 0.5);
         self.burst_pending = Some((self.player_position, [255, 230, 140], [255, 255, 255]));
-        self.sfx(Sound::Sigil);
+        self.sfx(Sound::WardBreak);
         log::info!("The ward broke");
     }
 
@@ -2483,16 +2526,22 @@ impl DreamscapeGame {
         else {
             return;
         };
+        let y = self.player_position.y;
+        self.slam_apex = self.slam_apex.max(y);
         if self.slam == 1 && vy <= 0.0 {
             self.slam = 2;
         }
         if self.slam == 2 {
             if grounded {
                 self.slam = 0;
-                self.rattle_enemies(upgrades::SLAM_RADIUS, 0.0, upgrades::SLAM_STUN);
+                // The higher the hop, the bigger the wave (and a LEAP first makes it a meteor).
+                let (radius, stun) =
+                    upgrades::slam_power(self.slam_apex - y, std::mem::take(&mut self.slam_meteor));
+                self.rattle_enemies(radius, 0.0, stun);
+                self.alert_enemies(upgrades::SLAM_NOISE);
                 self.flash.trigger([1.0, 0.8, 0.4], 0.45);
                 self.burst_pending = Some((self.player_position, [255, 190, 90], [255, 240, 200]));
-                self.sfx(Sound::Crumble);
+                self.sfx(Sound::SlamLand);
                 // The smash is over: let the recharge run.
                 for a in &mut self.run.abilities {
                     if a.ability == Ability::Slam {
@@ -2515,6 +2564,11 @@ impl DreamscapeGame {
             self.sfx(Sound::Denied);
             return;
         }
+        // Chained soon after another ability: a combo.
+        let combo = self
+            .last_ability
+            .filter(|&(_, t)| self.dream_age - t <= upgrades::COMBO_WINDOW)
+            .and_then(|(prev, _)| upgrades::combo(prev, state.ability));
         if state.ability == Ability::Blink {
             let Some(at) = self.dream.as_ref().and_then(|d| {
                 gameplay::blink_target(
@@ -2556,7 +2610,7 @@ impl DreamscapeGame {
                         self.anchor = Some((at, e, 0.0));
                         self.run.abilities[slot].cooldown = 0.8;
                         self.flash.trigger([0.6, 0.9, 1.0], 0.25);
-                        self.sfx(Sound::Sigil);
+                        self.sfx(Sound::AnchorDrop);
                         log::info!("Anchor dropped");
                     }
                     return;
@@ -2569,11 +2623,18 @@ impl DreamscapeGame {
         }
         match state.ability {
             Ability::Leap => {
-                let vy = self.jump_speed() * upgrades::LEAP_MULT;
+                let rise = if combo == Some(upgrades::Combo::Rise) {
+                    upgrades::RISE_MULT
+                } else {
+                    1.0
+                };
+                let vy = self.jump_speed() * upgrades::LEAP_MULT * rise;
                 self.set_player_vy(vy);
                 self.air_jumps_used = 0;
             }
             Ability::Slam => {
+                self.slam_apex = self.player_position.y;
+                self.slam_meteor = combo == Some(upgrades::Combo::Meteor);
                 if self.player_grounded {
                     let hop = self.jump_speed() * 0.7;
                     self.set_player_vy(hop);
@@ -2584,11 +2645,27 @@ impl DreamscapeGame {
                 }
             }
             Ability::Gust => {
-                self.rattle_enemies(
-                    upgrades::GUST_RADIUS,
-                    upgrades::GUST_PUSH,
-                    upgrades::GUST_STUN,
-                );
+                let (push, stun) = match combo {
+                    Some(upgrades::Combo::Shockwave) => (
+                        upgrades::GUST_PUSH * upgrades::SHOCKWAVE_PUSH_MULT,
+                        upgrades::GUST_STUN * upgrades::SHOCKWAVE_STUN_MULT,
+                    ),
+                    Some(upgrades::Combo::Bait) => (
+                        upgrades::GUST_PUSH,
+                        upgrades::GUST_STUN * upgrades::BAIT_STUN_MULT,
+                    ),
+                    _ => (upgrades::GUST_PUSH, upgrades::GUST_STUN),
+                };
+                self.rattle_enemies(upgrades::GUST_RADIUS, push, stun);
+                self.alert_enemies(upgrades::GUST_NOISE);
+            }
+            Ability::Dash => self.alert_enemies(upgrades::DASH_NOISE),
+            Ability::Hush if combo == Some(upgrades::Combo::Sanctuary) => {
+                for a in &mut self.run.abilities {
+                    if a.ability == Ability::Ward && a.active > 0.0 {
+                        a.active += upgrades::SANCTUARY_EXTRA;
+                    }
+                }
             }
             Ability::Step => {
                 let dir = self.flat_facing();
@@ -2696,14 +2773,22 @@ impl DreamscapeGame {
                 Ability::Float => Sound::AirJump,
                 Ability::Flare => Sound::PortalOpen,
                 Ability::Rewind => Sound::Blink,
-                Ability::Leap => Sound::AirJump,
+                Ability::Leap => Sound::Leap,
                 Ability::Slam => Sound::Deeper,
-                Ability::Anchor => Sound::Blink,
-                Ability::Ward => Sound::Sigil,
-                Ability::Step => Sound::PortalOpen,
-                Ability::Hush => Sound::Stillness,
-                Ability::Gust => Sound::Dash,
+                Ability::Anchor => Sound::AnchorBack,
+                Ability::Ward => Sound::WardUp,
+                Ability::Step => Sound::StepRise,
+                Ability::Hush => Sound::HushOn,
+                Ability::Gust => Sound::Gust,
             });
+            self.last_ability = Some((state.ability, self.dream_age));
+            if let Some(c) = combo {
+                log::info!("Combo: {}", c.name());
+                self.achievement_toast =
+                    Some((format!("COMBO  {}: {}", c.name(), c.desc()), 0.0));
+                self.flash.trigger([1.0, 0.95, 0.6], 0.4);
+                self.sfx(Sound::Combo);
+            }
         }
     }
 
@@ -2717,6 +2802,111 @@ impl DreamscapeGame {
                 t.position += d.normalize_or_zero() * step;
             }
         }
+    }
+
+    /// A skittish shard: closing in makes it hop to somewhere else on the route.
+    fn update_skittish(&mut self, dt: f32) {
+        let Some(mut s) = self.skittish.take() else {
+            return;
+        };
+        if self.shard_entities.is_empty() {
+            return; // collected: nothing left to hop
+        }
+        if let Some((from, to, t)) = s.flight {
+            let t = (t + dt / objective::FLINCH_TIME).min(1.0);
+            let e = t * t * (3.0 - 2.0 * t);
+            let arc = (t * std::f32::consts::PI).sin() * 3.2;
+            let now = from.lerp(to, e) + Vec3::Y * arc;
+            let delta = now - s.drawn;
+            for &ent in &self.shard_entities {
+                if let Ok(mut tr) = self.world.get::<&mut Transform>(ent) {
+                    tr.position += delta;
+                }
+            }
+            s.drawn = now;
+            s.flight = if t >= 1.0 { None } else { Some((from, to, t)) };
+            if t >= 1.0 {
+                s.drawn = to;
+                s.home = to;
+            }
+            self.skittish = Some(s);
+            return;
+        }
+        let near = {
+            let d = self.player_position - s.home;
+            Vec3::new(d.x, 0.0, d.z).length() < objective::FLINCH_RANGE
+                && (self.player_position.y - 1.0 - s.home.y).abs() < 2.5
+        };
+        if s.hops_left > 0 && near {
+            let route: Vec<Vec3> = self
+                .dream
+                .as_ref()
+                .map(|d| d.lucid_route.iter().map(|w| w.pos).collect())
+                .unwrap_or_default();
+            let seed = self.dream.as_ref().map_or(0, |d| d.seed);
+            let pick = (seed as u32).wrapping_add(s.hops_left as u32 * 7919);
+            match objective::flinch_dest(&route, self.player_position, s.home, pick) {
+                Some(to) => {
+                    s.hops_left -= 1;
+                    s.flight = Some((s.home, to, 0.0));
+                    self.sfx(Sound::Flinch);
+                    self.achievement_toast = Some(("THE SHARD FLINCHES".to_string(), 0.0));
+                    log::info!("The shard hops away");
+                }
+                None => s.hops_left = 0,
+            }
+        }
+        self.skittish = Some(s);
+    }
+
+    /// High caches: reach the pillar and the gold is yours (a run bonus).
+    fn update_caches(&mut self) {
+        if self.caches.is_empty() {
+            return;
+        }
+        let p = self.player_position;
+        let depth = self.director.depth;
+        let mut taken = Vec::new();
+        self.caches.retain(|&(at, glow, beam)| {
+            let flat = Vec3::new(p.x - at.x, 0.0, p.z - at.z).length();
+            if flat < 1.4 && (p.y - 1.0 - at.y).abs() < 1.8 {
+                taken.push((glow, beam));
+                false
+            } else {
+                true
+            }
+        });
+        for (glow, beam) in taken {
+            let _ = self.world.despawn(glow);
+            let _ = self.world.despawn(beam);
+            let dust = 8 + 2 * depth.min(20);
+            self.bonus_dust += dust;
+            self.flash.trigger([1.0, 0.85, 0.3], 0.45);
+            self.sfx(Sound::CacheGet);
+            self.achievement_toast = Some((format!("HIGH CACHE  +{dust} DUST"), 0.0));
+            log::info!("Cache: +{dust} dust (run bonus {})", self.bonus_dust);
+        }
+    }
+
+    /// Climbing onto a higher terrace: a note that rises with the height.
+    fn update_climb(&mut self) {
+        let grounded = self
+            .player
+            .and_then(|p| self.world.get::<&RigidBody>(p).ok().map(|b| b.grounded))
+            .unwrap_or(false);
+        if !grounded {
+            return;
+        }
+        let y = self.player_position.y;
+        let tiered = self
+            .dream
+            .as_ref()
+            .is_some_and(|d| d.terrain != dream::Terrain::Flat);
+        if tiered && self.ground_y > f32::MIN && y - self.ground_y > 0.5 {
+            let levels = y / dream::LEVEL_H;
+            self.sfx_pitched(Sound::Climb, (1.0 + 0.045 * levels).min(2.4));
+        }
+        self.ground_y = y;
     }
 
     /// Leaving a dream through the portal: HURRIED and GILDED pay out.
@@ -4695,6 +4885,12 @@ impl DreamscapeGame {
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.anchor = None;
+        self.last_ability = None;
+        self.slam_apex = 0.0;
+        self.slam_meteor = false;
+        self.caches.clear();
+        self.skittish = None;
+        self.ground_y = f32::MIN;
         self.stunned.clear();
         self.slam = 0;
         self.step_pending = None;
@@ -4878,6 +5074,66 @@ impl DreamscapeGame {
         }
         if let (Some(at), false) = (dream.note, find_memory) {
             self.spawn_note(at)?;
+        }
+        // High caches on the pillars: gold, with a beam you can see from below.
+        if !dream.caches.is_empty() {
+            let gem = self.mesh(Shape::Octahedron)?;
+            let beam = self.mesh(Shape::Cylinder)?;
+            let gold = self.texture(gl, [255, 210, 80, 255]);
+            for &at in &dream.caches {
+                let glow = self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 1.1,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.7, 1.0, 0.7),
+                    },
+                    MeshRenderer {
+                        mesh: gem.clone(),
+                        texture: Some(gold.clone()),
+                    },
+                    Spin(2.0),
+                    Bob {
+                        base: at.y + 1.1,
+                        amp: 0.2,
+                        speed: 2.0,
+                        phase: at.x,
+                    },
+                    Lit,
+                    Hero,
+                ));
+                let pillar_beam = self.world.spawn((
+                    Transform {
+                        position: at + Vec3::Y * 4.0,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.12, 8.0, 0.12),
+                    },
+                    MeshRenderer {
+                        mesh: beam.clone(),
+                        texture: Some(gold.clone()),
+                    },
+                    Lit,
+                    Hero,
+                ));
+                self.caches.push((at, glow, pillar_beam));
+            }
+        }
+        // Some shards are skittish: they hop away twice as you close in.
+        if matches!(self.objective, Some(objective::Active::Shard))
+            && !wake_door
+            && !self.autopilot
+            && !self.coop_active()
+            && !self.director.nightmare
+        {
+            if let Some(at) = dream.shard {
+                if objective::is_skittish(dream.seed, self.director.depth) {
+                    self.skittish = Some(Skittish {
+                        hops_left: objective::FLINCH_HOPS,
+                        home: at,
+                        drawn: at,
+                        flight: None,
+                    });
+                }
+            }
         }
         if self.prologue.is_some() && self.director.depth == 0 {
             if let Some(w) = dream.route.get(2.min(dream.route.len() - 1)) {
@@ -6090,6 +6346,8 @@ impl Game for DreamscapeGame {
             self.pull_shard(dt);
         }
         self.update_objective(ctx, dt);
+        self.update_skittish(dt);
+        self.update_caches();
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
@@ -6359,6 +6617,7 @@ impl Game for DreamscapeGame {
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
         self.update_slam();
+        self.update_climb();
         if let Some(p) = self.player {
             if self.world.get::<&RigidBody>(p).is_ok_and(|b| b.grounded) {
                 self.rewind_trail.push(self.dream_age, self.player_position);
@@ -6474,6 +6733,11 @@ impl Game for DreamscapeGame {
                 if let Some(at) = self.dream.as_ref().and_then(|d| d.shard) {
                     self.despawn_shard_slot();
                     self.spawn_shard_slot(at, false)?;
+                    if let Some(s) = &mut self.skittish {
+                        s.home = at;
+                        s.drawn = at;
+                        s.flight = None;
+                    }
                 }
             }
             self.update_title(ctx);
