@@ -586,7 +586,7 @@ mod tests {
     fn the_detail_names_the_key_or_says_passive_only() {
         let mut a = card_from(&record(TheTunnel, 1, 1, 0.1, false));
         a.number = 1;
-        let mut b = card_from(&record(SynesthesiaHall, 2, 1, 0.1, false));
+        let mut b = card_from(&record(TheTunnel, 2, 1, 0.1, false));
         b.number = 2;
         let chosen = [&a, &b];
         assert_eq!(slot_of(&chosen, 1), Some(0));

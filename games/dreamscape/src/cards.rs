@@ -609,10 +609,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_first_five_cards_teach_different_abilities() {
-        // TheTunnel and SynesthesiaHall both teach DASH.
+        // Lobby and WatchingWallpaper both teach STILLNESS.
         let mut pack = vec![
-            recalled(TheTunnel, 1, true),
-            recalled(SynesthesiaHall, 2, true),
+            recalled(Lobby, 1, true),
+            recalled(WatchingWallpaper, 2, true),
             recalled(Garden, 3, true),
             recalled(Awakening, 4, true),
         ];
@@ -622,14 +622,14 @@ pub(crate) mod tests {
             .filter(|r| r.remembered)
             .map(|r| r.card.theme)
             .collect();
-        assert_eq!(kept, vec![TheTunnel, Garden, Awakening]);
+        assert_eq!(kept, vec![Lobby, Garden, Awakening]);
         // Once five are held, duplicates are kept again.
         let owned: Vec<Card> = [Lobby, LiminalOffice, VoidPlatforms, Garden, TheTunnel]
             .iter()
             .enumerate()
             .map(|(i, &t)| card_from(&record(t, i as u64, 1, 0.1, false)))
             .collect();
-        let mut pack = vec![recalled(SynesthesiaHall, 9, true)];
+        let mut pack = vec![recalled(WatchingWallpaper, 9, true)];
         shape_first_pack(&mut pack, &owned);
         assert!(pack[0].remembered);
     }
