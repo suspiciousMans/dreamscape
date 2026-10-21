@@ -270,6 +270,20 @@ pub const BURST_CUBES: usize = 8;
 /// Seconds a burst lasts.
 pub const BURST_SECONDS: f32 = 0.5;
 
+/// How much of the tunnel-vision dark an object resists: lit things (you,
+/// shards, portals) glow fully; distant scenery only shows as a dim silhouette.
+pub const SILHOUETTE_LIT: f32 = 0.35;
+
+pub fn lit_level(lit: bool, silhouette: bool) -> f32 {
+    if lit {
+        1.0
+    } else if silhouette {
+        SILHOUETTE_LIT
+    } else {
+        0.0
+    }
+}
+
 /// DASH afterimages: one every this many seconds, each lasting `GHOST_LIFE`.
 pub const GHOST_EVERY: f32 = 0.04;
 pub const GHOST_LIFE: f32 = 0.35;
@@ -306,6 +320,17 @@ pub fn burst_cube(i: usize, age: f32) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn silhouettes_show_dimmer_than_lit_things_but_not_nothing() {
+        let (lit, sil, none) = (
+            super::lit_level(true, false),
+            super::lit_level(false, true),
+            super::lit_level(false, false),
+        );
+        assert!(lit > sil && sil > none);
+        assert_eq!(super::lit_level(true, true), 1.0);
+    }
+
     #[test]
     fn dash_ghosts_shrink_away() {
         assert_eq!(super::ghost_scale(0.0), 1.0);

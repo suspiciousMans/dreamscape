@@ -127,6 +127,11 @@ struct NoMelt;
 #[derive(Clone, Copy)]
 struct Lit;
 
+/// Distant scenery (clouds, islands) that shows through the tunnel-vision
+/// dark as a dim silhouette (roadmap 5.3).
+#[derive(Clone, Copy)]
+struct Silhouette;
+
 /// The dreamer: never vertex-snapped or fogged, and drawn again as a
 /// silhouette wherever something hides it.
 #[derive(Clone, Copy)]
@@ -5135,6 +5140,11 @@ impl DreamscapeGame {
             };
             match block.kind {
                 BlockKind::Decor => {
+                    if matches!(block.shape, Shape::Cloud | Shape::Island) {
+                        self.world
+                            .insert_one(entity, Silhouette)
+                            .expect("entity was just spawned");
+                    }
                     let island_under_floor = block.shape == Shape::Island && block.pos.y > -3.0;
                     if !island_under_floor {
                         self.world
@@ -7285,7 +7295,7 @@ impl Game for DreamscapeGame {
                     }
                 }
             }
-            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo)) in
+            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
                 self.world
                     .query::<(
                         &Transform,
@@ -7297,6 +7307,7 @@ impl Game for DreamscapeGame {
                         Option<&Translucent>,
                         Option<&PlayerBody>,
                         Option<&Halo>,
+                        Option<&Silhouette>,
                     )>()
                     .iter()
             {
@@ -7314,7 +7325,7 @@ impl Game for DreamscapeGame {
                 }
                 unsafe {
                     if let Some(l) = &lit_loc {
-                        gl.uniform_1_f32(Some(l), if lit.is_some() { 1.0 } else { 0.0 });
+                        gl.uniform_1_f32(Some(l), gameplay::lit_level(lit.is_some(), sil.is_some()));
                     }
                     if let Some(l) = &hero_loc {
                         gl.uniform_1_f32(Some(l), if hero.is_some() { 1.0 } else { 0.0 });
