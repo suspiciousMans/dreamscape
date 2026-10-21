@@ -25,6 +25,7 @@ use engine::ui::egui;
 
 mod access;
 mod achievements;
+mod balance;
 mod booklet_ui;
 mod boss;
 mod cards;
@@ -2911,6 +2912,25 @@ impl DreamscapeGame {
     }
 
     /// Leaving a dream through the portal: HURRIED and GILDED pay out.
+    /// `DREAMSCAPE_BALANCE=path.csv` (dev builds): one row per finished dream.
+    fn log_balance_row(&self) {
+        let Some(path) = dev::var_os("DREAMSCAPE_BALANCE") else {
+            return;
+        };
+        let theme = format!("{:?}", self.director.theme);
+        let row = balance::Row {
+            depth: self.director.depth,
+            theme: &theme,
+            difficulty: self.difficulty(),
+            seconds: self.dream_age,
+            catches: self.stats.caught,
+            upgrades: self.run.taken.len(),
+        };
+        if let Err(e) = balance::append(std::path::Path::new(&path), &row) {
+            log::warn!("could not write balance log: {e}");
+        }
+    }
+
     fn dream_bonus(&mut self) {
         let mut bonus = 0;
         if self.twists.timer().is_some_and(|t| self.dream_age <= t) {
@@ -6893,6 +6913,7 @@ impl Game for DreamscapeGame {
             && !self.coop_ghost()
         {
             log::info!("Portal entered at depth {}", self.director.depth);
+            self.log_balance_row();
             self.tutorial(tutorial::Event::Portal);
             self.dream_bonus();
             self.stats.twists.extend(self.twists.0.iter().copied());
