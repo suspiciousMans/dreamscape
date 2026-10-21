@@ -23,6 +23,7 @@ use engine::ui::EguiState;
 
 use engine::ui::egui;
 
+mod access;
 mod achievements;
 mod booklet_ui;
 mod boss;
@@ -4910,18 +4911,28 @@ impl DreamscapeGame {
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
-        self.shard_tex = Some(self.upload_surface(gl, &dream.surfaces.shard)?);
+        let cb = self.settings.colorblind_markers;
+        let shard_spec = if cb {
+            access::shard(dream.surfaces.shard.seed)
+        } else {
+            dream.surfaces.shard.clone()
+        };
+        self.shard_tex = Some(self.upload_surface(gl, &shard_spec)?);
         let preview = if theme == DreamTheme::Awakening {
             DreamTheme::Awakening
         } else {
             self.director.next
         };
-        let portal_tex =
-            self.upload_surface(gl, &dream::portal_surface(preview, dream.seed ^ 0x5EED))?;
-        self.wake_tex = Some(self.upload_surface(
-            gl,
-            &dream::portal_surface(DreamTheme::Awakening, dream.seed),
-        )?);
+        let (portal_spec, wake_spec) = if cb {
+            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
+        } else {
+            (
+                dream::portal_surface(preview, dream.seed ^ 0x5EED),
+                dream::portal_surface(DreamTheme::Awakening, dream.seed),
+            )
+        };
+        let portal_tex = self.upload_surface(gl, &portal_spec)?;
+        self.wake_tex = Some(self.upload_surface(gl, &wake_spec)?);
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
