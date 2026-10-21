@@ -4672,6 +4672,8 @@ impl DreamscapeGame {
         // the beacon burns twice as wide.
         let girth = if self.twists.has(Variant::Blackout) {
             0.35
+        } else if self.twists.has(Variant::NightShift) {
+            0.25
         } else {
             0.15
         };
@@ -7205,7 +7207,9 @@ impl Game for DreamscapeGame {
         } else {
             Vec3::Y
         };
-        let sight_scale = self.twists.sight()
+        let sight_scale = self
+            .twists
+            .sight_at(self.dream_age, self.settings.reduce_flashing)
             * self.run.sight()
             * self.active_form.sight_mult()
             * self
