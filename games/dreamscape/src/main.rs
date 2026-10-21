@@ -6827,14 +6827,18 @@ impl Game for DreamscapeGame {
                 1.0
             };
             let speed = self.player_speed() * ground;
+            // MIRRORED swaps the actions (left <-> right), after any key remap.
+            let mirrored = self.twists.mirrors_controls();
             let walk = if fp {
                 fpv::velocity(&self.input, self.yaw)
             } else {
-                gameplay::horizontal_velocity(&self.input)
+                gameplay::horizontal_velocity(&dream::mirror_input(self.input, mirrored))
             };
             let mut v = walk * (speed / gameplay::MOVE_SPEED);
             // The left stick, if it's pushed, wins (analogue: half-push walks).
-            if let Some((x, z)) = settings::stick_dir(ctx.input.left_stick()) {
+            if let Some((x, z)) = settings::stick_dir(ctx.input.left_stick())
+                .map(|s| dream::mirror_stick(s, mirrored))
+            {
                 v = if fp {
                     fpv::from_world_stick(x, z, self.yaw)
                 } else {

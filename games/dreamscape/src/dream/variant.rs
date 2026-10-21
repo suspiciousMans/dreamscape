@@ -4,6 +4,7 @@
 //! Everything here is a pure multiplier the game reads; nothing is drawn.
 
 use super::theme::{DreamTheme, Feature, LayoutKind};
+use crate::gameplay::PlayerInputState;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,9 +29,11 @@ pub enum Variant {
     NightShift,
     /// The camera pulls back: a small dreamer in a huge dream.
     Tiny,
+    /// Left is right and right is left (the actions swap, not the keys).
+    Mirrored,
 }
 
-pub const ALL_VARIANTS: [Variant; 10] = [
+pub const ALL_VARIANTS: [Variant; 11] = [
     Variant::LowGravity,
     Variant::Flooded,
     Variant::Blackout,
@@ -41,6 +44,7 @@ pub const ALL_VARIANTS: [Variant; 10] = [
     Variant::Gilded,
     Variant::NightShift,
     Variant::Tiny,
+    Variant::Mirrored,
 ];
 
 /// Seconds a HASTY dream gives you.
@@ -93,6 +97,7 @@ impl Variant {
             Variant::Gilded => "GILDED",
             Variant::NightShift => "FLICKERING",
             Variant::Tiny => "SHRUNK",
+            Variant::Mirrored => "MIRRORED",
         }
     }
 
@@ -108,14 +113,20 @@ impl Variant {
             Variant::Gilded => "everything here is worth more",
             Variant::NightShift => "the lights keep going out",
             Variant::Tiny => "the dream got bigger, or you got smaller",
+            Variant::Mirrored => "left is where right used to be",
         }
     }
 
-    /// Twists that make a dream unfair together: both cut your sight.
+    /// Twists that make a dream unfair together: both cut your sight, or
+    /// both turn your controls around (flipped twice they would cancel on one
+    /// axis and be a puzzle rather than a twist).
     pub fn clashes(self, other: Variant) -> bool {
         matches!(
             (self, other),
-            (Variant::NightShift, Variant::Blackout) | (Variant::Blackout, Variant::NightShift)
+            (Variant::NightShift, Variant::Blackout)
+                | (Variant::Blackout, Variant::NightShift)
+                | (Variant::Mirrored, Variant::Inverted)
+                | (Variant::Inverted, Variant::Mirrored)
         )
     }
 
@@ -131,9 +142,34 @@ impl Variant {
             Variant::Inverted => !theme.first_person(),
             // Pulling a first-person camera back makes no sense.
             Variant::Tiny => !theme.first_person(),
+            // Mouse-look plus swapped strafing is nausea, not a twist.
+            Variant::Mirrored => !theme.first_person(),
             Variant::LowGravity => theme.spec().feature != Feature::Weightless,
             _ => true,
         }
+    }
+}
+
+/// MIRRORED: swaps the logical left/right actions. Called on the input after
+/// key remapping has turned keys into actions, so rebinding is respected.
+pub fn mirror_input(input: PlayerInputState, mirrored: bool) -> PlayerInputState {
+    if mirrored {
+        PlayerInputState {
+            left: input.right,
+            right: input.left,
+            ..input
+        }
+    } else {
+        input
+    }
+}
+
+/// MIRRORED, for an analogue stick `(x, z)` in world axes: flips the sideways axis.
+pub fn mirror_stick(stick: (f32, f32), mirrored: bool) -> (f32, f32) {
+    if mirrored {
+        (-stick.0, stick.1)
+    } else {
+        stick
     }
 }
 
@@ -176,6 +212,11 @@ impl Twists {
         // The vignette is a radius around the dreamer in the world; a camera
         // twice as far back sees twice as much, so it grows with it.
         self.sight() * dip * self.camera_zoom()
+    }
+
+    /// MIRRORED: do left and right swap?
+    pub fn mirrors_controls(&self) -> bool {
+        self.has(Variant::Mirrored)
     }
 
     /// How many times further back the camera sits than usual.
@@ -433,7 +474,14 @@ mod tests {
         assert!((t.fog_push() - extra).abs() < 1e-4);
         // Nothing about the play changes.
         assert_eq!(
-            (t.gravity(), t.jump(), t.walk(), t.enemy_count(), t.enemy_speed(), t.dust()),
+            (
+                t.gravity(),
+                t.jump(),
+                t.walk(),
+                t.enemy_count(),
+                t.enemy_speed(),
+                t.dust()
+            ),
             (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
         );
         assert_eq!(t.timer(), None);
@@ -462,6 +510,75 @@ mod tests {
     fn tiny_has_a_label_and_a_blurb() {
         assert_eq!(Variant::Tiny.label(), "SHRUNK");
         assert!(!Variant::Tiny.blurb().is_empty());
+    }
+
+    #[test]
+    fn mirrored_swaps_the_logical_left_and_right_actions() {
+        let held = PlayerInputState {
+            left: true,
+            forward: true,
+            jump: true,
+            ..Default::default()
+        };
+        let m = mirror_input(held, true);
+        assert!(m.right && !m.left);
+        assert!(m.forward && m.jump && !m.backward);
+        // Both held stays both held; off is untouched.
+        let both = PlayerInputState {
+            left: true,
+            right: true,
+            ..Default::default()
+        };
+        assert_eq!(mirror_input(both, true), both);
+        assert_eq!(mirror_input(held, false), held);
+        // Mirroring twice is the identity.
+        assert_eq!(mirror_input(mirror_input(held, true), true), held);
+        // Walking left on a mirrored dream goes where right goes in a plain one.
+        let plain_right = crate::gameplay::horizontal_velocity(&PlayerInputState {
+            right: true,
+            ..Default::default()
+        });
+        let walk = crate::gameplay::horizontal_velocity(&mirror_input(
+            PlayerInputState {
+                left: true,
+                ..Default::default()
+            },
+            true,
+        ));
+        assert_eq!(walk, plain_right);
+    }
+
+    #[test]
+    fn mirrored_flips_only_the_sideways_stick() {
+        assert_eq!(mirror_stick((0.5, 0.8), true), (-0.5, 0.8));
+        assert_eq!(mirror_stick((0.5, 0.8), false), (0.5, 0.8));
+    }
+
+    #[test]
+    fn mirrored_never_shares_a_dream_with_upside_down_or_first_person() {
+        assert!(Variant::Mirrored.clashes(Variant::Inverted));
+        assert!(Variant::Inverted.clashes(Variant::Mirrored));
+        assert!(!Variant::Mirrored.clashes(Variant::Tiny));
+        for t in ALL_THEMES {
+            assert_eq!(Variant::Mirrored.fits(t), !t.first_person(), "{t:?}");
+            for s in 0..300 {
+                let tw = roll_with(t, s, 20, true, 0.9);
+                assert!(
+                    !(tw.has(Variant::Mirrored) && tw.has(Variant::Inverted)),
+                    "{t:?} seed {s}"
+                );
+                assert!(!(t.first_person() && tw.has(Variant::Mirrored)));
+            }
+        }
+    }
+
+    #[test]
+    fn mirrored_is_the_only_twist_that_swaps_controls() {
+        assert!(Twists(vec![Variant::Mirrored]).mirrors_controls());
+        assert!(!Twists::default().mirrors_controls());
+        assert!(!Twists(vec![Variant::Inverted]).mirrors_controls());
+        assert_eq!(Variant::Mirrored.label(), "MIRRORED");
+        assert!(!Variant::Mirrored.blurb().is_empty());
     }
 
     #[test]

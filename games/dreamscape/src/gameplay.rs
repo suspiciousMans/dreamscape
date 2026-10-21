@@ -19,7 +19,7 @@ pub const CAMERA_LERP_PER_SEC: f32 = 5.0;
 /// physics step that tunnels through a 0.2-thick floor.
 pub const MAX_DT: f32 = 1.0 / 30.0;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlayerInputState {
     pub forward: bool,
     pub backward: bool,
