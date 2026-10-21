@@ -13,6 +13,7 @@ use crate::upgrades::Upgrade;
 pub const NEEDED: usize = 5;
 
 /// Every attribute, once.
+#[cfg(test)]
 pub fn all_attributes() -> Vec<Attribute> {
     let mut out: Vec<Attribute> = Vec::new();
     for &t in ALL_THEMES.iter() {

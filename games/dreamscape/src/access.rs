@@ -32,6 +32,7 @@ pub fn portal(seed: u64) -> TexSpec {
 }
 
 /// WCAG relative luminance of an sRGB colour.
+#[cfg(test)]
 pub fn luminance(c: [u8; 3]) -> f32 {
     let lin = |v: u8| {
         let v = v as f32 / 255.0;
@@ -44,6 +45,7 @@ pub fn luminance(c: [u8; 3]) -> f32 {
     0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
 }
 
+#[cfg(test)]
 pub fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
