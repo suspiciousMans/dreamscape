@@ -348,6 +348,13 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// DASH afterimages (entity, born at dream_age) and the spawn timer.
+    dash_ghosts: Vec<(Entity, f32)>,
+    ghost_timer: f32,
+    /// STILLNESS: enemies turned blue, with the texture to give back.
+    chilled: Vec<(Entity, Arc<GpuTexture>)>,
+    /// PHASE: the dreamer is drawn see-through.
+    phased: bool,
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
     /// An ability just fired: burst here, in these colours (spawned next update).
@@ -630,6 +637,10 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            dash_ghosts: Vec::new(),
+            ghost_timer: 0.0,
+            chilled: Vec::new(),
+            phased: false,
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
@@ -1666,6 +1677,93 @@ impl DreamscapeGame {
             }
             true
         });
+        Ok(())
+    }
+
+    /// Roadmap 5.1: DASH leaves afterimages, STILLNESS turns the frozen
+    /// enemies blue, PHASE makes the dreamer see-through.
+    fn update_ability_fx(
+        &mut self,
+        gl: &engine::glow::Context,
+        player: Entity,
+        dt: f32,
+    ) -> anyhow::Result<()> {
+        let now = self.dream_age;
+        // DASH: a fading ghost every few hundredths of a second.
+        self.ghost_timer -= dt;
+        if self.run.active(Ability::Dash)
+            && !self.settings.reduced_motion
+            && self.ghost_timer <= 0.0
+        {
+            self.ghost_timer = gameplay::GHOST_EVERY;
+            if let Some(tex) = self.player_tex.clone() {
+                let e = self.world.spawn((
+                    Transform {
+                        position: self.player_position,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.9, 1.25, 0.9),
+                    },
+                    MeshRenderer {
+                        mesh: self.mesh(Shape::Octahedron)?,
+                        texture: Some(tex),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+                self.dash_ghosts.push((e, now));
+            }
+        }
+        let mut gone = Vec::new();
+        for (k, &(e, born)) in self.dash_ghosts.iter().enumerate() {
+            let s = gameplay::ghost_scale(now - born);
+            if s <= 0.0 {
+                gone.push(k);
+            } else if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                t.scale = Vec3::new(0.9, 1.25, 0.9) * s;
+            }
+        }
+        for k in gone.into_iter().rev() {
+            let (e, _) = self.dash_ghosts.remove(k);
+            let _ = self.world.despawn(e);
+        }
+
+        // STILLNESS: frozen enemies go blue until it ends.
+        let frozen = self.run.active(Ability::Stillness);
+        if frozen && self.chilled.is_empty() {
+            let blue = self.texture(gl, gameplay::CHILL_RGBA);
+            for p in &self.enemies {
+                if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(p.entity) {
+                    if let Some(old) = r.texture.replace(blue.clone()) {
+                        self.chilled.push((p.entity, old));
+                    }
+                }
+            }
+        } else if !frozen && !self.chilled.is_empty() {
+            for (e, old) in self.chilled.drain(..) {
+                if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(e) {
+                    r.texture = Some(old);
+                }
+            }
+        }
+
+        // PHASE: see-through while it lasts.
+        let phasing = self.run.active(Ability::Phase);
+        if phasing != self.phased {
+            self.phased = phasing;
+            let tex = if phasing {
+                Some(self.texture(gl, gameplay::PHASE_RGBA))
+            } else {
+                self.player_tex.clone()
+            };
+            if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(player) {
+                r.texture = tex;
+            }
+            if phasing {
+                let _ = self.world.insert_one(player, Translucent);
+            } else {
+                let _ = self.world.remove_one::<Translucent>(player);
+            }
+        }
         Ok(())
     }
 
@@ -2762,9 +2860,9 @@ impl DreamscapeGame {
                 .map(|&(_, a, b)| (a, b));
             let color = tint.map_or(color, |(a, _)| a.map(|c| c as f32 / 255.0));
             self.flash.trigger(color, 0.3);
-            if let Some((a, b)) = tint {
-                self.burst_pending = Some((self.player_position, a, b));
-            }
+            // Every ability bursts; a card's tint only changes the colours.
+            let (a, b) = tint.unwrap_or_else(|| gameplay::burst_colors(color));
+            self.burst_pending = Some((self.player_position, a, b));
             self.sfx(match state.ability {
                 Ability::Dash => Sound::Dash,
                 Ability::Blink => Sound::Blink,
@@ -4902,6 +5000,9 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.dash_ghosts.clear();
+        self.chilled.clear();
+        self.phased = false;
         self.bursts.clear();
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
@@ -6665,6 +6766,7 @@ impl Game for DreamscapeGame {
         self.update_door_hum(dt);
         self.update_echoes(player, dt)?;
         self.update_bursts(ctx.gl())?;
+        self.update_ability_fx(ctx.gl(), player, dt)?;
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self

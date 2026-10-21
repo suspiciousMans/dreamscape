@@ -270,6 +270,28 @@ pub const BURST_CUBES: usize = 8;
 /// Seconds a burst lasts.
 pub const BURST_SECONDS: f32 = 0.5;
 
+/// DASH afterimages: one every this many seconds, each lasting `GHOST_LIFE`.
+pub const GHOST_EVERY: f32 = 0.04;
+pub const GHOST_LIFE: f32 = 0.35;
+
+/// How big a dash afterimage is (1 = the dreamer) `age` seconds after birth.
+pub fn ghost_scale(age: f32) -> f32 {
+    (1.0 - age / GHOST_LIFE).clamp(0.0, 1.0)
+}
+
+/// Enemies held by STILLNESS are tinted this icy blue.
+pub const CHILL_RGBA: [u8; 4] = [90, 150, 255, 255];
+/// The dreamer's colour while PHASE has them see-through.
+pub const PHASE_RGBA: [u8; 4] = [235, 245, 255, 255];
+
+/// An ability's burst colours when no card tints it: its own colour, and
+/// a lighter version of it.
+pub fn burst_colors(c: [f32; 3]) -> ([u8; 3], [u8; 3]) {
+    let a = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let b = c.map(|v| ((v.clamp(0.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8);
+    (a, b)
+}
+
 /// Where burst cube `i` sits `age` seconds in, relative to the player, and
 /// its scale (shrinking to nothing as it fades).
 pub fn burst_cube(i: usize, age: f32) -> (Vec3, f32) {
@@ -284,6 +306,21 @@ pub fn burst_cube(i: usize, age: f32) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dash_ghosts_shrink_away() {
+        assert_eq!(super::ghost_scale(0.0), 1.0);
+        assert!(super::ghost_scale(super::GHOST_LIFE * 0.5) < 1.0);
+        assert_eq!(super::ghost_scale(super::GHOST_LIFE), 0.0);
+        assert_eq!(super::ghost_scale(5.0), 0.0);
+    }
+
+    #[test]
+    fn untinted_bursts_use_the_abilitys_own_colour_and_a_lighter_one() {
+        let (a, b) = super::burst_colors([0.5, 0.0, 1.0]);
+        assert_eq!(a, [128, 0, 255]);
+        assert!(b[0] > a[0] && b[1] > a[1] && b[2] == 255);
+    }
+
     use super::*;
     use engine::ecs::Transform;
 
