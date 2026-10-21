@@ -119,6 +119,30 @@ pub struct Codex {
     pub ascension_unlocked: u32,
     /// (day number, best depth that day).
     pub daily_best: Option<(u64, u32)>,
+    /// Quickest short-run wake, in seconds of dreaming.
+    pub fastest_wake: Option<u32>,
+    /// Deepest wake from a long run.
+    pub deepest_long: u32,
+    /// Deepest wake without taking a single upgrade.
+    pub bare_wake_depth: u32,
+}
+
+/// What a wake set a new best in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewRecord {
+    FastestWake,
+    DeepestLong,
+    BareWake,
+}
+
+impl NewRecord {
+    pub fn label(self) -> &'static str {
+        match self {
+            NewRecord::FastestWake => "NEW RECORD: fastest wake",
+            NewRecord::DeepestLong => "NEW RECORD: deepest long run",
+            NewRecord::BareWake => "NEW RECORD: deepest wake with no upgrades",
+        }
+    }
 }
 
 impl Codex {
@@ -155,6 +179,31 @@ impl Codex {
             return true;
         }
         false
+    }
+
+    /// Files a wake against the records; returns the ones it broke.
+    /// The first wake of a kind always sets a record.
+    pub fn record_wake(
+        &mut self,
+        long: bool,
+        seconds: u32,
+        depth: u32,
+        upgrades: usize,
+    ) -> Vec<NewRecord> {
+        let mut broke = Vec::new();
+        if !long && self.fastest_wake.map_or(true, |best| seconds < best) {
+            self.fastest_wake = Some(seconds);
+            broke.push(NewRecord::FastestWake);
+        }
+        if long && depth > self.deepest_long {
+            self.deepest_long = depth;
+            broke.push(NewRecord::DeepestLong);
+        }
+        if upgrades == 0 && depth > self.bare_wake_depth {
+            self.bare_wake_depth = depth;
+            broke.push(NewRecord::BareWake);
+        }
+        broke
     }
 
     pub fn record_daily(&mut self, day: u64, depth: u32) {
@@ -304,6 +353,27 @@ pub fn clear(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wakes_file_records_and_only_better_ones_break_them() {
+        use super::*;
+        let mut c = Codex::default();
+        assert_eq!(c.record_wake(false, 300, 3, 2), vec![NewRecord::FastestWake]);
+        assert!(c.record_wake(false, 300, 3, 2).is_empty());
+        assert_eq!(c.record_wake(false, 250, 3, 1), vec![NewRecord::FastestWake]);
+        // Long runs track depth, never time.
+        assert_eq!(c.record_wake(true, 9999, 9, 4), vec![NewRecord::DeepestLong]);
+        assert!(c.record_wake(true, 1, 9, 4).is_empty());
+        // No upgrades: its own record, any run length.
+        assert_eq!(c.record_wake(true, 1, 12, 0), vec![NewRecord::DeepestLong, NewRecord::BareWake]);
+        assert_eq!((c.bare_wake_depth, c.deepest_long), (12, 12));
+    }
+
+    #[test]
+    fn old_booklets_without_records_load_with_none() {
+        let c: super::Codex = ron::from_str("(nightmares_beaten: 2)").unwrap();
+        assert_eq!((c.fastest_wake, c.deepest_long, c.bare_wake_depth), (None, 0, 0));
+    }
+
     use super::*;
     use crate::upgrades::Ability;
 
