@@ -369,7 +369,9 @@ pub struct DreamscapeGame {
     /// Burst cubes: (entity, dream age at birth, index in the ring, centre).
     bursts: Vec<(Entity, f32, usize, Vec3)>,
     /// This dream's music, being composed on a worker thread.
-    music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    music_job: Option<std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>>,
+    /// Adaptive music: how much of the tension layer is playing (0..=1).
+    music_intensity: f32,
     /// Length of the current music loop, seconds.
     music_loop: f32,
     /// DECOY: where it stands and its marker.
@@ -653,6 +655,7 @@ impl DreamscapeGame {
             burst_pending: None,
             bursts: Vec::new(),
             music_job: None,
+            music_intensity: 0.0,
             music_loop: 1.0,
             decoy: None,
             anchor: None,
@@ -1216,7 +1219,9 @@ impl DreamscapeGame {
         log::info!("Music: {theme:?} in {:?} at {} bpm", st.scale, st.bpm);
         let compose = move || {
             let notes = music::score(&st, strangeness, seed, music::BARS);
-            music::render(&st, &notes, strangeness, music::BARS)
+            let music = music::render(&st, &notes, strangeness, music::BARS);
+            let layer = music::render(&st, &music::tension_score(&st, music::BARS), 0.0, music::BARS);
+            (music, layer)
         };
         let (tx, rx) = std::sync::mpsc::channel();
         #[cfg(not(target_os = "emscripten"))]
@@ -1233,7 +1238,7 @@ impl DreamscapeGame {
         let Some(rx) = &self.music_job else {
             return;
         };
-        let Ok(samples) = rx.try_recv() else {
+        let Ok((samples, layer)) = rx.try_recv() else {
             return;
         };
         self.music_job = None;
@@ -1244,6 +1249,8 @@ impl DreamscapeGame {
                 samples.len() as f32 / sounds::RATE as f32
             );
             audio.play_music_samples(samples, sounds::RATE, offset);
+            audio.play_music_layer_samples(layer, sounds::RATE, offset);
+            self.music_intensity = 0.0;
         }
     }
 
@@ -1686,6 +1693,23 @@ impl DreamscapeGame {
             true
         });
         Ok(())
+    }
+
+    /// Roadmap 5.5: the tension layer follows the nearest enemy and the
+    /// run's difficulty.
+    fn update_adaptive_music(&mut self, dt: f32) {
+        let here = self.player_position;
+        let nearest = self
+            .enemies
+            .iter()
+            .filter_map(|p| self.world.get::<&Transform>(p.entity).ok())
+            .map(|t| t.position.distance(here))
+            .min_by(f32::total_cmp);
+        let target = music::intensity(nearest, self.difficulty());
+        self.music_intensity = music::follow(self.music_intensity, target, dt);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_layer_gain(self.music_intensity * 0.8);
+        }
     }
 
     /// Roadmap 5.1: DASH leaves afterimages, STILLNESS turns the frozen
@@ -6796,6 +6820,7 @@ impl Game for DreamscapeGame {
         self.update_echoes(player, dt)?;
         self.update_bursts(ctx.gl())?;
         self.update_ability_fx(ctx.gl(), player, dt)?;
+        self.update_adaptive_music(dt);
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self
