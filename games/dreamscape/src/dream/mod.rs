@@ -24,4 +24,4 @@ pub use theme::{
     DreamTheme, EnemyKind, Feature, Mood, PropKind, ALL_ENEMY_KINDS, ALL_PROPS as ALL_PROP_KINDS,
     ALL_THEMES,
 };
-pub use variant::{roll_with as roll_twists, Twists, Variant, HASTY_DUST};
+pub use variant::{roll_with as roll_twists, Twists, Variant, ALL_VARIANTS, HASTY_DUST};

@@ -105,14 +105,14 @@ impl Variant {
     }
 
     /// Twists that make a dream unfair together: both cut your sight.
-    fn clashes(self, other: Variant) -> bool {
+    pub fn clashes(self, other: Variant) -> bool {
         matches!(
             (self, other),
             (Variant::NightShift, Variant::Blackout) | (Variant::Blackout, Variant::NightShift)
         )
     }
 
-    fn fits(self, theme: DreamTheme) -> bool {
+    pub fn fits(self, theme: DreamTheme) -> bool {
         let layout = theme.spec().layout;
         let has_void = matches!(layout, LayoutKind::PlatformChain | LayoutKind::Spiral);
         let has_enemies = theme.spec().enemies.1 > 0;
