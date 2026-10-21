@@ -26,9 +26,11 @@ pub enum Variant {
     Gilded,
     /// The lights cut out for a couple of seconds, over and over.
     NightShift,
+    /// The camera pulls back: a small dreamer in a huge dream.
+    Tiny,
 }
 
-pub const ALL_VARIANTS: [Variant; 9] = [
+pub const ALL_VARIANTS: [Variant; 10] = [
     Variant::LowGravity,
     Variant::Flooded,
     Variant::Blackout,
@@ -38,6 +40,7 @@ pub const ALL_VARIANTS: [Variant; 9] = [
     Variant::Hasty,
     Variant::Gilded,
     Variant::NightShift,
+    Variant::Tiny,
 ];
 
 /// Seconds a HASTY dream gives you.
@@ -51,6 +54,8 @@ pub const FROZEN_PERIOD: f32 = 3.0;
 /// `NIGHT_PERIOD`, so a dream always starts lit.
 pub const NIGHT_PERIOD: f32 = 8.0;
 pub const NIGHT_DARK: f32 = 2.0;
+/// SHRUNK: how many times further back the camera sits.
+pub const TINY_ZOOM: f32 = 2.0;
 /// How much of your sight is left at the darkest point.
 pub const NIGHT_FLOOR: f32 = 0.12;
 /// Seconds to dim and to come back.
@@ -87,6 +92,7 @@ impl Variant {
             Variant::Hasty => "HURRIED",
             Variant::Gilded => "GILDED",
             Variant::NightShift => "FLICKERING",
+            Variant::Tiny => "SHRUNK",
         }
     }
 
@@ -101,6 +107,7 @@ impl Variant {
             Variant::Hasty => "the portal is closing",
             Variant::Gilded => "everything here is worth more",
             Variant::NightShift => "the lights keep going out",
+            Variant::Tiny => "the dream got bigger, or you got smaller",
         }
     }
 
@@ -122,6 +129,8 @@ impl Variant {
             Variant::Swarm | Variant::Frozen => has_enemies,
             // Upside down + mouse look is nausea, not a twist.
             Variant::Inverted => !theme.first_person(),
+            // Pulling a first-person camera back makes no sense.
+            Variant::Tiny => !theme.first_person(),
             Variant::LowGravity => theme.spec().feature != Feature::Weightless,
             _ => true,
         }
@@ -164,7 +173,20 @@ impl Twists {
         } else {
             1.0
         };
-        self.sight() * dip
+        // The vignette is a radius around the dreamer in the world; a camera
+        // twice as far back sees twice as much, so it grows with it.
+        self.sight() * dip * self.camera_zoom()
+    }
+
+    /// How many times further back the camera sits than usual.
+    pub fn camera_zoom(&self) -> f32 {
+        self.product(|v| if v == Variant::Tiny { TINY_ZOOM } else { 1.0 })
+    }
+
+    /// World units to push the fog back by, so the dreamer (now further from
+    /// the camera) is no foggier than at normal zoom.
+    pub fn fog_push(&self) -> f32 {
+        crate::gameplay::CAMERA_OFFSET.length() * (self.camera_zoom() - 1.0)
     }
 
     pub fn enemy_count(&self) -> f32 {
@@ -396,6 +418,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tiny_pulls_the_camera_back_and_only_the_camera() {
+        assert_eq!(Twists::default().camera_zoom(), 1.0);
+        assert_eq!(Twists::default().fog_push(), 0.0);
+        let t = Twists(vec![Variant::Tiny]);
+        assert_eq!(t.camera_zoom(), TINY_ZOOM);
+        assert_eq!(TINY_ZOOM, 2.0);
+        // The fog is pushed back by exactly the extra camera distance, so the
+        // dreamer is no foggier than at normal zoom.
+        let extra = crate::gameplay::CAMERA_OFFSET.length() * (TINY_ZOOM - 1.0);
+        assert!((t.fog_push() - extra).abs() < 1e-4);
+        // Nothing about the play changes.
+        assert_eq!(
+            (t.gravity(), t.jump(), t.walk(), t.enemy_count(), t.enemy_speed(), t.dust()),
+            (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+        );
+        assert_eq!(t.timer(), None);
+    }
+
+    #[test]
+    fn tiny_dreams_see_as_much_of_the_dream_as_the_camera_does() {
+        let t = Twists(vec![Variant::Tiny]);
+        assert!((t.sight_at(0.0, false) - TINY_ZOOM).abs() < 1e-5);
+        assert_eq!(Twists::default().sight_at(0.0, false), 1.0);
+    }
+
+    #[test]
+    fn tiny_never_rolls_in_first_person_dreams_but_fits_the_rest() {
+        for t in ALL_THEMES {
+            assert_eq!(Variant::Tiny.fits(t), !t.first_person(), "{t:?}");
+            if t.first_person() {
+                for seed in 0..300 {
+                    assert!(!roll_with(t, seed, 20, true, 0.9).has(Variant::Tiny));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_has_a_label_and_a_blurb() {
+        assert_eq!(Variant::Tiny.label(), "SHRUNK");
+        assert!(!Variant::Tiny.blurb().is_empty());
     }
 
     #[test]

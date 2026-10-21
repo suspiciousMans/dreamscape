@@ -5607,7 +5607,7 @@ impl DreamscapeGame {
 
         let spawn = dream.spawn + Vec3::Y;
         self.player_position = spawn;
-        self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
+        self.camera_pos = spawn + gameplay::CAMERA_OFFSET * self.twists.camera_zoom();
         let crystal = self.booklet.stash.crystal.rgba();
         let player_texture = self.texture(gl, crystal);
         self.player_tex = Some(player_texture.clone());
@@ -5906,7 +5906,7 @@ impl DreamscapeGame {
             body.velocity = Vec3::ZERO;
         }
         self.player_position = spawn;
-        self.camera_pos = spawn + gameplay::CAMERA_OFFSET;
+        self.camera_pos = spawn + gameplay::CAMERA_OFFSET * self.twists.camera_zoom();
         if let Some((d, _)) = self.dissolve.as_mut() {
             d.reset();
         }
@@ -6740,7 +6740,12 @@ impl Game for DreamscapeGame {
             }
         }
         if self.transition.active() {
-            self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+            self.camera_pos = gameplay::follow_camera(
+                self.camera_pos,
+                self.player_position,
+                dt,
+                self.twists.camera_zoom(),
+            );
             return Ok(());
         }
         let Some(player) = self.player else {
@@ -7079,7 +7084,12 @@ impl Game for DreamscapeGame {
         for (_e, (t, _)) in self.world.query_mut::<(&mut Transform, &Halo)>() {
             t.position = Vec3::new(under.x, 0.04, under.z);
         }
-        self.camera_pos = gameplay::follow_camera(self.camera_pos, self.player_position, dt);
+        self.camera_pos = gameplay::follow_camera(
+                self.camera_pos,
+                self.player_position,
+                dt,
+                self.twists.camera_zoom(),
+            );
         self.update_door_hum(dt);
         self.update_echoes(player, dt)?;
         self.update_bursts(ctx.gl())?;
@@ -7387,6 +7397,11 @@ impl Game for DreamscapeGame {
         } else {
             Vec3::Y
         };
+        let fog_push = if self.debug_camera {
+            0.0
+        } else {
+            self.twists.fog_push()
+        };
         let sight_scale = self
             .twists
             .sight_at(self.dream_age, self.settings.reduce_flashing)
@@ -7506,10 +7521,10 @@ impl Game for DreamscapeGame {
                 gl.uniform_1_f32(Some(&l), params.vertex_snap_amount);
             }
             if let Some(l) = loc("uFogStart") {
-                gl.uniform_1_f32(Some(&l), params.fog_start);
+                gl.uniform_1_f32(Some(&l), params.fog_start + fog_push);
             }
             if let Some(l) = loc("uFogEnd") {
-                gl.uniform_1_f32(Some(&l), params.fog_end);
+                gl.uniform_1_f32(Some(&l), params.fog_end + fog_push);
             }
             if let Some(l) = loc("uFogColor") {
                 gl.uniform_3_f32(Some(&l), fog[0], fog[1], fog[2]);

@@ -78,12 +78,14 @@ pub fn advance_waypoint(
     index
 }
 
-pub fn follow_camera(current: Vec3, player: Vec3, dt: f32) -> Vec3 {
+/// `twist_zoom` is how far back the dream's twist (SHRUNK) wants the camera.
+pub fn follow_camera(current: Vec3, player: Vec3, dt: f32, twist_zoom: f32) -> Vec3 {
     // Dev: DREAMSCAPE_CAM_ZOOM=3 pulls the camera back (for terrain screenshots).
     let zoom = crate::dev::var("DREAMSCAPE_CAM_ZOOM")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(1.0);
+        .unwrap_or(1.0)
+        * twist_zoom;
     current.lerp(
         player + CAMERA_OFFSET * zoom,
         (CAMERA_LERP_PER_SEC * dt).clamp(0.0, 1.0),
@@ -410,14 +412,24 @@ mod tests {
         let player = Vec3::new(3.0, 0.5, 7.0);
         let mut cam = Vec3::ZERO;
         for _ in 0..300 {
-            cam = follow_camera(cam, player, 1.0 / 60.0);
+            cam = follow_camera(cam, player, 1.0 / 60.0, 1.0);
         }
         assert!((cam - (player + CAMERA_OFFSET)).length() < 0.01);
     }
 
     #[test]
+    fn camera_zoom_scales_the_whole_offset() {
+        let player = Vec3::new(3.0, 0.5, 7.0);
+        let mut cam = Vec3::ZERO;
+        for _ in 0..600 {
+            cam = follow_camera(cam, player, 1.0 / 60.0, 2.0);
+        }
+        assert!((cam - (player + CAMERA_OFFSET * 2.0)).length() < 0.01);
+    }
+
+    #[test]
     fn camera_lags_instead_of_snapping() {
-        let cam = follow_camera(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 1.0 / 60.0);
+        let cam = follow_camera(Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), 1.0 / 60.0, 1.0);
         assert!(cam.x > 0.0 && cam.x < 10.0);
     }
 
