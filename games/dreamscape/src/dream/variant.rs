@@ -5,6 +5,8 @@
 
 use super::theme::{DreamTheme, Feature, LayoutKind};
 use crate::gameplay::PlayerInputState;
+use crate::specials::{Trail, TRAIL_KEEP};
+use engine::glam::Vec3;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,9 +33,11 @@ pub enum Variant {
     Tiny,
     /// Left is right and right is left (the actions swap, not the keys).
     Mirrored,
+    /// A ghost of you from 5 seconds ago banks shards, and enemies chase it.
+    Echo,
 }
 
-pub const ALL_VARIANTS: [Variant; 11] = [
+pub const ALL_VARIANTS: [Variant; 12] = [
     Variant::LowGravity,
     Variant::Flooded,
     Variant::Blackout,
@@ -45,6 +49,7 @@ pub const ALL_VARIANTS: [Variant; 11] = [
     Variant::NightShift,
     Variant::Tiny,
     Variant::Mirrored,
+    Variant::Echo,
 ];
 
 /// Seconds a HASTY dream gives you.
@@ -98,6 +103,7 @@ impl Variant {
             Variant::NightShift => "FLICKERING",
             Variant::Tiny => "SHRUNK",
             Variant::Mirrored => "MIRRORED",
+            Variant::Echo => "ECHOING",
         }
     }
 
@@ -114,6 +120,7 @@ impl Variant {
             Variant::NightShift => "the lights keep going out",
             Variant::Tiny => "the dream got bigger, or you got smaller",
             Variant::Mirrored => "left is where right used to be",
+            Variant::Echo => "you are not alone, you are five seconds ago",
         }
     }
 
@@ -144,9 +151,40 @@ impl Variant {
             Variant::Tiny => !theme.first_person(),
             // Mouse-look plus swapped strafing is nausea, not a twist.
             Variant::Mirrored => !theme.first_person(),
+            // The Afterimage Fields already leave ghosts of you.
+            Variant::Echo => theme.spec().feature != Feature::Echoes,
             Variant::LowGravity => theme.spec().feature != Feature::Weightless,
             _ => true,
         }
+    }
+}
+
+/// ECHO: how many seconds behind you the ghost walks.
+pub const ECHO_DELAY: f32 = 5.0;
+/// ECHO: how close the ghost must get to a shard to bank it. No more than the
+/// dreamer's own reach (player radius 0.5 + half a shard 0.4), so the ghost
+/// can never pick up something the dreamer could not have.
+pub const ECHO_REACH: f32 = 0.9;
+
+/// Where the ECHO ghost stands `age` seconds into the dream: exactly where
+/// the dreamer was `ECHO_DELAY` seconds ago, or nowhere yet (a fresh dream,
+/// or the trail was cut by a catch).
+pub fn echo_ghost(trail: &Trail, age: f32) -> Option<Vec3> {
+    trail.at(age - ECHO_DELAY)
+}
+
+/// Is the ghost at `ghost` touching a shard at `shard`?
+pub fn echo_reaches(ghost: Vec3, shard: Vec3) -> bool {
+    let flat = Vec3::new(ghost.x - shard.x, 0.0, ghost.z - shard.z).length();
+    flat < ECHO_REACH && (ghost.y - shard.y).abs() < ECHO_REACH
+}
+
+/// What an enemy at `from` hunts in an ECHO dream: you or your ghost,
+/// whichever is closer.
+pub fn echo_chase_target(from: Vec3, player: Vec3, ghost: Option<Vec3>) -> Vec3 {
+    match ghost {
+        Some(g) if g.distance_squared(from) < player.distance_squared(from) => g,
+        _ => player,
     }
 }
 
@@ -212,6 +250,11 @@ impl Twists {
         // The vignette is a radius around the dreamer in the world; a camera
         // twice as far back sees twice as much, so it grows with it.
         self.sight() * dip * self.camera_zoom()
+    }
+
+    /// ECHO: is there a ghost in this dream?
+    pub fn has_echo_ghost(&self) -> bool {
+        self.has(Variant::Echo)
     }
 
     /// MIRRORED: do left and right swap?
@@ -579,6 +622,84 @@ mod tests {
         assert!(!Twists(vec![Variant::Inverted]).mirrors_controls());
         assert_eq!(Variant::Mirrored.label(), "MIRRORED");
         assert!(!Variant::Mirrored.blurb().is_empty());
+    }
+
+    #[test]
+    fn echo_is_a_ghost_of_you_five_seconds_ago() {
+        let mut trail = Trail::default();
+        // Walk along +x at 1 unit a second, 60 samples a second, for 10 seconds.
+        for i in 0..=600 {
+            let t = i as f32 / 60.0;
+            trail.push(t, Vec3::new(t, 1.0, 0.0));
+        }
+        assert!(TRAIL_KEEP > ECHO_DELAY, "the trail must reach back far enough");
+        let g = echo_ghost(&trail, 10.0).expect("ghost");
+        assert!((g.x - 5.0).abs() < 0.05, "{g:?}");
+        // Nothing to show before there is five seconds of past.
+        let mut fresh = Trail::default();
+        for i in 0..=120 {
+            fresh.push(i as f32 / 60.0, Vec3::ZERO);
+        }
+        assert_eq!(echo_ghost(&fresh, 2.0), None);
+        assert_eq!(echo_ghost(&Trail::default(), 30.0), None);
+    }
+
+    #[test]
+    fn echo_ghost_only_banks_a_shard_you_walked_up_to() {
+        let shard = Vec3::new(10.0, 1.2, 0.0);
+        // The ghost cannot reach further than the dreamer could.
+        assert!(ECHO_REACH <= crate::gameplay::PLAYER_RADIUS + 0.4);
+        assert!(echo_reaches(shard + Vec3::new(0.5, -0.2, 0.0), shard));
+        assert!(!echo_reaches(shard + Vec3::new(ECHO_REACH + 0.1, 0.0, 0.0), shard));
+        assert!(!echo_reaches(shard + Vec3::new(0.0, 3.0, 0.0), shard));
+        // A dreamer who dawdles at the start never lets the ghost near it.
+        let mut trail = Trail::default();
+        for i in 0..=1200 {
+            let t = i as f32 / 60.0;
+            trail.push(t, Vec3::new(0.0, 1.0, 0.0));
+            let g = echo_ghost(&trail, t);
+            assert!(g.is_none_or(|g| !echo_reaches(g, shard)));
+        }
+        // One who walks up to it does: five seconds later the ghost is there.
+        let mut trail = Trail::default();
+        let mut banked_at = None;
+        for i in 0..=1200 {
+            let t = i as f32 / 60.0;
+            let x = (t * 2.0).min(10.0);
+            trail.push(t, Vec3::new(x, 1.0, 0.0));
+            if banked_at.is_none()
+                && echo_ghost(&trail, t).is_some_and(|g| echo_reaches(g, shard))
+            {
+                banked_at = Some(t);
+            }
+        }
+        let t = banked_at.expect("banked");
+        assert!(t > 5.0 + 4.0, "the ghost trails by {ECHO_DELAY}s, got {t}");
+    }
+
+    #[test]
+    fn enemies_chase_whichever_of_you_and_the_ghost_is_closer() {
+        let me = Vec3::new(10.0, 0.0, 0.0);
+        let ghost = Vec3::new(0.0, 0.0, 0.0);
+        assert_eq!(echo_chase_target(Vec3::new(1.0, 0.0, 0.0), me, Some(ghost)), ghost);
+        assert_eq!(echo_chase_target(Vec3::new(9.0, 0.0, 0.0), me, Some(ghost)), me);
+        assert_eq!(echo_chase_target(Vec3::new(1.0, 0.0, 0.0), me, None), me);
+    }
+
+    #[test]
+    fn echo_never_rolls_in_afterimage_fields_and_is_a_plain_label() {
+        for seed in 0..500 {
+            assert!(!roll_with(DreamTheme::AfterimageFields, seed, 20, true, 0.9).has(Variant::Echo));
+        }
+        assert!(!Variant::Echo.fits(DreamTheme::AfterimageFields));
+        assert!(Variant::Echo.fits(DreamTheme::Garden));
+        assert_eq!(Variant::Echo.label(), "ECHOING");
+        assert!(!Variant::Echo.blurb().is_empty());
+        // It touches nothing but the ghost.
+        let t = Twists(vec![Variant::Echo]);
+        assert_eq!((t.gravity(), t.walk(), t.sight(), t.enemy_count(), t.dust()), (1.0, 1.0, 1.0, 1.0, 1.0));
+        assert!(t.has_echo_ghost());
+        assert!(!Twists::default().has_echo_ghost());
     }
 
     #[test]

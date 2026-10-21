@@ -419,6 +419,8 @@ pub struct DreamscapeGame {
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
     echo_timer: f32,
+    /// ECHO twist: the ghost of the dreamer from `ECHO_DELAY` seconds ago.
+    echo_ghost: Option<Entity>,
     player_tex: Option<Arc<GpuTexture>>,
     /// Watching Wallpaper: eyes in the walls.
     watchers: Vec<Entity>,
@@ -701,6 +703,7 @@ impl DreamscapeGame {
             steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
+            echo_ghost: None,
             player_tex: None,
             watchers: Vec::new(),
             dissolve: None,
@@ -1979,6 +1982,54 @@ impl DreamscapeGame {
             } else {
                 let _ = self.world.remove_one::<Translucent>(player);
             }
+        }
+        Ok(())
+    }
+
+    /// ECHO dreams: where the ghost stands now (none in a shared dream, which
+    /// has its own ghosts).
+    fn echo_ghost_pos(&self) -> Option<Vec3> {
+        if !self.twists.has_echo_ghost() || self.coop_active() {
+            return None;
+        }
+        dream::echo_ghost(&self.trail, self.dream_age)
+    }
+
+    /// ECHO dreams: draws the ghost where the dreamer was five seconds ago.
+    fn update_echo_ghost(&mut self) -> anyhow::Result<()> {
+        let at = self.echo_ghost_pos();
+        let scale = Vec3::new(0.9, 1.25, 0.9);
+        match (self.echo_ghost, at) {
+            (Some(e), Some(p)) => {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                    t.position = p;
+                    t.scale = scale;
+                }
+            }
+            (Some(e), None) => {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                    t.scale = Vec3::ZERO;
+                }
+            }
+            (None, Some(p)) => {
+                if let Some(tex) = self.player_tex.clone() {
+                    let e = self.world.spawn((
+                        Transform {
+                            position: p,
+                            rotation: Quat::IDENTITY,
+                            scale,
+                        },
+                        MeshRenderer {
+                            mesh: self.mesh(Shape::Octahedron)?,
+                            texture: Some(tex),
+                        },
+                        Translucent,
+                        Lit,
+                    ));
+                    self.echo_ghost = Some(e);
+                }
+            }
+            (None, None) => {}
         }
         Ok(())
     }
@@ -5301,6 +5352,7 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.echo_ghost = None; // its entity went with world.clear()
         self.dash_ghosts.clear();
         self.chilled.clear();
         self.phased = false;
@@ -6929,6 +6981,7 @@ impl Game for DreamscapeGame {
         if puppet {
             self.coop_apply_enemies();
         }
+        let ghost = self.echo_ghost_pos();
         let mut splits = Vec::new();
         let mut noticed = false;
         let hush = if self.run.active(Ability::Hush) {
@@ -6951,8 +7004,11 @@ impl Game for DreamscapeGame {
             }
             if let Ok(mut t) = self.world.get::<&mut Transform>(p.entity) {
                 let was = p.ai.chasing;
-                let target = if self.run.active(Ability::Decoy) || hunted.is_empty() {
+                let target = if self.run.active(Ability::Decoy) {
                     target
+                } else if hunted.is_empty() {
+                    // ECHO: they chase your ghost too, if it is nearer.
+                    dream::echo_chase_target(t.position, target, ghost)
                 } else {
                     nearest(&hunted, t.position)
                 };
@@ -7096,6 +7152,7 @@ impl Game for DreamscapeGame {
             );
         self.update_door_hum(dt);
         self.update_echoes(player, dt)?;
+        self.update_echo_ghost()?;
         self.update_bursts(ctx.gl())?;
         self.update_ability_fx(ctx.gl(), player, dt)?;
         self.update_adaptive_music(dt);
@@ -7254,11 +7311,21 @@ impl Game for DreamscapeGame {
         }
 
         // 5. Triggers: shards, the wake door, and the portal deeper
-        let touched: Vec<Entity> = overlaps
+        let mut touched: Vec<Entity> = overlaps
             .iter()
             .filter(|&&(a, _)| a == player)
             .map(|&(_, b)| b)
             .collect();
+        // ECHO: the ghost banks a shard (or a fragment) it walks up to, exactly
+        // as if the dreamer had touched it. Nothing else: not the wake door, the
+        // portal, a note or a chased memory.
+        if let Some(g) = self.echo_ghost_pos() {
+            for (e, (t, _)) in self.world.query::<(&Transform, &ShardMarker)>().iter() {
+                if dream::echo_reaches(g, t.position) && !touched.contains(&e) {
+                    touched.push(e);
+                }
+            }
+        }
         for &e in &touched {
             if self.world.get::<&NoteMarker>(e).is_ok() {
                 let _ = self.world.despawn(e);

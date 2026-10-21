@@ -25,5 +25,6 @@ pub use theme::{
     ALL_THEMES,
 };
 pub use variant::{
-    mirror_input, mirror_stick, roll_with as roll_twists, Twists, Variant, ALL_VARIANTS, HASTY_DUST,
+    echo_chase_target, echo_ghost, echo_reaches, mirror_input, mirror_stick,
+    roll_with as roll_twists, Twists, Variant, ALL_VARIANTS, HASTY_DUST,
 };
