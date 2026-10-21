@@ -23,7 +23,10 @@ use engine::ui::EguiState;
 
 use engine::ui::egui;
 
+mod access;
+mod attunement;
 mod achievements;
+mod balance;
 mod booklet_ui;
 mod boss;
 mod cards;
@@ -36,6 +39,7 @@ mod dev;
 mod dissolve;
 mod dream;
 mod ending;
+mod form;
 mod enemy_ai;
 mod eye;
 mod eye_motion;
@@ -124,6 +128,11 @@ struct NoMelt;
 /// Glows through the tunnel-vision darkness (you, shards, beacons, portal).
 #[derive(Clone, Copy)]
 struct Lit;
+
+/// Distant scenery (clouds, islands) that shows through the tunnel-vision
+/// dark as a dim silhouette (roadmap 5.3).
+#[derive(Clone, Copy)]
+struct Silhouette;
 
 /// The dreamer: never vertex-snapped or fogged, and drawn again as a
 /// silhouette wherever something hides it.
@@ -225,6 +234,7 @@ enum TitleItem {
     Start,
     Daily,
     RunLength,
+    Form,
     Ascension,
     Store,
     Booklet,
@@ -346,6 +356,15 @@ pub struct DreamscapeGame {
     loops: u32,
     /// Afterimage Fields: your ghosts (entity, born at dream_age) and the spawn timer.
     echoes: Vec<(Entity, f32)>,
+    /// DASH afterimages (entity, born at dream_age) and the spawn timer.
+    dash_ghosts: Vec<(Entity, f32)>,
+    ghost_timer: f32,
+    /// STILLNESS: enemies turned blue, with the texture to give back.
+    chilled: Vec<(Entity, Arc<GpuTexture>)>,
+    /// Records the last wake broke (shown on the summary).
+    new_records: Vec<progress::NewRecord>,
+    /// PHASE: the dreamer is drawn see-through.
+    phased: bool,
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
     /// An ability just fired: burst here, in these colours (spawned next update).
@@ -353,7 +372,9 @@ pub struct DreamscapeGame {
     /// Burst cubes: (entity, dream age at birth, index in the ring, centre).
     bursts: Vec<(Entity, f32, usize, Vec3)>,
     /// This dream's music, being composed on a worker thread.
-    music_job: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    music_job: Option<std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>>,
+    /// Adaptive music: how much of the tension layer is playing (0..=1).
+    music_intensity: f32,
     /// Length of the current music loop, seconds.
     music_loop: f32,
     /// DECOY: where it stands and its marker.
@@ -498,6 +519,8 @@ pub struct DreamscapeGame {
     ending_age: f32,
     /// This run's difficulty factor from its starting kit.
     loadout_scale: f32,
+    /// Who the dreamer is this run (roadmap 4.4).
+    active_form: form::Form,
     /// A shared dream, if this is one.
     coop: Option<coop_game::CoopState>,
     /// Co-op: the run to start next frame (seed, long, dreamers).
@@ -628,10 +651,16 @@ impl DreamscapeGame {
             bpm: 0.0,
             loops: 0,
             echoes: Vec::new(),
+            dash_ghosts: Vec::new(),
+            ghost_timer: 0.0,
+            chilled: Vec::new(),
+            new_records: Vec::new(),
+            phased: false,
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
             music_job: None,
+            music_intensity: 0.0,
             music_loop: 1.0,
             decoy: None,
             anchor: None,
@@ -715,6 +744,7 @@ impl DreamscapeGame {
             merge_return: hud::Mode::Title,
             ending_age: 0.0,
             loadout_scale: 1.0,
+            active_form: form::Form::Crystal,
             coop: None,
             pending_coop_start: None,
             caught_this_dream: 0,
@@ -1195,7 +1225,9 @@ impl DreamscapeGame {
         log::info!("Music: {theme:?} in {:?} at {} bpm", st.scale, st.bpm);
         let compose = move || {
             let notes = music::score(&st, strangeness, seed, music::BARS);
-            music::render(&st, &notes, strangeness, music::BARS)
+            let music = music::render(&st, &notes, strangeness, music::BARS);
+            let layer = music::render(&st, &music::tension_score(&st, music::BARS), 0.0, music::BARS);
+            (music, layer)
         };
         let (tx, rx) = std::sync::mpsc::channel();
         #[cfg(not(target_os = "emscripten"))]
@@ -1212,7 +1244,7 @@ impl DreamscapeGame {
         let Some(rx) = &self.music_job else {
             return;
         };
-        let Ok(samples) = rx.try_recv() else {
+        let Ok((samples, layer)) = rx.try_recv() else {
             return;
         };
         self.music_job = None;
@@ -1223,6 +1255,8 @@ impl DreamscapeGame {
                 samples.len() as f32 / sounds::RATE as f32
             );
             audio.play_music_samples(samples, sounds::RATE, offset);
+            audio.play_music_layer_samples(layer, sounds::RATE, offset);
+            self.music_intensity = 0.0;
         }
     }
 
@@ -1391,6 +1425,11 @@ impl DreamscapeGame {
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
+            booklet_attune: if self.mode == hud::Mode::Booklet {
+                attunement::line(&attunement::counts(self.booklet.cards()))
+            } else {
+                String::new()
+            },
             seed: self.run_seed,
             dust: self.booklet.stash.dust,
             eye: self.booklet.stash.eye,
@@ -1664,6 +1703,110 @@ impl DreamscapeGame {
             }
             true
         });
+        Ok(())
+    }
+
+    /// Roadmap 5.5: the tension layer follows the nearest enemy and the
+    /// run's difficulty.
+    fn update_adaptive_music(&mut self, dt: f32) {
+        let here = self.player_position;
+        let nearest = self
+            .enemies
+            .iter()
+            .filter_map(|p| self.world.get::<&Transform>(p.entity).ok())
+            .map(|t| t.position.distance(here))
+            .min_by(f32::total_cmp);
+        let target = music::intensity(nearest, self.difficulty());
+        self.music_intensity = music::follow(self.music_intensity, target, dt);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.set_music_layer_gain(self.music_intensity * 0.8);
+        }
+    }
+
+    /// Roadmap 5.1: DASH leaves afterimages, STILLNESS turns the frozen
+    /// enemies blue, PHASE makes the dreamer see-through.
+    fn update_ability_fx(
+        &mut self,
+        gl: &engine::glow::Context,
+        player: Entity,
+        dt: f32,
+    ) -> anyhow::Result<()> {
+        let now = self.dream_age;
+        // DASH: a fading ghost every few hundredths of a second.
+        self.ghost_timer -= dt;
+        if self.run.active(Ability::Dash)
+            && !self.settings.reduced_motion
+            && self.ghost_timer <= 0.0
+        {
+            self.ghost_timer = gameplay::GHOST_EVERY;
+            if let Some(tex) = self.player_tex.clone() {
+                let e = self.world.spawn((
+                    Transform {
+                        position: self.player_position,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(0.9, 1.25, 0.9),
+                    },
+                    MeshRenderer {
+                        mesh: self.mesh(Shape::Octahedron)?,
+                        texture: Some(tex),
+                    },
+                    Translucent,
+                    Lit,
+                ));
+                self.dash_ghosts.push((e, now));
+            }
+        }
+        let mut gone = Vec::new();
+        for (k, &(e, born)) in self.dash_ghosts.iter().enumerate() {
+            let s = gameplay::ghost_scale(now - born);
+            if s <= 0.0 {
+                gone.push(k);
+            } else if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                t.scale = Vec3::new(0.9, 1.25, 0.9) * s;
+            }
+        }
+        for k in gone.into_iter().rev() {
+            let (e, _) = self.dash_ghosts.remove(k);
+            let _ = self.world.despawn(e);
+        }
+
+        // STILLNESS: frozen enemies go blue until it ends.
+        let frozen = self.run.active(Ability::Stillness);
+        if frozen && self.chilled.is_empty() {
+            let blue = self.texture(gl, gameplay::CHILL_RGBA);
+            for p in &self.enemies {
+                if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(p.entity) {
+                    if let Some(old) = r.texture.replace(blue.clone()) {
+                        self.chilled.push((p.entity, old));
+                    }
+                }
+            }
+        } else if !frozen && !self.chilled.is_empty() {
+            for (e, old) in self.chilled.drain(..) {
+                if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(e) {
+                    r.texture = Some(old);
+                }
+            }
+        }
+
+        // PHASE: see-through while it lasts.
+        let phasing = self.run.active(Ability::Phase);
+        if phasing != self.phased {
+            self.phased = phasing;
+            let tex = if phasing {
+                Some(self.texture(gl, gameplay::PHASE_RGBA))
+            } else {
+                self.player_tex.clone()
+            };
+            if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(player) {
+                r.texture = tex;
+            }
+            if phasing {
+                let _ = self.world.insert_one(player, Translucent);
+            } else {
+                let _ = self.world.remove_one::<Translucent>(player);
+            }
+        }
         Ok(())
     }
 
@@ -2144,7 +2287,11 @@ impl DreamscapeGame {
             .as_ref()
             .map_or(1.0, |(_, b, _)| b.sight_scale());
         let clear =
-            (tunnel::sight_radius(strangeness) * self.twists.sight() * self.run.sight() * eclipse
+            (tunnel::sight_radius(strangeness)
+                * self.twists.sight()
+                * self.run.sight()
+                * self.active_form.sight_mult()
+                * eclipse
                 + self.run.sight_bonus())
                 * (1.0 - tunnel::SIGHT_FADE);
         let yaw = self.fp_yaw();
@@ -2760,9 +2907,9 @@ impl DreamscapeGame {
                 .map(|&(_, a, b)| (a, b));
             let color = tint.map_or(color, |(a, _)| a.map(|c| c as f32 / 255.0));
             self.flash.trigger(color, 0.3);
-            if let Some((a, b)) = tint {
-                self.burst_pending = Some((self.player_position, a, b));
-            }
+            // Every ability bursts; a card's tint only changes the colours.
+            let (a, b) = tint.unwrap_or_else(|| gameplay::burst_colors(color));
+            self.burst_pending = Some((self.player_position, a, b));
             self.sfx(match state.ability {
                 Ability::Dash => Sound::Dash,
                 Ability::Blink => Sound::Blink,
@@ -2910,6 +3057,25 @@ impl DreamscapeGame {
     }
 
     /// Leaving a dream through the portal: HURRIED and GILDED pay out.
+    /// `DREAMSCAPE_BALANCE=path.csv` (dev builds): one row per finished dream.
+    fn log_balance_row(&self) {
+        let Some(path) = dev::var_os("DREAMSCAPE_BALANCE") else {
+            return;
+        };
+        let theme = format!("{:?}", self.director.theme);
+        let row = balance::Row {
+            depth: self.director.depth,
+            theme: &theme,
+            difficulty: self.difficulty(),
+            seconds: self.dream_age,
+            catches: self.stats.caught,
+            upgrades: self.run.taken.len(),
+        };
+        if let Err(e) = balance::append(std::path::Path::new(&path), &row) {
+            log::warn!("could not write balance log: {e}");
+        }
+    }
+
     fn dream_bonus(&mut self) {
         let mut bonus = 0;
         if self.twists.timer().is_some_and(|t| self.dream_age <= t) {
@@ -3022,6 +3188,14 @@ impl DreamscapeGame {
             items.push(TitleItem::Prologue);
         }
         items.extend([TitleItem::Start, TitleItem::Daily, TitleItem::RunLength]);
+        if form::ALL
+            .iter()
+            .filter(|f| f.unlocked(&self.booklet.codex))
+            .count()
+            > 1
+        {
+            items.push(TitleItem::Form);
+        }
         if self.booklet.codex.ascension_unlocked > 0 {
             items.push(TitleItem::Ascension);
         }
@@ -3066,6 +3240,19 @@ impl DreamscapeGame {
                 format!("run: {}", self.run_length.label()),
                 title_ui::run_blurb(self.run_length.label()).into(),
             ),
+            TitleItem::Form => {
+                let f = self.booklet.codex.form;
+                let locked: Vec<String> = form::ALL
+                    .iter()
+                    .filter(|f| !f.unlocked(codex))
+                    .map(|f| format!("{}: {}", f.label(), f.unlock_hint()))
+                    .collect();
+                let mut blurb = f.blurb().to_string();
+                if !locked.is_empty() {
+                    blurb.push_str(&format!(" · locked — {}", locked.join(", ")));
+                }
+                ("f", format!("form: {}", f.label()), blurb)
+            }
             TitleItem::Ascension => (
                 "a/d",
                 format!("ascension: {}", self.ascension),
@@ -3122,6 +3309,13 @@ impl DreamscapeGame {
             TitleItem::Prologue => self.pending_start = Some(StartKind::Prologue),
             TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
             TitleItem::RunLength => self.run_length = self.run_length.toggled(),
+            TitleItem::Form => {
+                let next = self.booklet.codex.form.cycle(&self.booklet.codex, dir);
+                if next != self.booklet.codex.form {
+                    self.booklet.codex.form = next;
+                    self.persist_booklet();
+                }
+            }
             TitleItem::Ascension => {
                 let max = self.booklet.codex.ascension_unlocked as i32;
                 self.ascension = (self.ascension as i32 + dir).rem_euclid(max + 1) as u32;
@@ -3174,7 +3368,9 @@ impl DreamscapeGame {
                 self.director.nightmare_every = self.active_asc.nightmare_every();
                 self.run = s.upgrades();
                 self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
-                self.run.penalty_cards = self.active_asc.fewer_cards();
+                self.active_form = s.form;
+                self.run.penalty_cards =
+                    self.active_asc.fewer_cards() + self.active_form.fewer_choices();
                 self.run.no_free_reroll = !self.active_asc.free_rerolls();
                 self.refresh_card_effects();
                 self.just_continued = true;
@@ -3285,6 +3481,7 @@ impl DreamscapeGame {
                 .collect(),
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
+            form: self.active_form,
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -3302,6 +3499,7 @@ impl DreamscapeGame {
                 1.0
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
+            * self.active_form.speed_mult()
     }
 
     /// How strange the dream *looks*: CALM MIND takes the edge off.
@@ -4022,7 +4220,33 @@ impl DreamscapeGame {
                 cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
             );
         }
-        self.run = RunUpgrades::from_loadout(&cards);
+        // Forms are for solo runs: the daily and co-op stay the same for everyone.
+        self.active_form = if self.daily.is_some()
+            || self.autopilot
+            || self.prologue.is_some()
+            || self.coop.is_some()
+        {
+            form::Form::Crystal
+        } else {
+            self.booklet.codex.form
+        };
+        if self.active_form != form::Form::Crystal {
+            log::info!("Form: {}", self.active_form.label());
+        }
+        let gifts: Vec<Upgrade> = if self.active_form == form::Form::Crystal
+            && (self.daily.is_some() || self.prologue.is_some() || self.coop.is_some())
+        {
+            Vec::new()
+        } else {
+            let counts = attunement::counts(self.booklet.cards());
+            attunement::attuned(&counts)
+                .into_iter()
+                .map(attunement::reward)
+                .collect()
+        };
+        self.run = RunUpgrades::from_loadout(&cards)
+            .with_attunements(&gifts)
+            .with_start_ability(self.active_form.start_ability());
         if let Some(id) = self
             .booklet
             .lore
@@ -4038,7 +4262,7 @@ impl DreamscapeGame {
         self.loadout_scale = if self.coop.is_some() {
             1.0
         } else {
-            gameplay::loadout_difficulty(self.run.power())
+            gameplay::loadout_difficulty(self.run.power()) * self.active_form.difficulty_mult()
         };
         log::info!(
             "Starting kit power {:.1}: difficulty x{:.2}",
@@ -4078,7 +4302,7 @@ impl DreamscapeGame {
         if asc.always_hard() {
             self.director.hard_from.get_or_insert(0);
         }
-        self.run.penalty_cards = asc.fewer_cards();
+        self.run.penalty_cards = asc.fewer_cards() + self.active_form.fewer_choices();
         self.run.no_free_reroll = !asc.free_rerolls();
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
@@ -4184,6 +4408,19 @@ impl DreamscapeGame {
                     self.booklet.codex.ascension_unlocked
                 );
             }
+            self.new_records = if self.daily.is_none() {
+                self.booklet.codex.record_wake(
+                    self.run_length == RunLength::Long,
+                    self.stats.time as u32,
+                    depth,
+                    self.run.taken.len(),
+                )
+            } else {
+                Vec::new()
+            };
+            for r in &self.new_records {
+                log::info!("{}", r.label());
+            }
             self.persist_booklet();
             self.run_active = false;
             progress::clear(&self.save_path);
@@ -4269,6 +4506,9 @@ impl DreamscapeGame {
             names.sort_unstable();
             names.dedup();
             rows.push(("twists survived".into(), names.join(", ")));
+        }
+        for r in &self.new_records {
+            rows.push((String::new(), r.label().to_string()));
         }
         summary_ui::SummaryView {
             rows,
@@ -4881,6 +5121,9 @@ impl DreamscapeGame {
         self.bpm = spec.mood.bpm;
         self.loops = 0;
         self.echoes.clear();
+        self.dash_ghosts.clear();
+        self.chilled.clear();
+        self.phased = false;
         self.bursts.clear();
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
@@ -4910,18 +5153,28 @@ impl DreamscapeGame {
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
-        self.shard_tex = Some(self.upload_surface(gl, &dream.surfaces.shard)?);
+        let cb = self.settings.colorblind_markers;
+        let shard_spec = if cb {
+            access::shard(dream.surfaces.shard.seed)
+        } else {
+            dream.surfaces.shard.clone()
+        };
+        self.shard_tex = Some(self.upload_surface(gl, &shard_spec)?);
         let preview = if theme == DreamTheme::Awakening {
             DreamTheme::Awakening
         } else {
             self.director.next
         };
-        let portal_tex =
-            self.upload_surface(gl, &dream::portal_surface(preview, dream.seed ^ 0x5EED))?;
-        self.wake_tex = Some(self.upload_surface(
-            gl,
-            &dream::portal_surface(DreamTheme::Awakening, dream.seed),
-        )?);
+        let (portal_spec, wake_spec) = if cb {
+            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
+        } else {
+            (
+                dream::portal_surface(preview, dream.seed ^ 0x5EED),
+                dream::portal_surface(DreamTheme::Awakening, dream.seed),
+            )
+        };
+        let portal_tex = self.upload_surface(gl, &portal_spec)?;
+        self.wake_tex = Some(self.upload_surface(gl, &wake_spec)?);
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
@@ -5003,6 +5256,11 @@ impl DreamscapeGame {
             };
             match block.kind {
                 BlockKind::Decor => {
+                    if matches!(block.shape, Shape::Cloud | Shape::Island) {
+                        self.world
+                            .insert_one(entity, Silhouette)
+                            .expect("entity was just spawned");
+                    }
                     let island_under_floor = block.shape == Shape::Island && block.pos.y > -3.0;
                     if !island_under_floor {
                         self.world
@@ -5999,7 +6257,10 @@ impl Game for DreamscapeGame {
                 (hud::Mode::Title, Keycode::A | Keycode::Left | Keycode::D | Keycode::Right) => {
                     let items = self.title_items();
                     let item = items[self.title_sel.min(items.len() - 1)];
-                    if matches!(item, TitleItem::Ascension | TitleItem::RunLength) {
+                    if matches!(
+                        item,
+                        TitleItem::Ascension | TitleItem::RunLength | TitleItem::Form
+                    ) {
                         let dir = if matches!(key, Keycode::A | Keycode::Left) {
                             -1
                         } else {
@@ -6011,6 +6272,12 @@ impl Game for DreamscapeGame {
                 }
                 (hud::Mode::Title, Keycode::C) => {
                     self.title_select(ctx, TitleItem::Continue, 1);
+                    return;
+                }
+                (hud::Mode::Title, Keycode::F) => {
+                    if self.title_items().contains(&TitleItem::Form) {
+                        self.title_select(ctx, TitleItem::Form, 1);
+                    }
                     return;
                 }
                 (hud::Mode::Title, Keycode::T) => {
@@ -6634,6 +6901,8 @@ impl Game for DreamscapeGame {
         self.update_door_hum(dt);
         self.update_echoes(player, dt)?;
         self.update_bursts(ctx.gl())?;
+        self.update_ability_fx(ctx.gl(), player, dt)?;
+        self.update_adaptive_music(dt);
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self
@@ -6882,6 +7151,7 @@ impl Game for DreamscapeGame {
             && !self.coop_ghost()
         {
             log::info!("Portal entered at depth {}", self.director.depth);
+            self.log_balance_row();
             self.tutorial(tutorial::Event::Portal);
             self.dream_bonus();
             self.stats.twists.extend(self.twists.0.iter().copied());
@@ -6937,6 +7207,7 @@ impl Game for DreamscapeGame {
         };
         let sight_scale = self.twists.sight()
             * self.run.sight()
+            * self.active_form.sight_mult()
             * self
                 .hunter
                 .as_ref()
@@ -7151,7 +7422,7 @@ impl Game for DreamscapeGame {
                     }
                 }
             }
-            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo)) in
+            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
                 self.world
                     .query::<(
                         &Transform,
@@ -7163,6 +7434,7 @@ impl Game for DreamscapeGame {
                         Option<&Translucent>,
                         Option<&PlayerBody>,
                         Option<&Halo>,
+                        Option<&Silhouette>,
                     )>()
                     .iter()
             {
@@ -7180,7 +7452,7 @@ impl Game for DreamscapeGame {
                 }
                 unsafe {
                     if let Some(l) = &lit_loc {
-                        gl.uniform_1_f32(Some(l), if lit.is_some() { 1.0 } else { 0.0 });
+                        gl.uniform_1_f32(Some(l), gameplay::lit_level(lit.is_some(), sil.is_some()));
                     }
                     if let Some(l) = &hero_loc {
                         gl.uniform_1_f32(Some(l), if hero.is_some() { 1.0 } else { 0.0 });

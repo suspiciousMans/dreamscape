@@ -243,6 +243,54 @@ pub fn score(st: &Style, strange: f32, seed: u64, bars: u32) -> Vec<Note> {
     out
 }
 
+/// The adaptive layer: a driving pulse over the same loop, silent until
+/// enemies close in or the dreams get hard. Same length as `score`'s loop so
+/// the two stay in time. Only the key's root, so it can't clash with the pad.
+pub fn tension_score(st: &Style, bars: u32) -> Vec<Note> {
+    let total = bars as f32 * 4.0;
+    let mut out = Vec::new();
+    for beat in 0..total as i32 {
+        let b = beat as f32;
+        out.push(Note { beat: b, beats: 0.25, midi: 0, instr: Instr::Kick, vel: 1.0 });
+        out.push(Note { beat: b + 0.5, beats: 0.05, midi: 0, instr: Instr::Hat, vel: 0.7 });
+        out.push(Note { beat: b + 0.75, beats: 0.05, midi: 0, instr: Instr::Hat, vel: 0.4 });
+        for half in [0.0, 0.5] {
+            out.push(Note {
+                beat: b + half,
+                beats: 0.4,
+                midi: st.scale.note(st.root, 0),
+                instr: Instr::Bass,
+                vel: 0.8,
+            });
+        }
+    }
+    out
+}
+
+/// Enemies closer than this make the layer swell fully.
+pub const NEAR: f32 = 4.0;
+/// Enemies further than this add nothing.
+pub const FAR: f32 = 16.0;
+
+/// How much of the layer to play (0..=1): closeness of the nearest enemy,
+/// with a low floor that rises as the run gets harder.
+pub fn intensity(nearest_enemy: Option<f32>, difficulty: f32) -> f32 {
+    let floor = ((difficulty - 1.0) * 0.1).clamp(0.0, 0.25);
+    let near = nearest_enemy.map_or(0.0, |d| 1.0 - ((d - NEAR) / (FAR - NEAR)).clamp(0.0, 1.0));
+    near.max(floor).clamp(0.0, 1.0)
+}
+
+/// Eases `current` toward `target`: quick to build, slow to let go.
+pub fn follow(current: f32, target: f32, dt: f32) -> f32 {
+    let rate = if target > current { 1.5 } else { 0.35 };
+    let step = rate * dt;
+    if (target - current).abs() <= step {
+        target
+    } else {
+        current + step * (target - current).signum()
+    }
+}
+
 /// Seconds in one `bars`-bar loop.
 pub fn loop_secs(st: &Style, bars: u32) -> f32 {
     bars as f32 * 4.0 * 60.0 / st.bpm
@@ -378,6 +426,42 @@ mod tests {
     use super::*;
     use crate::dream::{DreamTheme, ALL_THEMES};
     use std::collections::HashSet;
+
+    #[test]
+    fn the_layer_is_as_long_as_the_music_in_every_dream() {
+        for &t in ALL_THEMES.iter() {
+            let st = style(t);
+            let layer = render(&st, &tension_score(&st, BARS), 0.0, BARS);
+            let music = render(&st, &score(&st, 0.3, 7, BARS), 0.3, BARS);
+            assert_eq!(layer.len(), music.len(), "{t:?}");
+            assert!(layer.iter().any(|x| x.abs() > 0.01), "{t:?} layer is silent");
+            assert!(layer.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+        }
+    }
+
+    #[test]
+    fn intensity_rises_as_enemies_close_in() {
+        assert_eq!(intensity(None, 1.0), 0.0);
+        assert_eq!(intensity(Some(FAR + 5.0), 1.0), 0.0);
+        assert_eq!(intensity(Some(NEAR - 1.0), 1.0), 1.0);
+        let (far, mid) = (intensity(Some(14.0), 1.0), intensity(Some(8.0), 1.0));
+        assert!(far < mid && mid < 1.0);
+    }
+
+    #[test]
+    fn hard_runs_keep_a_low_hum_even_with_no_enemy_near() {
+        assert!(intensity(None, 3.0) > intensity(None, 1.0));
+        assert!(intensity(None, 100.0) <= 0.25);
+    }
+
+    #[test]
+    fn the_layer_builds_fast_and_fades_slowly() {
+        let up = follow(0.0, 1.0, 0.5) - 0.0;
+        let down = 1.0 - follow(1.0, 0.0, 0.5);
+        assert!(up > down * 3.0);
+        assert_eq!(follow(0.5, 0.5, 1.0), 0.5);
+        assert_eq!(follow(0.99, 1.0, 1.0), 1.0);
+    }
 
     fn pitched(n: &Note) -> bool {
         !matches!(n.instr, Instr::Kick | Instr::Hat)

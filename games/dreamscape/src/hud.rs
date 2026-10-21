@@ -112,6 +112,8 @@ pub struct HudView {
     pub booklet_page: usize,
     pub booklet_pages: usize,
     pub booklet_total: usize,
+    /// One line: which attributes the dreamer is attuned to, and the next.
+    pub booklet_attune: String,
     pub seed: u64,
     pub dust: u32,
     pub eye: crate::store::EyeStyle,
