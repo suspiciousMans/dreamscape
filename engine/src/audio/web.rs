@@ -16,9 +16,10 @@ struct Voice {
 struct Mixer {
     sfx: Vec<Voice>,
     music: Option<Voice>,
+    layer: Option<Voice>,
 }
 
-static MIXER: Mutex<Mixer> = Mutex::new(Mixer { sfx: Vec::new(), music: None });
+static MIXER: Mutex<Mixer> = Mutex::new(Mixer { sfx: Vec::new(), music: None, layer: None });
 
 fn next(v: &mut Voice) -> Option<f32> {
     if v.pos >= v.samples.len() {
@@ -40,6 +41,9 @@ unsafe extern "C" fn callback(_: *mut std::ffi::c_void, stream: *mut u8, len: i3
         let mut acc = 0.0;
         if let Some(music) = m.music.as_mut() {
             acc += next(music).unwrap_or(0.0);
+        }
+        if let Some(layer) = m.layer.as_mut() {
+            acc += next(layer).unwrap_or(0.0);
         }
         for v in m.sfx.iter_mut() {
             acc += next(v).unwrap_or(0.0);
@@ -111,6 +115,7 @@ fn decode_wav(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
 /// Browser build of the engine's audio: the same API as the native `rodio`
 /// wrapper, mixed in an SDL2 audio callback.
 pub struct AudioContext {
+    layer_gain: f32,
     music_volume: f32,
     sfx_volume: f32,
 }
@@ -132,7 +137,7 @@ impl AudioContext {
             anyhow::ensure!(dev != 0, "no audio device");
             sdl::SDL_PauseAudioDevice(dev, 0);
         }
-        Ok(Self { music_volume: 1.0, sfx_volume: 1.0 })
+        Ok(Self { layer_gain: 0.0, music_volume: 1.0, sfx_volume: 1.0 })
     }
 
     fn push_sfx(&self, samples: Vec<f32>, volume: f32) {
@@ -195,6 +200,36 @@ impl AudioContext {
     pub fn stop_music(&mut self) {
         if let Ok(mut m) = MIXER.lock() {
             m.music = None;
+            m.layer = None;
+        }
+    }
+
+    /// See the native version.
+    pub fn play_music_layer_samples(&mut self, samples: Vec<f32>, sample_rate: u32, offset_secs: f32) {
+        let samples = to_mono_rate(&samples, 1, sample_rate);
+        let pos = if samples.is_empty() {
+            0
+        } else {
+            (offset_secs.max(0.0) * RATE as f32) as usize % samples.len()
+        };
+        self.layer_gain = 0.0;
+        if let Ok(mut m) = MIXER.lock() {
+            m.layer = (!samples.is_empty()).then(|| Voice {
+                samples: std::sync::Arc::new(samples),
+                pos,
+                volume: 0.0,
+                looped: true,
+            });
+        }
+    }
+
+    /// How loud the layer is, 0..=1 (scaled by the music volume).
+    pub fn set_music_layer_gain(&mut self, gain: f32) {
+        self.layer_gain = gain.clamp(0.0, 1.0);
+        if let Ok(mut m) = MIXER.lock() {
+            if let Some(layer) = m.layer.as_mut() {
+                layer.volume = self.layer_gain * self.music_volume;
+            }
         }
     }
 
@@ -211,6 +246,9 @@ impl AudioContext {
         if let Ok(mut m) = MIXER.lock() {
             if let Some(music) = m.music.as_mut() {
                 music.volume = self.music_volume;
+            }
+            if let Some(layer) = m.layer.as_mut() {
+                layer.volume = self.layer_gain * self.music_volume;
             }
         }
     }

@@ -14,6 +14,9 @@ pub struct AudioContext {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     music: Option<Sink>,
+    /// A second looping track mixed over the music (adaptive layers).
+    layer: Option<Sink>,
+    layer_gain: f32,
     music_volume: f32,
     sfx_volume: f32,
 }
@@ -25,6 +28,8 @@ impl AudioContext {
             _stream: stream,
             handle,
             music: None,
+            layer: None,
+            layer_gain: 0.0,
             music_volume: 1.0,
             sfx_volume: 1.0,
         })
@@ -129,6 +134,39 @@ impl AudioContext {
         if let Some(sink) = self.music.take() {
             sink.stop();
         }
+        if let Some(sink) = self.layer.take() {
+            sink.stop();
+        }
+    }
+
+    /// Loops a second track over the music, silent until `set_music_layer_gain`
+    /// raises it. Give it the same length and offset as the music so they
+    /// stay in time. Replaced whenever new music starts.
+    pub fn play_music_layer_samples(&mut self, samples: Vec<f32>, sample_rate: u32, offset_secs: f32) {
+        if let Some(old) = self.layer.take() {
+            old.stop();
+        }
+        if samples.is_empty() {
+            return;
+        }
+        let Ok(sink) = Sink::try_new(&self.handle) else {
+            return;
+        };
+        let source = rodio::buffer::SamplesBuffer::new(1, sample_rate, samples)
+            .repeat_infinite()
+            .skip_duration(Duration::from_secs_f32(offset_secs.max(0.0)));
+        sink.append(source);
+        self.layer_gain = 0.0;
+        sink.set_volume(0.0);
+        self.layer = Some(sink);
+    }
+
+    /// How loud the layer is, 0..=1 (scaled by the music volume).
+    pub fn set_music_layer_gain(&mut self, gain: f32) {
+        self.layer_gain = gain.clamp(0.0, 1.0);
+        if let Some(sink) = &self.layer {
+            sink.set_volume(self.layer_gain * self.music_volume);
+        }
     }
 
     /// Volume for `play_tone` and `play_sfx_file` (0..=1).
@@ -149,6 +187,9 @@ impl AudioContext {
         self.music_volume = volume.clamp(0.0, 1.0);
         if let Some(sink) = &self.music {
             sink.set_volume(volume);
+        }
+        if let Some(sink) = &self.layer {
+            sink.set_volume(self.layer_gain * self.music_volume);
         }
     }
 }
