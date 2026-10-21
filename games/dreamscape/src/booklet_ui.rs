@@ -139,6 +139,13 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         FontId::monospace(20.0 * u.max(0.8)),
         rgba(ink(v), 0.6),
     );
+    p.text(
+        Pos2::new(cx, screen.bottom() - 96.0 * u),
+        Align2::CENTER_BOTTOM,
+        &v.booklet_attune,
+        FontId::monospace(18.0 * u.max(0.8)),
+        rgba(hue(v.time * 0.05 + 0.3), 0.85),
+    );
     if (2..=24).contains(&v.booklet_pages) {
         let pip = cell;
         let gap = pip * 1.6;

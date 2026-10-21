@@ -24,6 +24,7 @@ use engine::ui::EguiState;
 use engine::ui::egui;
 
 mod access;
+mod attunement;
 mod achievements;
 mod balance;
 mod booklet_ui;
@@ -1424,6 +1425,11 @@ impl DreamscapeGame {
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
+            booklet_attune: if self.mode == hud::Mode::Booklet {
+                attunement::line(&attunement::counts(self.booklet.cards()))
+            } else {
+                String::new()
+            },
             seed: self.run_seed,
             dust: self.booklet.stash.dust,
             eye: self.booklet.stash.eye,
@@ -4227,7 +4233,19 @@ impl DreamscapeGame {
         if self.active_form != form::Form::Crystal {
             log::info!("Form: {}", self.active_form.label());
         }
+        let gifts: Vec<Upgrade> = if self.active_form == form::Form::Crystal
+            && (self.daily.is_some() || self.prologue.is_some() || self.coop.is_some())
+        {
+            Vec::new()
+        } else {
+            let counts = attunement::counts(self.booklet.cards());
+            attunement::attuned(&counts)
+                .into_iter()
+                .map(attunement::reward)
+                .collect()
+        };
         self.run = RunUpgrades::from_loadout(&cards)
+            .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
         if let Some(id) = self
             .booklet

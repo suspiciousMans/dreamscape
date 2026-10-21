@@ -806,6 +806,18 @@ impl RunUpgrades {
 
     /// Takes `u`. A new ability goes into a free slot, or replaces the
     /// oldest one when both are full.
+    /// Attunements (roadmap 4.2): one free stack of each attuned attribute's
+    /// passive, within the usual kit limits.
+    pub fn with_attunements(mut self, gifts: &[Upgrade]) -> Self {
+        for &u in gifts {
+            let held = self.taken.iter().filter(|t| !t.is_ability()).count();
+            if self.count(u) < u.info().max && held < KIT_PASSIVES {
+                self.taken.push(u);
+            }
+        }
+        self
+    }
+
     /// A form's gift: its starting ability, if there's a free slot for it.
     pub fn with_start_ability(mut self, a: Option<Ability>) -> Self {
         if let Some(a) = a {
