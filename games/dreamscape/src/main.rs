@@ -302,7 +302,7 @@ fn event_icon(plan: events::Plan) -> upgrades::Icon {
         Nothing => Icon::Lid,
         DoorGamble | DigThrough => Icon::Magnet,
         Upgrade | CommonUpgrade => Icon::Gem,
-        Dust(_) | VoiceDust => Icon::Gem,
+        ChairDust | VoiceDust => Icon::Gem,
         VoiceCard => Icon::Shard,
         FreeReroll => Icon::Brain,
         MoonBlink | MoonSteady => Icon::Eye,
@@ -1002,7 +1002,7 @@ impl DreamscapeGame {
         }
         let id = events::pick(seed, self.last_event);
         let event = events::event(id);
-        let dust = self.bonus_dust;
+        let dust = self.event_dust();
         let cards = event
             .choices
             .iter()
@@ -1046,6 +1046,22 @@ impl DreamscapeGame {
         true
     }
 
+    /// Dust an event can ask for: this run's earnings, then the banked stash.
+    fn event_dust(&self) -> u32 {
+        self.bonus_dust + self.booklet.stash.dust
+    }
+
+    /// Pays `n` dust, run earnings first, then the stash.
+    fn spend_event_dust(&mut self, n: u32) {
+        let from_run = n.min(self.bonus_dust);
+        self.bonus_dust -= from_run;
+        let from_stash = (n - from_run).min(self.booklet.stash.dust);
+        if from_stash > 0 {
+            self.booklet.stash.dust -= from_stash;
+            self.persist_booklet();
+        }
+    }
+
     /// Settles `index` of `event`. False if it can't be made (the screen stays).
     fn choose_event(&mut self, event: &events::Event, index: usize) -> bool {
         let seed = self.director.dream_seed();
@@ -1056,7 +1072,7 @@ impl DreamscapeGame {
             &self.run,
             self.director.depth,
             self.director.next,
-            self.bonus_dust,
+            self.event_dust(),
         ) else {
             return false;
         };
@@ -1065,9 +1081,7 @@ impl DreamscapeGame {
             events::apply_to_run(&mut self.run, a);
             match *a {
                 events::Applied::Dust(n) if n >= 0 => self.bonus_dust += n as u32,
-                events::Applied::Dust(n) => {
-                    self.bonus_dust = self.bonus_dust.saturating_sub(n.unsigned_abs())
-                }
+                events::Applied::Dust(n) => self.spend_event_dust(n.unsigned_abs()),
                 events::Applied::BankShard => {
                     self.director.lucidity += 1;
                     self.shards_this_run += 1;
@@ -1077,7 +1091,8 @@ impl DreamscapeGame {
                 events::Applied::OpenPick => open_pick = true,
                 events::Applied::Take(_)
                 | events::Applied::Lose(_)
-                | events::Applied::FreeReroll => {}
+                | events::Applied::FreeReroll
+                | events::Applied::ThinNextPick => {}
             }
         }
         self.director.shard_bonus = self.shard_bonus();
@@ -1179,6 +1194,7 @@ impl DreamscapeGame {
             return;
         }
         self.choice = None;
+        self.run.thin_next_pick = false;
         self.mode = hud::Mode::Playing;
         self.moth_after_nightmare();
         self.boss_reward = false;
@@ -1239,6 +1255,7 @@ impl DreamscapeGame {
                     return;
                 };
                 let before = self.run.synergies();
+                self.run.thin_next_pick = false;
                 self.run.take(u);
                 self.moth_after_nightmare();
                 self.boss_reward = false;
