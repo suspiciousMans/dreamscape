@@ -72,6 +72,7 @@ mod progress;
 mod records;
 mod reveal_ui;
 mod settings;
+mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sounds;
@@ -213,6 +214,19 @@ enum Crumble {
 /// Seconds a crumble tile shakes before falling, and stays gone.
 const CRUMBLE_SHAKE: f32 = 1.0;
 const CRUMBLE_GONE: f32 = 4.0;
+
+/// A cracked wall in the current dream, and the door it hides once broken.
+struct SecretWall {
+    /// Floor-level centre of the wall cell.
+    at: Vec3,
+    /// Wall height, and the warm texture the door wears.
+    height: f32,
+    door_tex: Arc<GpuTexture>,
+    /// The solid wall (cracked texture) and its glow, until it gives way.
+    wall: Option<(Entity, Entity)>,
+    /// The door that replaces it.
+    door: Option<Entity>,
+}
 
 struct CrumbleTile {
     entity: Option<Entity>,
@@ -406,6 +420,10 @@ pub struct DreamscapeGame {
     slam_meteor: bool,
     /// High caches (floor spot, glow, beam) still to be picked up.
     caches: Vec<(Vec3, Entity, Entity)>,
+    /// This dream's cracked wall, if it has one.
+    secret: Option<SecretWall>,
+    /// The crack's hint has been shown this launch.
+    secret_hint_given: bool,
     skittish: Option<Skittish>,
     /// Height of the ground you last stood on (for the climbing sound).
     ground_y: f32,
@@ -693,6 +711,8 @@ impl DreamscapeGame {
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
+            secret: None,
+            secret_hint_given: false,
             skittish: None,
             ground_y: f32::MIN,
             stunned: HashMap::new(),
@@ -2889,20 +2909,27 @@ impl DreamscapeGame {
             .last_ability
             .filter(|&(_, t)| self.dream_age - t <= upgrades::COMBO_WINDOW)
             .and_then(|(prev, _)| upgrades::combo(prev, state.ability));
+        // Blink or Dash into a cracked wall: it gives way (see below).
+        let cracks = self.secret_in_reach(state.ability);
         if state.ability == Ability::Blink {
-            let Some(at) = self.dream.as_ref().and_then(|d| {
+            let target = self.dream.as_ref().and_then(|d| {
                 gameplay::blink_target(
                     &d.blocks,
                     self.player_position,
                     self.facing,
                     upgrades::BLINK_CELLS,
                 )
-            }) else {
-                // Nowhere safe to land: don't spend the charge.
-                self.sfx(Sound::Denied);
-                return;
-            };
-            self.teleport_player(at);
+            });
+            match target {
+                Some(at) => self.teleport_player(at),
+                // Striking the crack spends the charge even with nowhere to land.
+                None if cracks => {}
+                None => {
+                    // Nowhere safe to land: don't spend the charge.
+                    self.sfx(Sound::Denied);
+                    return;
+                }
+            }
         }
         // ANCHOR is two-stage: the first use drops the marker (almost no
         // recharge), the second snaps you back and starts the real recharge.
@@ -3011,6 +3038,9 @@ impl DreamscapeGame {
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            if cracks {
+                self.open_secret();
+            }
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -3177,6 +3207,70 @@ impl DreamscapeGame {
             }
         }
         self.skittish = Some(s);
+    }
+
+    /// Would `ability`, used right now, strike this dream's closed cracked wall?
+    fn secret_in_reach(&self, ability: Ability) -> bool {
+        self.secret.as_ref().is_some_and(|s| {
+            s.wall.is_some()
+                && secrets::strikes(ability, self.player_position, self.facing, s.at)
+        })
+    }
+
+    /// The wall gives way: no collider, a door in its place.
+    fn open_secret(&mut self) {
+        let Some(sec) = self.secret.as_mut() else {
+            return;
+        };
+        let Some((wall, glow)) = sec.wall.take() else {
+            return;
+        };
+        let (at, height, tex) = (sec.at, sec.height, sec.door_tex.clone());
+        let _ = self.world.despawn(wall);
+        let _ = self.world.despawn(glow);
+        if let Ok(mesh) = self.mesh(Shape::Cube) {
+            // A warm slab filling the gap: lit, non-solid, a door.
+            let door = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * height * 0.5,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(gameplay::CELL * 0.7, height * 0.85, gameplay::CELL * 0.7),
+                },
+                MeshRenderer {
+                    mesh,
+                    texture: Some(tex),
+                },
+                Translucent,
+                Lit,
+            ));
+            if let Some(sec) = self.secret.as_mut() {
+                sec.door = Some(door);
+            }
+        }
+        self.flash.trigger([1.0, 0.85, 0.55], 0.4);
+        self.burst_pending = Some((at + Vec3::Y, [255, 214, 150], [255, 240, 210]));
+        self.sfx(Sound::PortalOpen);
+        self.achievement_toast = Some((secrets::OPENED.into(), 0.0));
+        log::info!("Cracked wall opened at {at:?}");
+    }
+
+    /// Per frame: the first sight of a crack and a running DASH striking it.
+    fn update_secret(&mut self) {
+        let Some(sec) = self.secret.as_ref() else {
+            return;
+        };
+        let at = sec.at;
+        let closed = sec.wall.is_some();
+        let p = self.player_position;
+        if closed {
+            if !self.secret_hint_given && secrets::notices(p, at) {
+                self.secret_hint_given = true;
+                self.achievement_toast = Some((secrets::HINT.into(), 0.0));
+            }
+            if self.run.active(Ability::Dash) && secrets::strikes(Ability::Dash, p, self.facing, at) {
+                self.open_secret();
+            }
+        }
     }
 
     /// High caches: reach the pillar and the gold is yours (a run bonus).
@@ -5319,6 +5413,7 @@ impl DreamscapeGame {
         self.slam_apex = 0.0;
         self.slam_meteor = false;
         self.caches.clear();
+        self.secret = None;
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -5340,6 +5435,23 @@ impl DreamscapeGame {
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
+        // A cracked wall wears the wall pattern with a bright hairline split.
+        let crack_tex = if dream.secret.is_some() {
+            let mut px = dream.surfaces.wall.rgba();
+            secrets::draw_crack(&mut px, TEX_SIZE, dream.seed);
+            let tex = Arc::new(GpuTexture::from_rgba8(
+                gl,
+                &px,
+                TEX_SIZE,
+                TEX_SIZE,
+                TextureFilter::Bilinear,
+            )?);
+            self.dream_textures.push(tex.clone());
+            Some(tex)
+        } else {
+            None
+        };
+        let mut cracked: Option<(Entity, Vec3, f32)> = None;
         let cb = self.settings.colorblind_markers;
         let shard_spec = if cb {
             access::shard(dream.surfaces.shard.seed)
@@ -5411,9 +5523,17 @@ impl DreamscapeGame {
                 self.crumbles.push(tile);
                 continue;
             }
+            let is_crack = block.kind == BlockKind::Wall
+                && dream.secret.is_some_and(|s| {
+                    (s.wall.x - block.pos.x).abs() < 1e-3 && (s.wall.z - block.pos.z).abs() < 1e-3
+                });
             let (texture, uv) = match block.kind {
                 BlockKind::Floor => (floor_tex.clone(), per_cell),
-                BlockKind::Wall => (wall_tex.clone(), per_cell),
+                BlockKind::Wall => match (&crack_tex, is_crack) {
+                    // One repeat across the cracked cell: the split stays whole.
+                    (Some(c), true) => (c.clone(), 1.0 / gameplay::CELL),
+                    _ => (wall_tex.clone(), per_cell),
+                },
                 BlockKind::Prop | BlockKind::Decor | BlockKind::Sky => (prop_tex.clone(), 0.5),
                 BlockKind::Portal => (portal_tex.clone(), 0.5),
                 BlockKind::Trim => (wall_tex.clone(), per_cell),
@@ -5431,6 +5551,9 @@ impl DreamscapeGame {
                 },
                 SurfaceUv(uv),
             ));
+            if is_crack {
+                cracked = Some((entity, block.pos, block.size.y));
+            }
             let half_extents = block.size * 0.5;
             // Scenery drifts: a slow spin and a bob, desynchronised by position.
             let h = (block.pos.x * 12.9898 + block.pos.z * 78.233).sin() * 43_758.547;
@@ -5497,6 +5620,41 @@ impl DreamscapeGame {
             }
         }
 
+        if let (Some((wall, pos, height)), Some(sec)) = (cracked, dream.secret) {
+            // A faint glow on the face you approach from, so it isn't decoration.
+            let toward = (sec.approach - sec.wall).normalize_or_zero();
+            let glow_tex = self.texture(gl, [190, 215, 255, 255]);
+            let glow = self.world.spawn((
+                Transform {
+                    position: Vec3::new(
+                        pos.x + toward.x * (gameplay::CELL * 0.5 + 0.03),
+                        pos.y,
+
+                        pos.z + toward.z * (gameplay::CELL * 0.5 + 0.03),
+                    ),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(
+                        if toward.x.abs() > 0.5 { 0.05 } else { 0.35 },
+                        height * 0.9,
+                        if toward.z.abs() > 0.5 { 0.05 } else { 0.35 },
+                    ),
+                },
+                MeshRenderer {
+                    mesh: self.mesh(Shape::Cube)?,
+                    texture: Some(glow_tex),
+                },
+                Translucent,
+                Lit,
+            ));
+            let door_tex = self.texture(gl, [255, 214, 150, 255]);
+            self.secret = Some(SecretWall {
+                at: sec.wall,
+                height,
+                door_tex,
+                wall: Some((wall, glow)),
+                door: None,
+            });
+        }
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
@@ -6804,6 +6962,7 @@ impl Game for DreamscapeGame {
         self.update_objective(ctx, dt);
         self.update_skittish(dt);
         self.update_caches();
+        self.update_secret();
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
