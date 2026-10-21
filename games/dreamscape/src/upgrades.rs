@@ -746,6 +746,8 @@ pub struct RunUpgrades {
     pub bonus_rerolls: u32,
     /// A companion's weight, pressing on one stat (`companion::burden`).
     pub burden: Option<crate::lore::Weight>,
+    /// An event's price: the next pick offers one fewer card, then clears.
+    pub thin_next_pick: bool,
 }
 
 /// Free rerolls per run.
@@ -994,6 +996,7 @@ impl RunUpgrades {
         (3 + self.n(Upgrade::WideChoice)
             - self.cursed(Curse::Greed) as i32
             - self.penalty_cards as i32
+            - self.thin_next_pick as i32
             - self.weigh(crate::companion::Stat::Choices, 0.0) as i32)
             .max(2) as usize
     }

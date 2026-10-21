@@ -52,8 +52,9 @@ pub enum Plan {
     Upgrade,
     /// A random common upgrade.
     CommonUpgrade,
-    Dust(i32),
-    /// Lose a held upgrade; bank a shard; the next dream is gilded.
+    /// Dust now, paid for with a thinner next pick.
+    ChairDust,
+    /// Lose a held upgrade; bank a shard.
     VoiceCard,
     /// Lose dust; the next dream is gilded.
     VoiceDust,
@@ -122,7 +123,7 @@ pub fn event(id: Id) -> Event {
             choices: [
                 Choice {
                     text: "Give it a card",
-                    detail: "lose an upgrade. bank a shard. next dream gilded",
+                    detail: "lose an upgrade. bank a shard",
                     cost: 0,
                     plan: Plan::VoiceCard,
                 },
@@ -148,9 +149,9 @@ pub fn event(id: Id) -> Event {
                 },
                 Choice {
                     text: "Take the chair",
-                    detail: "+10 dust",
+                    detail: "+10 dust. next pick: one fewer card",
                     cost: 0,
-                    plan: Plan::Dust(CHAIR_DUST as i32),
+                    plan: Plan::ChairDust,
                 },
                 WALK_AWAY("Leave it"),
             ],
@@ -223,6 +224,8 @@ pub enum Applied {
     Lose(Upgrade),
     BankShard,
     FreeReroll,
+    /// The next upgrade pick offers one fewer card.
+    ThinNextPick,
     /// The next dream is gilded.
     GildNext,
     /// The next dream also gets this twist.
@@ -334,21 +337,21 @@ pub fn resolve(
             applied.extend(gift(random_upgrade(&mut rng, run, depth, true)));
             "it was yours all along".into()
         }
-        Plan::Dust(n) => {
-            applied.push(Applied::Dust(n));
-            "it's heavier than it looks".into()
-        }
         Plan::VoiceCard => {
             let lost = held_passive(run)?;
             applied.push(Applied::Lose(lost));
             applied.push(Applied::BankShard);
-            applied.push(Applied::GildNext);
-            "the voice takes it, and something shines".into()
+            "the voice takes it, and keeps it safe".into()
         }
         Plan::VoiceDust => {
             // The 15 dust is the choice's up-front cost, already charged above.
             applied.push(Applied::GildNext);
             "the voice takes it, and the next dream shines".into()
+        }
+        Plan::ChairDust => {
+            applied.push(Applied::Dust(CHAIR_DUST as i32));
+            applied.push(Applied::ThinNextPick);
+            "you carry it out. it's heavier than it looks".into()
         }
         Plan::FreeReroll => {
             applied.push(Applied::FreeReroll);
@@ -403,6 +406,7 @@ pub fn apply_to_run(run: &mut RunUpgrades, a: &Applied) {
             }
         }
         Applied::FreeReroll => run.bonus_rerolls += 1,
+        Applied::ThinNextPick => run.thin_next_pick = true,
         _ => {}
     }
 }
@@ -601,10 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn the_voice_takes_a_card_and_pays_in_shards_and_gold() {
+    fn the_voice_trades_a_card_for_a_shard_and_dust_for_gold() {
         let r = resolve(&event(Id::Voice), 0, 4, &loaded_run(), 5, DreamTheme::Garden, 0).unwrap();
         assert!(matches!(r.applied[0], Applied::Lose(_)));
         assert!(r.applied.contains(&Applied::BankShard));
+        assert!(!r.applied.contains(&Applied::GildNext), "gilding is the dust price");
+        let r = resolve(&event(Id::Voice), 1, 4, &loaded_run(), 5, DreamTheme::Garden, VOICE_DUST).unwrap();
         assert!(r.applied.contains(&Applied::GildNext));
     }
 
@@ -674,7 +680,15 @@ mod tests {
         }
         assert_eq!(run.rerolls_left(), before + 1);
         let r = resolve(&chair, 1, 1, &run, 5, DreamTheme::Garden, 0).unwrap();
-        assert_eq!(r.applied, vec![Applied::Dust(CHAIR_DUST as i32)]);
+        assert_eq!(
+            r.applied,
+            vec![Applied::Dust(CHAIR_DUST as i32), Applied::ThinNextPick]
+        );
+        let full = run.choice_count();
+        for a in &r.applied {
+            apply_to_run(&mut run, a);
+        }
+        assert_eq!(run.choice_count(), full - 1, "the chair's price");
     }
 
     #[test]
