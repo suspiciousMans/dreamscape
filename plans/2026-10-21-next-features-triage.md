@@ -141,11 +141,12 @@ merging, or stay separate from the store's `[m]` merge screen?
   power on top of forms and loadouts. Watch the loadout difficulty scaling.
 - **F3:** a copyable `seed + depth` string for the daily.
 
-## 4. Open questions
-1. Do you want events (C) or variants (A, B) first? My order puts A then C.
-2. Approve the event text before it is written into the game, or should I
-   draft five and you edit?
-3. Should secret rooms (D) be in scope for this round at all?
+## 4. Decisions (2026-10-21)
+1. Night Shift first, then events. Night Shift is built (shown in game as
+   FLICKERING): branch `feat/night-shift`.
+2. Event text is drafted in `2026-10-21-event-drafts.md` for review. Nothing is
+   wired into the game until the text is approved.
+3. Secret rooms (D) are in scope. They stay last, after events.
 
 ## 5. Not planned here
 Engine work (see `jame-engine/docs/ROADMAP.md`) and balance retuning. Both are
