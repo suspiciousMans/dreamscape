@@ -4932,6 +4932,10 @@ impl DreamscapeGame {
             note: self.pending_note.is_some()
                 && self.objective_kind != Some(objective::Kind::FindMemory),
             fragments: self.objective_kind == Some(objective::Kind::Fragments),
+            // Never in nightmares, the prologue, co-op or the Awakening (all
+            // returned above or are not descent dreams); never above depth 2.
+            secret: self.director.theme != DreamTheme::Awakening
+                && dream::secret_rolls(seed, self.director.depth, dream::SECRET_CHANCE),
         }
     }
 
@@ -5201,6 +5205,9 @@ impl DreamscapeGame {
         if let Some(b) = self.director.blend {
             dream::blend_surfaces(&mut dream.surfaces, b);
             log::info!("Fused dream: {theme:?} with {b:?}");
+        }
+        if let Some(s) = dream.secret {
+            log::info!("Cracked wall at {:?} (reach it from {:?})", s.wall, s.approach);
         }
         // No shard cell (a pure corridor): nothing to ask for.
         let kind = self.objective_kind.filter(|_| dream.shard.is_some());
