@@ -806,6 +806,17 @@ impl RunUpgrades {
 
     /// Takes `u`. A new ability goes into a free slot, or replaces the
     /// oldest one when both are full.
+    /// A form's gift: its starting ability, if there's a free slot for it.
+    pub fn with_start_ability(mut self, a: Option<Ability>) -> Self {
+        if let Some(a) = a {
+            if self.abilities.len() < ABILITY_SLOTS && !self.abilities.iter().any(|s| s.ability == a)
+            {
+                self.take(Upgrade::Learn(a));
+            }
+        }
+        self
+    }
+
     pub fn take(&mut self, u: Upgrade) {
         if let Upgrade::Learn(a) = u {
             if self.abilities.len() >= ABILITY_SLOTS {

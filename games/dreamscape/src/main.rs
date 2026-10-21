@@ -38,6 +38,7 @@ mod dev;
 mod dissolve;
 mod dream;
 mod ending;
+mod form;
 mod enemy_ai;
 mod eye;
 mod eye_motion;
@@ -232,6 +233,7 @@ enum TitleItem {
     Start,
     Daily,
     RunLength,
+    Form,
     Ascension,
     Store,
     Booklet,
@@ -516,6 +518,8 @@ pub struct DreamscapeGame {
     ending_age: f32,
     /// This run's difficulty factor from its starting kit.
     loadout_scale: f32,
+    /// Who the dreamer is this run (roadmap 4.4).
+    active_form: form::Form,
     /// A shared dream, if this is one.
     coop: Option<coop_game::CoopState>,
     /// Co-op: the run to start next frame (seed, long, dreamers).
@@ -739,6 +743,7 @@ impl DreamscapeGame {
             merge_return: hud::Mode::Title,
             ending_age: 0.0,
             loadout_scale: 1.0,
+            active_form: form::Form::Crystal,
             coop: None,
             pending_coop_start: None,
             caught_this_dream: 0,
@@ -2276,7 +2281,11 @@ impl DreamscapeGame {
             .as_ref()
             .map_or(1.0, |(_, b, _)| b.sight_scale());
         let clear =
-            (tunnel::sight_radius(strangeness) * self.twists.sight() * self.run.sight() * eclipse
+            (tunnel::sight_radius(strangeness)
+                * self.twists.sight()
+                * self.run.sight()
+                * self.active_form.sight_mult()
+                * eclipse
                 + self.run.sight_bonus())
                 * (1.0 - tunnel::SIGHT_FADE);
         let yaw = self.fp_yaw();
@@ -3173,6 +3182,14 @@ impl DreamscapeGame {
             items.push(TitleItem::Prologue);
         }
         items.extend([TitleItem::Start, TitleItem::Daily, TitleItem::RunLength]);
+        if form::ALL
+            .iter()
+            .filter(|f| f.unlocked(&self.booklet.codex))
+            .count()
+            > 1
+        {
+            items.push(TitleItem::Form);
+        }
         if self.booklet.codex.ascension_unlocked > 0 {
             items.push(TitleItem::Ascension);
         }
@@ -3217,6 +3234,19 @@ impl DreamscapeGame {
                 format!("run: {}", self.run_length.label()),
                 title_ui::run_blurb(self.run_length.label()).into(),
             ),
+            TitleItem::Form => {
+                let f = self.booklet.codex.form;
+                let locked: Vec<String> = form::ALL
+                    .iter()
+                    .filter(|f| !f.unlocked(codex))
+                    .map(|f| format!("{}: {}", f.label(), f.unlock_hint()))
+                    .collect();
+                let mut blurb = f.blurb().to_string();
+                if !locked.is_empty() {
+                    blurb.push_str(&format!(" · locked — {}", locked.join(", ")));
+                }
+                ("f", format!("form: {}", f.label()), blurb)
+            }
             TitleItem::Ascension => (
                 "a/d",
                 format!("ascension: {}", self.ascension),
@@ -3273,6 +3303,13 @@ impl DreamscapeGame {
             TitleItem::Prologue => self.pending_start = Some(StartKind::Prologue),
             TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
             TitleItem::RunLength => self.run_length = self.run_length.toggled(),
+            TitleItem::Form => {
+                let next = self.booklet.codex.form.cycle(&self.booklet.codex, dir);
+                if next != self.booklet.codex.form {
+                    self.booklet.codex.form = next;
+                    self.persist_booklet();
+                }
+            }
             TitleItem::Ascension => {
                 let max = self.booklet.codex.ascension_unlocked as i32;
                 self.ascension = (self.ascension as i32 + dir).rem_euclid(max + 1) as u32;
@@ -3325,7 +3362,9 @@ impl DreamscapeGame {
                 self.director.nightmare_every = self.active_asc.nightmare_every();
                 self.run = s.upgrades();
                 self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
-                self.run.penalty_cards = self.active_asc.fewer_cards();
+                self.active_form = s.form;
+                self.run.penalty_cards =
+                    self.active_asc.fewer_cards() + self.active_form.fewer_choices();
                 self.run.no_free_reroll = !self.active_asc.free_rerolls();
                 self.refresh_card_effects();
                 self.just_continued = true;
@@ -3436,6 +3475,7 @@ impl DreamscapeGame {
                 .collect(),
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
+            form: self.active_form,
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -3453,6 +3493,7 @@ impl DreamscapeGame {
                 1.0
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
+            * self.active_form.speed_mult()
     }
 
     /// How strange the dream *looks*: CALM MIND takes the edge off.
@@ -4173,7 +4214,21 @@ impl DreamscapeGame {
                 cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
             );
         }
-        self.run = RunUpgrades::from_loadout(&cards);
+        // Forms are for solo runs: the daily and co-op stay the same for everyone.
+        self.active_form = if self.daily.is_some()
+            || self.autopilot
+            || self.prologue.is_some()
+            || self.coop.is_some()
+        {
+            form::Form::Crystal
+        } else {
+            self.booklet.codex.form
+        };
+        if self.active_form != form::Form::Crystal {
+            log::info!("Form: {}", self.active_form.label());
+        }
+        self.run = RunUpgrades::from_loadout(&cards)
+            .with_start_ability(self.active_form.start_ability());
         if let Some(id) = self
             .booklet
             .lore
@@ -4189,7 +4244,7 @@ impl DreamscapeGame {
         self.loadout_scale = if self.coop.is_some() {
             1.0
         } else {
-            gameplay::loadout_difficulty(self.run.power())
+            gameplay::loadout_difficulty(self.run.power()) * self.active_form.difficulty_mult()
         };
         log::info!(
             "Starting kit power {:.1}: difficulty x{:.2}",
@@ -4229,7 +4284,7 @@ impl DreamscapeGame {
         if asc.always_hard() {
             self.director.hard_from.get_or_insert(0);
         }
-        self.run.penalty_cards = asc.fewer_cards();
+        self.run.penalty_cards = asc.fewer_cards() + self.active_form.fewer_choices();
         self.run.no_free_reroll = !asc.free_rerolls();
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
@@ -6184,7 +6239,10 @@ impl Game for DreamscapeGame {
                 (hud::Mode::Title, Keycode::A | Keycode::Left | Keycode::D | Keycode::Right) => {
                     let items = self.title_items();
                     let item = items[self.title_sel.min(items.len() - 1)];
-                    if matches!(item, TitleItem::Ascension | TitleItem::RunLength) {
+                    if matches!(
+                        item,
+                        TitleItem::Ascension | TitleItem::RunLength | TitleItem::Form
+                    ) {
                         let dir = if matches!(key, Keycode::A | Keycode::Left) {
                             -1
                         } else {
@@ -6196,6 +6254,12 @@ impl Game for DreamscapeGame {
                 }
                 (hud::Mode::Title, Keycode::C) => {
                     self.title_select(ctx, TitleItem::Continue, 1);
+                    return;
+                }
+                (hud::Mode::Title, Keycode::F) => {
+                    if self.title_items().contains(&TitleItem::Form) {
+                        self.title_select(ctx, TitleItem::Form, 1);
+                    }
                     return;
                 }
                 (hud::Mode::Title, Keycode::T) => {
@@ -7125,6 +7189,7 @@ impl Game for DreamscapeGame {
         };
         let sight_scale = self.twists.sight()
             * self.run.sight()
+            * self.active_form.sight_mult()
             * self
                 .hunter
                 .as_ref()

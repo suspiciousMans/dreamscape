@@ -325,7 +325,10 @@ mod tests {
         assert!(s.reduced_motion && s.motion() < 1.0);
         assert_eq!(value(&s, Row::Music), "100%");
         assert_eq!(value(&s, Row::Key(Action::Jump)), "Space");
-        assert_eq!(rows().len(), 9 + ALL_ACTIONS.len() + 1);
+        adjust(&mut s, Row::ColorblindMarkers, 1);
+        assert!(s.colorblind_markers);
+        assert_eq!(value(&s, Row::ColorblindMarkers), "on");
+        assert_eq!(rows().len(), 10 + ALL_ACTIONS.len() + 1);
     }
 
     #[test]

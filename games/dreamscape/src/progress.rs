@@ -125,6 +125,8 @@ pub struct Codex {
     pub deepest_long: u32,
     /// Deepest wake without taking a single upgrade.
     pub bare_wake_depth: u32,
+    /// The form picked on the title screen.
+    pub form: crate::form::Form,
 }
 
 /// What a wake set a new best in.
@@ -254,6 +256,9 @@ pub struct SavedRun {
     /// The starting kit's difficulty factor (older saves: none).
     #[serde(default)]
     pub loadout_scale: Option<f32>,
+    /// Who the dreamer was (older saves: the crystal).
+    #[serde(default)]
+    pub form: crate::form::Form,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +473,7 @@ mod tests {
             card_dreams: Vec::new(),
             burden: None,
             loadout_scale: None,
+            form: Default::default(),
         }
     }
 
