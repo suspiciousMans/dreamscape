@@ -39,6 +39,7 @@ mod dev;
 mod dissolve;
 mod dream;
 mod ending;
+mod events;
 mod form;
 mod enemy_ai;
 mod eye;
@@ -289,6 +290,23 @@ enum ChoiceKind {
     Upgrade(Vec<Upgrade>),
     /// At the wake door: 0 = wake, 1 = go deeper.
     WakeDoor,
+    /// A between-dream event (roadmap 3.5), in place of the upgrade pick.
+    Event(events::Event),
+}
+
+/// The icon on an event's choice card.
+fn event_icon(plan: events::Plan) -> upgrades::Icon {
+    use events::Plan::*;
+    use upgrades::Icon;
+    match plan {
+        Nothing => Icon::Lid,
+        DoorGamble | DigThrough => Icon::Magnet,
+        Upgrade | CommonUpgrade => Icon::Gem,
+        Dust(_) | VoiceDust => Icon::Gem,
+        VoiceCard => Icon::Shard,
+        FreeReroll => Icon::Brain,
+        MoonBlink | MoonSteady => Icon::Eye,
+    }
 }
 
 fn init_logging() {
@@ -595,6 +613,13 @@ pub struct DreamscapeGame {
     peak_difficulty: f32,
     /// Offer an upgrade once the next dream has finished reforming.
     offer_upgrade: bool,
+    /// The last between-dream event (so it never repeats), and whether the
+    /// dream just before this one had one (so they never come back to back).
+    last_event: Option<events::Id>,
+    event_just_shown: bool,
+    /// Set by events: the next dream is gilded / gets this extra twist.
+    gild_next: bool,
+    twist_next: Option<Variant>,
     choice: Option<ChoiceKind>,
     choice_view: upgrade_ui::ChoiceView,
     /// The pending pick is a beaten nightmare's reward.
@@ -819,6 +844,10 @@ impl DreamscapeGame {
             bonus_dust: 0,
             peak_difficulty: 1.0,
             offer_upgrade: false,
+            last_event: None,
+            event_just_shown: false,
+            gild_next: false,
+            twist_next: None,
             choice: None,
             choice_view: upgrade_ui::ChoiceView::default(),
             boss_reward: false,
@@ -953,6 +982,127 @@ impl DreamscapeGame {
         self.choice = Some(ChoiceKind::Upgrade(options));
         self.input = PlayerInputState::default();
         self.mode = hud::Mode::Choice;
+    }
+
+    /// Between-dream events (roadmap 3.5): about one dream in six offers a
+    /// small choice in place of the upgrade pick. Returns true if one opened.
+    fn open_event_choice(&mut self) -> bool {
+        let seed = self.director.dream_seed();
+        let allowed = self.prologue.is_none() && self.coop.is_none();
+        let due = allowed
+            && events::due(
+                seed,
+                self.director.depth,
+                self.event_just_shown,
+                self.boss_reward,
+            );
+        if !due {
+            self.event_just_shown = false;
+            return false;
+        }
+        let id = events::pick(seed, self.last_event);
+        let event = events::event(id);
+        let dust = self.bonus_dust;
+        let cards = event
+            .choices
+            .iter()
+            .map(|c| {
+                let can = events::available(c, &self.run, dust);
+                let tag = if can {
+                    if c.cost > 0 {
+                        format!("costs {} dust", c.cost)
+                    } else {
+                        String::new()
+                    }
+                } else if c.cost > dust {
+                    format!("needs {} dust", c.cost)
+                } else {
+                    "nothing to give".into()
+                };
+                upgrade_ui::ChoiceCard {
+                    name: c.text.into(),
+                    desc: c.detail.into(),
+                    icon: event_icon(c.plan),
+                    color: if can { [200, 190, 255] } else { [110, 110, 130] },
+                    frame: if can { [150, 140, 220] } else { [80, 80, 100] },
+                    tag,
+                }
+            })
+            .collect();
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: event.title.into(),
+            subtitle: event.prompt.into(),
+            cards,
+            selected: 0,
+            age: 0.0,
+            hint: "[a/d] choose   [enter] decide".into(),
+        };
+        log::info!("Event: {:?} at depth {}", id, self.director.depth);
+        self.last_event = Some(id);
+        self.event_just_shown = true;
+        self.choice = Some(ChoiceKind::Event(event));
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+        true
+    }
+
+    /// Settles `index` of `event`. False if it can't be made (the screen stays).
+    fn choose_event(&mut self, event: &events::Event, index: usize) -> bool {
+        let seed = self.director.dream_seed();
+        let Some(res) = events::resolve(
+            event,
+            index,
+            seed,
+            &self.run,
+            self.director.depth,
+            self.director.next,
+            self.bonus_dust,
+        ) else {
+            return false;
+        };
+        let mut open_pick = false;
+        for a in &res.applied {
+            events::apply_to_run(&mut self.run, a);
+            match *a {
+                events::Applied::Dust(n) if n >= 0 => self.bonus_dust += n as u32,
+                events::Applied::Dust(n) => {
+                    self.bonus_dust = self.bonus_dust.saturating_sub(n.unsigned_abs())
+                }
+                events::Applied::BankShard => {
+                    self.director.lucidity += 1;
+                    self.shards_this_run += 1;
+                }
+                events::Applied::GildNext => self.gild_next = true,
+                events::Applied::TwistNext(v) => self.twist_next = Some(v),
+                events::Applied::OpenPick => open_pick = true,
+                events::Applied::Take(_)
+                | events::Applied::Lose(_)
+                | events::Applied::FreeReroll => {}
+            }
+        }
+        self.director.shard_bonus = self.shard_bonus();
+        log::info!("Event choice {index}: {} ({:?})", res.line, res.applied);
+        self.achievement_toast = Some((res.line, 0.0));
+        self.sfx(Sound::Pick);
+        if open_pick {
+            self.open_upgrade_choice();
+        }
+        true
+    }
+
+    /// The moon and the voice reach into the dream after the event.
+    fn apply_event_twists(&mut self) {
+        if self.director.nightmare || self.prologue.is_some() {
+            return;
+        }
+        if std::mem::take(&mut self.gild_next) && !self.twists.has(Variant::Gilded) {
+            self.twists.0.push(Variant::Gilded);
+        }
+        if let Some(v) = self.twist_next.take() {
+            if !self.twists.has(v) && !self.twists.0.iter().any(|&o| v.clashes(o)) {
+                self.twists.0.push(v);
+            }
+        }
     }
 
     fn reroll_choice(&mut self) {
@@ -1112,6 +1262,12 @@ impl DreamscapeGame {
                 self.flash
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
                 self.sfx(Sound::Pick);
+            }
+            ChoiceKind::Event(event) => {
+                if !self.choose_event(&event, index) {
+                    self.choice = Some(ChoiceKind::Event(event));
+                    self.mode = hud::Mode::Choice;
+                }
             }
             ChoiceKind::WakeDoor if index == 0 => {
                 log::info!("Wake door taken at depth {}", self.director.depth);
@@ -4334,6 +4490,10 @@ impl DreamscapeGame {
         self.bonus_dust = 0;
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
+        self.last_event = None;
+        self.event_just_shown = false;
+        self.gild_next = false;
+        self.twist_next = None;
         self.choice = None;
         log::info!(
             "Run length: {:?} ({} shards to wake)",
@@ -4672,6 +4832,8 @@ impl DreamscapeGame {
         // the beacon burns twice as wide.
         let girth = if self.twists.has(Variant::Blackout) {
             0.35
+        } else if self.twists.has(Variant::NightShift) {
+            0.25
         } else {
             0.15
         };
@@ -4981,6 +5143,7 @@ impl DreamscapeGame {
                 self.active_asc.twist_bonus(),
             )
         };
+        self.apply_event_twists();
         if self.twists.has(Variant::Gilded) {
             self.director.has_shard = true;
         }
@@ -6551,7 +6714,9 @@ impl Game for DreamscapeGame {
                 transition::Event::Done => {
                     log::info!("Melt: reformed at depth {}", self.director.depth);
                     if std::mem::take(&mut self.offer_upgrade) {
-                        self.open_upgrade_choice();
+                        if !self.open_event_choice() {
+                            self.open_upgrade_choice();
+                        }
                         return Ok(());
                     }
                 }
@@ -7205,7 +7370,9 @@ impl Game for DreamscapeGame {
         } else {
             Vec3::Y
         };
-        let sight_scale = self.twists.sight()
+        let sight_scale = self
+            .twists
+            .sight_at(self.dream_age, self.settings.reduce_flashing)
             * self.run.sight()
             * self.active_form.sight_mult()
             * self

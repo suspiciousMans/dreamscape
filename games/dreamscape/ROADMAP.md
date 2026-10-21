@@ -87,7 +87,7 @@ Each dream needs a `ThemeSpec`, vocabulary (at least 18 of each word list, nouns
 - **Kaleidoscope**: a post-effect with 4-way mirror symmetry, while gameplay stays normal.
 - **Breathing**: walls physically shift by up to half a cell. The route stays valid because only non-route walls move.
 
-### 3.5 Between-dream events
+### 3.5 Between-dream events ✅
 Short text choices shown between dreams, instead of an upgrade, about 1 time in 6. For example: "A door hums. Open it?" leads to an upgrade or a curse. "A voice offers to carry a shard" gives +1 shard and the next dream is gilded, but costs one upgrade. They reuse the choice screen.
 
 ### 3.6 Secret rooms

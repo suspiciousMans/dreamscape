@@ -24,9 +24,11 @@ pub enum Variant {
     Hasty,
     /// A guaranteed shard and double dust, but the enemies are faster.
     Gilded,
+    /// The lights cut out for a couple of seconds, over and over.
+    NightShift,
 }
 
-pub const ALL_VARIANTS: [Variant; 8] = [
+pub const ALL_VARIANTS: [Variant; 9] = [
     Variant::LowGravity,
     Variant::Flooded,
     Variant::Blackout,
@@ -35,6 +37,7 @@ pub const ALL_VARIANTS: [Variant; 8] = [
     Variant::Frozen,
     Variant::Hasty,
     Variant::Gilded,
+    Variant::NightShift,
 ];
 
 /// Seconds a HASTY dream gives you.
@@ -44,6 +47,33 @@ pub const HASTY_DUST: u32 = 12;
 /// FROZEN: enemies stand still for this long out of every period.
 pub const FROZEN_HOLD: f32 = 1.0;
 pub const FROZEN_PERIOD: f32 = 3.0;
+/// NIGHT SHIFT: the lights cut out for the last `NIGHT_DARK` seconds of every
+/// `NIGHT_PERIOD`, so a dream always starts lit.
+pub const NIGHT_PERIOD: f32 = 8.0;
+pub const NIGHT_DARK: f32 = 2.0;
+/// How much of your sight is left at the darkest point.
+pub const NIGHT_FLOOR: f32 = 0.12;
+/// Seconds to dim and to come back.
+pub const NIGHT_FADE: f32 = 0.4;
+/// With "reduce flashing" on: a shallower, slower dip.
+pub const NIGHT_FLOOR_SOFT: f32 = 0.45;
+pub const NIGHT_FADE_SOFT: f32 = 0.9;
+
+/// How much of your sight a NIGHT SHIFT dream leaves at `age` seconds in
+/// (1 = lit, down to the floor in the dark).
+pub fn night_level(age: f32, soft: bool) -> f32 {
+    let (floor, fade) = if soft {
+        (NIGHT_FLOOR_SOFT, NIGHT_FADE_SOFT)
+    } else {
+        (NIGHT_FLOOR, NIGHT_FADE)
+    };
+    let into = age.rem_euclid(NIGHT_PERIOD) - (NIGHT_PERIOD - NIGHT_DARK);
+    if into < 0.0 {
+        return 1.0;
+    }
+    let depth = (into / fade).min((NIGHT_DARK - into) / fade).clamp(0.0, 1.0);
+    1.0 - depth * (1.0 - floor)
+}
 
 impl Variant {
     pub fn label(self) -> &'static str {
@@ -56,6 +86,7 @@ impl Variant {
             Variant::Frozen => "STUTTERING",
             Variant::Hasty => "HURRIED",
             Variant::Gilded => "GILDED",
+            Variant::NightShift => "FLICKERING",
         }
     }
 
@@ -69,10 +100,19 @@ impl Variant {
             Variant::Frozen => "they keep forgetting to move",
             Variant::Hasty => "the portal is closing",
             Variant::Gilded => "everything here is worth more",
+            Variant::NightShift => "the lights keep going out",
         }
     }
 
-    fn fits(self, theme: DreamTheme) -> bool {
+    /// Twists that make a dream unfair together: both cut your sight.
+    pub fn clashes(self, other: Variant) -> bool {
+        matches!(
+            (self, other),
+            (Variant::NightShift, Variant::Blackout) | (Variant::Blackout, Variant::NightShift)
+        )
+    }
+
+    pub fn fits(self, theme: DreamTheme) -> bool {
         let layout = theme.spec().layout;
         let has_void = matches!(layout, LayoutKind::PlatformChain | LayoutKind::Spiral);
         let has_enemies = theme.spec().enemies.1 > 0;
@@ -115,6 +155,16 @@ impl Twists {
 
     pub fn sight(&self) -> f32 {
         self.product(|v| if v == Variant::Blackout { 0.7 } else { 1.0 })
+    }
+
+    /// `sight`, plus the NIGHT SHIFT dips at `age` seconds into the dream.
+    pub fn sight_at(&self, age: f32, soft: bool) -> f32 {
+        let dip = if self.has(Variant::NightShift) {
+            night_level(age, soft)
+        } else {
+            1.0
+        };
+        self.sight() * dip
     }
 
     pub fn enemy_count(&self) -> f32 {
@@ -187,7 +237,7 @@ pub fn roll_with(theme: DreamTheme, seed: u64, depth: u32, hard: bool, bonus: f6
         let options: Vec<Variant> = ALL_VARIANTS
             .iter()
             .copied()
-            .filter(|v| v.fits(theme) && !out.contains(v))
+            .filter(|v| v.fits(theme) && !out.contains(v) && !out.iter().any(|o| v.clashes(*o)))
             .collect();
         if let Some(&v) = options.choose(&mut rng) {
             out.push(v);
@@ -291,6 +341,61 @@ mod tests {
         assert!(Twists(vec![Variant::Flooded]).walk() < 1.0);
         assert_eq!(Twists(vec![Variant::Hasty]).timer(), Some(HASTY_SECONDS));
         assert_eq!(t.label(), "WEIGHTLESS · GILDED");
+    }
+
+    #[test]
+    fn a_night_shift_dream_starts_lit_and_dips_each_period() {
+        assert_eq!(night_level(0.0, false), 1.0);
+        assert_eq!(night_level(NIGHT_PERIOD - NIGHT_DARK - 0.01, false), 1.0);
+        let mid = NIGHT_PERIOD - NIGHT_DARK * 0.5;
+        assert!((night_level(mid, false) - NIGHT_FLOOR).abs() < 1e-5);
+        // Back to bright, and the cycle repeats.
+        assert!(night_level(NIGHT_PERIOD + 0.5, false) > 0.99);
+        assert!((night_level(mid + NIGHT_PERIOD * 3.0, false) - NIGHT_FLOOR).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_dip_eases_in_and_out_rather_than_cutting() {
+        let start = NIGHT_PERIOD - NIGHT_DARK;
+        let mut last = 1.0;
+        for i in 0..=100 {
+            let l = night_level(start + NIGHT_DARK * i as f32 / 100.0, false);
+            assert!((l - last).abs() < 0.2, "step of {} at {i}", (l - last).abs());
+            last = l;
+        }
+    }
+
+    #[test]
+    fn reduce_flashing_makes_a_shallower_slower_dip() {
+        let mid = NIGHT_PERIOD - NIGHT_DARK * 0.5;
+        assert!(night_level(mid, true) > night_level(mid, false));
+        assert!(night_level(mid, true) >= NIGHT_FLOOR_SOFT - 1e-5);
+        let start = NIGHT_PERIOD - NIGHT_DARK;
+        let jump = |soft| night_level(start + 0.1, soft);
+        assert!(jump(true) > jump(false));
+    }
+
+    #[test]
+    fn only_night_shift_dreams_dip_and_the_floor_is_never_blind() {
+        let t = Twists(vec![Variant::NightShift]);
+        let mid = NIGHT_PERIOD - NIGHT_DARK * 0.5;
+        assert!(t.sight_at(mid, false) < t.sight_at(0.0, false));
+        assert!(t.sight_at(mid, false) > 0.0);
+        assert_eq!(Twists::default().sight_at(mid, false), 1.0);
+        assert_eq!(Twists(vec![Variant::Blackout]).sight_at(mid, false), 0.7);
+    }
+
+    #[test]
+    fn night_shift_and_blackout_never_share_a_dream() {
+        for t in ALL_THEMES {
+            for s in 0..300 {
+                let tw = roll_with(t, s, 20, true, 0.9);
+                assert!(
+                    !(tw.has(Variant::NightShift) && tw.has(Variant::Blackout)),
+                    "{t:?} seed {s}"
+                );
+            }
+        }
     }
 
     #[test]
