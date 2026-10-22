@@ -59,6 +59,7 @@ mod loadout_ui;
 mod lore;
 mod memories_ui;
 mod merge_ui;
+mod moth_shop;
 mod music;
 mod objective;
 mod pack_art;
@@ -226,6 +227,9 @@ struct SecretWall {
     wall: Option<(Entity, Entity)>,
     /// The door that replaces it.
     door: Option<Entity>,
+    /// You have stepped out of the doorway since you last used it (so
+    /// leaving the shop doesn't throw you straight back in).
+    armed: bool,
 }
 
 struct CrumbleTile {
@@ -306,6 +310,8 @@ enum ChoiceKind {
     WakeDoor,
     /// A between-dream event (roadmap 3.5), in place of the upgrade pick.
     Event(events::Event),
+    /// The moth's room behind a cracked wall (cards in `moth_stock`).
+    MothShop,
 }
 
 /// The icon on an event's choice card.
@@ -424,6 +430,8 @@ pub struct DreamscapeGame {
     secret: Option<SecretWall>,
     /// The crack's hint has been shown this launch.
     secret_hint_given: bool,
+    /// What the moth still has on the shelf in this dream.
+    moth_stock: Option<Vec<Upgrade>>,
     skittish: Option<Skittish>,
     /// Height of the ground you last stood on (for the climbing sound).
     ground_y: f32,
@@ -713,6 +721,7 @@ impl DreamscapeGame {
             caches: Vec::new(),
             secret: None,
             secret_hint_given: false,
+            moth_stock: None,
             skittish: None,
             ground_y: f32::MIN,
             stunned: HashMap::new(),
@@ -1300,6 +1309,7 @@ impl DreamscapeGame {
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
                 self.sfx(Sound::Pick);
             }
+            ChoiceKind::MothShop => self.buy_from_moth(index),
             ChoiceKind::Event(event) => {
                 if !self.choose_event(&event, index) {
                     self.choice = Some(ChoiceKind::Event(event));
@@ -3261,6 +3271,7 @@ impl DreamscapeGame {
         };
         let at = sec.at;
         let closed = sec.wall.is_some();
+        let (has_door, armed) = (sec.door.is_some(), sec.armed);
         let p = self.player_position;
         if closed {
             if !self.secret_hint_given && secrets::notices(p, at) {
@@ -3270,7 +3281,153 @@ impl DreamscapeGame {
             if self.run.active(Ability::Dash) && secrets::strikes(Ability::Dash, p, self.facing, at) {
                 self.open_secret();
             }
+        } else if has_door {
+            let inside = secrets::at_door(p, at);
+            if !inside && !armed {
+                if let Some(sec) = self.secret.as_mut() {
+                    sec.armed = true;
+                }
+            } else if inside && armed && self.mode == hud::Mode::Playing {
+                self.enter_moth_shop();
+            }
         }
+    }
+
+    /// Through the door: the moth's room, as a shelf of cards over the frozen
+    /// dream (so leaving puts you back exactly where you stood).
+    fn enter_moth_shop(&mut self) {
+        if self.mode != hud::Mode::Playing
+            || self.choice.is_some()
+            || self.transition.active()
+            || self.coop.is_some()
+            || self.prologue.is_some()
+            || self.autopilot
+        {
+            return;
+        }
+        if let Some(sec) = self.secret.as_mut() {
+            sec.armed = false;
+        }
+        if self.moth_stock.is_none() {
+            self.moth_stock = Some(moth_shop::stock(
+                self.director.dream_seed(),
+                &self.run,
+                self.director.depth,
+            ));
+        }
+        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+        self.show_moth_shop(0);
+    }
+
+    /// Paints the shelf with the ordinary choice screen.
+    fn show_moth_shop(&mut self, selected: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        if shelf.is_empty() {
+            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
+            return;
+        }
+        let cards = shelf
+            .iter()
+            .enumerate()
+            .map(|(i, &u)| {
+                let info = u.info();
+                let cost = moth_shop::price(info.tier).unwrap_or(0);
+                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run).is_ok();
+                let have = self.run.count(u);
+                let level = if have > 0 {
+                    format!(" · {} / {}", have + 1, info.max)
+                } else {
+                    String::new()
+                };
+                upgrade_ui::ChoiceCard {
+                    name: info.name.into(),
+                    desc: info.desc.into(),
+                    icon: info.icon,
+                    color: if can { info.color } else { [110, 110, 130] },
+                    frame: if can { info.tier.frame() } else { [80, 80, 100] },
+                    tag: if can {
+                        format!("{cost} dust · {}{level}", info.tier.label())
+                    } else if self.bonus_dust < cost {
+                        format!("needs {cost} dust")
+                    } else {
+                        "no use to you".into()
+                    },
+                }
+            })
+            .collect();
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: moth_shop::TITLE.into(),
+            subtitle: format!("{} · you have {} dust", moth_shop::SUBTITLE, self.bonus_dust),
+            cards,
+            selected: selected.min(shelf.len() - 1),
+            age: 0.0,
+            hint: "[a/d] choose   [enter] buy   [x] leave".into(),
+        };
+        self.choice = Some(ChoiceKind::MothShop);
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// [enter] on a card: pay run dust for it (never the banked stash).
+    fn buy_from_moth(&mut self, index: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run) {
+            Ok((u, cost)) => {
+                let before = self.run.synergies();
+                self.bonus_dust -= cost;
+                self.run.take(u);
+                self.upgrade_taken_fx(u, &before);
+                if let Some(s) = self.moth_stock.as_mut() {
+                    s.remove(index);
+                }
+                // The card and its price are saved together, so a quit
+                // right after can't keep one without the other.
+                self.save_run();
+                log::info!("Moth sold {u:?} for {cost} dust ({} left)", self.bonus_dust);
+            }
+            Err(why) => {
+                log::info!("Moth refused: {why:?}");
+                self.sfx(Sound::Denied);
+            }
+        }
+        if self.moth_stock.as_ref().is_some_and(|s| s.is_empty()) {
+            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
+            return;
+        }
+        self.show_moth_shop(index);
+    }
+
+    /// [x]: back to the dream, exactly where you stood.
+    fn leave_moth_shop(&mut self) {
+        if !matches!(self.choice, Some(ChoiceKind::MothShop)) {
+            return;
+        }
+        self.choice = None;
+        self.mode = hud::Mode::Playing;
+        self.sfx(Sound::Reroll);
+    }
+
+    /// What a freshly taken upgrade does around the edges (shared by the
+    /// moth's shelf; the after-dream pick has its own copy of this).
+    fn upgrade_taken_fx(&mut self, u: Upgrade, before: &[upgrades::Synergy]) {
+        self.director.shard_bonus = self.shard_bonus();
+        if u == Upgrade::LucidHeart {
+            // Banked straight away: it can't be dropped.
+            self.director.lucidity += 1;
+            self.shards_this_run += 1;
+        }
+        if self.run_active {
+            let n = self.run.synergies().len();
+            self.achieve(Some(achievements::Event::Synergies(n)));
+        }
+        for s in self.run.synergies() {
+            if !before.contains(&s) {
+                log::info!("Synergy: {} ({})", s.name(), s.desc());
+            }
+        }
+        self.flash
+            .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
+        self.sfx(Sound::Pick);
     }
 
     /// High caches: reach the pillar and the gold is yours (a run bonus).
@@ -5414,6 +5571,7 @@ impl DreamscapeGame {
         self.slam_meteor = false;
         self.caches.clear();
         self.secret = None;
+        self.moth_stock = None;
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -5653,6 +5811,7 @@ impl DreamscapeGame {
                 door_tex,
                 wall: Some((wall, glow)),
                 door: None,
+                armed: true,
             });
         }
         log::info!("Dream spawned {} entities", self.world.len());
@@ -6387,6 +6546,9 @@ impl Game for DreamscapeGame {
                         }
                     }
                     Keycode::R => self.reroll_choice(),
+                    Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
+                        self.leave_moth_shop()
+                    }
                     Keycode::X => self.skip_choice(),
                     // Cards deal in first, so a held key can't pick blind.
                     Keycode::Return | Keycode::Space if self.choice_view.age > 0.4 => {

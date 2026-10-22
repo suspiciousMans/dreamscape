@@ -11,6 +11,8 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 pub const REACH: f32 = CELL * 1.8;
 /// How squarely you must face it (cosine of the angle).
 pub const FACING_DOT: f32 = 0.6;
+/// How close to the door's centre counts as stepping through.
+pub const DOOR_RADIUS: f32 = CELL * 0.6;
 /// You notice the crack from this far (flat).
 pub const NOTICE: f32 = CELL * 2.6;
 
@@ -40,6 +42,11 @@ pub fn strikes(ability: Ability, player: Vec3, facing: Vec3, wall: Vec3) -> bool
         return false;
     }
     to.normalize().dot(dir.normalize()) >= FACING_DOT
+}
+
+/// Standing in the doorway.
+pub fn at_door(player: Vec3, door: Vec3) -> bool {
+    flat(player - door).length() <= DOOR_RADIUS
 }
 
 /// Close enough to see the crack.
@@ -108,8 +115,10 @@ mod tests {
     }
 
     #[test]
-    fn height_is_ignored_and_the_crack_is_noticed_from_a_few_cells() {
+    fn height_is_ignored_the_doorway_is_small_and_the_crack_is_noticed_from_a_few_cells() {
         assert!(strikes(Ability::Blink, Vec3::new(CELL, 4.0, 0.0), -Vec3::X, WALL));
+        assert!(at_door(Vec3::new(0.5, 1.0, 0.0), WALL));
+        assert!(!at_door(Vec3::new(CELL, 1.0, 0.0), WALL));
         assert!(notices(Vec3::new(2.0 * CELL, 1.0, 0.0), WALL));
         assert!(!notices(Vec3::new(4.0 * CELL, 1.0, 0.0), WALL));
     }
