@@ -261,6 +261,9 @@ pub struct SavedRun {
     pub perks: Vec<crate::store::Perk>,
     pub shards_this_run: u32,
     pub bonus_dust: u32,
+    // === pacts ===
+    #[serde(default)]
+    pub pacts: Vec<crate::pacts::Pact>,
     pub peak_difficulty: f32,
     pub run_log: Vec<DreamRecord>,
     pub seen_kinds: Vec<EnemyKind>,
@@ -501,6 +504,7 @@ mod tests {
             perks: vec![],
             shards_this_run: 2,
             bonus_dust: 9,
+            pacts: vec![],
             peak_difficulty: 2.5,
             run_log: vec![],
             seen_kinds: vec![EnemyKind::Stalker],
