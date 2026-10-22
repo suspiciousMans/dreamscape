@@ -378,7 +378,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 _ => 1.0,
             };
             if is_sel {
-                let r = Rect::from_center_size(c, Vec2::splat(slot - 6.0));
+                // Tall enough to hold the price tag under the icon.
+                let r = Rect::from_min_max(
+                    c - Vec2::splat(slot * 0.5 - 3.0),
+                    c + Vec2::new(slot * 0.5 - 3.0, 40.0),
+                );
                 p.rect_filled(r, 0.0, rgba(hue(v.time * 0.2), 0.18));
                 crate::pixel_ui::brackets(p, r.expand(2.0), 3.0, rgba(hue(v.time * 0.2), 1.0));
             }

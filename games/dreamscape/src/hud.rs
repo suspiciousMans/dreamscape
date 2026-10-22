@@ -388,6 +388,50 @@ pub(crate) fn glitch_text(
     }
 }
 
+/// The size the in-game HUD is drawn for.
+const HUD_DESIGN: (f32, f32) = (1100.0, 720.0);
+
+/// How big the in-game HUD is drawn in a window of `w` x `h` pixels: 1.0 at
+/// its design size, smaller in small windows and larger in big ones, so its
+/// text and bars keep the same share of the screen. Other screens lay
+/// themselves out and stay at 1.0.
+pub fn ui_scale(mode: Mode, w: f32, h: f32) -> f32 {
+    match mode {
+        Mode::Playing | Mode::Paused => (h / HUD_DESIGN.1)
+            .min(w / HUD_DESIGN.0)
+            .clamp(0.55, 2.5),
+        _ => 1.0,
+    }
+}
+
+/// The smallest window a fixed-layout screen is laid out for. In anything
+/// smaller it is drawn at this size and scaled down to fit, so no text runs
+/// off the edge. (Larger windows draw it as they always did.)
+fn design_size(v: &HudView) -> Option<(f32, f32)> {
+    match v.mode {
+        Mode::Store if v.store_tab == 0 => Some((1100.0, 600.0)),
+        Mode::Store => Some((800.0, 450.0)),
+        Mode::Loadout => Some((800.0, 450.0)),
+        Mode::Booklet => Some((1100.0, 112.0 + crate::booklet_ui::CARD_SIZE.y + 170.0)),
+        _ => None,
+    }
+}
+
+/// A painter whose layer is scaled so a `design`-sized screen fits `screen`,
+/// and the (larger) virtual screen to lay out on. Identity when it already fits.
+fn fit_layer(ctx: &egui::Context, screen: Rect, design: (f32, f32)) -> (egui::Painter, Rect) {
+    let k = (screen.width() / design.0)
+        .min(screen.height() / design.1)
+        .clamp(0.1, 1.0);
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("dream_hud_fit"));
+    ctx.set_transform_layer(
+        layer,
+        egui::emath::TSTransform::new(screen.min.to_vec2(), k),
+    );
+    let virtual_screen = Rect::from_min_size(Pos2::ZERO, screen.size() / k);
+    (ctx.layer_painter(layer).with_clip_rect(virtual_screen), virtual_screen)
+}
+
 pub fn draw(
     ctx: &egui::Context,
     v: &HudView,
@@ -418,6 +462,10 @@ pub fn draw(
             rgba([220, 210, 255], 0.85),
         );
     }
+    let (p, screen) = match design_size(v) {
+        Some(design) => fit_layer(ctx, screen, design),
+        None => (p, screen),
+    };
     match v.mode {
         Mode::Journal => return journal(&p, screen, v),
         Mode::Reveal => {
@@ -552,7 +600,7 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
         top,
         Align2::CENTER_TOP,
         name,
-        FontId::monospace(30.0),
+        FontId::monospace(crate::pixel_ui::fit(name, 30.0, screen.width() - 40.0, 12.0)),
         rgba([255, 90, 160], 0.95),
     );
     let w = 46.0;
@@ -572,7 +620,7 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
                 top + Vec2::new(0.0, 64.0),
                 Align2::CENTER_TOP,
                 *msg,
-                FontId::monospace(28.0),
+                FontId::monospace(crate::pixel_ui::fit(msg, 28.0, screen.width() - 40.0, 12.0)),
                 rgba([255, 240, 120], 1.0),
             );
         }
@@ -648,25 +696,37 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
         y += 22.0;
     }
-    for perk in &v.perks {
+    // The lists stop above the ability boxes (bottom left) and fold the rest
+    // into "+N more", so a long run never runs off the screen.
+    // (and above the eye's speech plate while it is talking).
+    let floor = if v.eye_line.is_some() { 96.0 + 8.0 * EYE_PX + 44.0 } else { 96.0 };
+    let room = ((screen.bottom() - floor - (screen.top() + 20.0 + y)) / 20.0).floor().max(1.0) as usize;
+    let rows: Vec<(String, [u8; 3])> = v
+        .perks
+        .iter()
+        .map(|perk| (format!("+ {perk}"), [80, 230, 200]))
+        .chain(v.upgrades.iter().map(|u| (format!("* {u}"), [255, 200, 120])))
+        .collect();
+    let shown = if rows.len() > room { room - 1 } else { rows.len() };
+    let list_w = (screen.width() * 0.4).max(120.0);
+    for (text, rgb) in rows.iter().take(shown) {
         p.text(
             screen.left_top() + Vec2::new(30.0, 20.0 + y),
             Align2::LEFT_TOP,
-            format!("+ {perk}"),
-            FontId::monospace(18.0),
-            rgba([80, 230, 200], 0.8),
+            text,
+            FontId::monospace(crate::pixel_ui::fit(text, 18.0, list_w, 9.0)),
+            rgba(*rgb, 0.8),
         );
         y += 20.0;
     }
-    for u in &v.upgrades {
+    if rows.len() > shown {
         p.text(
             screen.left_top() + Vec2::new(30.0, 20.0 + y),
             Align2::LEFT_TOP,
-            format!("* {u}"),
-            FontId::monospace(18.0),
-            rgba([255, 200, 120], 0.8),
+            format!("+{} more", rows.len() - shown),
+            FontId::monospace(16.0),
+            rgba([200, 190, 230], 0.6),
         );
-        y += 20.0;
     }
 }
 
@@ -674,12 +734,14 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     let right = screen.right_top() + Vec2::new(-28.0, 22.0);
     let mut y = 0.0;
+    // The depth counter owns the left; the right side keeps to what's left.
+    let side_w = (screen.width() - 56.0 - 260.0).max(screen.width() * 0.4);
     if !v.twist.is_empty() {
         p.text(
             right + Vec2::new(0.0, y),
             Align2::RIGHT_TOP,
             &v.twist,
-            FontId::monospace(24.0),
+            FontId::monospace(crate::pixel_ui::fit(&v.twist, 24.0, side_w, 10.0)),
             rgba(hue(v.time * 0.1), 0.9),
         );
         y += 28.0;
@@ -690,7 +752,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             right + Vec2::new(0.0, y),
             Align2::RIGHT_TOP,
             o,
-            FontId::monospace(32.0),
+            FontId::monospace(crate::pixel_ui::fit(o, 32.0, side_w, 12.0)),
             rgba(
                 if open {
                     [120, 255, 240]
@@ -968,7 +1030,7 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
                 return;
             }
             // Measure the whole line so the plate doesn't grow as it types.
-            let font = FontId::proportional(24.0);
+            let font = FontId::proportional(crate::pixel_ui::fit(&text, 24.0, screen.width() - 60.0, 10.0));
             let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
 
             let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
@@ -1009,7 +1071,7 @@ fn achievement_toast(p: &egui::Painter, screen: Rect, name: &str, age: f32) {
         r.left_top() + Vec2::new(14.0, 26.0),
         Align2::LEFT_TOP,
         name,
-        FontId::proportional(22.0),
+        FontId::proportional(crate::pixel_ui::fit(name, 22.0, r.width() - 28.0, 9.0)),
         rgba([240, 230, 255], a),
     );
 }
@@ -1245,12 +1307,13 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
         ink(v)
     };
     let y = screen.top() + screen.height() * 0.2;
+    let card_w = screen.width() - 40.0;
     glitch_text(
         p,
         Pos2::new(screen.center().x, y),
         true,
         &v.title,
-        40.0,
+        crate::pixel_ui::fit(&v.title, 40.0, card_w, 14.0),
         core,
         a,
         v,
@@ -1259,7 +1322,7 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
         Pos2::new(screen.center().x, y + 50.0),
         Align2::CENTER_TOP,
         &v.whisper,
-        FontId::proportional(24.0),
+        FontId::proportional(crate::pixel_ui::fit(&v.whisper, 24.0, card_w, 10.0)),
         rgba([200, 190, 230], a * 0.85),
     );
     if !v.hint.is_empty() {
@@ -1267,16 +1330,17 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
             Pos2::new(screen.center().x, y + 116.0),
             Align2::CENTER_TOP,
             &v.hint,
-            FontId::monospace(20.0),
+            FontId::monospace(crate::pixel_ui::fit(&v.hint, 20.0, card_w, 9.0)),
             rgba([255, 150, 190], a),
         );
     }
     if !v.twist.is_empty() {
+        let line = format!("{} — {}", v.twist, v.twist_blurb);
         p.text(
             Pos2::new(screen.center().x, y + 86.0),
             Align2::CENTER_TOP,
-            format!("{} — {}", v.twist, v.twist_blurb),
-            FontId::monospace(22.0),
+            &line,
+            FontId::monospace(crate::pixel_ui::fit(&line, 22.0, card_w, 9.0)),
             rgba(hue(v.time * 0.1), a),
         );
     }

@@ -63,26 +63,40 @@ pub fn draw_note(p: &egui::Painter, screen: Rect, v: &HudView, note: &(String, S
         );
         y += 34.0 * u;
     }
+    let line_w = size.x - 56.0;
+    let object = object.to_uppercase();
     p.text(
         r.left_top() + Vec2::new(28.0, 22.0 * u),
         Align2::LEFT_TOP,
-        object.to_uppercase(),
-        FontId::monospace(16.0 * u.max(0.8)),
+        &object,
+        FontId::monospace(pixel_ui::fit(&object, 16.0 * u.max(0.8), line_w, 8.0)),
         rgba(PAPER_INK, 0.6),
     );
     p.text(
         r.left_top() + Vec2::new(28.0, 46.0 * u),
         Align2::LEFT_TOP,
         title,
-        FontId::monospace(22.0 * u.max(0.8)),
+        FontId::monospace(pixel_ui::fit(title, 22.0 * u.max(0.8), line_w, 9.0)),
         rgba(PAPER_INK, 0.95),
     );
-    let g = p.layout(
+    // The body shrinks until it fits between the title and the footer.
+    let body_room = (r.bottom() - 56.0 * u) - (r.top() + 96.0 * u);
+    let mut body_size = 26.0 * u.max(0.8);
+    let mut g = p.layout(
         body.clone(),
-        FontId::proportional(26.0 * u.max(0.8)),
+        FontId::proportional(body_size),
         rgba(PAPER_INK, 1.0),
-        size.x - 56.0,
+        line_w,
     );
+    while g.size().y > body_room && body_size > 11.0 {
+        body_size *= 0.92;
+        g = p.layout(
+            body.clone(),
+            FontId::proportional(body_size),
+            rgba(PAPER_INK, 1.0),
+            line_w,
+        );
+    }
     p.galley(
         r.left_top() + Vec2::new(28.0, 96.0 * u),
         g,
