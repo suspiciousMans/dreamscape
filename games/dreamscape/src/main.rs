@@ -89,6 +89,11 @@ mod tunnel;
 mod tutorial;
 mod upgrade_ui;
 mod upgrades;
+mod pacts;
+mod pressure;
+mod shard_rules;
+mod tactics;
+mod theme_rules;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, EnemyKind, Pressure, PropKind,
@@ -380,10 +385,22 @@ pub struct DreamscapeGame {
     motif: Option<PropKind>,
     enemies: Vec<Pacer>,
     specials: Vec<SpecialEnemy>,
+    // === shards ===
+    shard_kind: shard_rules::ShardKind,
+    /// dream_age when a heavy shard was picked up.
+    heavy_since: Option<f32>,
+    /// Alert-radius multiplier currently applied to the pacers.
+    heavy_applied: f32,
+    /// Beam angle that points the guard sentry at its shard.
+    guard_angle: Option<f32>,
+    // === end shards ===
     /// Where the dreamer has been (the mimic walks it).
     trail: specials::Trail,
     mimic_awake_at: f32,
     jester_cooldown: f32,
+    // === tactics ===
+    tactics: tactics::State,
+    // === end tactics ===
     crumbles: Vec<CrumbleTile>,
     fog: Vec<(Vec3, f32)>,
     /// Mycelium veins (segments you walk faster on).
@@ -486,6 +503,10 @@ pub struct DreamscapeGame {
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
     dream_hint: String,
+    // === hazards ===
+    /// This dream's theme rule (depth 3+, normal dreams).
+    theme_rule: Option<theme_rules::RuleState>,
+    // === end hazards ===
     /// Every sound effect, synthesized at start-up.
     sounds: HashMap<Sound, Vec<f32>>,
     /// Booklet [p]: save this page's cards as images after the next frame.
@@ -578,6 +599,13 @@ pub struct DreamscapeGame {
     pending_coop_start: Option<(u64, bool, usize)>,
     /// Times caught in the current dream (untouched nightmares).
     caught_this_dream: u32,
+    // === ascension ===
+    /// Where you were caught this dream / the spot the last dream remembers (rule 12).
+    asc_caught_here: Option<Vec3>,
+    asc_remembered: Option<Vec3>,
+    /// The eye's clock already ran out this dream (rule 15).
+    asc_eye_failed: bool,
+    // === end ascension ===
     /// Seconds spent holding a stalker still with your gaze.
     stare: f32,
     /// A just-earned achievement's name, and how long it has shown.
@@ -645,8 +673,21 @@ pub struct DreamscapeGame {
     twists: Twists,
     /// Seconds spent playing this dream (HURRIED timer, FROZEN rhythm).
     dream_age: f32,
+    // === pressure ===
+    pressure: pressure::Pressure,
+    pressure_phase: pressure::Phase,
+    /// Run dust when this dream began (a collapse halves what came after).
+    pressure_dust_start: u32,
+    /// This run ended in a collapse.
+    pressure_collapsed: bool,
+    // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
+    // === pacts ===
+    /// Pacts taken this run, and the one the open pick offers.
+    pacts: Vec<pacts::Pact>,
+    pact_offer: Option<pacts::Pact>,
+    // === end pacts ===
     /// Highest difficulty survived this run (scales the dust you wake with).
     peak_difficulty: f32,
     /// Offer an upgrade once the next dream has finished reforming.
@@ -702,9 +743,18 @@ impl DreamscapeGame {
             motif: None,
             enemies: Vec::new(),
             specials: Vec::new(),
+            // === shards ===
+            shard_kind: shard_rules::ShardKind::Plain,
+            heavy_since: None,
+            heavy_applied: 1.0,
+            guard_angle: None,
+            // === end shards ===
             trail: specials::Trail::default(),
             mimic_awake_at: 0.0,
             jester_cooldown: 0.0,
+            // === tactics ===
+            tactics: tactics::State::default(),
+            // === end tactics ===
             crumbles: Vec::new(),
             fog: Vec::new(),
             veins: Vec::new(),
@@ -748,6 +798,7 @@ impl DreamscapeGame {
             dissolve: None,
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
+            theme_rule: None,
             export_requested: false,
             sounds: sounds::ALL_SOUNDS
                 .iter()
@@ -815,6 +866,9 @@ impl DreamscapeGame {
             coop: None,
             pending_coop_start: None,
             caught_this_dream: 0,
+            asc_caught_here: None,
+            asc_remembered: None,
+            asc_eye_failed: false,
             stare: 0.0,
             achievement_toast: None,
             to_bottom: false,
@@ -886,7 +940,15 @@ impl DreamscapeGame {
             twists: Twists::default(),
             perks: Vec::new(),
             dream_age: 0.0,
+            // === pressure ===
+            pressure: pressure::Pressure::off(),
+            pressure_phase: pressure::Phase::Calm,
+            pressure_dust_start: 0,
+            pressure_collapsed: false,
+            // === end pressure ===
             bonus_dust: 0,
+            pacts: Vec::new(),
+            pact_offer: None,
             peak_difficulty: 1.0,
             offer_upgrade: false,
             last_event: None,
@@ -962,10 +1024,27 @@ impl DreamscapeGame {
             depth: self.director.depth,
             boss: self.boss_reward,
         };
-        let options = upgrades::roll_choices(seed, &self.run, roll);
+        let mut options = upgrades::roll_choices(seed, &self.run, roll);
         if options.is_empty() {
             return;
         }
+        // === pacts ===
+        let pfx = pacts::effects(&self.pacts);
+        options.truncate(options.len().saturating_sub(pfx.fewer_cards).max(2).min(options.len()));
+        self.pact_offer = None;
+        if !self.boss_reward && self.prologue.is_none() && self.coop.is_none() && !self.autopilot {
+            self.pact_offer = pacts::roll_pact(
+                self.director.dream_seed() ^ self.director.depth as u64,
+                self.director.depth,
+                &self.pacts,
+            );
+            if self.pact_offer.is_some() && options.len() >= 3 {
+                options.pop();
+            } else {
+                self.pact_offer = None;
+            }
+        }
+        // === end pacts ===
         let card = |u: Upgrade| {
             let info = u.info();
             let have = self.run.count(u);
@@ -1015,14 +1094,31 @@ impl DreamscapeGame {
                 "depth {} · keep one for the rest of the run",
                 self.director.depth
             ),
-            cards: options.iter().map(|&u| card(u)).collect(),
+            cards: options
+                .iter()
+                .map(|&u| card(u))
+                // === pacts ===
+                .chain(self.pact_offer.map(|p| upgrade_ui::ChoiceCard {
+                    name: p.name().into(),
+                    desc: p.desc().into(),
+                    icon: upgrades::Icon::Lid,
+                    color: [255, 90, 100],
+                    frame: [255, 60, 80],
+                    tag: format!("pact · +{:.2} dust", p.bonus()),
+                }))
+                // === end pacts ===
+                .collect(),
             selected: 0,
             age: 0.0,
-            hint: format!(
-                "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
-                self.run.rerolls_left(),
-                upgrades::SKIP_DUST
-            ),
+            hint: if pfx.no_reroll_skip {
+                "[a/d] choose   [enter] take it".into()
+            } else {
+                format!(
+                    "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
+                    self.run.rerolls_left(),
+                    if pfx.skip_pays_nothing { 0 } else { upgrades::SKIP_DUST }
+                )
+            },
         };
         self.choice = Some(ChoiceKind::Upgrade(options));
         self.input = PlayerInputState::default();
@@ -1170,8 +1266,35 @@ impl DreamscapeGame {
         }
     }
 
+    // === pacts ===
+    /// Signs a pact: its drawback holds for the rest of the run.
+    fn take_pact(&mut self, p: pacts::Pact) {
+        self.pacts.push(p);
+        self.pact_offer = None;
+        self.run.thin_next_pick = false;
+        self.director.shards_to_wake += p.effects().extra_shards;
+        if p.effects().owed_dust > 0 {
+            match pacts::owed_payment(self.event_dust()) {
+                pacts::OwedPayment::Dust(n) => self.spend_event_dust(n),
+                pacts::OwedPayment::LoseCard => {
+                    if let Some(i) = self.run.taken.iter().rposition(|u| !u.is_ability()) {
+                        self.run.taken.remove(i);
+                    }
+                }
+            }
+        }
+        self.director.shard_bonus = self.shard_bonus();
+        self.achievement_toast = Some((format!("pact: {}", p.name()), 0.0));
+        self.sfx(Sound::Pick);
+        log::info!("Pact taken: {p:?} (run: {:?})", self.pacts);
+    }
+    // === end pacts ===
+
     fn reroll_choice(&mut self) {
-        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) || self.run.rerolls_left() == 0 {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
+            || self.run.rerolls_left() == 0
+            || pacts::effects(&self.pacts).no_reroll_skip // === pacts ===
+        {
             return;
         }
         self.run.rerolls_used += 1;
@@ -1240,7 +1363,9 @@ impl DreamscapeGame {
     }
 
     fn skip_choice(&mut self) {
-        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
+            || pacts::effects(&self.pacts).no_reroll_skip // === pacts ===
+        {
             return;
         }
         self.choice = None;
@@ -1248,7 +1373,9 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         self.moth_after_nightmare();
         self.boss_reward = false;
-        self.bonus_dust += upgrades::SKIP_DUST;
+        if !pacts::effects(&self.pacts).skip_pays_nothing {
+            self.bonus_dust += upgrades::SKIP_DUST; // === pacts ===
+        }
         self.stats.skipped += 1;
         self.coop_ready();
         log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
@@ -1299,6 +1426,14 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         match kind {
             ChoiceKind::Upgrade(options) => {
+                // === pacts ===
+                if let (true, Some(p)) = (index == options.len(), self.pact_offer) {
+                    self.take_pact(p);
+                    self.boss_reward = false;
+                    self.coop_ready();
+                    return;
+                }
+                // === end pacts ===
                 let Some(&u) = options.get(index) else {
                     self.choice = Some(ChoiceKind::Upgrade(options));
                     self.mode = hud::Mode::Choice;
@@ -1529,7 +1664,7 @@ impl DreamscapeGame {
                 loadout_ui::LoadoutView {
                     cards: self.booklet.cards().cloned().collect(),
                     chosen: self.booklet.lore.loadout.clone(),
-                    slots: self.booklet.lore.slots(),
+                    slots: self.asc_slots(),
                     selected: self.loadout_sel,
                     companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
                         let l = &self.booklet.lore;
@@ -1757,7 +1892,16 @@ impl DreamscapeGame {
                     )
                 })
                 .collect(),
-            twist: self.twists.label(),
+            twist: {
+                // === shards ===
+                let t = self.twists.label();
+                if self.heavy_elapsed().is_some_and(|e| e < shard_rules::HEAVY_SECONDS) {
+                    if t.is_empty() { "heavy".to_string() } else { format!("{t} · heavy") }
+                } else {
+                    t
+                }
+                // === end shards ===
+            },
             twist_blurb: self
                 .twists
                 .0
@@ -1765,7 +1909,15 @@ impl DreamscapeGame {
                 .map(|v| v.blurb())
                 .collect::<Vec<_>>()
                 .join("; "),
-            timer: self.twists.timer().map(|t| t - self.dream_age),
+            timer: self.dream_timer().map(|t| t - self.dream_age),
+            // === pressure ===
+            pressure_lid: (self.pressure.phase() != pressure::Phase::Calm).then(|| {
+                (
+                    self.pressure.lid(),
+                    self.pressure.phase() != pressure::Phase::Stirring,
+                )
+            }),
+            // === end pressure ===
             difficulty: self.director.hardness().map(|_| self.difficulty()),
             summary: if self.mode == hud::Mode::Summary {
                 self.summary_view()
@@ -2591,6 +2743,17 @@ impl DreamscapeGame {
         if self.stare >= achievements::STARE_SECONDS && self.run_active {
             self.achieve(Some(achievements::Event::Stare(self.stare)));
         }
+        // === tactics ===
+        let tactic_depth = self.director.depth;
+        let mimic_extra = tactics::mimic_extra_delay(tactic_depth);
+        let mimic_now = self
+            .specials
+            .iter()
+            .find(|sp| sp.kind == EnemyKind::Mimic)
+            .and_then(|_| {
+                specials::mimic_pos(&self.trail, self.dream_age - mimic_extra, self.mimic_awake_at)
+            });
+        // === end tactics ===
         let mut calls = Vec::new();
         for sp in &mut self.specials {
             let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
@@ -2605,7 +2768,7 @@ impl DreamscapeGame {
                     }
                 }
                 SpecialAI::Mimic => {
-                    match specials::mimic_pos(&self.trail, self.dream_age, self.mimic_awake_at) {
+                    match specials::mimic_pos(&self.trail, self.dream_age - mimic_extra, self.mimic_awake_at) { // tactics
                         Some(p) if !held => {
                             t.position = p;
                             t.scale = Vec3::new(0.9, 1.25, 0.9);
@@ -2616,7 +2779,7 @@ impl DreamscapeGame {
                 }
                 SpecialAI::Sentry(s, beam) => {
                     let at = Vec3::new(t.position.x, 0.0, t.position.z);
-                    if !held && s.update(at, player, dt) {
+                    if !held && s.update_scaled(at, player, dt, tactics::sentry_boost(tactic_depth, at, s.facing(), mimic_now)) { // tactics
                         calls.push(at);
                     }
                     let facing = s.facing();
@@ -2688,13 +2851,24 @@ impl DreamscapeGame {
             return;
         }
         let seed = (self.dream_age * 1000.0) as u32;
+        // === tactics ===
+        let watchers: Vec<Vec3> = self
+            .specials
+            .iter()
+            .filter(|sp| matches!(sp.ai, SpecialAI::Stalker(_) | SpecialAI::Sentry(..)))
+            .filter_map(|sp| self.world.get::<&Transform>(sp.entity).ok().map(|t| t.position))
+            .collect();
+        let depth = self.director.depth;
         let landing = self.dream.as_ref().and_then(|d| {
-            specials::throw_directions(seed)
+            let landings: Vec<Option<Vec3>> = specials::throw_directions(seed)
                 .into_iter()
-                .find_map(|dir| {
+                .map(|dir| {
                     gameplay::blink_target(&d.blocks, player, dir, specials::JESTER_THROW)
                 })
+                .collect();
+            tactics::jester_dir(depth, &landings, &watchers).and_then(|i| landings[i])
         });
+        // === end tactics ===
         self.jester_cooldown = specials::JESTER_COOLDOWN;
         if let (Some(at), Some(p)) = (landing, self.player) {
             if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
@@ -2789,7 +2963,10 @@ impl DreamscapeGame {
         let special = self.specials.iter().any(|sp| {
             let armed = match &sp.ai {
                 SpecialAI::Stalker(s) => s.moving,
-                SpecialAI::Mimic => self.dream_age >= self.mimic_awake_at,
+                SpecialAI::Mimic => {
+                    self.dream_age - tactics::mimic_extra_delay(self.director.depth)
+                        >= self.mimic_awake_at // tactics
+                }
                 SpecialAI::Drifter(_) => true,
                 SpecialAI::Sentry(..) | SpecialAI::Jester(_) => false,
             };
@@ -3682,8 +3859,37 @@ impl DreamscapeGame {
     }
 
     fn shard_bonus(&self) -> f64 {
-        self.run.shard_bonus() - self.active_asc.shard_penalty()
+        // === ascension ===
+        (self.run.shard_bonus() * self.active_asc.pickup_factor()) - self.active_asc.shard_penalty()
+        // === end ascension ===
     }
+
+    // === ascension ===
+    /// The ascension a run started now would use (none for daily/co-op/prologue/autopilot).
+    fn run_asc(&self) -> progress::Ascension {
+        if self.daily.is_some() || self.autopilot || self.prologue.is_some() || self.coop.is_some() {
+            progress::Ascension(0)
+        } else {
+            progress::Ascension(self.ascension)
+        }
+    }
+
+    /// Loadout slots this run may use (rule 13).
+    fn asc_slots(&self) -> usize {
+        self.run_asc().loadout_slots(self.booklet.lore.slots())
+    }
+
+    /// Clock for this dream: the twist's, or the closing eye's (rule 15).
+    fn dream_timer(&self) -> Option<f32> {
+        let eye = (!self.director.nightmare && self.prologue.is_none() && self.coop.is_none())
+            .then(|| self.active_asc.eye_timer(self.director.depth))
+            .flatten();
+        match (self.twists.timer(), eye) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    // === end ascension ===
 
     /// The title menu, top to bottom.
     fn title_items(&self) -> Vec<TitleItem> {
@@ -3956,6 +4162,7 @@ impl DreamscapeGame {
                 self.perks = s.perks.clone();
                 self.shards_this_run = s.shards_this_run;
                 self.bonus_dust = s.bonus_dust;
+                self.pacts = s.pacts.clone(); // === pacts ===
                 self.peak_difficulty = s.peak_difficulty;
                 self.run_log = s.run_log.clone();
                 self.seen_kinds = s.seen_kinds.clone();
@@ -4056,6 +4263,7 @@ impl DreamscapeGame {
             perks: self.perks.clone(),
             shards_this_run: self.shards_this_run,
             bonus_dust: self.bonus_dust,
+            pacts: self.pacts.clone(), // === pacts ===
             peak_difficulty: self.peak_difficulty,
             run_log: self.run_log.clone(),
             seen_kinds: self.seen_kinds.clone(),
@@ -4084,6 +4292,7 @@ impl DreamscapeGame {
     /// The dreamer's walking speed right now.
     fn player_speed(&self) -> f32 {
         gameplay::MOVE_SPEED
+            * pacts::effects(&self.pacts).player_speed_mult // === pacts ===
             * self.run.speed()
             * self.twists.walk()
             * if self.has_perk(store::Perk::LongStride) {
@@ -4093,7 +4302,17 @@ impl DreamscapeGame {
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
             * self.active_form.speed_mult()
+            // === shards ===
+            * shard_rules::heavy_mults(self.heavy_elapsed()).0
+            // === end shards ===
     }
+
+    // === shards ===
+    /// Seconds since a heavy shard was picked up, if it still weighs on you.
+    fn heavy_elapsed(&self) -> Option<f32> {
+        self.heavy_since.map(|t| (self.dream_age - t).max(0.0))
+    }
+    // === end shards ===
 
     /// How strange the dream *looks*: CALM MIND takes the edge off.
     fn visual_strangeness(&self) -> f32 {
@@ -4656,7 +4875,7 @@ impl DreamscapeGame {
                 else {
                     return;
                 };
-                let slots = self.booklet.lore.slots();
+                let slots = self.asc_slots();
                 if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
                     self.persist_booklet();
                 }
@@ -4729,7 +4948,11 @@ impl DreamscapeGame {
         let cards = if self.prologue.is_some() {
             Vec::new()
         } else {
-            self.booklet.loadout_cards()
+            // === ascension === (rule 13: one fewer slot)
+            let mut c = self.booklet.loadout_cards();
+            c.truncate(self.asc_slots());
+            c
+            // === end ascension ===
         };
         self.card_fx = retention::card_effects(&self.booklet, &cards);
         self.loadout_numbers = cards.iter().map(|c| c.number).collect();
@@ -4805,7 +5028,11 @@ impl DreamscapeGame {
         let cards = if self.prologue.is_some() {
             Vec::new()
         } else {
-            self.booklet.loadout_cards()
+            // === ascension === (rule 13: one fewer slot)
+            let mut c = self.booklet.loadout_cards();
+            c.truncate(self.asc_slots());
+            c
+            // === end ascension ===
         };
         if !cards.is_empty() {
             log::info!(
@@ -4885,6 +5112,8 @@ impl DreamscapeGame {
             },
         );
         self.active_asc = asc;
+        self.asc_caught_here = None; // ascension 12: a new run forgets
+        self.asc_remembered = None;
         self.director.shards_to_wake += asc.extra_shards();
         self.director.nightmare_every = asc.nightmare_every();
         // Card dreams are personal: a shared dream has none.
@@ -4897,6 +5126,8 @@ impl DreamscapeGame {
         }
         self.run.penalty_cards = asc.fewer_cards() + self.active_form.fewer_choices();
         self.run.no_free_reroll = !asc.free_rerolls();
+        self.pacts.clear(); // === pacts ===
+        self.pact_offer = None;
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
         if let Some(n) = crate::dev::var("DREAMSCAPE_SHARDS_NEEDED")
@@ -4925,6 +5156,7 @@ impl DreamscapeGame {
         self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
+        self.pressure_collapsed = false; // pressure
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
         self.last_event = None;
@@ -5048,7 +5280,7 @@ impl DreamscapeGame {
 
     /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
     fn dust_multiplier(&self) -> f32 {
-        self.run.dust()
+        (self.run.dust() + pacts::dust_bonus(&self.pacts)) // === pacts ===
             * gameplay::difficulty_reward(self.peak_difficulty)
             * (1.0 + self.card_fx.dust_bonus_pct as f32 / 100.0)
             * streaks::multiplier(self.booklet.clean.current)
@@ -5106,9 +5338,19 @@ impl DreamscapeGame {
             names.dedup();
             rows.push(("twists survived".into(), names.join(", ")));
         }
+        // === pressure ===
+        if self.pressure_collapsed {
+            rows.push((String::new(), pressure::SUMMARY_LINE.into()));
+        }
+        // === end pressure ===
         for (r, d) in &self.new_records {
             rows.push((String::new(), format!("{} (+{d} dust)", r.label())));
         }
+        // === pacts ===
+        for line in pacts::summary_lines(&self.pacts) {
+            rows.push(("pact".into(), line));
+        }
+        // === end pacts ===
         summary_ui::SummaryView {
             rows,
             upgrades: self.run.summary(),
@@ -5119,9 +5361,10 @@ impl DreamscapeGame {
                 .map(|s| s.name().to_string())
                 .collect(),
             dust: format!(
-                "dust x{:.2}  (hoarding x{:.2} · nightmare x{:.2})  + {} bonus",
+                "dust x{:.2}  (hoarding x{:.2} · pacts +{:.2} · nightmare x{:.2})  + {} bonus",
                 self.dust_multiplier(),
                 self.run.dust(),
+                pacts::dust_bonus(&self.pacts),
                 gameplay::difficulty_reward(self.peak_difficulty),
                 self.bonus_dust
             ),
@@ -5130,6 +5373,55 @@ impl DreamscapeGame {
 
     /// Begin melting toward `pending`. Ignored if a melt is already running
     /// (so touching the portal for several frames can't queue two descents).
+    // === pressure ===
+    /// Normal dreams only: no nightmares, the awakening, the prologue or co-op.
+    fn pressure_applies(&self) -> bool {
+        self.prologue.is_none()
+            && self.coop.is_none()
+            && !self.director.nightmare
+            && self.director.theme != DreamTheme::Awakening
+            && self.director.theme != DreamTheme::Lobby
+    }
+
+    /// Per frame (Playing only): tick the clock, stir the pacers, speak,
+    /// and collapse the dream when the eye closes.
+    fn update_pressure(&mut self, dt: f32) {
+        if !self.pressure.active() || self.transition.active() || self.dream.is_none() {
+            return;
+        }
+        self.pressure.tick(dt);
+        let phase = self.pressure.phase();
+        let cap = 0.92 * self.player_speed() / enemy_ai::CHASE_BOOST;
+        let (sm, am) = (self.pressure.speed_mult(), self.pressure.chase_mult());
+        for p in &mut self.enemies {
+            p.ai.set_pressure(sm, am, cap);
+        }
+        if phase == self.pressure_phase {
+            return;
+        }
+        self.pressure_phase = phase;
+        match phase {
+            pressure::Phase::Stirring => self.say_pressure(pressure::LINE_STIRRING),
+            pressure::Phase::Warning => self.say_pressure(pressure::LINE_WARNING),
+            pressure::Phase::Collapsed => {
+                self.bonus_dust =
+                    pressure::collapse_dust(self.pressure_dust_start, self.bonus_dust);
+                self.pressure_collapsed = true;
+                log::info!("Pressure: the dream collapsed at depth {}", self.director.depth);
+                self.flash.trigger([1.0, 1.0, 1.0], 1.0);
+                self.sfx(Sound::WakeDoor);
+                self.begin_melt(transition::Pending::Wake);
+            }
+            pressure::Phase::Calm => {}
+        }
+    }
+
+    fn say_pressure(&mut self, text: &str) {
+        log::info!("Pressure: {text}");
+        self.eye_line = Some((text.to_string(), 0.0));
+    }
+    // === end pressure ===
+
     fn begin_melt(&mut self, pending: transition::Pending) {
         let fog = match pending {
             transition::Pending::Descend => self.director.next.spec().fog_color,
@@ -5278,9 +5570,15 @@ impl DreamscapeGame {
         };
         let beacon = self.world.spawn((
             Transform {
-                position: at + Vec3::Y * (size.y + 0.4 + BEACON_HEIGHT * 0.5),
+                position: at
+                    + Vec3::Y
+                        * (size.y + 0.4 + BEACON_HEIGHT * self.active_asc.pickup_factor() as f32 * 0.5),
                 rotation: Quat::IDENTITY,
-                scale: Vec3::new(girth, BEACON_HEIGHT, girth),
+                scale: Vec3::new(
+                    girth,
+                    BEACON_HEIGHT * self.active_asc.pickup_factor() as f32, // ascension 14
+                    girth,
+                ),
             },
             MeshRenderer {
                 mesh: beacon_mesh,
@@ -5434,6 +5732,13 @@ impl DreamscapeGame {
         self.juice.hit(juice::Hit::Shard, self.settings.reduced_motion);
         self.sfx_pitched(Sound::Shard, pitch);
         self.director.collect_shard();
+        self.pressure.refund_on_shard(); // pressure
+        // === shards ===
+        self.heavy_since = (self.shard_kind == shard_rules::ShardKind::Heavy).then_some(self.dream_age);
+        // === end shards ===
+        if let Some(r) = self.theme_rule.as_mut() {
+            r.on_shard(); // hazards
+        }
         self.shards_this_run += 1;
         if self.run_active {
             self.achieve(Some(achievements::Event::ShardTaken));
@@ -5586,12 +5891,39 @@ impl DreamscapeGame {
                 self.active_asc.twist_bonus(),
             )
         };
+        // === ascension === 16: a twist every dream; 12: remember the last catch; 15: fresh clock
+        if self.active_asc.always_twist(self.director.depth)
+            && self.twists.0.is_empty()
+            && !self.director.nightmare
+            && self.prologue.is_none()
+        {
+            let fits: Vec<Variant> = dream::ALL_VARIANTS
+                .iter()
+                .copied()
+                .filter(|v| v.fits(theme))
+                .collect();
+            if let Some(v) = progress::forced_twist(self.director.dream_seed(), &fits) {
+                self.twists.0.push(v);
+            }
+        }
+        self.asc_remembered = self.asc_caught_here.take();
+        self.asc_eye_failed = false;
+        // === end ascension ===
         self.apply_event_twists();
         if self.twists.has(Variant::Gilded) {
             self.director.has_shard = true;
         }
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
+        // === pressure ===
+        self.pressure = pressure::Pressure::for_dream(
+            self.director.depth,
+            self.pressure_applies(),
+            self.twists.timer().is_some(),
+        );
+        self.pressure_phase = pressure::Phase::Calm;
+        self.pressure_dust_start = self.bonus_dust;
+        // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
         if !self.run_log.is_empty() && !std::mem::take(&mut self.just_continued) {
@@ -5653,6 +5985,47 @@ impl DreamscapeGame {
         if let Some(o) = &self.objective {
             log::info!("Objective: {}", o.label());
         }
+        // === shards ===
+        self.heavy_since = None;
+        self.heavy_applied = 1.0;
+        self.shard_kind = shard_rules::ShardKind::Plain;
+        self.guard_angle = None;
+        if let Some(shard) = dream.shard {
+            let eligible = !self.director.nightmare
+                && self.prologue.is_none()
+                && self.coop.is_none()
+                && self.director.depth >= shard_rules::MIN_DEPTH
+                && !(self.director.lucid() && dream.shard.is_some())
+                && matches!(self.objective, None | Some(objective::Active::Shard));
+            let want = shard_rules::kind_for(
+                dream.seed,
+                dream.depth,
+                self.twists.has(Variant::Gilded),
+                eligible,
+            );
+            self.shard_kind = want;
+            if want == shard_rules::ShardKind::Guarded {
+                let route: Vec<Vec3> = dream.lucid_route.iter().map(|w| w.pos).collect();
+                let floor = shard_rules::floor_cells(&dream.blocks);
+                match shard_rules::guard_cell(dream.seed, shard, &floor, &route, &[dream.spawn, dream.portal]) {
+                    Some(at) => {
+                        dream.specials.push(dream::Special {
+                            kind: dream::EnemyKind::Sentry,
+                            at,
+                            a: at,
+                            b: at,
+                        });
+                        self.guard_angle = Some(shard_rules::facing_angle(at, shard));
+                        log::info!("Guarded shard: sentry at {at:?}");
+                    }
+                    None => self.shard_kind = shard_rules::ShardKind::Plain,
+                }
+            }
+            if self.shard_kind != shard_rules::ShardKind::Plain {
+                log::info!("Shard kind: {:?}", self.shard_kind);
+            }
+        }
+        // === end shards ===
         self.hunter = None;
         self.sealed_portal = None;
         self.sigils_left = dream.sigils.len();
@@ -6156,6 +6529,7 @@ impl DreamscapeGame {
             * self.twists.enemy_speed()
             * self.run.enemy_speed()
             * self.active_asc.enemy_speed()
+            * pacts::effects(&self.pacts).enemy_speed_mult // === pacts ===
             * (1.0 - self.card_fx.calm_pct.min(50) as f32 / 100.0)
             * if slow_heart {
                 store::SLOW_HEART_ENEMY_SPEED
@@ -6169,10 +6543,29 @@ impl DreamscapeGame {
             gameplay::pressured_chase_radius(dream.depth, difficulty)
                 * self.run.alert()
                 * self.active_asc.alert()
+                * pacts::effects(&self.pacts).alert_mult // === pacts ===
         };
         let cap = 0.92 * player_speed / enemy_ai::CHASE_BOOST;
         let mut elite_tex: HashMap<Elite, Arc<GpuTexture>> = HashMap::new();
-        for (k, &(a, b)) in dream.patrols.iter().enumerate() {
+        // === ascension === 12: one more watcher where you fell last dream
+        let mut patrols = dream.patrols.clone();
+        if let Some(c) = self.asc_remembered.filter(|_| {
+            self.active_asc.remembers(self.director.depth) && !self.director.nightmare
+        }) {
+            let walk: Vec<(f32, f32)> = dream.lucid_route.iter().map(|w| (w.pos.x, w.pos.z)).collect();
+            if let Some((x, z)) = progress::remembered_spot(
+                dream.seed,
+                (c.x, c.z),
+                (dream.spawn.x, dream.spawn.z),
+                &walk,
+            ) {
+                let y = dream.lucid_route.iter().find(|w| w.pos.x == x && w.pos.z == z).map_or(dream.spawn.y, |w| w.pos.y);
+                let at = Vec3::new(x, y, z);
+                patrols.push((at, at));
+            }
+        }
+        // === end ascension ===
+        for (k, &(a, b)) in patrols.iter().enumerate() {
             let elite = specials::roll_elite(dream.seed, k, difficulty);
             let texture = match elite {
                 None => enemy_texture.clone(),
@@ -6217,6 +6610,32 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        // === shards ===
+        if let (Some(a), Some(SpecialEnemy { ai: SpecialAI::Sentry(s, _), .. })) =
+            (self.guard_angle, self.specials.last_mut())
+        {
+            s.angle = a;
+        }
+        // === end shards ===
+        // === hazards ===
+        self.theme_rule = theme_rules::RuleState::new(
+            self.director.theme,
+            self.director.depth,
+            !self.director.nightmare
+                && self.prologue.is_none()
+                && self.coop.is_none()
+                && self.director.theme != DreamTheme::Awakening,
+            self.director.dream_seed() ^ 0x4841_5A41_5244,
+        );
+        if self.theme_rule.is_some() {
+            let line = theme_rules::rule_for(self.director.theme).line;
+            self.dream_hint = if self.dream_hint.is_empty() {
+                line.to_string()
+            } else {
+                format!("{line} · {}", self.dream_hint)
+            };
+        }
+        // === end hazards ===
         self.spawn_features(gl, &dream)?;
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
@@ -6407,7 +6826,11 @@ impl DreamscapeGame {
             d.reset();
         }
         self.route_index = 0;
-        self.grace = gameplay::RESPAWN_GRACE
+        self.grace = if self.active_asc.no_safe_respawn(self.director.depth) {
+            0.0 // ascension 11: no grace
+        } else {
+            1.0
+        } * gameplay::RESPAWN_GRACE
             * self.run.grace()
             * self.active_asc.grace()
             * (1.0 + 0.2 * self.card_fx.grace_bonus as f32)
@@ -7300,8 +7723,27 @@ impl Game for DreamscapeGame {
                 .clamp(-fpv::PITCH_LIMIT, fpv::PITCH_LIMIT);
         }
         self.dream_age += dt;
+        if let Some(r) = self.theme_rule.as_mut() {
+            r.tick(dt); // hazards
+        }
+        // === ascension === 15: the eye's clock runs out once per dream
+        if !self.asc_eye_failed
+            && self.active_asc.eye_timer(self.director.depth).is_some_and(|t| self.dream_age > t)
+            && self.dream_timer().is_some()
+            && !self.director.nightmare
+            && self.prologue.is_none()
+        {
+            self.asc_eye_failed = true;
+            if let Some(u) = progress::lose_last_card(&mut self.run.taken) {
+                log::info!("The eye closed: {u:?} is gone");
+            }
+        }
+        // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
+        // === pressure ===
+        self.update_pressure(dt);
+        // === end pressure ===
 
         // 0b. Abilities
         let requests = std::mem::take(&mut self.ability_requests);
@@ -7355,7 +7797,7 @@ impl Game for DreamscapeGame {
                 specials::FOG_SLOW
             } else {
                 1.0
-            };
+            } * self.theme_rule.map_or(1.0, |r| r.effect().speed); // hazards
             let speed = self.player_speed() * ground;
             // MIRRORED swaps the actions (left <-> right), after any key remap.
             let mirrored = self.twists.mirrors_controls();
@@ -7425,8 +7867,11 @@ impl Game for DreamscapeGame {
             } else {
                 desired
             };
-            body.velocity.x = v.x;
-            body.velocity.z = v.z;
+            // === hazards ===
+            let push = self.theme_rule.map_or((0.0, 0.0), |r| r.effect().push);
+            body.velocity.x = v.x + push.0;
+            body.velocity.z = v.z + push.1;
+            // === end hazards ===
             self.player_grounded = body.grounded;
             if body.grounded {
                 self.air_jumps_used = 0;
@@ -7462,11 +7907,27 @@ impl Game for DreamscapeGame {
         let ghost = self.echo_ghost_pos();
         let mut splits = Vec::new();
         let mut noticed = false;
+        // === tactics ===
+        let tactic_depth = self.director.depth;
+        let tactics_on = tactics::active(tactic_depth, !hunted.is_empty() || self.hunter.is_some());
+        self.tactics.tick(self.enemies.len(), dt);
+        let mut chase_starts: Vec<(usize, Option<Elite>)> = Vec::new();
+        // === end tactics ===
         let hush = if self.run.active(Ability::Hush) {
             upgrades::HUSH_SLOW
         } else {
             1.0
         };
+        // === shards ===
+        let want_alert = shard_rules::heavy_mults(self.heavy_elapsed()).1;
+        if (want_alert - self.heavy_applied).abs() > 1e-4 {
+            let f = want_alert / self.heavy_applied;
+            for p in &mut self.enemies {
+                p.ai.scale_alert(f);
+            }
+            self.heavy_applied = want_alert;
+        }
+        // === end shards ===
         for (k, p) in self.enemies.iter_mut().enumerate() {
             if held || puppet {
                 continue;
@@ -7504,6 +7965,7 @@ impl Game for DreamscapeGame {
                 if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
                     noticed = true;
+                    chase_starts.push((k, p.elite)); // tactics
                     if p.elite == Some(Elite::Splitter) && !p.split {
                         p.split = true;
                         splits.push((k, t.position));
@@ -7511,6 +7973,33 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === tactics ===
+        if tactics_on && !chase_starts.is_empty() {
+            let pos_of = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
+            let snapshot: Vec<(usize, Vec3)> = self
+                .enemies
+                .iter()
+                .enumerate()
+                .filter_map(|(k, p)| pos_of(&self.world, p.entity).map(|v| (k, v)))
+                .collect();
+            for (k, elite) in chase_starts {
+                let Some(&(_, from)) = snapshot.iter().find(|&&(i, _)| i == k) else {
+                    continue;
+                };
+                let others: Vec<(usize, Vec3, f32)> = snapshot
+                    .iter()
+                    .map(|&(i, v)| (i, v, self.tactics.cooldown(i)))
+                    .collect();
+                for i in tactics::shout_targets(tactic_depth, k, from, &others) {
+                    self.tactics.mark(i);
+                    self.enemies[i].ai.alert();
+                }
+                for i in tactics::pack_follow(tactic_depth, k, elite, from, &snapshot) {
+                    self.enemies[i].ai.alert();
+                }
+            }
+        }
+        // === end tactics ===
         if noticed {
             self.think(eye::Moment::EnemySeen, true);
         }
@@ -7754,6 +8243,14 @@ impl Game for DreamscapeGame {
             if caught {
                 self.stats.caught += 1;
                 self.caught_this_dream += 1;
+                // === ascension === 11: half your lucidity; 12: the spot is remembered
+                if self.active_asc.no_safe_respawn(self.director.depth) {
+                    self.director.lucidity = progress::Ascension::halve_lucidity(self.director.lucidity);
+                }
+                if self.active_asc.remembers(self.director.depth) {
+                    self.asc_caught_here = Some(self.player_position);
+                }
+                // === end ascension ===
             } else {
                 self.stats.fell += 1;
             }
@@ -8999,6 +9496,46 @@ mod screen_smoke {
         bad
     }
 
+    // === pacts ===
+    #[test]
+    fn pacts_bite_and_pay() {
+        let mut g = game("pacts");
+        g.director.depth = 5;
+        let base_speed = g.player_speed();
+        let base_mult = g.dust_multiplier();
+        g.take_pact(pacts::Pact::HeavyDreams);
+        assert!(g.player_speed() < base_speed);
+        assert!(g.dust_multiplier() > base_mult);
+        let shards = g.director.shards_to_wake;
+        g.take_pact(pacts::Pact::ShortFuse);
+        assert_eq!(g.director.shards_to_wake, shards + 1);
+        g.take_pact(pacts::Pact::NoRegrets);
+        g.open_upgrade_choice();
+        let rerolls = g.run.rerolls_used;
+        g.reroll_choice();
+        assert_eq!(g.run.rerolls_used, rerolls);
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert!(g.choice.is_some() && g.bonus_dust == dust);
+        let rows = g.summary_view();
+        assert!(rows.rows.iter().any(|(k, _)| k == "pact"));
+    }
+
+    #[test]
+    fn thin_air_removes_a_card_and_owed_costs_dust() {
+        let mut g = game("pacts2");
+        g.director.depth = 5;
+        g.open_upgrade_choice();
+        let n = g.choice_view.cards.len();
+        g.take_pact(pacts::Pact::ThinAir);
+        g.open_upgrade_choice();
+        assert_eq!(g.choice_view.cards.len(), (n - 1).max(2));
+        g.bonus_dust = 25;
+        g.take_pact(pacts::Pact::Owed);
+        assert_eq!(g.bonus_dust, 15);
+    }
+    // === end pacts ===
+
     #[test]
     fn audit_text_fits_every_screen() {
         use dream::DreamTheme;
@@ -9012,6 +9549,15 @@ mod screen_smoke {
         g.booklet.stash.earn(5000);
         let _ = DreamTheme::Lobby;
         let mut bad = Vec::new();
+        // === ascension === the title picker at every level
+        g.booklet.codex.ascension_unlocked = progress::MAX_ASCENSION;
+        g.mode = hud::Mode::Title;
+        for l in 0..=progress::MAX_ASCENSION {
+            g.ascension = l;
+            bad.extend(overflows(&g, &format!("Title asc {l}")));
+        }
+        g.ascension = 0;
+        // === end ascension ===
         for mode in [
             hud::Mode::Warning,
             hud::Mode::Title,
@@ -9025,6 +9571,18 @@ mod screen_smoke {
             g.mode = mode;
             bad.extend(overflows(&g, &format!("{mode:?}")));
         }
+        // === pressure ===
+        g.pressure_collapsed = true;
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-collapsed"));
+        g.pressure_collapsed = false;
+        g.mode = hud::Mode::Playing;
+        for warn in [false, true] {
+            bad.extend(overflows_with(&g, "HUD-pressure", &|v| {
+                v.pressure_lid = Some((0.6, warn));
+            }));
+        }
+        // === end pressure ===
         g.open_settings();
         bad.extend(overflows(&g, "Settings"));
         g.open_codex();
@@ -9058,6 +9616,31 @@ mod screen_smoke {
             g.open_upgrade_choice();
             bad.extend(overflows(&g, &format!("Upgrades@{depth}")));
         }
+        // === pacts ===
+        for p in pacts::ALL {
+            g.pacts.clear();
+            g.director.depth = 6;
+            g.open_upgrade_choice();
+            g.pact_offer = Some(p);
+            let mut cards = g.choice_view.cards.clone();
+            cards.pop();
+            cards.push(upgrade_ui::ChoiceCard {
+                name: p.name().into(),
+                desc: p.desc().into(),
+                icon: upgrades::Icon::Lid,
+                color: [255, 90, 100],
+                frame: [255, 60, 80],
+                tag: format!("pact · +{:.2} dust", p.bonus()),
+            });
+            g.choice_view.cards = cards;
+            bad.extend(overflows(&g, &format!("Pact {p:?}")));
+        }
+        g.pacts = pacts::ALL.to_vec();
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-pacts"));
+        g.pacts.clear();
+        g.pact_offer = None;
+        // === end pacts ===
         g.open_pack();
         g.pack.age = f32::MAX;
         bad.extend(overflows(&g, "Reveal"));

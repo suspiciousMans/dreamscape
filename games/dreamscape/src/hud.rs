@@ -163,6 +163,10 @@ pub struct HudView {
     pub twist_blurb: String,
     /// HURRIED dreams: seconds left (negative = missed).
     pub timer: Option<f32>,
+    // === pressure ===
+    /// The dream is stirring: eyelid closed 0..1 and whether it is the final warning.
+    pub pressure_lid: Option<(f32, bool)>,
+    // === end pressure ===
     /// Hard runs: current difficulty multiplier.
     pub difficulty: Option<f32>,
     pub choice: crate::upgrade_ui::ChoiceView,
@@ -503,6 +507,11 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
+    // === pressure ===
+    if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
+        pressure_bar(&p, screen, lid, warn, v.time);
+    }
+    // === end pressure ===
     boss_bar(&p, screen, v);
     controls_legend(&p, screen, v);
     if v.first_person {
@@ -729,6 +738,35 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
 }
+
+// === pressure ===
+/// Two thin lids creeping in from both ends of a slit at the top: when they
+/// meet, the dream collapses.
+fn pressure_bar(p: &egui::Painter, screen: Rect, lid: f32, warn: bool, time: f32) {
+    let w = (screen.width() * 0.3).clamp(80.0, 260.0);
+    let c = Pos2::new(screen.center().x, screen.top() + 14.0);
+    let half = w / 2.0;
+    let h = 5.0;
+    p.rect_filled(
+        Rect::from_center_size(c, Vec2::new(w, h)),
+        0.0,
+        rgba([20, 14, 40], 0.6),
+    );
+    let reach = half * lid.clamp(0.0, 1.0);
+    let blink = warn && (time * 3.0) as i32 % 2 == 0;
+    let rgb = if warn { [255, 70, 100] } else { [190, 160, 255] };
+    let a = if blink { 0.55 } else { 0.9 };
+    for sign in [-1.0f32, 1.0] {
+        let x0 = c.x + sign * half;
+        let x1 = c.x + sign * (half - reach);
+        p.rect_filled(
+            Rect::from_x_y_ranges(x0.min(x1)..=x0.max(x1), c.y - h / 2.0..=c.y + h / 2.0),
+            0.0,
+            rgba(rgb, a),
+        );
+    }
+}
+// === end pressure ===
 
 /// Top right: the dream's twist and HURRIED timer. Bottom left: abilities.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {

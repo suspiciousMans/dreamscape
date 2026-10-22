@@ -29,6 +29,11 @@ pub struct EnemyAI {
     cooldown: f32,
     /// Seconds left of a forced lunge (a sentry called it).
     alerted: f32,
+    // === pressure ===
+    speed_mult: f32,
+    alert_mult: f32,
+    speed_cap: f32,
+    // === end pressure ===
 }
 
 fn flat(v: Vec3) -> Vec3 {
@@ -48,7 +53,29 @@ impl EnemyAI {
             chase_left: CHASE_TIME,
             cooldown: 0.0,
             alerted: 0.0,
+            speed_mult: 1.0,
+            alert_mult: 1.0,
+            speed_cap: f32::MAX,
         }
+    }
+
+    // === pressure ===
+    /// The eye stirs: scale speed and alert radius. Speed may grow only up
+    /// to `cap` (and never drops below its base).
+    pub fn set_pressure(&mut self, speed_mult: f32, alert_mult: f32, cap: f32) {
+        self.speed_mult = speed_mult;
+        self.alert_mult = alert_mult;
+        self.speed_cap = cap;
+    }
+
+    fn eff_speed(&self) -> f32 {
+        (self.speed * self.speed_mult).min(self.speed_cap.max(self.speed))
+    }
+    // === end pressure ===
+
+    /// Scales how far away it notices you (shards: a heavy carrier is louder).
+    pub fn scale_alert(&mut self, factor: f32) {
+        self.alert_radius *= factor;
     }
 
     /// Back to the start of its patrol, calm (a time loop rewound the dream).
@@ -81,7 +108,7 @@ impl EnemyAI {
     pub fn update(&mut self, pos: &mut Vec3, player: Vec3, dt: f32) {
         self.cooldown = (self.cooldown - dt).max(0.0);
         self.alerted = (self.alerted - dt).max(0.0);
-        let near = flat(player - *pos).length() < self.alert_radius;
+        let near = flat(player - *pos).length() < self.alert_radius * self.alert_mult;
         let in_leash = flat(player - self.home()).length() < self.leash;
         let noticed = (self.alert_radius > 0.0 && near) || self.alerted > 0.0;
         let wants = noticed && in_leash && self.cooldown <= 0.0;
@@ -98,14 +125,14 @@ impl EnemyAI {
         }
         self.chasing = wants && self.cooldown <= 0.0;
         let (target, speed) = if self.chasing {
-            (player, self.speed * CHASE_BOOST)
+            (player, self.eff_speed() * CHASE_BOOST)
         } else {
             let wp = if self.toward_b { self.b } else { self.a };
             // Movement snaps onto the waypoint, so this is an exact arrival.
             if flat(wp - *pos).length() < 1e-4 {
                 self.toward_b = !self.toward_b;
             }
-            (if self.toward_b { self.b } else { self.a }, self.speed)
+            (if self.toward_b { self.b } else { self.a }, self.eff_speed())
         };
         let to = flat(target - *pos);
         let step = speed * dt;
@@ -129,6 +156,26 @@ mod tests {
         for _ in 0..(secs * 60.0) as usize {
             ai.update(pos, player, 1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn pressure_widens_alert_and_respects_the_speed_cap() {
+        let (a, b) = (Vec3::ZERO, Vec3::X * 6.0);
+        let player = Vec3::new(3.0, 0.0, 0.0);
+        let mut calm = EnemyAI::new(a, b, 2.0, 2.0, 20.0);
+        let mut pos = Vec3::new(0.0, 0.0, -2.5);
+        calm.update(&mut pos, player, 1.0 / 60.0);
+        assert!(!calm.chasing);
+        let mut stirred = EnemyAI::new(a, b, 2.0, 2.0, 20.0);
+        stirred.set_pressure(1.1, 1.4, 2.1);
+        let mut pos = Vec3::new(0.0, 0.0, -2.5);
+        stirred.update(&mut pos, Vec3::new(0.0, 0.0, 0.0), 1.0 / 60.0);
+        assert!(stirred.chasing, "2.5 away is inside 2.0*1.4");
+        let mut fast = EnemyAI::new(a, b, 2.0, 0.0, 0.0);
+        fast.set_pressure(1.5, 1.0, 2.1);
+        assert!((fast.eff_speed() - 2.1).abs() < 1e-6);
+        fast.set_pressure(1.5, 1.0, 1.0);
+        assert_eq!(fast.eff_speed(), 2.0, "cap never lowers the base");
     }
 
     #[test]
