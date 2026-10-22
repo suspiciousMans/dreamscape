@@ -389,6 +389,9 @@ pub struct DreamscapeGame {
     trail: specials::Trail,
     mimic_awake_at: f32,
     jester_cooldown: f32,
+    // === tactics ===
+    tactics: tactics::State,
+    // === end tactics ===
     crumbles: Vec<CrumbleTile>,
     fog: Vec<(Vec3, f32)>,
     /// Mycelium veins (segments you walk faster on).
@@ -710,6 +713,9 @@ impl DreamscapeGame {
             trail: specials::Trail::default(),
             mimic_awake_at: 0.0,
             jester_cooldown: 0.0,
+            // === tactics ===
+            tactics: tactics::State::default(),
+            // === end tactics ===
             crumbles: Vec::new(),
             fog: Vec::new(),
             veins: Vec::new(),
@@ -2596,6 +2602,17 @@ impl DreamscapeGame {
         if self.stare >= achievements::STARE_SECONDS && self.run_active {
             self.achieve(Some(achievements::Event::Stare(self.stare)));
         }
+        // === tactics ===
+        let tactic_depth = self.director.depth;
+        let mimic_extra = tactics::mimic_extra_delay(tactic_depth);
+        let mimic_now = self
+            .specials
+            .iter()
+            .find(|sp| sp.kind == EnemyKind::Mimic)
+            .and_then(|_| {
+                specials::mimic_pos(&self.trail, self.dream_age - mimic_extra, self.mimic_awake_at)
+            });
+        // === end tactics ===
         let mut calls = Vec::new();
         for sp in &mut self.specials {
             let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
@@ -2610,7 +2627,7 @@ impl DreamscapeGame {
                     }
                 }
                 SpecialAI::Mimic => {
-                    match specials::mimic_pos(&self.trail, self.dream_age, self.mimic_awake_at) {
+                    match specials::mimic_pos(&self.trail, self.dream_age - mimic_extra, self.mimic_awake_at) { // tactics
                         Some(p) if !held => {
                             t.position = p;
                             t.scale = Vec3::new(0.9, 1.25, 0.9);
@@ -2621,7 +2638,7 @@ impl DreamscapeGame {
                 }
                 SpecialAI::Sentry(s, beam) => {
                     let at = Vec3::new(t.position.x, 0.0, t.position.z);
-                    if !held && s.update(at, player, dt) {
+                    if !held && s.update_scaled(at, player, dt, tactics::sentry_boost(tactic_depth, at, s.facing(), mimic_now)) { // tactics
                         calls.push(at);
                     }
                     let facing = s.facing();
@@ -2693,13 +2710,24 @@ impl DreamscapeGame {
             return;
         }
         let seed = (self.dream_age * 1000.0) as u32;
+        // === tactics ===
+        let watchers: Vec<Vec3> = self
+            .specials
+            .iter()
+            .filter(|sp| matches!(sp.ai, SpecialAI::Stalker(_) | SpecialAI::Sentry(..)))
+            .filter_map(|sp| self.world.get::<&Transform>(sp.entity).ok().map(|t| t.position))
+            .collect();
+        let depth = self.director.depth;
         let landing = self.dream.as_ref().and_then(|d| {
-            specials::throw_directions(seed)
+            let landings: Vec<Option<Vec3>> = specials::throw_directions(seed)
                 .into_iter()
-                .find_map(|dir| {
+                .map(|dir| {
                     gameplay::blink_target(&d.blocks, player, dir, specials::JESTER_THROW)
                 })
+                .collect();
+            tactics::jester_dir(depth, &landings, &watchers).and_then(|i| landings[i])
         });
+        // === end tactics ===
         self.jester_cooldown = specials::JESTER_COOLDOWN;
         if let (Some(at), Some(p)) = (landing, self.player) {
             if let Ok(mut t) = self.world.get::<&mut Transform>(p) {
@@ -2794,7 +2822,10 @@ impl DreamscapeGame {
         let special = self.specials.iter().any(|sp| {
             let armed = match &sp.ai {
                 SpecialAI::Stalker(s) => s.moving,
-                SpecialAI::Mimic => self.dream_age >= self.mimic_awake_at,
+                SpecialAI::Mimic => {
+                    self.dream_age - tactics::mimic_extra_delay(self.director.depth)
+                        >= self.mimic_awake_at // tactics
+                }
                 SpecialAI::Drifter(_) => true,
                 SpecialAI::Sentry(..) | SpecialAI::Jester(_) => false,
             };
@@ -7467,6 +7498,12 @@ impl Game for DreamscapeGame {
         let ghost = self.echo_ghost_pos();
         let mut splits = Vec::new();
         let mut noticed = false;
+        // === tactics ===
+        let tactic_depth = self.director.depth;
+        let tactics_on = tactics::active(tactic_depth, !hunted.is_empty() || self.hunter.is_some());
+        self.tactics.tick(self.enemies.len(), dt);
+        let mut chase_starts: Vec<(usize, Option<Elite>)> = Vec::new();
+        // === end tactics ===
         let hush = if self.run.active(Ability::Hush) {
             upgrades::HUSH_SLOW
         } else {
@@ -7509,6 +7546,7 @@ impl Game for DreamscapeGame {
                 if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
                     noticed = true;
+                    chase_starts.push((k, p.elite)); // tactics
                     if p.elite == Some(Elite::Splitter) && !p.split {
                         p.split = true;
                         splits.push((k, t.position));
@@ -7516,6 +7554,33 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === tactics ===
+        if tactics_on && !chase_starts.is_empty() {
+            let pos_of = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
+            let snapshot: Vec<(usize, Vec3)> = self
+                .enemies
+                .iter()
+                .enumerate()
+                .filter_map(|(k, p)| pos_of(&self.world, p.entity).map(|v| (k, v)))
+                .collect();
+            for (k, elite) in chase_starts {
+                let Some(&(_, from)) = snapshot.iter().find(|&&(i, _)| i == k) else {
+                    continue;
+                };
+                let others: Vec<(usize, Vec3, f32)> = snapshot
+                    .iter()
+                    .map(|&(i, v)| (i, v, self.tactics.cooldown(i)))
+                    .collect();
+                for i in tactics::shout_targets(tactic_depth, k, from, &others) {
+                    self.tactics.mark(i);
+                    self.enemies[i].ai.alert();
+                }
+                for i in tactics::pack_follow(tactic_depth, k, elite, from, &snapshot) {
+                    self.enemies[i].ai.alert();
+                }
+            }
+        }
+        // === end tactics ===
         if noticed {
             self.think(eye::Moment::EnemySeen, true);
         }
