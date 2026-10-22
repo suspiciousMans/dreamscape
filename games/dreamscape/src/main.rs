@@ -89,6 +89,11 @@ mod tunnel;
 mod tutorial;
 mod upgrade_ui;
 mod upgrades;
+mod pacts;
+mod pressure;
+mod shard_rules;
+mod tactics;
+mod theme_rules;
 
 use dream::{
     Atmosphere, BlockKind, Dream, DreamDirector, DreamTheme, EnemyKind, Pressure, PropKind,
