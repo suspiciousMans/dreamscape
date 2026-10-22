@@ -1046,6 +1046,12 @@ impl DreamscapeGame {
             return false;
         }
         let id = events::pick(seed, self.last_event);
+        self.show_event(id);
+        true
+    }
+
+    /// The choice screen for event `id`.
+    fn show_event(&mut self, id: events::Id) {
         let event = events::event(id);
         let dust = self.event_dust();
         let cards = event
@@ -1088,7 +1094,6 @@ impl DreamscapeGame {
         self.choice = Some(ChoiceKind::Event(event));
         self.input = PlayerInputState::default();
         self.mode = hud::Mode::Choice;
-        true
     }
 
     /// Dust an event can ask for: this run's earnings, then the banked stash.
@@ -8270,6 +8275,7 @@ impl Game for DreamscapeGame {
         let overlay = tunnel && hud_view.mode == hud::Mode::Playing
             || tunnel && hud_view.mode == hud::Mode::Paused;
         if let Some(ui) = self.ui.as_mut() {
+            ui.ui_scale = hud::ui_scale(hud_view.mode, drawable_size.0 as f32, drawable_size.1 as f32);
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
@@ -8460,15 +8466,28 @@ mod screen_smoke {
 
     /// One drawn frame of the current screen at the given size.
     fn frame(g: &DreamscapeGame, w: f32, h: f32) -> Vec<egui::epaint::ClippedShape> {
-        let v = g.hud_view();
+        frame_with(g, w, h, &|_| {})
+    }
+
+    /// `frame`, with the view bent first (to put long strings on screen).
+    fn frame_with(
+        g: &DreamscapeGame,
+        w: f32,
+        h: f32,
+        tweak: &dyn Fn(&mut hud::HudView),
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let mut v = g.hud_view();
+        tweak(&mut v);
         let ctx = egui::Context::default();
         hud::install_font(&ctx);
         let mut art = booklet_ui::CardArt::default();
         let mut packs_art = pack_art::PackArt::default();
+        // Points, as the game gives egui them: the HUD is drawn scaled.
+        let k = hud::ui_scale(v.mode, w, h);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::Vec2::new(w, h),
+                egui::Vec2::new(w / k, h / k),
             )),
             ..Default::default()
         };
@@ -8887,6 +8906,223 @@ mod screen_smoke {
         g.pick_pointer(c(1).0, c(1).1, true);
         assert_eq!(g.mode, hud::Mode::Reveal);
         assert_eq!(g.pack.pack, packs::open(&offers(3)[1]));
+    }
+
+    /// Every text shape in a frame, flattened: (text, its rect on screen).
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) if !t.galley.is_empty() => {
+                    out.push((t.galley.text().to_string(), t.galley.rect.translate(t.pos.to_vec2())))
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// Filled panels and boxes in a frame (the containers text sits in).
+    fn boxes(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
+        fn walk(s: &egui::Shape, out: &mut Vec<egui::Rect>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Rect(r) if r.fill.a() > 0 && r.rect.width() > 8.0 && r.rect.height() > 8.0 => {
+                    out.push(r.rect)
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    const AUDIT_SIZES: [(f32, f32); 9] = [
+        (640.0, 360.0),
+        (800.0, 600.0),
+        (1024.0, 768.0),
+        (1280.0, 720.0),
+        (1366.0, 768.0),
+        (1920.0, 1080.0),
+        (2560.0, 1440.0),
+        (3440.0, 1440.0),
+        (3840.0, 2160.0),
+    ];
+
+    /// Text that runs off the screen, or out of the smallest panel it starts in.
+    fn overflows(g: &DreamscapeGame, label: &str) -> Vec<String> {
+        overflows_with(g, label, &|_| {})
+    }
+
+    fn overflows_with(
+        g: &DreamscapeGame,
+        label: &str,
+        tweak: &dyn Fn(&mut hud::HudView),
+    ) -> Vec<String> {
+        let mut bad = Vec::new();
+        let drawn = texts(&frame_with(g, 1280.0, 720.0, tweak)).len();
+        eprintln!("audit {label}: {drawn} texts");
+        if drawn == 0 {
+            bad.push(format!("{label} drew no text at all"));
+        }
+        for (w, h) in AUDIT_SIZES {
+            let shapes = frame_with(g, w, h, tweak);
+            let k = hud::ui_scale(g.mode, w, h);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w / k, h / k));
+            let panels = boxes(&shapes);
+            for (text, r) in texts(&shapes) {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let tol = 1.5;
+                if !screen.expand(tol).contains_rect(r) {
+                    bad.push(format!("{label} {w}x{h} OFF-SCREEN {text:?} {r:?}"));
+                    continue;
+                }
+                // The tightest panel that holds the text's centre and is
+                // bigger than the text: the text belongs to it.
+                let c = r.center();
+                let home = panels
+                    .iter()
+                    .filter(|b| b.contains(c) && b.area() > r.area() * 1.05 && b.area() < screen.area() * 0.9)
+                    .min_by(|a, b| a.area().total_cmp(&b.area()));
+                if let Some(b) = home {
+                    if !b.expand(tol).contains_rect(r) {
+                        bad.push(format!("{label} {w}x{h} OUT-OF-BOX {text:?} {r:?} box {b:?}"));
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn audit_text_fits_every_screen() {
+        use dream::DreamTheme;
+        let mut g = game("audit");
+        let records: Vec<_> = dream::ALL_THEMES
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| cards::tests::record(t, 40 + i as u64, 1 + i as u32, 0.3, i % 2 == 0))
+            .collect();
+        g.booklet.add_run(1, &records);
+        g.booklet.stash.earn(5000);
+        let _ = DreamTheme::Lobby;
+        let mut bad = Vec::new();
+        for mode in [
+            hud::Mode::Warning,
+            hud::Mode::Title,
+            hud::Mode::Summary,
+            hud::Mode::Code,
+            hud::Mode::Lobby,
+            hud::Mode::Ending,
+            hud::Mode::Paused,
+            hud::Mode::Playing,
+        ] {
+            g.mode = mode;
+            bad.extend(overflows(&g, &format!("{mode:?}")));
+        }
+        g.open_settings();
+        bad.extend(overflows(&g, "Settings"));
+        g.open_codex();
+        bad.extend(overflows(&g, "Codex"));
+        g.open_booklet();
+        bad.extend(overflows(&g, "Booklet"));
+        g.open_loadout();
+        bad.extend(overflows(&g, "Loadout"));
+        g.open_merge(hud::Mode::Title);
+        bad.extend(overflows(&g, "Merge"));
+        g.open_store();
+        bad.extend(overflows(&g, "Store"));
+        g.store_tab = 1;
+        bad.extend(overflows(&g, "Lottery"));
+        g.begin_pick(offers(3));
+        bad.extend(overflows(&g, "PackPick"));
+        g.pick.age = 3.0;
+        bad.extend(overflows(&g, "PackPick-late"));
+        g.mode = hud::Mode::Memories;
+        bad.extend(overflows(&g, "Memories"));
+        g.mode = hud::Mode::Journal;
+        bad.extend(overflows(&g, "Journal"));
+        for id in events::ALL {
+            g.show_event(id);
+            bad.extend(overflows(&g, &format!("Event {id:?}")));
+        }
+        g.open_wake_choice();
+        bad.extend(overflows(&g, "WakeChoice"));
+        for depth in [1, 6, 12] {
+            g.director.depth = depth;
+            g.open_upgrade_choice();
+            bad.extend(overflows(&g, &format!("Upgrades@{depth}")));
+        }
+        g.open_pack();
+        g.pack.age = f32::MAX;
+        bad.extend(overflows(&g, "Reveal"));
+        g.begin_run();
+        g.mode = hud::Mode::Playing;
+        bad.extend(overflows(&g, "Run"));
+        // The in-game HUD with long lines on it.
+        let long = |n: usize| "the quick brown dream jumps over lazy sleepers ".repeat(4)[..n].to_string();
+        g.mode = hud::Mode::Playing;
+        bad.extend(overflows_with(&g, "HUD-long", &|v| {
+            v.title = long(28);
+            v.whisper = long(60);
+            v.entrance_age = f32::MAX;
+            v.eye_line = Some((long(70), 1.5));
+            v.coop_line = Some(long(50));
+            v.objective = Some(long(50));
+            v.goal = long(60);
+            v.twist = long(20);
+            v.twist_blurb = long(50);
+            v.hint = long(60);
+            v.boss = Some((long(28), 3, 5, Some("A WARNING THAT IS QUITE LONG INDEED")));
+            v.upgrades = (0..12).map(|i| format!("{} {i}", long(18))).collect();
+        }));
+        bad.extend(overflows_with(&g, "Toast-long", &|v| {
+            v.entrance_age = f32::MAX;
+            v.achievement = Some((long(32), 1.0));
+        }));
+        g.mode = hud::Mode::Note;
+        bad.extend(overflows_with(&g, "Note-long", &|v| {
+            v.note = Some((long(30), long(40), long(140)));
+        }));
+        g.mode = hud::Mode::Store;
+        g.store_tab = 0;
+        bad.extend(overflows_with(&g, "Store-long", &|v| {
+            v.store_status = Some(long(70));
+        }));
+        g.mode = hud::Mode::Booklet;
+        bad.extend(overflows_with(&g, "Booklet-long", &|v| {
+            v.booklet_attune = long(80);
+        }));
+        g.mode = hud::Mode::Title;
+        bad.extend(overflows_with(&g, "Title-long", &|v| {
+            v.goal = long(60);
+            v.perks = vec!["lantern oil", "second wind", "a long spare key", "fog", "chalk", "salt"];
+            v.menu = (0..10)
+                .map(|i| ("k".to_string(), format!("menu item number {i}"), long(40)))
+                .collect();
+        }));
+        // Animated screens at other moments of their run.
+        for t in [0.5, 2.0, 6.0, 15.0, 40.0, 90.0, 200.0] {
+            g.time = t;
+            g.ending_age = t;
+            g.title_age = t;
+            g.warning_age = t;
+            for mode in [hud::Mode::Ending, hud::Mode::Title, hud::Mode::Warning, hud::Mode::Summary] {
+                g.mode = mode;
+                bad.extend(overflows(&g, &format!("{mode:?}@{t}")));
+            }
+        }
+        bad.sort();
+        bad.dedup();
+        for b in &bad {
+            eprintln!("{b}");
+        }
+        assert!(bad.is_empty(), "{} text overflows", bad.len());
     }
 
     #[test]

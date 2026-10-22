@@ -33,7 +33,7 @@ pub fn draw_warning(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
     let panel = Rect::from_center_size(
         Pos2::new(cx, screen.center().y - 10.0 * u),
-        Vec2::new(width, galley.size().y + c * 16.0),
+        Vec2::new(width, galley.size().y + c * 12.0 + 52.0 * u),
     );
     let amber = [255, 210, 80];
     pixel_ui::panel(p, panel, amber, rgba([14, 8, 6], 1.0), c, 1.0);
@@ -98,43 +98,62 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     // A long menu (host/join/memories...) needs the room: lift the header and keep
     // the menu clear of the goal/streak lines pinned to the bottom.
     let top = screen.top() + screen.height() * if v.menu.len() > 8 { 0.1 } else { 0.2 };
+    // The header's fixed offsets shrink together on short windows.
+    let k = (screen.height() / 720.0).clamp(0.5, 1.0);
     glitch_text(
         p,
         Pos2::new(cx, top),
         true,
         "DREAMSCAPE",
-        96.0,
+        96.0 * k,
         ink(v),
         1.0,
         v,
     );
     p.text(
-        Pos2::new(cx, top + 108.0),
+        Pos2::new(cx, top + 108.0 * k),
         Align2::CENTER_TOP,
         "you are asleep. you know you are asleep. find a way out.",
-        FontId::proportional(22.0),
+        FontId::proportional(pixel_ui::fit(
+            "you are asleep. you know you are asleep. find a way out.",
+            22.0,
+            screen.width() - 20.0,
+            10.0,
+        )),
         rgba([200, 190, 230], 0.8),
     );
-    crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0), v.eye, v);
+    crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0 * k), v.eye, v);
 
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
-    let menu_top = top + 236.0;
-    let step = ((screen.bottom() - 105.0 - menu_top) / v.menu.len().max(1) as f32).min(36.0);
-    let font = (step * 0.9).clamp(16.0, 26.0);
+    let menu_top = top + 236.0 * k;
+    // Keep the menu clear of the caption, the goal line, the stats strip and
+    // the perks, all of which are centred on the same axis as the menu.
+    let caption_size = 15.0 * u.max(0.8);
+    let caption_room = caption_size + c * 4.0;
+    let goal_room = if v.goal.is_empty() { 0.0 } else { 18.0 * u.max(0.8) + 14.0 * u };
+    let bottom_room = 62.0 * u + 12.0 * u + 22.0 * u + goal_room + caption_room + 6.0;
+    let n = v.menu.len().max(1) as f32;
+    let step = ((screen.bottom() - bottom_room.max(105.0) - menu_top - c * 6.0) / n).min(36.0);
+    let font = (step * 0.9).clamp(9.0, 26.0);
+    // Rows are centred; the panel is as wide as its longest row needs, evenly
+    // padded, and sits on the screen's centre line.
+    let rows: Vec<String> = v
+        .menu
+        .iter()
+        .map(|(key, label, _)| v.k(&format!("[{key}]  {label}")))
+        .collect();
+    let longest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as f32;
+    let want = longest * font * 0.6 + c * 16.0;
+    let width = want.max(340.0 * u).min(screen.width() - 20.0);
     let panel = Rect::from_min_max(
-        Pos2::new(
-            (cx - 290.0 * u).max(screen.left() + 10.0),
-            menu_top - c * 3.0,
-        ),
-        Pos2::new(
-            (cx + 470.0 * u).min(screen.right() - 10.0),
-            menu_top + step * v.menu.len() as f32 + c * 2.0,
-        ),
+        Pos2::new(cx - width * 0.5, menu_top - c * 3.0),
+        Pos2::new(cx + width * 0.5, menu_top + step * n - 2.0 + c * 3.0),
     );
     pixel_ui::panel(p, panel, [120, 100, 180], rgba([8, 4, 20], 0.82), c, 0.7);
-    for (i, (key, label, note)) in v.menu.iter().enumerate() {
-        let sel = i == v.shop_col.min(v.menu.len().saturating_sub(1));
+    let selected = v.shop_col.min(v.menu.len().saturating_sub(1));
+    for (i, ((_, _, _), row)) in v.menu.iter().zip(&rows).enumerate() {
+        let sel = i == selected;
         let y = menu_top + i as f32 * step;
         let col = if sel { hue(v.time * 0.2) } else { ink(v) };
         if sel {
@@ -148,19 +167,24 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 c,
             );
         }
+        // Never wider than the panel's inside, whatever the label says.
+        let size = pixel_ui::fit(row, font, width - c * 12.0, 8.0);
         p.text(
-            Pos2::new(cx - 200.0 * u, y),
-            Align2::LEFT_TOP,
-            v.k(&format!("[{key}]  {label}")),
-            FontId::monospace(font),
+            Pos2::new(cx, y + step * 0.5 - 2.0),
+            Align2::CENTER_CENTER,
+            row,
+            FontId::monospace(size),
             rgba(col, if sel { 1.0 } else { 0.7 }),
         );
-        if sel && !note.is_empty() {
+    }
+    // What the highlighted choice does, one centred line under the panel.
+    if let Some((_, _, note)) = v.menu.get(selected) {
+        if !note.is_empty() {
             p.text(
-                Pos2::new(cx + 170.0 * u, y + 7.0),
-                Align2::LEFT_TOP,
+                Pos2::new(cx, panel.bottom() + c * 2.0),
+                Align2::CENTER_TOP,
                 note,
-                FontId::monospace(15.0 * u.max(0.8)),
+                FontId::monospace(pixel_ui::fit(note, caption_size, screen.width() - 40.0, 8.0)),
                 rgba([255, 120, 150], 0.85),
             );
         }

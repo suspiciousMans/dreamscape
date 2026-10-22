@@ -64,11 +64,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     if let Some((i, t)) = line_at(age) {
         let text = LINES[i];
         let a = ((LINE_SECONDS - t) / 0.8).clamp(0.0, 1.0);
+        // Sized for the whole line, so it never changes size as it types in.
+        let size = crate::pixel_ui::fit(text, 28.0, screen.width() - 40.0, 10.0);
         p.text(
             Pos2::new(c.x, c.y + 140.0),
             Align2::CENTER_TOP,
             crate::eye::shown(text, t),
-            FontId::proportional(28.0),
+            FontId::proportional(size),
             rgba([226, 214, 250], a),
         );
     }
@@ -80,7 +82,12 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 Pos2::new(c.x, y),
                 Align2::CENTER_TOP,
                 *line,
-                FontId::monospace(if i == 0 { 44.0 } else { 20.0 }),
+                FontId::monospace(crate::pixel_ui::fit(
+                    line,
+                    if i == 0 { 44.0 } else { 20.0 },
+                    screen.width() - 40.0,
+                    10.0,
+                )),
                 rgba(ink(v), a),
             );
             y += if i == 0 { 70.0 } else { 34.0 };
@@ -89,7 +96,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             Pos2::new(c.x, screen.bottom() - 90.0),
             Align2::CENTER_TOP,
             HELP_LINE,
-            FontId::monospace(16.0),
+            FontId::monospace(crate::pixel_ui::fit(HELP_LINE, 16.0, screen.width() - 40.0, 9.0)),
             rgba([190, 180, 220], 0.85 * a),
         );
         p.text(

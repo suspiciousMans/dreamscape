@@ -15,6 +15,9 @@ pub struct EguiState {
     start: Instant,
     pointer_pos: egui::Pos2,
     modifiers: egui::Modifiers,
+    /// UI points per window pixel's inverse: 1.0 draws 1 point = 1 pixel; 1.5
+    /// draws everything half again as big (crisp, not stretched).
+    pub ui_scale: f32,
 }
 
 impl EguiState {
@@ -27,6 +30,7 @@ impl EguiState {
             start: Instant::now(),
             pointer_pos: egui::Pos2::ZERO,
             modifiers: egui::Modifiers::default(),
+            ui_scale: 1.0,
         })
     }
 
@@ -132,10 +136,16 @@ impl EguiState {
         drawable_size: (u32, u32),
         run_ui: impl FnMut(&egui::Context),
     ) -> egui::FullOutput {
+        let scale = self.ui_scale.clamp(0.25, 4.0);
         self.raw_input.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
-            egui::vec2(drawable_size.0 as f32, drawable_size.1 as f32),
+            egui::vec2(drawable_size.0 as f32 / scale, drawable_size.1 as f32 / scale),
         ));
+        self.raw_input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(scale);
         self.raw_input.time = Some(self.start.elapsed().as_secs_f64());
         self.raw_input.modifiers = self.modifiers;
 

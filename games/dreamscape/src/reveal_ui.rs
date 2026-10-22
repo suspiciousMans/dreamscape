@@ -415,6 +415,17 @@ pub fn draw_pick(
             rgba(ink(v), 1.0),
         );
     }
+    let c = crate::pixel_ui::cell(u);
+    let pity = pity_line(v.pack_dry);
+    let size = crate::pixel_ui::fit(&pity, 16.0 * u, screen.width() - 60.0, 9.0);
+    let strip = Rect::from_center_size(
+        Pos2::new(cx, screen.bottom() - 74.0 * u),
+        Vec2::new(
+            (pity.chars().count() as f32 * size * 0.6 + c * 8.0).min(screen.width() - 20.0),
+            size + c * 4.0,
+        ),
+    );
+    let gap = PICK_GAP * u;
     let n = view.offers.len();
     let sel = view.selected.min(n.saturating_sub(1));
     let rects = pick_rects(screen, n);
@@ -475,13 +486,22 @@ pub fn draw_pick(
         }
         // Honest facts under the pack: theme, size, how likely each card is kept.
         let dim = if chosen { 1.0 } else { 0.6 };
-        let mut y = base.bottom() + 20.0 * u + slide;
+        // The lines shrink together to stay clear of the pity strip below.
+        let lines = if offer.memory_chances.is_empty() { 3.0 } else { 4.0 };
+        let wanted = (22.0 + 18.0 + 16.0 + 16.0 * (lines - 2.0) + 4.0 * lines) * u;
+        let gap_below = (20.0 * u).min(6.0 * u + 14.0 * u * (wanted / 60.0).min(1.0));
+        let room = (strip.top() - 3.0) - (base.bottom() + gap_below + slide);
+        let shrink = (room / wanted).clamp(0.45, 1.0);
+        let mut y = base.bottom() + gap_below + slide;
         let line = |p: &egui::Painter, y: &mut f32, text: String, size: f32, a: f32| {
+            let size = size * shrink;
+            // Never wider than the space between neighbouring packs.
+            let fitted = crate::pixel_ui::fit(&text, size * u, (base.width() + gap).max(60.0), 7.0);
             p.text(
                 Pos2::new(base.center().x, *y),
                 Align2::CENTER_TOP,
                 text,
-                FontId::monospace(size * u),
+                FontId::monospace(fitted),
                 rgba(ink(v), a * dim),
             );
             *y += (size + 4.0) * u;
@@ -494,16 +514,6 @@ pub fn draw_pick(
             line(p, &mut y, m, 16.0, 0.75);
         }
     }
-    let c = crate::pixel_ui::cell(u);
-    let pity = pity_line(v.pack_dry);
-    let size = crate::pixel_ui::fit(&pity, 16.0 * u, screen.width() - 60.0, 9.0);
-    let strip = Rect::from_center_size(
-        Pos2::new(cx, screen.bottom() - 74.0 * u),
-        Vec2::new(
-            (pity.chars().count() as f32 * size * 0.6 + c * 8.0).min(screen.width() - 20.0),
-            size + c * 4.0,
-        ),
-    );
     crate::pixel_ui::panel(p, strip, [200, 170, 230], rgba([10, 5, 24], 0.85), c, 0.6);
     p.text(
         strip.center(),
