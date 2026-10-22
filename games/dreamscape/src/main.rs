@@ -676,6 +676,11 @@ pub struct DreamscapeGame {
     // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
+    // === pacts ===
+    /// Pacts taken this run, and the one the open pick offers.
+    pacts: Vec<pacts::Pact>,
+    pact_offer: Option<pacts::Pact>,
+    // === end pacts ===
     /// Highest difficulty survived this run (scales the dust you wake with).
     peak_difficulty: f32,
     /// Offer an upgrade once the next dream has finished reforming.
@@ -932,6 +937,8 @@ impl DreamscapeGame {
             pressure_collapsed: false,
             // === end pressure ===
             bonus_dust: 0,
+            pacts: Vec::new(),
+            pact_offer: None,
             peak_difficulty: 1.0,
             offer_upgrade: false,
             last_event: None,
@@ -1007,10 +1014,27 @@ impl DreamscapeGame {
             depth: self.director.depth,
             boss: self.boss_reward,
         };
-        let options = upgrades::roll_choices(seed, &self.run, roll);
+        let mut options = upgrades::roll_choices(seed, &self.run, roll);
         if options.is_empty() {
             return;
         }
+        // === pacts ===
+        let pfx = pacts::effects(&self.pacts);
+        options.truncate(options.len().saturating_sub(pfx.fewer_cards).max(2).min(options.len()));
+        self.pact_offer = None;
+        if !self.boss_reward && self.prologue.is_none() && self.coop.is_none() && !self.autopilot {
+            self.pact_offer = pacts::roll_pact(
+                self.director.dream_seed() ^ self.director.depth as u64,
+                self.director.depth,
+                &self.pacts,
+            );
+            if self.pact_offer.is_some() && options.len() >= 3 {
+                options.pop();
+            } else {
+                self.pact_offer = None;
+            }
+        }
+        // === end pacts ===
         let card = |u: Upgrade| {
             let info = u.info();
             let have = self.run.count(u);
@@ -1060,14 +1084,31 @@ impl DreamscapeGame {
                 "depth {} · keep one for the rest of the run",
                 self.director.depth
             ),
-            cards: options.iter().map(|&u| card(u)).collect(),
+            cards: options
+                .iter()
+                .map(|&u| card(u))
+                // === pacts ===
+                .chain(self.pact_offer.map(|p| upgrade_ui::ChoiceCard {
+                    name: p.name().into(),
+                    desc: p.desc().into(),
+                    icon: upgrades::Icon::Lid,
+                    color: [255, 90, 100],
+                    frame: [255, 60, 80],
+                    tag: format!("pact · +{:.2} dust", p.bonus()),
+                }))
+                // === end pacts ===
+                .collect(),
             selected: 0,
             age: 0.0,
-            hint: format!(
-                "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
-                self.run.rerolls_left(),
-                upgrades::SKIP_DUST
-            ),
+            hint: if pfx.no_reroll_skip {
+                "[a/d] choose   [enter] take it".into()
+            } else {
+                format!(
+                    "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
+                    self.run.rerolls_left(),
+                    if pfx.skip_pays_nothing { 0 } else { upgrades::SKIP_DUST }
+                )
+            },
         };
         self.choice = Some(ChoiceKind::Upgrade(options));
         self.input = PlayerInputState::default();
@@ -1215,8 +1256,35 @@ impl DreamscapeGame {
         }
     }
 
+    // === pacts ===
+    /// Signs a pact: its drawback holds for the rest of the run.
+    fn take_pact(&mut self, p: pacts::Pact) {
+        self.pacts.push(p);
+        self.pact_offer = None;
+        self.run.thin_next_pick = false;
+        self.director.shards_to_wake += p.effects().extra_shards;
+        if p.effects().owed_dust > 0 {
+            match pacts::owed_payment(self.event_dust()) {
+                pacts::OwedPayment::Dust(n) => self.spend_event_dust(n),
+                pacts::OwedPayment::LoseCard => {
+                    if let Some(i) = self.run.taken.iter().rposition(|u| !u.is_ability()) {
+                        self.run.taken.remove(i);
+                    }
+                }
+            }
+        }
+        self.director.shard_bonus = self.shard_bonus();
+        self.achievement_toast = Some((format!("pact: {}", p.name()), 0.0));
+        self.sfx(Sound::Pick);
+        log::info!("Pact taken: {p:?} (run: {:?})", self.pacts);
+    }
+    // === end pacts ===
+
     fn reroll_choice(&mut self) {
-        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) || self.run.rerolls_left() == 0 {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
+            || self.run.rerolls_left() == 0
+            || pacts::effects(&self.pacts).no_reroll_skip // === pacts ===
+        {
             return;
         }
         self.run.rerolls_used += 1;
@@ -1285,7 +1353,9 @@ impl DreamscapeGame {
     }
 
     fn skip_choice(&mut self) {
-        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_))) {
+        if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
+            || pacts::effects(&self.pacts).no_reroll_skip // === pacts ===
+        {
             return;
         }
         self.choice = None;
@@ -1293,7 +1363,9 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         self.moth_after_nightmare();
         self.boss_reward = false;
-        self.bonus_dust += upgrades::SKIP_DUST;
+        if !pacts::effects(&self.pacts).skip_pays_nothing {
+            self.bonus_dust += upgrades::SKIP_DUST; // === pacts ===
+        }
         self.stats.skipped += 1;
         self.coop_ready();
         log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
@@ -1344,6 +1416,14 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         match kind {
             ChoiceKind::Upgrade(options) => {
+                // === pacts ===
+                if let (true, Some(p)) = (index == options.len(), self.pact_offer) {
+                    self.take_pact(p);
+                    self.boss_reward = false;
+                    self.coop_ready();
+                    return;
+                }
+                // === end pacts ===
                 let Some(&u) = options.get(index) else {
                     self.choice = Some(ChoiceKind::Upgrade(options));
                     self.mode = hud::Mode::Choice;
@@ -4043,6 +4123,7 @@ impl DreamscapeGame {
                 self.perks = s.perks.clone();
                 self.shards_this_run = s.shards_this_run;
                 self.bonus_dust = s.bonus_dust;
+                self.pacts = s.pacts.clone(); // === pacts ===
                 self.peak_difficulty = s.peak_difficulty;
                 self.run_log = s.run_log.clone();
                 self.seen_kinds = s.seen_kinds.clone();
@@ -4143,6 +4224,7 @@ impl DreamscapeGame {
             perks: self.perks.clone(),
             shards_this_run: self.shards_this_run,
             bonus_dust: self.bonus_dust,
+            pacts: self.pacts.clone(), // === pacts ===
             peak_difficulty: self.peak_difficulty,
             run_log: self.run_log.clone(),
             seen_kinds: self.seen_kinds.clone(),
@@ -4171,6 +4253,7 @@ impl DreamscapeGame {
     /// The dreamer's walking speed right now.
     fn player_speed(&self) -> f32 {
         gameplay::MOVE_SPEED
+            * pacts::effects(&self.pacts).player_speed_mult // === pacts ===
             * self.run.speed()
             * self.twists.walk()
             * if self.has_perk(store::Perk::LongStride) {
@@ -4994,6 +5077,8 @@ impl DreamscapeGame {
         }
         self.run.penalty_cards = asc.fewer_cards() + self.active_form.fewer_choices();
         self.run.no_free_reroll = !asc.free_rerolls();
+        self.pacts.clear(); // === pacts ===
+        self.pact_offer = None;
         self.director.shard_bonus = self.shard_bonus();
         // Dev: DREAMSCAPE_SHARDS_NEEDED=40 previews a deep run's shard counter.
         if let Some(n) = crate::dev::var("DREAMSCAPE_SHARDS_NEEDED")
@@ -5146,7 +5231,7 @@ impl DreamscapeGame {
 
     /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
     fn dust_multiplier(&self) -> f32 {
-        self.run.dust()
+        (self.run.dust() + pacts::dust_bonus(&self.pacts)) // === pacts ===
             * gameplay::difficulty_reward(self.peak_difficulty)
             * (1.0 + self.card_fx.dust_bonus_pct as f32 / 100.0)
             * streaks::multiplier(self.booklet.clean.current)
@@ -5212,6 +5297,11 @@ impl DreamscapeGame {
         for (r, d) in &self.new_records {
             rows.push((String::new(), format!("{} (+{d} dust)", r.label())));
         }
+        // === pacts ===
+        for line in pacts::summary_lines(&self.pacts) {
+            rows.push(("pact".into(), line));
+        }
+        // === end pacts ===
         summary_ui::SummaryView {
             rows,
             upgrades: self.run.summary(),
@@ -5222,9 +5312,10 @@ impl DreamscapeGame {
                 .map(|s| s.name().to_string())
                 .collect(),
             dust: format!(
-                "dust x{:.2}  (hoarding x{:.2} · nightmare x{:.2})  + {} bonus",
+                "dust x{:.2}  (hoarding x{:.2} · pacts +{:.2} · nightmare x{:.2})  + {} bonus",
                 self.dust_multiplier(),
                 self.run.dust(),
+                pacts::dust_bonus(&self.pacts),
                 gameplay::difficulty_reward(self.peak_difficulty),
                 self.bonus_dust
             ),
@@ -6365,6 +6456,7 @@ impl DreamscapeGame {
             * self.twists.enemy_speed()
             * self.run.enemy_speed()
             * self.active_asc.enemy_speed()
+            * pacts::effects(&self.pacts).enemy_speed_mult // === pacts ===
             * (1.0 - self.card_fx.calm_pct.min(50) as f32 / 100.0)
             * if slow_heart {
                 store::SLOW_HEART_ENEMY_SPEED
@@ -6378,6 +6470,7 @@ impl DreamscapeGame {
             gameplay::pressured_chase_radius(dream.depth, difficulty)
                 * self.run.alert()
                 * self.active_asc.alert()
+                * pacts::effects(&self.pacts).alert_mult // === pacts ===
         };
         let cap = 0.92 * player_speed / enemy_ai::CHASE_BOOST;
         let mut elite_tex: HashMap<Elite, Arc<GpuTexture>> = HashMap::new();
@@ -9287,6 +9380,46 @@ mod screen_smoke {
         bad
     }
 
+    // === pacts ===
+    #[test]
+    fn pacts_bite_and_pay() {
+        let mut g = game("pacts");
+        g.director.depth = 5;
+        let base_speed = g.player_speed();
+        let base_mult = g.dust_multiplier();
+        g.take_pact(pacts::Pact::HeavyDreams);
+        assert!(g.player_speed() < base_speed);
+        assert!(g.dust_multiplier() > base_mult);
+        let shards = g.director.shards_to_wake;
+        g.take_pact(pacts::Pact::ShortFuse);
+        assert_eq!(g.director.shards_to_wake, shards + 1);
+        g.take_pact(pacts::Pact::NoRegrets);
+        g.open_upgrade_choice();
+        let rerolls = g.run.rerolls_used;
+        g.reroll_choice();
+        assert_eq!(g.run.rerolls_used, rerolls);
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert!(g.choice.is_some() && g.bonus_dust == dust);
+        let rows = g.summary_view();
+        assert!(rows.rows.iter().any(|(k, _)| k == "pact"));
+    }
+
+    #[test]
+    fn thin_air_removes_a_card_and_owed_costs_dust() {
+        let mut g = game("pacts2");
+        g.director.depth = 5;
+        g.open_upgrade_choice();
+        let n = g.choice_view.cards.len();
+        g.take_pact(pacts::Pact::ThinAir);
+        g.open_upgrade_choice();
+        assert_eq!(g.choice_view.cards.len(), (n - 1).max(2));
+        g.bonus_dust = 25;
+        g.take_pact(pacts::Pact::Owed);
+        assert_eq!(g.bonus_dust, 15);
+    }
+    // === end pacts ===
+
     #[test]
     fn audit_text_fits_every_screen() {
         use dream::DreamTheme;
@@ -9358,6 +9491,31 @@ mod screen_smoke {
             g.open_upgrade_choice();
             bad.extend(overflows(&g, &format!("Upgrades@{depth}")));
         }
+        // === pacts ===
+        for p in pacts::ALL {
+            g.pacts.clear();
+            g.director.depth = 6;
+            g.open_upgrade_choice();
+            g.pact_offer = Some(p);
+            let mut cards = g.choice_view.cards.clone();
+            cards.pop();
+            cards.push(upgrade_ui::ChoiceCard {
+                name: p.name().into(),
+                desc: p.desc().into(),
+                icon: upgrades::Icon::Lid,
+                color: [255, 90, 100],
+                frame: [255, 60, 80],
+                tag: format!("pact · +{:.2} dust", p.bonus()),
+            });
+            g.choice_view.cards = cards;
+            bad.extend(overflows(&g, &format!("Pact {p:?}")));
+        }
+        g.pacts = pacts::ALL.to_vec();
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-pacts"));
+        g.pacts.clear();
+        g.pact_offer = None;
+        // === end pacts ===
         g.open_pack();
         g.pack.age = f32::MAX;
         bad.extend(overflows(&g, "Reveal"));
