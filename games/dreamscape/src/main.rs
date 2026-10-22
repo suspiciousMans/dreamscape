@@ -2730,6 +2730,9 @@ impl DreamscapeGame {
                 * self.run.sight()
                 * self.active_form.sight_mult()
                 * eclipse
+                * self // hazards
+                    .theme_rule
+                    .map_or(1.0, |r| theme_rules::dimmed_sight(1.0, &r.effect()))
                 + self.run.sight_bonus())
                 * (1.0 - tunnel::SIGHT_FADE);
         let yaw = self.fp_yaw();
@@ -8471,6 +8474,12 @@ impl Game for DreamscapeGame {
             };
         // Off on the title/menus and in the F1 overview; on while dreaming.
         let tunnel = self.tunnel_on && !self.debug_camera && self.mode != hud::Mode::Title;
+        // === hazards ===
+        let sight_scale = sight_scale
+            * self
+                .theme_rule
+                .map_or(1.0, |r| theme_rules::dimmed_sight(1.0, &r.effect()));
+        // === end hazards ===
         let sight = if tunnel {
             tunnel::sight_radius(strangeness) * sight_scale + sight_bonus
         } else {

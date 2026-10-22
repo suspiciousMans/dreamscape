@@ -221,6 +221,12 @@ pub fn heard_radius(base: f32, e: &Effect) -> f32 {
     base * e.hearing.max(0.0)
 }
 
+/// How far you see once the light has dimmed (DimmingLight). Never blind:
+/// the dark can shrink the circle to 40% of the floor value at the worst.
+pub fn dimmed_sight(sight: f32, e: &Effect) -> f32 {
+    sight * e.visibility.clamp(0.4, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +357,19 @@ mod tests {
         let deeper = heard_radius(base, &st(Kind::Silence, 9).effect());
         assert!(deeper > loud);
         assert_eq!(heard_radius(base, &st(Kind::GustWind, 9).effect()), base);
+    }
+
+    #[test]
+    fn dimming_shrinks_the_sight_circle_but_never_blinds() {
+        let mut s = st(Kind::DimmingLight, 20);
+        assert_eq!(dimmed_sight(12.0, &s.effect()), 12.0);
+        s.tick(30.0);
+        let mid = dimmed_sight(12.0, &s.effect());
+        s.tick(500.0);
+        let late = dimmed_sight(12.0, &s.effect());
+        assert!(mid < 12.0 && late < mid && late >= 12.0 * 0.4 - 1e-4);
+        s.on_shard();
+        assert_eq!(dimmed_sight(12.0, &s.effect()), 12.0);
+        assert_eq!(dimmed_sight(12.0, &st(Kind::StickyFloor, 9).effect()), 12.0);
     }
 }
