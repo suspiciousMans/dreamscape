@@ -72,6 +72,8 @@ mod powers;
 mod progress;
 mod records;
 mod reveal_ui;
+mod code_ui;
+mod seedcode;
 mod settings;
 mod secrets;
 mod settings_ui;
@@ -244,6 +246,8 @@ enum StartKind {
     Daily,
     Continue,
     Prologue,
+    /// A friend's dream code: (seed, long run).
+    Code(u64, bool),
 }
 
 /// Title menu entries.
@@ -252,6 +256,7 @@ enum TitleItem {
     Continue,
     Start,
     Daily,
+    DreamCode,
     RunLength,
     Form,
     Ascension,
@@ -613,6 +618,11 @@ pub struct DreamscapeGame {
     shop_col: usize,
     /// Title menu selection.
     title_sel: usize,
+    /// Digits typed into the dream-code box, and why the last try failed.
+    code_digits: String,
+    code_error: String,
+    /// The wake summary's code was copied to the clipboard.
+    code_copied: bool,
     store_status: Option<String>,
     /// Perks consumed for the current run.
     perks: Vec<store::Perk>,
@@ -838,6 +848,9 @@ impl DreamscapeGame {
             shop_shelf: 0,
             shop_col: 0,
             title_sel: 0,
+            code_digits: String::new(),
+            code_error: String::new(),
+            code_copied: false,
             store_status: None,
             entrance: eye_motion::Entrance::new(),
             objective_clock: 0.0,
@@ -1553,6 +1566,20 @@ impl DreamscapeGame {
             } else {
                 coop_game::LobbyView::default()
             },
+            code: if self.mode == hud::Mode::Code {
+                code_ui::CodeView {
+                    digits: self.code_digits.clone(),
+                    error: self.code_error.clone(),
+                }
+            } else {
+                code_ui::CodeView::default()
+            },
+            run_code: if self.mode == hud::Mode::Summary {
+                self.run_code()
+            } else {
+                String::new()
+            },
+            code_copied: self.code_copied,
             title_age: self.title_age,
             warning_age: self.warning_age,
             pickup_ring: self.juice.ring(),
@@ -3662,7 +3689,12 @@ impl DreamscapeGame {
         if !self.booklet.lore.prologue_done {
             items.push(TitleItem::Prologue);
         }
-        items.extend([TitleItem::Start, TitleItem::Daily, TitleItem::RunLength]);
+        items.extend([
+            TitleItem::Start,
+            TitleItem::Daily,
+            TitleItem::DreamCode,
+            TitleItem::RunLength,
+        ]);
         if form::ALL
             .iter()
             .filter(|f| f.unlocked(&self.booklet.codex))
@@ -3709,6 +3741,11 @@ impl DreamscapeGame {
                     Some(d) => format!("the same dream for everyone today · your best: depth {d}"),
                     None => "the same dream for everyone today".into(),
                 },
+            ),
+            TitleItem::DreamCode => (
+                "k",
+                "dream a friend's code".into(),
+                "the same dream, from a code".into(),
             ),
             TitleItem::RunLength => (
                 "r",
@@ -3783,6 +3820,7 @@ impl DreamscapeGame {
             TitleItem::Start => self.open_loadout(),
             TitleItem::Prologue => self.pending_start = Some(StartKind::Prologue),
             TitleItem::Daily => self.pending_start = Some(StartKind::Daily),
+            TitleItem::DreamCode => self.open_code_entry(),
             TitleItem::RunLength => self.run_length = self.run_length.toggled(),
             TitleItem::Form => {
                 let next = self.booklet.codex.form.cycle(&self.booklet.codex, dir);
@@ -3806,6 +3844,65 @@ impl DreamscapeGame {
             TitleItem::HostCoop => self.open_host_lobby(),
             TitleItem::JoinCoop => self.open_join_lobby(),
             TitleItem::Quit => ctx.should_quit = true,
+        }
+    }
+
+    fn open_code_entry(&mut self) {
+        self.code_digits.clear();
+        self.code_error.clear();
+        self.mode = hud::Mode::Code;
+    }
+
+    /// A key in the dream-code box.
+    fn code_key(&mut self, key: Keycode) {
+        match key {
+            Keycode::Escape => self.mode = hud::Mode::Title,
+            Keycode::Backspace => {
+                self.code_digits.pop();
+                self.code_error.clear();
+            }
+            Keycode::Return | Keycode::KpEnter => match seedcode::decode(&self.code_digits) {
+                Ok((seed, long)) => {
+                    self.code_error.clear();
+                    self.pending_start = Some(StartKind::Code(seed, long));
+                }
+                Err(e) => self.code_error = e.to_string(),
+            },
+            k => {
+                // Letters and digits arrive as their key names ("A", "7").
+                let name = k.name();
+                let mut it = name.chars();
+                if let (Some(c), None) = (it.next(), it.next()) {
+                    if seedcode::push(&mut self.code_digits, c) {
+                        self.code_error.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paste a whole code (or as much of it as fits).
+    fn code_paste(&mut self, text: &str) {
+        self.code_digits.clear();
+        for c in seedcode::clean(text).chars() {
+            seedcode::push(&mut self.code_digits, c);
+        }
+        self.code_error.clear();
+    }
+
+    /// The code of the run just played, for sharing.
+    fn run_code(&self) -> String {
+        seedcode::encode(self.run_seed, self.run_length == RunLength::Long)
+    }
+
+    fn copy_run_code(&mut self, ctx: &mut Context) {
+        let code = self.run_code();
+        match ctx.platform.video.clipboard().set_clipboard_text(&code) {
+            Ok(()) => {
+                self.code_copied = true;
+                log::info!("Copied dream code {code}");
+            }
+            Err(e) => log::warn!("Could not copy the dream code: {e}"),
         }
     }
 
@@ -3875,6 +3972,22 @@ impl DreamscapeGame {
                 // The dream is regenerated; don't log it twice.
                 self.run_log.pop();
                 log::info!("Continuing a run at depth {}", self.director.depth);
+            }
+            StartKind::Code(seed, long) => {
+                self.prologue = None;
+                self.run_seed = seed;
+                self.run_length = if long {
+                    RunLength::Long
+                } else {
+                    RunLength::Short
+                };
+                crash::SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+                self.daily = None;
+                self.director = DreamDirector::with_length(seed, self.run_length);
+                self.motif = None;
+                self.run_log.clear();
+                self.begin_run();
+                log::info!("Dream code: seed {seed}, {}", self.run_length.label());
             }
             StartKind::Prologue => {
                 self.daily = None;
@@ -6564,13 +6677,39 @@ impl Game for DreamscapeGame {
         if matches!(event, Event::KeyDown { .. }) {
             self.using_pad = false;
         }
+        // Ctrl+V in the code box pastes from the clipboard.
+        if let Event::KeyDown {
+            keycode: Some(Keycode::V),
+            keymod,
+            repeat: false,
+            ..
+        } = event
+        {
+            if self.mode == hud::Mode::Code
+                && keymod.intersects(
+                    engine::sdl2::keyboard::Mod::LCTRLMOD | engine::sdl2::keyboard::Mod::RCTRLMOD,
+                )
+            {
+                if let Ok(text) = ctx.platform.video.clipboard().clipboard_text() {
+                    self.code_paste(&text);
+                }
+                return;
+            }
+        }
         if down && !repeat && self.mode == hud::Mode::Settings {
             self.settings_key(ctx, key);
             return;
         }
         if down && !repeat {
             let revealed = reveal_ui::reveal_done_pack(&self.pack.pack, self.pack.age);
+            if self.mode == hud::Mode::Code {
+                self.code_key(key);
+                return;
+            }
             if self.mode == hud::Mode::Summary {
+                if key == Keycode::C {
+                    self.copy_run_code(ctx);
+                }
                 if matches!(key, Keycode::Return | Keycode::Space) && self.title_age > 0.5 {
                     self.title_age = 0.0;
                     self.start_pack_pick();
@@ -6839,6 +6978,10 @@ impl Game for DreamscapeGame {
                     if self.title_items().contains(&TitleItem::Form) {
                         self.title_select(ctx, TitleItem::Form, 1);
                     }
+                    return;
+                }
+                (hud::Mode::Title, Keycode::K) => {
+                    self.title_select(ctx, TitleItem::DreamCode, 1);
                     return;
                 }
                 (hud::Mode::Title, Keycode::T) => {
@@ -8424,6 +8567,73 @@ mod screen_smoke {
         assert_eq!(shapes(&g), calm, "ring is gone after its time");
         g.juice.door(0.01, Some(1.0));
         assert!(shapes(&g) > calm, "the door glow adds shapes");
+    }
+
+    #[test]
+    fn the_dream_code_box_types_pastes_rejects_typos_and_starts_the_same_run() {
+        let mut g = game("code");
+        g.open_code_entry();
+        assert_eq!(g.mode, hud::Mode::Code);
+        assert!(shapes(&g) > 5, "the box draws");
+
+        // Typing the code of a known run, key by key, ends up starting it.
+        let code = seedcode::encode(123_456_789, true);
+        for ch in seedcode::clean(&code).chars() {
+            let k = Keycode::from_name(&ch.to_string()).expect("key for digit");
+            g.code_key(k);
+        }
+        assert_eq!(g.code_digits, seedcode::clean(&code));
+        g.code_key(Keycode::Return);
+        assert_eq!(g.pending_start, Some(StartKind::Code(123_456_789, true)));
+        assert!(g.code_error.is_empty());
+
+        // A pasted code with dashes, lower case and look-alikes works too.
+        g.code_paste(&format!("  {}\n", code.to_lowercase().replace('0', "o")));
+        assert_eq!(g.code_digits, seedcode::clean(&code));
+
+        // One wrong digit is refused with a reason, and starts nothing.
+        g.pending_start = None;
+        let mut bad = seedcode::clean(&code).into_bytes();
+        bad[2] = if bad[2] == b'7' { b'8' } else { b'7' };
+        g.code_paste(&String::from_utf8(bad).unwrap());
+        g.code_key(Keycode::Return);
+        assert_eq!(g.pending_start, None);
+        assert!(g.code_error.contains("typo"), "{}", g.code_error);
+        assert!(shapes(&g) > 5, "the error draws");
+
+        // Backspace edits, escape goes back.
+        g.code_key(Keycode::Backspace);
+        assert_eq!(g.code_digits.len(), seedcode::DIGITS - 1);
+        g.code_key(Keycode::Escape);
+        assert_eq!(g.mode, hud::Mode::Title);
+    }
+
+    #[test]
+    fn the_wake_summary_offers_the_runs_own_code_which_reads_back() {
+        let mut g = game("summary_code");
+        g.run_seed = 987_654_321;
+        g.run_length = RunLength::Long;
+        g.mode = hud::Mode::Summary;
+        let v = g.hud_view();
+        assert_eq!(
+            seedcode::decode(&v.run_code),
+            Ok((987_654_321, true)),
+            "the summary shows a code that replays this run"
+        );
+        g.title_age = 10.0;
+        assert!(shapes(&g) > 20);
+        // Off the summary screen it stays out of the way.
+        g.mode = hud::Mode::Title;
+        assert!(g.hud_view().run_code.is_empty());
+    }
+
+    #[test]
+    fn the_title_menu_offers_the_dream_code() {
+        let g = game("title_code");
+        assert!(g.title_items().contains(&TitleItem::DreamCode));
+        let (key, label, _) = g.title_label(TitleItem::DreamCode);
+        assert_eq!(key, "k");
+        assert!(label.contains("code"));
     }
 
     #[test]
