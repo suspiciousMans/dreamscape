@@ -239,6 +239,16 @@ struct SecretWall {
     armed: bool,
 }
 
+// === hazards ===
+struct ShrinkFloor {
+    /// Cells in the order they go (outer first; never the route).
+    order: Vec<(i32, i32)>,
+    /// Each still-standing cell's tile and resting position.
+    tiles: HashMap<(i32, i32), (Entity, Vec3)>,
+    gone: usize,
+}
+// === end hazards ===
+
 struct CrumbleTile {
     entity: Option<Entity>,
     block: dream::Block,
@@ -508,6 +518,8 @@ pub struct DreamscapeGame {
     theme_rule: Option<theme_rules::RuleState>,
     /// Fog pocket discs and where each rests (they drift around it).
     fog_discs: Vec<(Entity, Vec3)>,
+    /// Shrinking floor: order the cells go in, and their tiles.
+    shrink: Option<ShrinkFloor>,
     // === end hazards ===
     /// Every sound effect, synthesized at start-up.
     sounds: HashMap<Sound, Vec<f32>>,
@@ -802,6 +814,7 @@ impl DreamscapeGame {
             dream_hint: String::new(),
             theme_rule: None,
             fog_discs: Vec::new(), // hazards
+            shrink: None,          // hazards
             export_requested: false,
             sounds: sounds::ALL_SOUNDS
                 .iter()
@@ -2569,6 +2582,49 @@ impl DreamscapeGame {
             }
         }
     }
+
+    // === hazards ===
+    /// This dream's theme rule, if one applies (depth 3+, normal dreams).
+    fn hazard_rule_state(&self) -> Option<theme_rules::RuleState> {
+        theme_rules::RuleState::new(
+            self.director.theme,
+            self.director.depth,
+            !self.director.nightmare
+                && self.prologue.is_none()
+                && self.coop.is_none()
+                && self.director.theme != DreamTheme::Awakening,
+            self.director.dream_seed() ^ 0x4841_5A41_5244,
+        )
+    }
+
+    /// Shrinking floor: the outer cells go, shaking a second first. The tiles
+    /// are the same one-cell slabs `update_crumbles` uses; none is ever on the
+    /// route or its margin (see `theme_rules::shrink_order`).
+    fn update_shrink(&mut self) {
+        let Some(r) = self.theme_rule else { return };
+        let Some(sf) = self.shrink.as_mut() else { return };
+        let n = theme_rules::shrink_count(r.age, r.strength, sf.order.len());
+        let soon = theme_rules::shrink_count(r.age + 1.0, r.strength, sf.order.len());
+        let mut fell = false;
+        for i in sf.gone..n {
+            if let Some((e, _)) = sf.tiles.remove(&sf.order[i]) {
+                let _ = self.world.despawn(e);
+                fell = true;
+            }
+        }
+        sf.gone = sf.gone.max(n);
+        for i in n..soon {
+            if let Some(&(e, base)) = sf.tiles.get(&sf.order[i]) {
+                if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                    tr.position = base + Vec3::new(0.06 * (self.time * 40.0).sin(), -0.03, 0.0);
+                }
+            }
+        }
+        if fell {
+            self.sfx(Sound::Crumble);
+        }
+    }
+    // === end hazards ===
 
     /// Wading through a fog pocket?
     fn in_fog(&self) -> bool {
@@ -6109,6 +6165,7 @@ impl DreamscapeGame {
         self.jester_cooldown = 0.0;
         self.fog = dream.fog_pockets.clone();
         self.fog_discs.clear(); // hazards
+        self.shrink = None; // hazards
         self.veins = dream.veins.clone();
         self.gates.clear();
         self.shifters.clear();
@@ -6193,6 +6250,49 @@ impl DreamscapeGame {
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
+        // === hazards === shrinking floor: which cells may go, outer first
+        let mut shrink_order: Vec<(i32, i32)> = Vec::new();
+        let mut shrink_tiles: HashMap<(i32, i32), (Entity, Vec3)> = HashMap::new();
+        if self
+            .hazard_rule_state()
+            .is_some_and(|r| r.kind == theme_rules::Kind::ShrinkingFloor)
+            && !matches!(
+                self.objective,
+                Some(objective::Active::Chase(_)) | Some(objective::Active::HoldOn(_))
+            )
+        {
+            let key = |p: Vec3| theme_rules::cell_key(p.x, p.z, gameplay::CELL);
+            let dissolving: Vec<(i32, i32)> = dream.dissolve.iter().map(|&c| key(c)).collect();
+            let mut cells = Vec::new();
+            for b in dream.blocks.iter().filter(|b| b.kind == BlockKind::Floor) {
+                let n = (b.size.x / gameplay::CELL).round().max(1.0) as i32;
+                for i in 0..n {
+                    let at = b.pos + Vec3::X * (i as f32 - (n - 1) as f32 * 0.5) * gameplay::CELL;
+                    if !dissolving.contains(&key(at)) {
+                        cells.push(key(at));
+                    }
+                }
+            }
+            let mut route: Vec<(i32, i32)> = dream
+                .route
+                .iter()
+                .chain(dream.lucid_route.iter())
+                .map(|w| key(w.pos))
+                .collect();
+            route.extend([dream.spawn, dream.portal].into_iter().map(key));
+            route.extend(dream.shard.into_iter().map(key));
+            route.extend(dream.fragments.iter().copied().map(key));
+            route.extend(dream.sigils.iter().copied().map(key));
+            route.extend(dream.crumbles.iter().copied().map(key));
+            if let (Some(lo), Some(hi)) = (
+                cells.iter().copied().reduce(|a, b| (a.0.min(b.0), a.1.min(b.1))),
+                cells.iter().copied().reduce(|a, b| (a.0.max(b.0), a.1.max(b.1))),
+            ) {
+                let center = ((lo.0 + hi.0) / 2, (lo.1 + hi.1) / 2);
+                shrink_order = theme_rules::shrink_order(&cells, &route, center);
+            }
+        }
+        // === end hazards ===
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
@@ -6239,6 +6339,30 @@ impl DreamscapeGame {
                 self.crumbles.push(tile);
                 continue;
             }
+            // === hazards === a run holding shrinkable cells becomes one slab per cell
+            if !shrink_order.is_empty()
+                && block.kind == BlockKind::Floor
+                && (block.size.z - gameplay::CELL).abs() < 1e-3
+            {
+                let n = (block.size.x / gameplay::CELL).round().max(1.0) as i32;
+                let at = |i: i32| {
+                    block.pos + Vec3::X * (i as f32 - (n - 1) as f32 * 0.5) * gameplay::CELL
+                };
+                let key = |p: Vec3| theme_rules::cell_key(p.x, p.z, gameplay::CELL);
+                if (0..n).any(|i| shrink_order.contains(&key(at(i)))) {
+                    for i in 0..n {
+                        let mut b = block.clone();
+                        b.pos = at(i);
+                        b.size.x = gameplay::CELL;
+                        let e = self.spawn_tile(&b, floor_tex.clone())?;
+                        if shrink_order.contains(&key(b.pos)) {
+                            shrink_tiles.insert(key(b.pos), (e, b.pos));
+                        }
+                    }
+                    continue;
+                }
+            }
+            // === end hazards ===
             let is_crack = block.kind == BlockKind::Wall
                 && dream.secret.is_some_and(|s| {
                     (s.wall.x - block.pos.x).abs() < 1e-3 && (s.wall.z - block.pos.z).abs() < 1e-3
@@ -6631,15 +6755,7 @@ impl DreamscapeGame {
         }
         // === end shards ===
         // === hazards ===
-        self.theme_rule = theme_rules::RuleState::new(
-            self.director.theme,
-            self.director.depth,
-            !self.director.nightmare
-                && self.prologue.is_none()
-                && self.coop.is_none()
-                && self.director.theme != DreamTheme::Awakening,
-            self.director.dream_seed() ^ 0x4841_5A41_5244,
-        );
+        self.theme_rule = self.hazard_rule_state();
         if self.theme_rule.is_some() {
             let line = theme_rules::rule_for(self.director.theme).line;
             self.dream_hint = if self.dream_hint.is_empty() {
@@ -6648,6 +6764,11 @@ impl DreamscapeGame {
                 format!("{line} · {}", self.dream_hint)
             };
         }
+        self.shrink = (!shrink_order.is_empty()).then(|| ShrinkFloor {
+            order: shrink_order,
+            tiles: shrink_tiles,
+            gone: 0,
+        });
         // === end hazards ===
         self.spawn_features(gl, &dream)?;
         if !dream.dissolve.is_empty() {
@@ -7752,6 +7873,7 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        self.update_shrink();
         // === end hazards ===
         // === ascension === 15: the eye's clock runs out once per dream
         if !self.asc_eye_failed

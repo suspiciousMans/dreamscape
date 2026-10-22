@@ -190,16 +190,21 @@ impl RuleState {
     }
 }
 
-/// Floor cells that are gone after `age` seconds of a shrinking floor.
-/// `cells` are every floor cell, `route` the shard/portal route (it and a
-/// one-cell margin are kept safe), `center` where the collapse closes in on.
-/// Outer cells go first; route cells never go. Pure and deterministic.
-pub fn shrunk_cells(
+/// Grid cell of a world position (floor cells are CELL wide; robust to the
+/// grid's half-cell centring).
+pub fn cell_key(x: f32, z: f32, cell: f32) -> (i32, i32) {
+    (
+        (x / cell + 0.5 + 1e-3).floor() as i32,
+        (z / cell + 0.5 + 1e-3).floor() as i32,
+    )
+}
+
+/// The order a shrinking floor takes `cells` in: outermost first, never the
+/// route nor a one-cell margin around it. Pure and deterministic.
+pub fn shrink_order(
     cells: &[(i32, i32)],
     route: &[(i32, i32)],
     center: (i32, i32),
-    age: f32,
-    strength: f32,
 ) -> Vec<(i32, i32)> {
     let safe = |c: &(i32, i32)| {
         route
@@ -209,10 +214,29 @@ pub fn shrunk_cells(
     let mut cand: Vec<(i32, i32)> = cells.iter().copied().filter(|c| !safe(c)).collect();
     let d = |c: &(i32, i32)| (c.0 - center.0).abs().max((c.1 - center.1).abs());
     cand.sort_by(|a, b| d(b).cmp(&d(a)).then(a.cmp(b)));
-    // Full strength: a cell every 2s; 0.25: every ~5s. Never more than half.
+    cand.dedup();
+    cand
+}
+
+/// How many cells of an order `candidates` long are gone after `age` seconds.
+/// Full strength: a cell every 2s; 0.25: every ~5s. Never more than half.
+pub fn shrink_count(age: f32, strength: f32, candidates: usize) -> usize {
     let per_sec = 0.125 + 0.375 * strength;
-    let n = ((age.max(0.0) * per_sec) as usize).min(cand.len() / 2);
-    cand.truncate(n);
+    ((age.max(0.0) * per_sec) as usize).min(candidates / 2)
+}
+
+/// Floor cells that are gone after `age` seconds of a shrinking floor.
+/// `cells` are every floor cell, `route` the shard/portal route (it and a
+/// one-cell margin are kept safe), `center` where the collapse closes in on.
+pub fn shrunk_cells(
+    cells: &[(i32, i32)],
+    route: &[(i32, i32)],
+    center: (i32, i32),
+    age: f32,
+    strength: f32,
+) -> Vec<(i32, i32)> {
+    let mut cand = shrink_order(cells, route, center);
+    cand.truncate(shrink_count(age, strength, cand.len()));
     cand
 }
 
@@ -415,5 +439,32 @@ mod tests {
         }
         assert!(moved > FOG_LOOP, "it should actually travel");
         assert_ne!(fog_center(base, 0, 9.0, drift, 3), fog_center(base, 1, 9.0, drift, 3));
+    }
+
+    #[test]
+    fn shrink_order_is_outer_first_and_count_ramps() {
+        let cells: Vec<(i32, i32)> = (0..11).flat_map(|x| (0..11).map(move |z| (x, z))).collect();
+        let route: Vec<(i32, i32)> = (0..11).map(|x| (x, 5)).collect();
+        let order = shrink_order(&cells, &route, (5, 5));
+        assert!(!order.is_empty());
+        let d = |c: &(i32, i32)| (c.0 - 5).abs().max((c.1 - 5).abs());
+        assert!(order.windows(2).all(|w| d(&w[0]) >= d(&w[1])));
+        assert!(order.iter().all(|c| (c.1 - 5).abs() > 1));
+        let n = order.len();
+        assert_eq!(shrink_count(0.0, 1.0, n), 0);
+        assert!(shrink_count(10.0, 1.0, n) > shrink_count(10.0, 0.25, n));
+        assert_eq!(shrink_count(1e6, 1.0, n), n / 2);
+        assert_eq!(shrink_count(-5.0, 1.0, n), 0);
+    }
+
+    #[test]
+    fn cell_key_is_stable_for_centred_and_half_offset_grids() {
+        for k in -6..6 {
+            let even = (k as f32 + 0.5) * 3.0; // even-width grid
+            let odd = k as f32 * 3.0;
+            assert_eq!(cell_key(even, 0.0, 3.0).0, cell_key(even + 0.2, 0.0, 3.0).0);
+            assert_eq!(cell_key(odd, odd, 3.0), (cell_key(odd + 0.2, odd - 0.2, 3.0)));
+            assert_eq!(cell_key(even + 3.0, 0.0, 3.0).0, cell_key(even, 0.0, 3.0).0 + 1);
+        }
     }
 }
