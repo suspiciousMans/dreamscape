@@ -503,6 +503,10 @@ pub struct DreamscapeGame {
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
     dream_hint: String,
+    // === hazards ===
+    /// This dream's theme rule (depth 3+, normal dreams).
+    theme_rule: Option<theme_rules::RuleState>,
+    // === end hazards ===
     /// Every sound effect, synthesized at start-up.
     sounds: HashMap<Sound, Vec<f32>>,
     /// Booklet [p]: save this page's cards as images after the next frame.
@@ -782,6 +786,7 @@ impl DreamscapeGame {
             dissolve: None,
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
+            theme_rule: None,
             export_requested: false,
             sounds: sounds::ALL_SOUNDS
                 .iter()
@@ -5585,6 +5590,9 @@ impl DreamscapeGame {
         // === shards ===
         self.heavy_since = (self.shard_kind == shard_rules::ShardKind::Heavy).then_some(self.dream_age);
         // === end shards ===
+        if let Some(r) = self.theme_rule.as_mut() {
+            r.on_shard(); // hazards
+        }
         self.shards_this_run += 1;
         if self.run_active {
             self.achieve(Some(achievements::Event::ShardTaken));
@@ -6425,6 +6433,25 @@ impl DreamscapeGame {
             s.angle = a;
         }
         // === end shards ===
+        // === hazards ===
+        self.theme_rule = theme_rules::RuleState::new(
+            self.director.theme,
+            self.director.depth,
+            !self.director.nightmare
+                && self.prologue.is_none()
+                && self.coop.is_none()
+                && self.director.theme != DreamTheme::Awakening,
+            self.director.dream_seed() ^ 0x4841_5A41_5244,
+        );
+        if self.theme_rule.is_some() {
+            let line = theme_rules::rule_for(self.director.theme).line;
+            self.dream_hint = if self.dream_hint.is_empty() {
+                line.to_string()
+            } else {
+                format!("{line} · {}", self.dream_hint)
+            };
+        }
+        // === end hazards ===
         self.spawn_features(gl, &dream)?;
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
@@ -7508,6 +7535,9 @@ impl Game for DreamscapeGame {
                 .clamp(-fpv::PITCH_LIMIT, fpv::PITCH_LIMIT);
         }
         self.dream_age += dt;
+        if let Some(r) = self.theme_rule.as_mut() {
+            r.tick(dt); // hazards
+        }
         self.stats.time += dt;
         self.run.tick(dt);
         // === pressure ===
@@ -7566,7 +7596,7 @@ impl Game for DreamscapeGame {
                 specials::FOG_SLOW
             } else {
                 1.0
-            };
+            } * self.theme_rule.map_or(1.0, |r| r.effect().speed); // hazards
             let speed = self.player_speed() * ground;
             // MIRRORED swaps the actions (left <-> right), after any key remap.
             let mirrored = self.twists.mirrors_controls();
@@ -7636,8 +7666,11 @@ impl Game for DreamscapeGame {
             } else {
                 desired
             };
-            body.velocity.x = v.x;
-            body.velocity.z = v.z;
+            // === hazards ===
+            let push = self.theme_rule.map_or((0.0, 0.0), |r| r.effect().push);
+            body.velocity.x = v.x + push.0;
+            body.velocity.z = v.z + push.1;
+            // === end hazards ===
             self.player_grounded = body.grounded;
             if body.grounded {
                 self.air_jumps_used = 0;
