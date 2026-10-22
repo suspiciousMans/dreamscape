@@ -40,6 +40,8 @@ pub enum Mode {
     Ending,
     /// Hosting or joining a shared dream.
     Lobby,
+    /// Typing a friend's dream code.
+    Code,
 }
 
 pub const TITLE_IN: f32 = 0.6;
@@ -132,6 +134,11 @@ pub struct HudView {
     pub streak: u32,
     /// "ONE MORE DREAM: ..." (title, summary and pack screens).
     pub goal: String,
+    /// The dream-code entry box (only filled while on that screen).
+    pub code: crate::code_ui::CodeView,
+    /// The wake summary's shareable code, and whether it was just copied.
+    pub run_code: String,
+    pub code_copied: bool,
     /// 0..1 progress of the pickup ring, if one is rippling out.
     pub pickup_ring: Option<f32>,
     /// Chain length of the latest pickup (0 for a lone one).
@@ -433,6 +440,7 @@ pub fn draw(
         Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
         Mode::Ending => return crate::ending::draw(&p, screen, v),
         Mode::Lobby => return crate::coop_game::draw_lobby(&p, screen, v),
+        Mode::Code => return crate::code_ui::draw(&p, screen, v, &v.code),
         Mode::Note => {
             if let Some(n) = &v.note {
                 return crate::memories_ui::draw_note(&p, screen, v, n);

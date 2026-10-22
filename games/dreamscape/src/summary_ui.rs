@@ -154,6 +154,20 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SummaryView) {
                 rgba(hue(v.time * 0.15), 0.9),
             );
         }
+        if !v.run_code.is_empty() {
+            let line = if v.code_copied {
+                format!("{}   copied", v.run_code)
+            } else {
+                format!("{}   [c] copy to share", v.run_code)
+            };
+            p.text(
+                Pos2::new(cx, screen.bottom() - 124.0),
+                Align2::CENTER_TOP,
+                v.k(&line),
+                FontId::monospace(20.0),
+                rgba([140, 255, 220], 0.9),
+            );
+        }
         crate::loadout_ui::hint_bar(p, screen, v, "[enter] see what you remember");
     }
     pixel_ui::scanlines(p, screen, c, 8);
