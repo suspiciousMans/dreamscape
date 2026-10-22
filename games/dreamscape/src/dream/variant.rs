@@ -5,7 +5,7 @@
 
 use super::theme::{DreamTheme, Feature, LayoutKind};
 use crate::gameplay::PlayerInputState;
-use crate::specials::{Trail, TRAIL_KEEP};
+use crate::specials::Trail;
 use engine::glam::Vec3;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 

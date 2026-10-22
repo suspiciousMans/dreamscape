@@ -15,9 +15,20 @@ pub enum Form {
     Ember,
     /// Sees further; walks slower.
     Pearl,
+    /// Starts with FLARE and sees a little further; walks a little slower.
+    Lantern,
+    /// Quicker on its feet; sees less.
+    Hare,
 }
 
-pub const ALL: [Form; 4] = [Form::Crystal, Form::Moth, Form::Ember, Form::Pearl];
+pub const ALL: [Form; 6] = [
+    Form::Crystal,
+    Form::Moth,
+    Form::Ember,
+    Form::Pearl,
+    Form::Lantern,
+    Form::Hare,
+];
 
 impl Form {
     pub fn label(self) -> &'static str {
@@ -26,6 +37,8 @@ impl Form {
             Form::Moth => "moth",
             Form::Ember => "ember",
             Form::Pearl => "pearl",
+            Form::Lantern => "lantern",
+            Form::Hare => "hare",
         }
     }
 
@@ -35,6 +48,8 @@ impl Form {
             Form::Moth => "starts with BLINK · one fewer upgrade to choose from",
             Form::Ember => "starts with DASH · enemies run hotter",
             Form::Pearl => "sees further · walks slower",
+            Form::Lantern => "starts with FLARE · sees a little further · walks a little slower",
+            Form::Hare => "faster on its feet · sees less",
         }
     }
 
@@ -45,6 +60,8 @@ impl Form {
             Form::Moth => "wake from a run",
             Form::Ember => "beat a nightmare",
             Form::Pearl => "wake from a long run",
+            Form::Lantern => "visit 10 kinds of dream",
+            Form::Hare => "wake from a short run in under 5 minutes",
         }
     }
 
@@ -54,6 +71,8 @@ impl Form {
             Form::Moth => c.fastest_wake.is_some() || c.deepest_long > 0 || c.bare_wake_depth > 0,
             Form::Ember => c.nightmares_beaten > 0,
             Form::Pearl => c.deepest_long > 0,
+            Form::Lantern => c.dreams.len() >= 10,
+            Form::Hare => c.fastest_wake.is_some_and(|s| s < 300),
         }
     }
 
@@ -61,6 +80,7 @@ impl Form {
         match self {
             Form::Moth => Some(Ability::Blink),
             Form::Ember => Some(Ability::Dash),
+            Form::Lantern => Some(Ability::Flare),
             _ => None,
         }
     }
@@ -81,19 +101,21 @@ impl Form {
 
     /// Multiplies how far the dreamer sees through the dark.
     pub fn sight_mult(self) -> f32 {
-        if self == Form::Pearl {
-            1.25
-        } else {
-            1.0
+        match self {
+            Form::Pearl => 1.25,
+            Form::Lantern => 1.1,
+            Form::Hare => 0.85,
+            _ => 1.0,
         }
     }
 
     /// Multiplies walking speed.
     pub fn speed_mult(self) -> f32 {
-        if self == Form::Pearl {
-            0.92
-        } else {
-            1.0
+        match self {
+            Form::Pearl => 0.92,
+            Form::Lantern => 0.95,
+            Form::Hare => 1.1,
+            _ => 1.0,
         }
     }
 
@@ -125,6 +147,13 @@ mod tests {
         c.fastest_wake = Some(300);
         assert!(Form::Moth.unlocked(&c) && !Form::Pearl.unlocked(&c));
         c.deepest_long = 8;
+        assert!(Form::Pearl.unlocked(&c) && !Form::Lantern.unlocked(&c));
+        c.dreams = (0..10).map(|i| (crate::dream::ALL_THEMES[i], 1)).collect();
+        assert!(Form::Lantern.unlocked(&c));
+        // Hare wants a fast wake, not just any wake.
+        c.fastest_wake = Some(300);
+        assert!(!Form::Hare.unlocked(&c));
+        c.fastest_wake = Some(299);
         assert!(ALL.iter().all(|f| f.unlocked(&c)));
     }
 
@@ -132,8 +161,8 @@ mod tests {
     fn cycling_walks_the_unlocked_forms_and_wraps() {
         let mut c = Codex::default();
         c.nightmares_beaten = 1;
-        c.fastest_wake = Some(1);
-        // Crystal, Moth, Ember are open; Pearl is not.
+        c.fastest_wake = Some(1000);
+        // Crystal, Moth, Ember are open; the rest are not (a slow wake).
         assert_eq!(Form::Crystal.cycle(&c, 1), Form::Moth);
         assert_eq!(Form::Ember.cycle(&c, 1), Form::Crystal);
         assert_eq!(Form::Crystal.cycle(&c, -1), Form::Ember);
@@ -149,7 +178,10 @@ mod tests {
                 || f.speed_mult() != 1.0;
             assert_eq!(changes, f != Form::Crystal, "{f:?}");
         }
-        // And each non-default form has a cost as well as a gift.
+        // The newer two, gift and cost.
+        assert!(Form::Lantern.start_ability().is_some() && Form::Lantern.speed_mult() < 1.0);
+        assert!(Form::Hare.speed_mult() > 1.0 && Form::Hare.sight_mult() < 1.0);
+        // And each older non-default form has a cost as well as a gift.
         assert!(Form::Moth.fewer_choices() > 0 && Form::Moth.start_ability().is_some());
         assert!(Form::Ember.difficulty_mult() > 1.0 && Form::Ember.start_ability().is_some());
         assert!(Form::Pearl.sight_mult() > 1.0 && Form::Pearl.speed_mult() < 1.0);

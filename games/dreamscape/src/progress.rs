@@ -138,6 +138,21 @@ pub enum NewRecord {
 }
 
 impl NewRecord {
+    /// Dust paid for it: a bonus the first time, a little for every
+    /// improvement after.
+    pub fn dust(self, first: bool) -> u32 {
+        let base = match self {
+            NewRecord::FastestWake => 40,
+            NewRecord::DeepestLong => 60,
+            NewRecord::BareWake => 50,
+        };
+        if first {
+            base
+        } else {
+            base / 4
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             NewRecord::FastestWake => "NEW RECORD: fastest wake",
@@ -191,19 +206,22 @@ impl Codex {
         seconds: u32,
         depth: u32,
         upgrades: usize,
-    ) -> Vec<NewRecord> {
+    ) -> Vec<(NewRecord, u32)> {
         let mut broke = Vec::new();
         if !long && self.fastest_wake.map_or(true, |best| seconds < best) {
+            let first = self.fastest_wake.is_none();
             self.fastest_wake = Some(seconds);
-            broke.push(NewRecord::FastestWake);
+            broke.push((NewRecord::FastestWake, NewRecord::FastestWake.dust(first)));
         }
         if long && depth > self.deepest_long {
+            let first = self.deepest_long == 0;
             self.deepest_long = depth;
-            broke.push(NewRecord::DeepestLong);
+            broke.push((NewRecord::DeepestLong, NewRecord::DeepestLong.dust(first)));
         }
         if upgrades == 0 && depth > self.bare_wake_depth {
+            let first = self.bare_wake_depth == 0;
             self.bare_wake_depth = depth;
-            broke.push(NewRecord::BareWake);
+            broke.push((NewRecord::BareWake, NewRecord::BareWake.dust(first)));
         }
         broke
     }
@@ -361,16 +379,33 @@ mod tests {
     #[test]
     fn wakes_file_records_and_only_better_ones_break_them() {
         use super::*;
+        let kinds = |v: Vec<(NewRecord, u32)>| v.into_iter().map(|r| r.0).collect::<Vec<_>>();
         let mut c = Codex::default();
-        assert_eq!(c.record_wake(false, 300, 3, 2), vec![NewRecord::FastestWake]);
+        assert_eq!(kinds(c.record_wake(false, 300, 3, 2)), vec![NewRecord::FastestWake]);
         assert!(c.record_wake(false, 300, 3, 2).is_empty());
-        assert_eq!(c.record_wake(false, 250, 3, 1), vec![NewRecord::FastestWake]);
+        assert_eq!(kinds(c.record_wake(false, 250, 3, 1)), vec![NewRecord::FastestWake]);
         // Long runs track depth, never time.
-        assert_eq!(c.record_wake(true, 9999, 9, 4), vec![NewRecord::DeepestLong]);
+        assert_eq!(kinds(c.record_wake(true, 9999, 9, 4)), vec![NewRecord::DeepestLong]);
         assert!(c.record_wake(true, 1, 9, 4).is_empty());
         // No upgrades: its own record, any run length.
-        assert_eq!(c.record_wake(true, 1, 12, 0), vec![NewRecord::DeepestLong, NewRecord::BareWake]);
+        assert_eq!(
+            kinds(c.record_wake(true, 1, 12, 0)),
+            vec![NewRecord::DeepestLong, NewRecord::BareWake]
+        );
         assert_eq!((c.bare_wake_depth, c.deepest_long), (12, 12));
+    }
+
+    #[test]
+    fn the_first_record_pays_more_than_beating_it() {
+        use super::*;
+        let mut c = Codex::default();
+        let first = c.record_wake(false, 300, 3, 2)[0].1;
+        let again = c.record_wake(false, 200, 3, 2)[0].1;
+        assert_eq!(first, NewRecord::FastestWake.dust(true));
+        assert!(first > again && again > 0);
+        for r in [NewRecord::FastestWake, NewRecord::DeepestLong, NewRecord::BareWake] {
+            assert!(r.dust(true) > r.dust(false) && r.dust(false) > 0, "{r:?}");
+        }
     }
 
     #[test]

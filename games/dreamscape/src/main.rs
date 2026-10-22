@@ -400,7 +400,7 @@ pub struct DreamscapeGame {
     /// STILLNESS: enemies turned blue, with the texture to give back.
     chilled: Vec<(Entity, Arc<GpuTexture>)>,
     /// Records the last wake broke (shown on the summary).
-    new_records: Vec<progress::NewRecord>,
+    new_records: Vec<(progress::NewRecord, u32)>,
     /// PHASE: the dreamer is drawn see-through.
     phased: bool,
     /// Each loadout ability and the dream colours of the card that taught it.
@@ -4897,8 +4897,10 @@ impl DreamscapeGame {
             } else {
                 Vec::new()
             };
-            for r in &self.new_records {
-                log::info!("{}", r.label());
+            let dust: u32 = self.new_records.iter().map(|r| r.1).sum();
+            self.booklet.stash.dust += dust;
+            for (r, d) in &self.new_records {
+                log::info!("{} (+{d} dust)", r.label());
             }
             self.persist_booklet();
             self.run_active = false;
@@ -4986,8 +4988,8 @@ impl DreamscapeGame {
             names.dedup();
             rows.push(("twists survived".into(), names.join(", ")));
         }
-        for r in &self.new_records {
-            rows.push((String::new(), r.label().to_string()));
+        for (r, d) in &self.new_records {
+            rows.push((String::new(), format!("{} (+{d} dust)", r.label())));
         }
         summary_ui::SummaryView {
             rows,
