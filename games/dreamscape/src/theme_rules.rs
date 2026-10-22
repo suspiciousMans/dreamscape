@@ -216,6 +216,11 @@ pub fn shrunk_cells(
     cand
 }
 
+/// How far a loud ability carries, once the rule has its say (Silence).
+pub fn heard_radius(base: f32, e: &Effect) -> f32 {
+    base * e.hearing.max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +339,17 @@ mod tests {
             .min()
             .unwrap();
         assert!(near >= 6);
+    }
+
+    #[test]
+    fn silence_widens_what_enemies_hear_and_other_rules_do_not() {
+        let base = 10.0;
+        let quiet = heard_radius(base, &Effect::NONE);
+        assert_eq!(quiet, base);
+        let loud = heard_radius(base, &st(Kind::Silence, 3).effect());
+        assert!(loud > base && loud <= base * 1.8);
+        let deeper = heard_radius(base, &st(Kind::Silence, 9).effect());
+        assert!(deeper > loud);
+        assert_eq!(heard_radius(base, &st(Kind::GustWind, 9).effect()), base);
     }
 }

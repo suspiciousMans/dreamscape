@@ -3088,6 +3088,11 @@ impl DreamscapeGame {
     /// Loud abilities carry: every enemy within `radius` that isn't reeling
     /// turns toward you.
     fn alert_enemies(&mut self, radius: f32) {
+        // === hazards ===
+        let radius = self
+            .theme_rule
+            .map_or(radius, |r| theme_rules::heard_radius(radius, &r.effect()));
+        // === end hazards ===
         let player = self.player_position;
         for p in &mut self.enemies {
             if self.stunned.contains_key(&p.entity) {
