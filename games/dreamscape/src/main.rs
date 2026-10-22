@@ -6764,6 +6764,53 @@ impl DreamscapeGame {
                 format!("{line} · {}", self.dream_hint)
             };
         }
+        // Beat floor: more hot tiles on the route, on the existing beat clock.
+        if self
+            .theme_rule
+            .is_some_and(|r| r.kind == theme_rules::Kind::BeatFloor)
+        {
+            let key = |p: Vec3| theme_rules::cell_key(p.x, p.z, gameplay::CELL);
+            let jumpy = |i: usize| {
+                dream.route[i].jump || dream.route.get(i + 1).is_some_and(|w| w.jump)
+            };
+            let route: Vec<(i32, i32)> = dream
+                .route
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| !jumpy(i))
+                .map(|(_, w)| key(w.pos))
+                .collect();
+            let mut keep: Vec<(i32, i32)> = dream.beat_tiles.iter().copied().map(key).collect();
+            keep.extend([dream.spawn, dream.portal].into_iter().map(key));
+            keep.extend(dream.shard.into_iter().map(key));
+            keep.extend(dream.crumbles.iter().copied().map(key));
+            keep.extend(dream.shifters.iter().map(|&(c, _)| key(c)));
+            let r = self.theme_rule.expect("checked above");
+            let cells = theme_rules::beat_hazard_cells(&route, &keep, r.seed, r.strength);
+            if !cells.is_empty() {
+                let beat_tex = self.texture(gl, [255, 80, 200, 255]);
+                let plate = self.mesh(Shape::Cube)?;
+                for w in dream.route.iter() {
+                    if !cells.contains(&key(w.pos)) {
+                        continue;
+                    }
+                    let at = w.pos;
+                    let e = self.world.spawn((
+                        Transform {
+                            position: at + Vec3::Y * 0.03,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::new(gameplay::CELL * 0.5, 0.005, gameplay::CELL * 0.5),
+                        },
+                        MeshRenderer {
+                            mesh: plate.clone(),
+                            texture: Some(beat_tex.clone()),
+                        },
+                        Lit,
+                    ));
+                    self.beat_tiles.push((e, at));
+                }
+            }
+        }
         self.shrink = (!shrink_order.is_empty()).then(|| ShrinkFloor {
             order: shrink_order,
             tiles: shrink_tiles,

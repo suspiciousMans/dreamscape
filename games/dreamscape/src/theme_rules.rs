@@ -274,6 +274,47 @@ pub fn fog_center(base: (f32, f32), idx: usize, age: f32, drift: f32, seed: u64)
     )
 }
 
+/// Route cells that burn on the beat (BeatFloor): about `2 + 6*strength`
+/// spread along the route, never within 3 steps of its ends and never on or
+/// next to a `keep_clear` cell. Off the beat they are plain floor, so crossing
+/// between beats is always safe. Own seeded hash, deterministic.
+pub fn beat_hazard_cells(
+    route: &[(i32, i32)],
+    keep_clear: &[(i32, i32)],
+    seed: u64,
+    strength: f32,
+) -> Vec<(i32, i32)> {
+    const END: usize = 3;
+    if route.len() < 2 * END + 2 {
+        return Vec::new();
+    }
+    let span = &route[END..route.len() - END];
+    let want = ((2.0 + 6.0 * strength).round() as usize).min(span.len() / 4).max(1);
+    let near = |c: &(i32, i32)| {
+        keep_clear
+            .iter()
+            .any(|k| (k.0 - c.0).abs() <= 1 && (k.1 - c.1).abs() <= 1)
+    };
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for i in 0..want {
+        let lo = span.len() * i / want;
+        let hi = (span.len() * (i + 1) / want).max(lo + 1);
+        let mut h = seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        h ^= h >> 31;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 29;
+        // Start at a hashed spot in the slice and take the first allowed cell.
+        for k in 0..hi - lo {
+            let c = span[lo + (h as usize + k) % (hi - lo)];
+            if !near(&c) && !out.contains(&c) {
+                out.push(c);
+                break;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +507,32 @@ mod tests {
             assert_eq!(cell_key(odd, odd, 3.0), (cell_key(odd + 0.2, odd - 0.2, 3.0)));
             assert_eq!(cell_key(even + 3.0, 0.0, 3.0).0, cell_key(even, 0.0, 3.0).0 + 1);
         }
+    }
+
+    #[test]
+    fn beat_cells_sit_on_the_route_away_from_ends_and_keep_clear() {
+        let route: Vec<(i32, i32)> = (0..40).map(|x| (x, 3)).collect();
+        let keep = [(20, 3), (10, 3)];
+        let a = beat_hazard_cells(&route, &keep, 99, strength(4));
+        assert!(!a.is_empty());
+        assert_eq!(a, beat_hazard_cells(&route, &keep, 99, strength(4)));
+        for c in &a {
+            assert!(route.contains(c));
+            assert!(c.0 >= 3 && c.0 < 37, "ends stay clear: {c:?}");
+            assert!(keep.iter().all(|k| (k.0 - c.0).abs() > 1));
+        }
+        let mut u = a.clone();
+        u.dedup();
+        assert_eq!(u.len(), a.len());
+        assert!(beat_hazard_cells(&route, &keep, 99, 1.0).len() >= a.len());
+        assert!(beat_hazard_cells(&route[..5], &[], 1, 1.0).is_empty());
+        // The floor is only hot half the time: some beat is always safe.
+        let mut s = st(Kind::BeatFloor, 6);
+        let (mut hot, mut cold) = (false, false);
+        for _ in 0..8 {
+            if s.effect().beat_hot { hot = true } else { cold = true }
+            s.tick(BEAT_SECS);
+        }
+        assert!(hot && cold);
     }
 }
