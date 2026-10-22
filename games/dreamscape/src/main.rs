@@ -599,6 +599,13 @@ pub struct DreamscapeGame {
     pending_coop_start: Option<(u64, bool, usize)>,
     /// Times caught in the current dream (untouched nightmares).
     caught_this_dream: u32,
+    // === ascension ===
+    /// Where you were caught this dream / the spot the last dream remembers (rule 12).
+    asc_caught_here: Option<Vec3>,
+    asc_remembered: Option<Vec3>,
+    /// The eye's clock already ran out this dream (rule 15).
+    asc_eye_failed: bool,
+    // === end ascension ===
     /// Seconds spent holding a stalker still with your gaze.
     stare: f32,
     /// A just-earned achievement's name, and how long it has shown.
@@ -859,6 +866,9 @@ impl DreamscapeGame {
             coop: None,
             pending_coop_start: None,
             caught_this_dream: 0,
+            asc_caught_here: None,
+            asc_remembered: None,
+            asc_eye_failed: false,
             stare: 0.0,
             achievement_toast: None,
             to_bottom: false,
@@ -1654,7 +1664,7 @@ impl DreamscapeGame {
                 loadout_ui::LoadoutView {
                     cards: self.booklet.cards().cloned().collect(),
                     chosen: self.booklet.lore.loadout.clone(),
-                    slots: self.booklet.lore.slots(),
+                    slots: self.asc_slots(),
                     selected: self.loadout_sel,
                     companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
                         let l = &self.booklet.lore;
@@ -1899,7 +1909,7 @@ impl DreamscapeGame {
                 .map(|v| v.blurb())
                 .collect::<Vec<_>>()
                 .join("; "),
-            timer: self.twists.timer().map(|t| t - self.dream_age),
+            timer: self.dream_timer().map(|t| t - self.dream_age),
             // === pressure ===
             pressure_lid: (self.pressure.phase() != pressure::Phase::Calm).then(|| {
                 (
@@ -3849,8 +3859,37 @@ impl DreamscapeGame {
     }
 
     fn shard_bonus(&self) -> f64 {
-        self.run.shard_bonus() - self.active_asc.shard_penalty()
+        // === ascension ===
+        (self.run.shard_bonus() * self.active_asc.pickup_factor()) - self.active_asc.shard_penalty()
+        // === end ascension ===
     }
+
+    // === ascension ===
+    /// The ascension a run started now would use (none for daily/co-op/prologue/autopilot).
+    fn run_asc(&self) -> progress::Ascension {
+        if self.daily.is_some() || self.autopilot || self.prologue.is_some() || self.coop.is_some() {
+            progress::Ascension(0)
+        } else {
+            progress::Ascension(self.ascension)
+        }
+    }
+
+    /// Loadout slots this run may use (rule 13).
+    fn asc_slots(&self) -> usize {
+        self.run_asc().loadout_slots(self.booklet.lore.slots())
+    }
+
+    /// Clock for this dream: the twist's, or the closing eye's (rule 15).
+    fn dream_timer(&self) -> Option<f32> {
+        let eye = (!self.director.nightmare && self.prologue.is_none() && self.coop.is_none())
+            .then(|| self.active_asc.eye_timer(self.director.depth))
+            .flatten();
+        match (self.twists.timer(), eye) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+    // === end ascension ===
 
     /// The title menu, top to bottom.
     fn title_items(&self) -> Vec<TitleItem> {
@@ -4836,7 +4875,7 @@ impl DreamscapeGame {
                 else {
                     return;
                 };
-                let slots = self.booklet.lore.slots();
+                let slots = self.asc_slots();
                 if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
                     self.persist_booklet();
                 }
@@ -4909,7 +4948,11 @@ impl DreamscapeGame {
         let cards = if self.prologue.is_some() {
             Vec::new()
         } else {
-            self.booklet.loadout_cards()
+            // === ascension === (rule 13: one fewer slot)
+            let mut c = self.booklet.loadout_cards();
+            c.truncate(self.asc_slots());
+            c
+            // === end ascension ===
         };
         self.card_fx = retention::card_effects(&self.booklet, &cards);
         self.loadout_numbers = cards.iter().map(|c| c.number).collect();
@@ -4985,7 +5028,11 @@ impl DreamscapeGame {
         let cards = if self.prologue.is_some() {
             Vec::new()
         } else {
-            self.booklet.loadout_cards()
+            // === ascension === (rule 13: one fewer slot)
+            let mut c = self.booklet.loadout_cards();
+            c.truncate(self.asc_slots());
+            c
+            // === end ascension ===
         };
         if !cards.is_empty() {
             log::info!(
@@ -5065,6 +5112,8 @@ impl DreamscapeGame {
             },
         );
         self.active_asc = asc;
+        self.asc_caught_here = None; // ascension 12: a new run forgets
+        self.asc_remembered = None;
         self.director.shards_to_wake += asc.extra_shards();
         self.director.nightmare_every = asc.nightmare_every();
         // Card dreams are personal: a shared dream has none.
@@ -5521,9 +5570,15 @@ impl DreamscapeGame {
         };
         let beacon = self.world.spawn((
             Transform {
-                position: at + Vec3::Y * (size.y + 0.4 + BEACON_HEIGHT * 0.5),
+                position: at
+                    + Vec3::Y
+                        * (size.y + 0.4 + BEACON_HEIGHT * self.active_asc.pickup_factor() as f32 * 0.5),
                 rotation: Quat::IDENTITY,
-                scale: Vec3::new(girth, BEACON_HEIGHT, girth),
+                scale: Vec3::new(
+                    girth,
+                    BEACON_HEIGHT * self.active_asc.pickup_factor() as f32, // ascension 14
+                    girth,
+                ),
             },
             MeshRenderer {
                 mesh: beacon_mesh,
@@ -5836,6 +5891,24 @@ impl DreamscapeGame {
                 self.active_asc.twist_bonus(),
             )
         };
+        // === ascension === 16: a twist every dream; 12: remember the last catch; 15: fresh clock
+        if self.active_asc.always_twist(self.director.depth)
+            && self.twists.0.is_empty()
+            && !self.director.nightmare
+            && self.prologue.is_none()
+        {
+            let fits: Vec<Variant> = dream::ALL_VARIANTS
+                .iter()
+                .copied()
+                .filter(|v| v.fits(theme))
+                .collect();
+            if let Some(v) = progress::forced_twist(self.director.dream_seed(), &fits) {
+                self.twists.0.push(v);
+            }
+        }
+        self.asc_remembered = self.asc_caught_here.take();
+        self.asc_eye_failed = false;
+        // === end ascension ===
         self.apply_event_twists();
         if self.twists.has(Variant::Gilded) {
             self.director.has_shard = true;
@@ -6474,7 +6547,25 @@ impl DreamscapeGame {
         };
         let cap = 0.92 * player_speed / enemy_ai::CHASE_BOOST;
         let mut elite_tex: HashMap<Elite, Arc<GpuTexture>> = HashMap::new();
-        for (k, &(a, b)) in dream.patrols.iter().enumerate() {
+        // === ascension === 12: one more watcher where you fell last dream
+        let mut patrols = dream.patrols.clone();
+        if let Some(c) = self.asc_remembered.filter(|_| {
+            self.active_asc.remembers(self.director.depth) && !self.director.nightmare
+        }) {
+            let walk: Vec<(f32, f32)> = dream.lucid_route.iter().map(|w| (w.pos.x, w.pos.z)).collect();
+            if let Some((x, z)) = progress::remembered_spot(
+                dream.seed,
+                (c.x, c.z),
+                (dream.spawn.x, dream.spawn.z),
+                &walk,
+            ) {
+                let y = dream.lucid_route.iter().find(|w| w.pos.x == x && w.pos.z == z).map_or(dream.spawn.y, |w| w.pos.y);
+                let at = Vec3::new(x, y, z);
+                patrols.push((at, at));
+            }
+        }
+        // === end ascension ===
+        for (k, &(a, b)) in patrols.iter().enumerate() {
             let elite = specials::roll_elite(dream.seed, k, difficulty);
             let texture = match elite {
                 None => enemy_texture.clone(),
@@ -6735,7 +6826,11 @@ impl DreamscapeGame {
             d.reset();
         }
         self.route_index = 0;
-        self.grace = gameplay::RESPAWN_GRACE
+        self.grace = if self.active_asc.no_safe_respawn(self.director.depth) {
+            0.0 // ascension 11: no grace
+        } else {
+            1.0
+        } * gameplay::RESPAWN_GRACE
             * self.run.grace()
             * self.active_asc.grace()
             * (1.0 + 0.2 * self.card_fx.grace_bonus as f32)
@@ -7631,6 +7726,19 @@ impl Game for DreamscapeGame {
         if let Some(r) = self.theme_rule.as_mut() {
             r.tick(dt); // hazards
         }
+        // === ascension === 15: the eye's clock runs out once per dream
+        if !self.asc_eye_failed
+            && self.active_asc.eye_timer(self.director.depth).is_some_and(|t| self.dream_age > t)
+            && self.dream_timer().is_some()
+            && !self.director.nightmare
+            && self.prologue.is_none()
+        {
+            self.asc_eye_failed = true;
+            if let Some(u) = progress::lose_last_card(&mut self.run.taken) {
+                log::info!("The eye closed: {u:?} is gone");
+            }
+        }
+        // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
         // === pressure ===
@@ -8135,6 +8243,14 @@ impl Game for DreamscapeGame {
             if caught {
                 self.stats.caught += 1;
                 self.caught_this_dream += 1;
+                // === ascension === 11: half your lucidity; 12: the spot is remembered
+                if self.active_asc.no_safe_respawn(self.director.depth) {
+                    self.director.lucidity = progress::Ascension::halve_lucidity(self.director.lucidity);
+                }
+                if self.active_asc.remembers(self.director.depth) {
+                    self.asc_caught_here = Some(self.player_position);
+                }
+                // === end ascension ===
             } else {
                 self.stats.fell += 1;
             }
@@ -9433,6 +9549,15 @@ mod screen_smoke {
         g.booklet.stash.earn(5000);
         let _ = DreamTheme::Lobby;
         let mut bad = Vec::new();
+        // === ascension === the title picker at every level
+        g.booklet.codex.ascension_unlocked = progress::MAX_ASCENSION;
+        g.mode = hud::Mode::Title;
+        for l in 0..=progress::MAX_ASCENSION {
+            g.ascension = l;
+            bad.extend(overflows(&g, &format!("Title asc {l}")));
+        }
+        g.ascension = 0;
+        // === end ascension ===
         for mode in [
             hud::Mode::Warning,
             hud::Mode::Title,

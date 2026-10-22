@@ -14,7 +14,16 @@ use crate::upgrades::{RunUpgrades, Upgrade};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const MAX_ASCENSION: u32 = 10;
+pub const MAX_ASCENSION: u32 = 16;
+
+/// Rule levels (11+) leave depths 0 and 1 alone.
+pub const RULES_FROM_DEPTH: u32 = 2;
+/// The eye's clock at level 15, and what each level above 14 takes off it.
+pub const EYE_SECONDS: f32 = 90.0;
+pub const EYE_SHRINK: f32 = 3.0;
+/// Level 12: how far from the remembered spot a watcher may stand, and how close to the start it may not.
+pub const MEMORY_RADIUS: f32 = 14.0;
+pub const MEMORY_START_CLEAR: f32 = 6.0;
 
 /// One level's addition, for the title screen.
 pub fn ascension_rule(level: u32) -> &'static str {
@@ -29,7 +38,13 @@ pub fn ascension_rule(level: u32) -> &'static str {
         7 => "enemies notice you from further away",
         8 => "shards are rarer",
         9 => "half the safety after a respawn",
-        _ => "every dream harder than the last, from the start",
+        10 => "every dream harder than the last, from the start",
+        11 => "caught: back to the start, half your lucidity",
+        12 => "the dream waits where you fell",
+        13 => "one fewer ability",
+        14 => "shard beacons and sense, halved",
+        15 => "the eye is closing: slow, and it takes a card",
+        _ => "everything at once: a twist every dream",
     }
 }
 
@@ -95,6 +110,95 @@ impl Ascension {
     pub fn always_hard(self) -> bool {
         self.at(10)
     }
+    /// Rule levels apply from `RULES_FROM_DEPTH` on.
+    pub fn rules_at(self, depth: u32) -> bool {
+        depth >= RULES_FROM_DEPTH
+    }
+    /// 11: a catch sends you to the start with half your lucidity.
+    pub fn no_safe_respawn(self, depth: u32) -> bool {
+        self.at(11) && self.rules_at(depth)
+    }
+    pub fn halve_lucidity(lucidity: u32) -> u32 {
+        lucidity / 2
+    }
+    /// 12: the dream remembers where you fell.
+    pub fn remembers(self, depth: u32) -> bool {
+        self.at(12) && self.rules_at(depth)
+    }
+    /// 13: loadout slots after the penalty (never below 1).
+    pub fn loadout_slots(self, slots: usize) -> usize {
+        if self.at(13) {
+            slots.saturating_sub(1).max(1)
+        } else {
+            slots
+        }
+    }
+    /// 14: multiplier on shard sense and beacon strength.
+    pub fn pickup_factor(self) -> f64 {
+        if self.at(14) {
+            0.5
+        } else {
+            1.0
+        }
+    }
+    /// 15: the eye's clock for this dream, if any.
+    pub fn eye_timer(self, depth: u32) -> Option<f32> {
+        (self.at(15) && self.rules_at(depth))
+            .then(|| (EYE_SECONDS - EYE_SHRINK * (self.0 - 14) as f32).max(30.0))
+    }
+    /// 16: a twist is always active.
+    pub fn always_twist(self, depth: u32) -> bool {
+        self.at(16) && self.rules_at(depth)
+    }
+}
+
+/// 12: where a watcher stands. Picks from `walkable` points within
+/// `MEMORY_RADIUS` of where you were caught, never within
+/// `MEMORY_START_CLEAR` of the start. Seeded; `None` when nothing fits.
+pub fn remembered_spot(
+    seed: u64,
+    caught: (f32, f32),
+    start: (f32, f32),
+    walkable: &[(f32, f32)],
+) -> Option<(f32, f32)> {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    let d = |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+    let ok: Vec<(f32, f32)> = walkable
+        .iter()
+        .copied()
+        .filter(|&p| d(p, start) >= MEMORY_START_CLEAR)
+        .collect();
+    let near: Vec<(f32, f32)> = ok.iter().copied().filter(|&p| d(p, caught) <= MEMORY_RADIUS).collect();
+    let pool = if near.is_empty() {
+        // Nothing close: take the closest few instead (still bounded by the list).
+        let mut by = ok;
+        by.sort_by(|a, b| d(*a, caught).total_cmp(&d(*b, caught)));
+        by.truncate(3);
+        by
+    } else {
+        near
+    };
+    if pool.is_empty() {
+        return None;
+    }
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xA5CE_0012);
+    Some(pool[rng.gen_range(0..pool.len())])
+}
+
+/// 15: failing the clock costs the newest picked card (abilities stay).
+pub fn lose_last_card(taken: &mut Vec<Upgrade>) -> Option<Upgrade> {
+    let i = taken.iter().rposition(|u| !matches!(u, Upgrade::Learn(_)))?;
+    Some(taken.remove(i))
+}
+
+/// 16: a seeded twist from `options` (the caller passes the ones that fit).
+pub fn forced_twist<T: Copy>(seed: u64, options: &[T]) -> Option<T> {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    if options.is_empty() {
+        return None;
+    }
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xA5CE_0016);
+    Some(options[rng.gen_range(0..options.len())])
 }
 
 /// Days since the Unix epoch (UTC) for a unix time in seconds.
@@ -433,7 +537,62 @@ mod tests {
         assert!(Ascension(5).twist_bonus() > 0.0 && Ascension(3).twist_bonus() == 0.0);
         for l in 0..=MAX_ASCENSION {
             assert!(!ascension_rule(l).is_empty());
+            assert!(ascension_rule(l).len() <= 48, "short enough to fit");
         }
+    }
+
+    #[test]
+    fn rule_levels_11_to_16_stack_and_spare_the_start() {
+        assert_eq!(MAX_ASCENSION, 16);
+        assert!(!Ascension(10).no_safe_respawn(5) && Ascension(11).no_safe_respawn(5));
+        assert!(!Ascension(11).no_safe_respawn(1), "depth 0-1 are gentle");
+        assert_eq!(Ascension::halve_lucidity(5), 2);
+        assert!(!Ascension(11).remembers(5) && Ascension(12).remembers(5));
+        assert_eq!(Ascension(12).loadout_slots(3), 3);
+        assert_eq!(Ascension(13).loadout_slots(3), 2);
+        assert_eq!(Ascension(16).loadout_slots(1), 1);
+        assert_eq!(Ascension(13).pickup_factor(), 1.0);
+        assert_eq!(Ascension(14).pickup_factor(), 0.5);
+        assert_eq!(Ascension(14).eye_timer(5), None);
+        assert_eq!(Ascension(15).eye_timer(5), Some(87.0));
+        assert_eq!(Ascension(16).eye_timer(5), Some(84.0));
+        assert_eq!(Ascension(16).eye_timer(1), None);
+        assert!(!Ascension(15).always_twist(5) && Ascension(16).always_twist(5));
+        assert!(Ascension(16).no_safe_respawn(2) && Ascension(16).remembers(2));
+    }
+
+    #[test]
+    fn remembered_spot_is_seeded_bounded_and_off_the_start() {
+        let walk: Vec<(f32, f32)> = (0..30).map(|i| (i as f32 * 2.0, 0.0)).collect();
+        let start = (0.0, 0.0);
+        for seed in 0..50 {
+            let p = remembered_spot(seed, (30.0, 0.0), start, &walk).unwrap();
+            assert!(p.0 >= MEMORY_START_CLEAR);
+            assert!((p.0 - 30.0).abs() <= MEMORY_RADIUS);
+            assert_eq!(Some(p), remembered_spot(seed, (30.0, 0.0), start, &walk));
+        }
+        // caught on the start cell: still never spawns there
+        let p = remembered_spot(1, start, start, &walk).unwrap();
+        assert!(p.0 >= MEMORY_START_CLEAR);
+        assert_eq!(remembered_spot(1, start, start, &[(1.0, 0.0)]), None);
+        assert_eq!(remembered_spot(1, start, start, &[]), None);
+    }
+
+    #[test]
+    fn eye_failure_costs_newest_card_not_abilities() {
+        let mut t = vec![Upgrade::ShardSense, Upgrade::Learn(Ability::Ward), Upgrade::WideEyes];
+        assert_eq!(lose_last_card(&mut t), Some(Upgrade::WideEyes));
+        assert_eq!(lose_last_card(&mut t), Some(Upgrade::ShardSense));
+        assert_eq!(lose_last_card(&mut t), None);
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn forced_twist_is_seeded() {
+        let o = [1, 2, 3, 4];
+        assert_eq!(forced_twist(9, &o), forced_twist(9, &o));
+        assert_eq!(forced_twist::<u8>(9, &[]), None);
+        assert!((0..20).map(|s| forced_twist(s, &o).unwrap()).collect::<std::collections::HashSet<_>>().len() > 1);
     }
 
     #[test]
