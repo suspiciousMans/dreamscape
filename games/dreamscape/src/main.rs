@@ -506,6 +506,8 @@ pub struct DreamscapeGame {
     // === hazards ===
     /// This dream's theme rule (depth 3+, normal dreams).
     theme_rule: Option<theme_rules::RuleState>,
+    /// Fog pocket discs and where each rests (they drift around it).
+    fog_discs: Vec<(Entity, Vec3)>,
     // === end hazards ===
     /// Every sound effect, synthesized at start-up.
     sounds: HashMap<Sound, Vec<f32>>,
@@ -799,6 +801,7 @@ impl DreamscapeGame {
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
             theme_rule: None,
+            fog_discs: Vec::new(), // hazards
             export_requested: false,
             sounds: sounds::ALL_SOUNDS
                 .iter()
@@ -2694,7 +2697,7 @@ impl DreamscapeGame {
             let fog_tex = self.texture(gl, [150, 90, 220, 255]);
             let disc = self.mesh(Shape::Cylinder)?;
             for &(at, r) in &dream.fog_pockets {
-                self.world.spawn((
+                let fog_e = self.world.spawn((
                     Transform {
                         position: at + Vec3::Y * 0.3,
                         rotation: Quat::IDENTITY,
@@ -2707,6 +2710,7 @@ impl DreamscapeGame {
                     Translucent,
                     Lit,
                 ));
+                self.fog_discs.push((fog_e, at)); // hazards
             }
             hints.push("purple fog slows you down");
         }
@@ -6104,6 +6108,7 @@ impl DreamscapeGame {
         self.mimic_awake_at = specials::MIMIC_DELAY;
         self.jester_cooldown = 0.0;
         self.fog = dream.fog_pockets.clone();
+        self.fog_discs.clear(); // hazards
         self.veins = dream.veins.clone();
         self.gates.clear();
         self.shifters.clear();
@@ -7734,6 +7739,20 @@ impl Game for DreamscapeGame {
         if let Some(r) = self.theme_rule.as_mut() {
             r.tick(dt); // hazards
         }
+        // === hazards === drifting fog: the pockets (and what slows you) move
+        if let Some(r) = self.theme_rule {
+            let drift = r.effect().fog_drift;
+            if drift > 0.0 && self.fog.len() == self.fog_discs.len() {
+                for (i, &(e, base)) in self.fog_discs.iter().enumerate() {
+                    let (x, z) = theme_rules::fog_center((base.x, base.z), i, r.age, drift, r.seed);
+                    self.fog[i].0 = Vec3::new(x, base.y, z);
+                    if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                        tr.position = Vec3::new(x, base.y + 0.3, z);
+                    }
+                }
+            }
+        }
+        // === end hazards ===
         // === ascension === 15: the eye's clock runs out once per dream
         if !self.asc_eye_failed
             && self.active_asc.eye_timer(self.director.depth).is_some_and(|t| self.dream_age > t)

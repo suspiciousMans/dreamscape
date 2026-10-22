@@ -227,6 +227,29 @@ pub fn dimmed_sight(sight: f32, e: &Effect) -> f32 {
     sight * e.visibility.clamp(0.4, 1.0)
 }
 
+/// Radius (units) of the slow loop a fog pocket drifts around.
+pub const FOG_LOOP: f32 = 4.0;
+
+/// Where fog pocket `idx` (resting at `base`, xz) sits after `age` seconds of
+/// drifting at `drift` units/s. A slow loop that starts exactly at `base`;
+/// `drift` 0 never moves. Pure; `seed` picks each pocket's phase and turn.
+pub fn fog_center(base: (f32, f32), idx: usize, age: f32, drift: f32, seed: u64) -> (f32, f32) {
+    if drift <= 0.0 {
+        return base;
+    }
+    let mut h = seed ^ (idx as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 29;
+    let phase = (h % 6283) as f32 / 1000.0;
+    let dir = if h & 1 << 20 == 0 { 1.0 } else { -1.0 };
+    let a = phase + dir * age * drift / FOG_LOOP;
+    (
+        base.0 + FOG_LOOP * (a.cos() - phase.cos()),
+        base.1 + FOG_LOOP * (a.sin() - phase.sin()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +394,26 @@ mod tests {
         s.on_shard();
         assert_eq!(dimmed_sight(12.0, &s.effect()), 12.0);
         assert_eq!(dimmed_sight(12.0, &st(Kind::StickyFloor, 9).effect()), 12.0);
+    }
+
+    #[test]
+    fn fog_drifts_slowly_in_a_bounded_loop() {
+        let base = (10.0, -4.0);
+        assert_eq!(fog_center(base, 0, 50.0, 0.0, 3), base);
+        assert_eq!(fog_center(base, 2, 0.0, 0.7, 3), base);
+        let drift = st(Kind::DriftingFog, 5).effect().fog_drift;
+        assert!(drift > 0.0 && drift < 1.0);
+        let mut prev = base;
+        let mut moved = 0.0_f32;
+        for i in 1..=2000 {
+            let p = fog_center(base, 1, i as f32 * 0.1, drift, 3);
+            let step = ((p.0 - prev.0).powi(2) + (p.1 - prev.1).powi(2)).sqrt() / 0.1;
+            assert!(step <= drift * 1.01, "too fast: {step}");
+            assert!(((p.0 - base.0).powi(2) + (p.1 - base.1).powi(2)).sqrt() <= 2.0 * FOG_LOOP + 1e-3);
+            moved = moved.max(((p.0 - base.0).powi(2) + (p.1 - base.1).powi(2)).sqrt());
+            prev = p;
+        }
+        assert!(moved > FOG_LOOP, "it should actually travel");
+        assert_ne!(fog_center(base, 0, 9.0, drift, 3), fog_center(base, 1, 9.0, drift, 3));
     }
 }
