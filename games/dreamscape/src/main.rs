@@ -650,6 +650,14 @@ pub struct DreamscapeGame {
     twists: Twists,
     /// Seconds spent playing this dream (HURRIED timer, FROZEN rhythm).
     dream_age: f32,
+    // === pressure ===
+    pressure: pressure::Pressure,
+    pressure_phase: pressure::Phase,
+    /// Run dust when this dream began (a collapse halves what came after).
+    pressure_dust_start: u32,
+    /// This run ended in a collapse.
+    pressure_collapsed: bool,
+    // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
     /// Highest difficulty survived this run (scales the dust you wake with).
@@ -891,6 +899,12 @@ impl DreamscapeGame {
             twists: Twists::default(),
             perks: Vec::new(),
             dream_age: 0.0,
+            // === pressure ===
+            pressure: pressure::Pressure::off(),
+            pressure_phase: pressure::Phase::Calm,
+            pressure_dust_start: 0,
+            pressure_collapsed: false,
+            // === end pressure ===
             bonus_dust: 0,
             peak_difficulty: 1.0,
             offer_upgrade: false,
@@ -1771,6 +1785,14 @@ impl DreamscapeGame {
                 .collect::<Vec<_>>()
                 .join("; "),
             timer: self.twists.timer().map(|t| t - self.dream_age),
+            // === pressure ===
+            pressure_lid: (self.pressure.phase() != pressure::Phase::Calm).then(|| {
+                (
+                    self.pressure.lid(),
+                    self.pressure.phase() != pressure::Phase::Stirring,
+                )
+            }),
+            // === end pressure ===
             difficulty: self.director.hardness().map(|_| self.difficulty()),
             summary: if self.mode == hud::Mode::Summary {
                 self.summary_view()
@@ -4930,6 +4952,7 @@ impl DreamscapeGame {
         self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
+        self.pressure_collapsed = false; // pressure
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
         self.last_event = None;
@@ -5111,6 +5134,11 @@ impl DreamscapeGame {
             names.dedup();
             rows.push(("twists survived".into(), names.join(", ")));
         }
+        // === pressure ===
+        if self.pressure_collapsed {
+            rows.push((String::new(), pressure::SUMMARY_LINE.into()));
+        }
+        // === end pressure ===
         for (r, d) in &self.new_records {
             rows.push((String::new(), format!("{} (+{d} dust)", r.label())));
         }
@@ -5135,6 +5163,55 @@ impl DreamscapeGame {
 
     /// Begin melting toward `pending`. Ignored if a melt is already running
     /// (so touching the portal for several frames can't queue two descents).
+    // === pressure ===
+    /// Normal dreams only: no nightmares, the awakening, the prologue or co-op.
+    fn pressure_applies(&self) -> bool {
+        self.prologue.is_none()
+            && self.coop.is_none()
+            && !self.director.nightmare
+            && self.director.theme != DreamTheme::Awakening
+            && self.director.theme != DreamTheme::Lobby
+    }
+
+    /// Per frame (Playing only): tick the clock, stir the pacers, speak,
+    /// and collapse the dream when the eye closes.
+    fn update_pressure(&mut self, dt: f32) {
+        if !self.pressure.active() || self.transition.active() || self.dream.is_none() {
+            return;
+        }
+        self.pressure.tick(dt);
+        let phase = self.pressure.phase();
+        let cap = 0.92 * self.player_speed() / enemy_ai::CHASE_BOOST;
+        let (sm, am) = (self.pressure.speed_mult(), self.pressure.chase_mult());
+        for p in &mut self.enemies {
+            p.ai.set_pressure(sm, am, cap);
+        }
+        if phase == self.pressure_phase {
+            return;
+        }
+        self.pressure_phase = phase;
+        match phase {
+            pressure::Phase::Stirring => self.say_pressure(pressure::LINE_STIRRING),
+            pressure::Phase::Warning => self.say_pressure(pressure::LINE_WARNING),
+            pressure::Phase::Collapsed => {
+                self.bonus_dust =
+                    pressure::collapse_dust(self.pressure_dust_start, self.bonus_dust);
+                self.pressure_collapsed = true;
+                log::info!("Pressure: the dream collapsed at depth {}", self.director.depth);
+                self.flash.trigger([1.0, 1.0, 1.0], 1.0);
+                self.sfx(Sound::WakeDoor);
+                self.begin_melt(transition::Pending::Wake);
+            }
+            pressure::Phase::Calm => {}
+        }
+    }
+
+    fn say_pressure(&mut self, text: &str) {
+        log::info!("Pressure: {text}");
+        self.eye_line = Some((text.to_string(), 0.0));
+    }
+    // === end pressure ===
+
     fn begin_melt(&mut self, pending: transition::Pending) {
         let fog = match pending {
             transition::Pending::Descend => self.director.next.spec().fog_color,
@@ -5439,6 +5516,7 @@ impl DreamscapeGame {
         self.juice.hit(juice::Hit::Shard, self.settings.reduced_motion);
         self.sfx_pitched(Sound::Shard, pitch);
         self.director.collect_shard();
+        self.pressure.refund_on_shard(); // pressure
         self.shards_this_run += 1;
         if self.run_active {
             self.achieve(Some(achievements::Event::ShardTaken));
@@ -5597,6 +5675,15 @@ impl DreamscapeGame {
         }
         self.peak_difficulty = self.peak_difficulty.max(self.difficulty());
         self.dream_age = 0.0;
+        // === pressure ===
+        self.pressure = pressure::Pressure::for_dream(
+            self.director.depth,
+            self.pressure_applies(),
+            self.twists.timer().is_some(),
+        );
+        self.pressure_phase = pressure::Phase::Calm;
+        self.pressure_dust_start = self.bonus_dust;
+        // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
         if !self.run_log.is_empty() && !std::mem::take(&mut self.just_continued) {
@@ -7307,6 +7394,9 @@ impl Game for DreamscapeGame {
         self.dream_age += dt;
         self.stats.time += dt;
         self.run.tick(dt);
+        // === pressure ===
+        self.update_pressure(dt);
+        // === end pressure ===
 
         // 0b. Abilities
         let requests = std::mem::take(&mut self.ability_requests);
@@ -9030,6 +9120,18 @@ mod screen_smoke {
             g.mode = mode;
             bad.extend(overflows(&g, &format!("{mode:?}")));
         }
+        // === pressure ===
+        g.pressure_collapsed = true;
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-collapsed"));
+        g.pressure_collapsed = false;
+        g.mode = hud::Mode::Playing;
+        for warn in [false, true] {
+            bad.extend(overflows_with(&g, "HUD-pressure", &|v| {
+                v.pressure_lid = Some((0.6, warn));
+            }));
+        }
+        // === end pressure ===
         g.open_settings();
         bad.extend(overflows(&g, "Settings"));
         g.open_codex();
