@@ -385,6 +385,15 @@ pub struct DreamscapeGame {
     motif: Option<PropKind>,
     enemies: Vec<Pacer>,
     specials: Vec<SpecialEnemy>,
+    // === shards ===
+    shard_kind: shard_rules::ShardKind,
+    /// dream_age when a heavy shard was picked up.
+    heavy_since: Option<f32>,
+    /// Alert-radius multiplier currently applied to the pacers.
+    heavy_applied: f32,
+    /// Beam angle that points the guard sentry at its shard.
+    guard_angle: Option<f32>,
+    // === end shards ===
     /// Where the dreamer has been (the mimic walks it).
     trail: specials::Trail,
     mimic_awake_at: f32,
@@ -707,6 +716,12 @@ impl DreamscapeGame {
             motif: None,
             enemies: Vec::new(),
             specials: Vec::new(),
+            // === shards ===
+            shard_kind: shard_rules::ShardKind::Plain,
+            heavy_since: None,
+            heavy_applied: 1.0,
+            guard_angle: None,
+            // === end shards ===
             trail: specials::Trail::default(),
             mimic_awake_at: 0.0,
             jester_cooldown: 0.0,
@@ -1762,7 +1777,16 @@ impl DreamscapeGame {
                     )
                 })
                 .collect(),
-            twist: self.twists.label(),
+            twist: {
+                // === shards ===
+                let t = self.twists.label();
+                if self.heavy_elapsed().is_some_and(|e| e < shard_rules::HEAVY_SECONDS) {
+                    if t.is_empty() { "heavy".to_string() } else { format!("{t} · heavy") }
+                } else {
+                    t
+                }
+                // === end shards ===
+            },
             twist_blurb: self
                 .twists
                 .0
@@ -4098,7 +4122,17 @@ impl DreamscapeGame {
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
             * self.active_form.speed_mult()
+            // === shards ===
+            * shard_rules::heavy_mults(self.heavy_elapsed()).0
+            // === end shards ===
     }
+
+    // === shards ===
+    /// Seconds since a heavy shard was picked up, if it still weighs on you.
+    fn heavy_elapsed(&self) -> Option<f32> {
+        self.heavy_since.map(|t| (self.dream_age - t).max(0.0))
+    }
+    // === end shards ===
 
     /// How strange the dream *looks*: CALM MIND takes the edge off.
     fn visual_strangeness(&self) -> f32 {
@@ -5439,6 +5473,9 @@ impl DreamscapeGame {
         self.juice.hit(juice::Hit::Shard, self.settings.reduced_motion);
         self.sfx_pitched(Sound::Shard, pitch);
         self.director.collect_shard();
+        // === shards ===
+        self.heavy_since = (self.shard_kind == shard_rules::ShardKind::Heavy).then_some(self.dream_age);
+        // === end shards ===
         self.shards_this_run += 1;
         if self.run_active {
             self.achieve(Some(achievements::Event::ShardTaken));
@@ -5658,6 +5695,47 @@ impl DreamscapeGame {
         if let Some(o) = &self.objective {
             log::info!("Objective: {}", o.label());
         }
+        // === shards ===
+        self.heavy_since = None;
+        self.heavy_applied = 1.0;
+        self.shard_kind = shard_rules::ShardKind::Plain;
+        self.guard_angle = None;
+        if let Some(shard) = dream.shard {
+            let eligible = !self.director.nightmare
+                && self.prologue.is_none()
+                && self.coop.is_none()
+                && self.director.depth >= shard_rules::MIN_DEPTH
+                && !(self.director.lucid() && dream.shard.is_some())
+                && matches!(self.objective, None | Some(objective::Active::Shard));
+            let want = shard_rules::kind_for(
+                dream.seed,
+                dream.depth,
+                self.twists.has(Variant::Gilded),
+                eligible,
+            );
+            self.shard_kind = want;
+            if want == shard_rules::ShardKind::Guarded {
+                let route: Vec<Vec3> = dream.lucid_route.iter().map(|w| w.pos).collect();
+                let floor = shard_rules::floor_cells(&dream.blocks);
+                match shard_rules::guard_cell(dream.seed, shard, &floor, &route, &[dream.spawn, dream.portal]) {
+                    Some(at) => {
+                        dream.specials.push(dream::Special {
+                            kind: dream::EnemyKind::Sentry,
+                            at,
+                            a: at,
+                            b: at,
+                        });
+                        self.guard_angle = Some(shard_rules::facing_angle(at, shard));
+                        log::info!("Guarded shard: sentry at {at:?}");
+                    }
+                    None => self.shard_kind = shard_rules::ShardKind::Plain,
+                }
+            }
+            if self.shard_kind != shard_rules::ShardKind::Plain {
+                log::info!("Shard kind: {:?}", self.shard_kind);
+            }
+        }
+        // === end shards ===
         self.hunter = None;
         self.sealed_portal = None;
         self.sigils_left = dream.sigils.len();
@@ -6222,6 +6300,13 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        // === shards ===
+        if let (Some(a), Some(SpecialEnemy { ai: SpecialAI::Sentry(s, _), .. })) =
+            (self.guard_angle, self.specials.last_mut())
+        {
+            s.angle = a;
+        }
+        // === end shards ===
         self.spawn_features(gl, &dream)?;
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
@@ -7472,6 +7557,16 @@ impl Game for DreamscapeGame {
         } else {
             1.0
         };
+        // === shards ===
+        let want_alert = shard_rules::heavy_mults(self.heavy_elapsed()).1;
+        if (want_alert - self.heavy_applied).abs() > 1e-4 {
+            let f = want_alert / self.heavy_applied;
+            for p in &mut self.enemies {
+                p.ai.scale_alert(f);
+            }
+            self.heavy_applied = want_alert;
+        }
+        // === end shards ===
         for (k, p) in self.enemies.iter_mut().enumerate() {
             if held || puppet {
                 continue;

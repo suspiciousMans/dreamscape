@@ -217,6 +217,20 @@ mod tests {
         assert!(layouts >= 3, "only {layouts} layouts had a guard cell");
     }
 
+    #[test]
+    fn a_heavy_carrier_is_noticed_from_further_away() {
+        use crate::enemy_ai::EnemyAI;
+        let notices = |scale: f32, gap: f32| {
+            let mut ai = EnemyAI::new(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 2.0, 5.0, 20.0);
+            ai.scale_alert(scale);
+            let mut p = Vec3::ZERO;
+            ai.update(&mut p, Vec3::new(gap, 0.0, 0.0), 0.016);
+            ai.chasing
+        };
+        assert!(!notices(1.0, 6.5));
+        assert!(notices(HEAVY_ALERT, 6.5));
+    }
+
     fn flat_d(a: Vec3, b: Vec3) -> f32 {
         Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
     }

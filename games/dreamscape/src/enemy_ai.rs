@@ -51,6 +51,11 @@ impl EnemyAI {
         }
     }
 
+    /// Scales how far away it notices you (shards: a heavy carrier is louder).
+    pub fn scale_alert(&mut self, factor: f32) {
+        self.alert_radius *= factor;
+    }
+
     /// Back to the start of its patrol, calm (a time loop rewound the dream).
     pub fn reset(&mut self) {
         self.toward_b = true;
