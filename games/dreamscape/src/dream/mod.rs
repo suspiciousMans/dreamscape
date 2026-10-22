@@ -6,6 +6,7 @@ mod grid;
 mod layout;
 mod meshes;
 mod names;
+mod secret;
 mod texture;
 mod theme;
 mod variant;
@@ -18,6 +19,7 @@ pub use build::{
 };
 pub use director::{DreamDirector, RunLength, DEEPER_SHARDS, NIGHTMARE_EVERY, SHARD_CHANCE};
 pub use meshes::{build as build_mesh, Shape, ALL_SHAPES};
+pub use secret::{rolls as secret_rolls, SECRET_CHANCE};
 pub use names::{dream_name, whisper};
 pub use texture::{Pattern, TEX_SIZE};
 pub use theme::{

@@ -59,6 +59,7 @@ mod loadout_ui;
 mod lore;
 mod memories_ui;
 mod merge_ui;
+mod moth_shop;
 mod music;
 mod objective;
 mod pack_art;
@@ -72,6 +73,7 @@ mod progress;
 mod records;
 mod reveal_ui;
 mod settings;
+mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sounds;
@@ -214,6 +216,22 @@ enum Crumble {
 const CRUMBLE_SHAKE: f32 = 1.0;
 const CRUMBLE_GONE: f32 = 4.0;
 
+/// A cracked wall in the current dream, and the door it hides once broken.
+struct SecretWall {
+    /// Floor-level centre of the wall cell.
+    at: Vec3,
+    /// Wall height, and the warm texture the door wears.
+    height: f32,
+    door_tex: Arc<GpuTexture>,
+    /// The solid wall (cracked texture) and its glow, until it gives way.
+    wall: Option<(Entity, Entity)>,
+    /// The door that replaces it.
+    door: Option<Entity>,
+    /// You have stepped out of the doorway since you last used it (so
+    /// leaving the shop doesn't throw you straight back in).
+    armed: bool,
+}
+
 struct CrumbleTile {
     entity: Option<Entity>,
     block: dream::Block,
@@ -292,6 +310,8 @@ enum ChoiceKind {
     WakeDoor,
     /// A between-dream event (roadmap 3.5), in place of the upgrade pick.
     Event(events::Event),
+    /// The moth's room behind a cracked wall (cards in `moth_stock`).
+    MothShop,
 }
 
 /// The icon on an event's choice card.
@@ -406,6 +426,12 @@ pub struct DreamscapeGame {
     slam_meteor: bool,
     /// High caches (floor spot, glow, beam) still to be picked up.
     caches: Vec<(Vec3, Entity, Entity)>,
+    /// This dream's cracked wall, if it has one.
+    secret: Option<SecretWall>,
+    /// The crack's hint has been shown this launch.
+    secret_hint_given: bool,
+    /// What the moth still has on the shelf in this dream.
+    moth_stock: Option<Vec<Upgrade>>,
     skittish: Option<Skittish>,
     /// Height of the ground you last stood on (for the climbing sound).
     ground_y: f32,
@@ -693,6 +719,9 @@ impl DreamscapeGame {
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
+            secret: None,
+            secret_hint_given: false,
+            moth_stock: None,
             skittish: None,
             ground_y: f32::MIN,
             stunned: HashMap::new(),
@@ -1280,6 +1309,7 @@ impl DreamscapeGame {
                     .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
                 self.sfx(Sound::Pick);
             }
+            ChoiceKind::MothShop => self.buy_from_moth(index),
             ChoiceKind::Event(event) => {
                 if !self.choose_event(&event, index) {
                     self.choice = Some(ChoiceKind::Event(event));
@@ -2889,20 +2919,27 @@ impl DreamscapeGame {
             .last_ability
             .filter(|&(_, t)| self.dream_age - t <= upgrades::COMBO_WINDOW)
             .and_then(|(prev, _)| upgrades::combo(prev, state.ability));
+        // Blink or Dash into a cracked wall: it gives way (see below).
+        let cracks = self.secret_in_reach(state.ability);
         if state.ability == Ability::Blink {
-            let Some(at) = self.dream.as_ref().and_then(|d| {
+            let target = self.dream.as_ref().and_then(|d| {
                 gameplay::blink_target(
                     &d.blocks,
                     self.player_position,
                     self.facing,
                     upgrades::BLINK_CELLS,
                 )
-            }) else {
-                // Nowhere safe to land: don't spend the charge.
-                self.sfx(Sound::Denied);
-                return;
-            };
-            self.teleport_player(at);
+            });
+            match target {
+                Some(at) => self.teleport_player(at),
+                // Striking the crack spends the charge even with nowhere to land.
+                None if cracks => {}
+                None => {
+                    // Nowhere safe to land: don't spend the charge.
+                    self.sfx(Sound::Denied);
+                    return;
+                }
+            }
         }
         // ANCHOR is two-stage: the first use drops the marker (almost no
         // recharge), the second snaps you back and starts the real recharge.
@@ -3011,6 +3048,9 @@ impl DreamscapeGame {
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            if cracks {
+                self.open_secret();
+            }
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -3177,6 +3217,217 @@ impl DreamscapeGame {
             }
         }
         self.skittish = Some(s);
+    }
+
+    /// Would `ability`, used right now, strike this dream's closed cracked wall?
+    fn secret_in_reach(&self, ability: Ability) -> bool {
+        self.secret.as_ref().is_some_and(|s| {
+            s.wall.is_some()
+                && secrets::strikes(ability, self.player_position, self.facing, s.at)
+        })
+    }
+
+    /// The wall gives way: no collider, a door in its place.
+    fn open_secret(&mut self) {
+        let Some(sec) = self.secret.as_mut() else {
+            return;
+        };
+        let Some((wall, glow)) = sec.wall.take() else {
+            return;
+        };
+        let (at, height, tex) = (sec.at, sec.height, sec.door_tex.clone());
+        let _ = self.world.despawn(wall);
+        let _ = self.world.despawn(glow);
+        if let Ok(mesh) = self.mesh(Shape::Cube) {
+            // A warm slab filling the gap: lit, non-solid, a door.
+            let door = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * height * 0.5,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(gameplay::CELL * 0.7, height * 0.85, gameplay::CELL * 0.7),
+                },
+                MeshRenderer {
+                    mesh,
+                    texture: Some(tex),
+                },
+                Translucent,
+                Lit,
+            ));
+            if let Some(sec) = self.secret.as_mut() {
+                sec.door = Some(door);
+            }
+        }
+        self.flash.trigger([1.0, 0.85, 0.55], 0.4);
+        self.burst_pending = Some((at + Vec3::Y, [255, 214, 150], [255, 240, 210]));
+        self.sfx(Sound::PortalOpen);
+        self.achievement_toast = Some((secrets::OPENED.into(), 0.0));
+        log::info!("Cracked wall opened at {at:?}");
+    }
+
+    /// Per frame: the first sight of a crack and a running DASH striking it.
+    fn update_secret(&mut self) {
+        let Some(sec) = self.secret.as_ref() else {
+            return;
+        };
+        let at = sec.at;
+        let closed = sec.wall.is_some();
+        let (has_door, armed) = (sec.door.is_some(), sec.armed);
+        let p = self.player_position;
+        if closed {
+            if !self.secret_hint_given && secrets::notices(p, at) {
+                self.secret_hint_given = true;
+                self.achievement_toast = Some((secrets::HINT.into(), 0.0));
+            }
+            if self.run.active(Ability::Dash) && secrets::strikes(Ability::Dash, p, self.facing, at) {
+                self.open_secret();
+            }
+        } else if has_door {
+            let inside = secrets::at_door(p, at);
+            if !inside && !armed {
+                if let Some(sec) = self.secret.as_mut() {
+                    sec.armed = true;
+                }
+            } else if inside && armed && self.mode == hud::Mode::Playing {
+                self.enter_moth_shop();
+            }
+        }
+    }
+
+    /// Through the door: the moth's room, as a shelf of cards over the frozen
+    /// dream (so leaving puts you back exactly where you stood).
+    fn enter_moth_shop(&mut self) {
+        if self.mode != hud::Mode::Playing
+            || self.choice.is_some()
+            || self.transition.active()
+            || self.coop.is_some()
+            || self.prologue.is_some()
+            || self.autopilot
+        {
+            return;
+        }
+        if let Some(sec) = self.secret.as_mut() {
+            sec.armed = false;
+        }
+        if self.moth_stock.is_none() {
+            self.moth_stock = Some(moth_shop::stock(
+                self.director.dream_seed(),
+                &self.run,
+                self.director.depth,
+            ));
+        }
+        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+        self.show_moth_shop(0);
+    }
+
+    /// Paints the shelf with the ordinary choice screen.
+    fn show_moth_shop(&mut self, selected: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        if shelf.is_empty() {
+            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
+            return;
+        }
+        let cards = shelf
+            .iter()
+            .enumerate()
+            .map(|(i, &u)| {
+                let info = u.info();
+                let cost = moth_shop::price(info.tier).unwrap_or(0);
+                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run).is_ok();
+                let have = self.run.count(u);
+                let level = if have > 0 {
+                    format!(" · {} / {}", have + 1, info.max)
+                } else {
+                    String::new()
+                };
+                upgrade_ui::ChoiceCard {
+                    name: info.name.into(),
+                    desc: info.desc.into(),
+                    icon: info.icon,
+                    color: if can { info.color } else { [110, 110, 130] },
+                    frame: if can { info.tier.frame() } else { [80, 80, 100] },
+                    tag: if can {
+                        format!("{cost} dust · {}{level}", info.tier.label())
+                    } else if self.bonus_dust < cost {
+                        format!("needs {cost} dust")
+                    } else {
+                        "no use to you".into()
+                    },
+                }
+            })
+            .collect();
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: moth_shop::TITLE.into(),
+            subtitle: format!("{} · you have {} dust", moth_shop::SUBTITLE, self.bonus_dust),
+            cards,
+            selected: selected.min(shelf.len() - 1),
+            age: 0.0,
+            hint: "[a/d] choose   [enter] buy   [x] leave".into(),
+        };
+        self.choice = Some(ChoiceKind::MothShop);
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// [enter] on a card: pay run dust for it (never the banked stash).
+    fn buy_from_moth(&mut self, index: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run) {
+            Ok((u, cost)) => {
+                let before = self.run.synergies();
+                self.bonus_dust -= cost;
+                self.run.take(u);
+                self.upgrade_taken_fx(u, &before);
+                if let Some(s) = self.moth_stock.as_mut() {
+                    s.remove(index);
+                }
+                // The card and its price are saved together, so a quit
+                // right after can't keep one without the other.
+                self.save_run();
+                log::info!("Moth sold {u:?} for {cost} dust ({} left)", self.bonus_dust);
+            }
+            Err(why) => {
+                log::info!("Moth refused: {why:?}");
+                self.sfx(Sound::Denied);
+            }
+        }
+        if self.moth_stock.as_ref().is_some_and(|s| s.is_empty()) {
+            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
+            return;
+        }
+        self.show_moth_shop(index);
+    }
+
+    /// [x]: back to the dream, exactly where you stood.
+    fn leave_moth_shop(&mut self) {
+        if !matches!(self.choice, Some(ChoiceKind::MothShop)) {
+            return;
+        }
+        self.choice = None;
+        self.mode = hud::Mode::Playing;
+        self.sfx(Sound::Reroll);
+    }
+
+    /// What a freshly taken upgrade does around the edges (shared by the
+    /// moth's shelf; the after-dream pick has its own copy of this).
+    fn upgrade_taken_fx(&mut self, u: Upgrade, before: &[upgrades::Synergy]) {
+        self.director.shard_bonus = self.shard_bonus();
+        if u == Upgrade::LucidHeart {
+            // Banked straight away: it can't be dropped.
+            self.director.lucidity += 1;
+            self.shards_this_run += 1;
+        }
+        if self.run_active {
+            let n = self.run.synergies().len();
+            self.achieve(Some(achievements::Event::Synergies(n)));
+        }
+        for s in self.run.synergies() {
+            if !before.contains(&s) {
+                log::info!("Synergy: {} ({})", s.name(), s.desc());
+            }
+        }
+        self.flash
+            .trigger(u.info().color.map(|c| c as f32 / 255.0), 0.5);
+        self.sfx(Sound::Pick);
     }
 
     /// High caches: reach the pillar and the gold is yours (a run bonus).
@@ -4932,6 +5183,10 @@ impl DreamscapeGame {
             note: self.pending_note.is_some()
                 && self.objective_kind != Some(objective::Kind::FindMemory),
             fragments: self.objective_kind == Some(objective::Kind::Fragments),
+            // Never in nightmares, the prologue, co-op or the Awakening (all
+            // returned above or are not descent dreams); never above depth 2.
+            secret: self.director.theme != DreamTheme::Awakening
+                && dream::secret_rolls(seed, self.director.depth, dream::SECRET_CHANCE),
         }
     }
 
@@ -5202,6 +5457,9 @@ impl DreamscapeGame {
             dream::blend_surfaces(&mut dream.surfaces, b);
             log::info!("Fused dream: {theme:?} with {b:?}");
         }
+        if let Some(s) = dream.secret {
+            log::info!("Cracked wall at {:?} (reach it from {:?})", s.wall, s.approach);
+        }
         // No shard cell (a pure corridor): nothing to ask for.
         let kind = self.objective_kind.filter(|_| dream.shard.is_some());
         self.objective = kind.map(|k| match k {
@@ -5312,6 +5570,8 @@ impl DreamscapeGame {
         self.slam_apex = 0.0;
         self.slam_meteor = false;
         self.caches.clear();
+        self.secret = None;
+        self.moth_stock = None;
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -5333,6 +5593,23 @@ impl DreamscapeGame {
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
+        // A cracked wall wears the wall pattern with a bright hairline split.
+        let crack_tex = if dream.secret.is_some() {
+            let mut px = dream.surfaces.wall.rgba();
+            secrets::draw_crack(&mut px, TEX_SIZE, dream.seed);
+            let tex = Arc::new(GpuTexture::from_rgba8(
+                gl,
+                &px,
+                TEX_SIZE,
+                TEX_SIZE,
+                TextureFilter::Bilinear,
+            )?);
+            self.dream_textures.push(tex.clone());
+            Some(tex)
+        } else {
+            None
+        };
+        let mut cracked: Option<(Entity, Vec3, f32)> = None;
         let cb = self.settings.colorblind_markers;
         let shard_spec = if cb {
             access::shard(dream.surfaces.shard.seed)
@@ -5404,9 +5681,17 @@ impl DreamscapeGame {
                 self.crumbles.push(tile);
                 continue;
             }
+            let is_crack = block.kind == BlockKind::Wall
+                && dream.secret.is_some_and(|s| {
+                    (s.wall.x - block.pos.x).abs() < 1e-3 && (s.wall.z - block.pos.z).abs() < 1e-3
+                });
             let (texture, uv) = match block.kind {
                 BlockKind::Floor => (floor_tex.clone(), per_cell),
-                BlockKind::Wall => (wall_tex.clone(), per_cell),
+                BlockKind::Wall => match (&crack_tex, is_crack) {
+                    // One repeat across the cracked cell: the split stays whole.
+                    (Some(c), true) => (c.clone(), 1.0 / gameplay::CELL),
+                    _ => (wall_tex.clone(), per_cell),
+                },
                 BlockKind::Prop | BlockKind::Decor | BlockKind::Sky => (prop_tex.clone(), 0.5),
                 BlockKind::Portal => (portal_tex.clone(), 0.5),
                 BlockKind::Trim => (wall_tex.clone(), per_cell),
@@ -5424,6 +5709,9 @@ impl DreamscapeGame {
                 },
                 SurfaceUv(uv),
             ));
+            if is_crack {
+                cracked = Some((entity, block.pos, block.size.y));
+            }
             let half_extents = block.size * 0.5;
             // Scenery drifts: a slow spin and a bob, desynchronised by position.
             let h = (block.pos.x * 12.9898 + block.pos.z * 78.233).sin() * 43_758.547;
@@ -5490,6 +5778,42 @@ impl DreamscapeGame {
             }
         }
 
+        if let (Some((wall, pos, height)), Some(sec)) = (cracked, dream.secret) {
+            // A faint glow on the face you approach from, so it isn't decoration.
+            let toward = (sec.approach - sec.wall).normalize_or_zero();
+            let glow_tex = self.texture(gl, [190, 215, 255, 255]);
+            let glow = self.world.spawn((
+                Transform {
+                    position: Vec3::new(
+                        pos.x + toward.x * (gameplay::CELL * 0.5 + 0.03),
+                        pos.y,
+
+                        pos.z + toward.z * (gameplay::CELL * 0.5 + 0.03),
+                    ),
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(
+                        if toward.x.abs() > 0.5 { 0.05 } else { 0.35 },
+                        height * 0.9,
+                        if toward.z.abs() > 0.5 { 0.05 } else { 0.35 },
+                    ),
+                },
+                MeshRenderer {
+                    mesh: self.mesh(Shape::Cube)?,
+                    texture: Some(glow_tex),
+                },
+                Translucent,
+                Lit,
+            ));
+            let door_tex = self.texture(gl, [255, 214, 150, 255]);
+            self.secret = Some(SecretWall {
+                at: sec.wall,
+                height,
+                door_tex,
+                wall: Some((wall, glow)),
+                door: None,
+                armed: true,
+            });
+        }
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
@@ -6222,6 +6546,9 @@ impl Game for DreamscapeGame {
                         }
                     }
                     Keycode::R => self.reroll_choice(),
+                    Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
+                        self.leave_moth_shop()
+                    }
                     Keycode::X => self.skip_choice(),
                     // Cards deal in first, so a held key can't pick blind.
                     Keycode::Return | Keycode::Space if self.choice_view.age > 0.4 => {
@@ -6797,6 +7124,7 @@ impl Game for DreamscapeGame {
         self.update_objective(ctx, dt);
         self.update_skittish(dt);
         self.update_caches();
+        self.update_secret();
         if !self.eye_queue.is_empty()
             && self
                 .eye_line

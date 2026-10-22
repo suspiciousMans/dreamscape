@@ -4,6 +4,7 @@ use super::detail;
 use super::grid::{Cell, Grid, Terrain, LEVEL_H, P};
 use super::layout;
 use super::meshes::Shape;
+use super::secret::{self, Secret};
 use super::texture::{self as tex, Pattern};
 use super::theme::{DreamTheme, EnemyKind, Feature, LayoutKind, PropKind, ThemeSpec};
 use crate::gameplay::{CELL, SLAB};
@@ -112,6 +113,8 @@ pub struct Dream {
     pub terrain: Terrain,
     /// High caches on pillars (floor level at the top): a plain jump can't reach them.
     pub caches: Vec<Vec3>,
+    /// A cracked wall hiding the moth's door, when the dream has one.
+    pub secret: Option<Secret>,
 }
 
 /// One special enemy. `at` is where it starts; `a`/`b` are its two ends
@@ -252,6 +255,8 @@ pub struct Goals {
     pub note: bool,
     /// Two more shard fragments besides the shard cell.
     pub fragments: bool,
+    /// A cracked wall off the route (only in layouts that can hide one).
+    pub secret: bool,
 }
 
 /// Dreams that can come as a pyramid or a crater: the open, airy ones.
@@ -365,6 +370,15 @@ pub fn generate_with(
         out
     };
     on_path.extend(lucid_path.iter().map(|&(p, _)| p));
+    // A cracked wall: its own stream, chosen from walls beside off-route floor.
+    // Its approach cell stays free of props so you can always stand there.
+    let secret_cells = if goals.secret && spec.wall_height > 0.0 && secret::hosts(spec.layout) {
+        secret::pick(grid, &on_path, layout.spawn, seed)
+    } else {
+        None
+    };
+    let mut prop_keep = on_path.clone();
+    prop_keep.extend(secret_cells.map(|(_, a)| a));
     // White Dissolve: every cell you walk through (bar the ends) can dissolve.
     let dissolve_cells: Vec<P> = if spec.feature == Feature::Dissolve {
         let n = lucid_path.len();
@@ -399,7 +413,7 @@ pub fn generate_with(
     let motif_at = props(
         grid,
         &spec,
-        &on_path,
+        &prop_keep,
         layout.spawn,
         motif,
         &mut rng,
@@ -522,6 +536,10 @@ pub fn generate_with(
         dissolve: dissolve_cells.iter().map(|&c| grid.world(c)).collect(),
         terrain: grid.terrain(),
         caches: grid.pillars().iter().map(|&p| grid.world(p)).collect(),
+        secret: secret_cells.map(|(wall, approach)| Secret {
+            wall: grid.world(wall),
+            approach: grid.world(approach),
+        }),
     }
 }
 
@@ -748,6 +766,7 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         dissolve: Vec::new(),
         terrain: Terrain::Flat,
         caches: Vec::new(),
+        secret: None,
     }
 }
 
@@ -2036,6 +2055,104 @@ mod tests {
         assert!(with_shard > 250, "only {with_shard}/360 dreams got a shard");
     }
 
+    fn generate_secret(theme: DreamTheme, seed: u64, depth: u32, secret: bool) -> Dream {
+        generate_with(
+            theme,
+            seed,
+            depth,
+            Some(PropKind::Pillar),
+            true,
+            Pressure::default(),
+            Goals {
+                secret,
+                ..Goals::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_cracked_wall_never_moves_the_route_the_shard_or_the_portal() {
+        let mut hidden = 0;
+        for theme in ALL_THEMES {
+            for seed in 0..80 {
+                let plain = generate_secret(theme, seed, 3, false);
+                let d = generate_secret(theme, seed, 3, true);
+                assert!(plain.secret.is_none());
+                let same = |a: &[Waypoint], b: &[Waypoint]| {
+                    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.pos == y.pos && x.jump == y.jump)
+                };
+                assert!(same(&plain.route, &d.route), "{theme:?}/{seed}: route moved");
+                assert!(same(&plain.lucid_route, &d.lucid_route), "{theme:?}/{seed}: lucid route moved");
+                assert_eq!((plain.shard, plain.portal, plain.spawn), (d.shard, d.portal, d.spawn));
+                let Some(s) = d.secret else { continue };
+                hidden += 1;
+                let wall_h = theme.spec().wall_height;
+                assert!(wall_h > 0.0, "{theme:?}/{seed}: wall-less dream hid a wall");
+                // The cracked cell is a real wall block; the approach is open floor.
+                assert!(
+                    d.blocks.iter().any(|b| b.kind == BlockKind::Wall
+                        && flat_dist(b.pos, s.wall) < 1e-3),
+                    "{theme:?}/{seed}: no wall at the crack"
+                );
+                assert!(d.blocks.iter().any(|b| b.kind == BlockKind::Floor
+                    && (s.approach.x - b.pos.x).abs() <= b.size.x * 0.5
+                    && (s.approach.z - b.pos.z).abs() <= b.size.z * 0.5));
+                assert!((s.wall - s.approach).length() < CELL * 1.01);
+                for r in [&d.route, &d.lucid_route] {
+                    assert!(
+                        !r.iter().any(|w| flat_dist(w.pos, s.approach) < 1e-3
+                            || flat_dist(w.pos, s.wall) < 1e-3),
+                        "{theme:?}/{seed}: crack on the route"
+                    );
+                }
+                for at in d.shard.into_iter().chain(d.note).chain(d.fragments.iter().copied()) {
+                    assert!(flat_dist(at, s.wall) > 1e-3 && flat_dist(at, s.approach) > 1e-3);
+                }
+                assert!(flat_dist(d.portal, s.wall) > 1e-3 && flat_dist(d.spawn, s.wall) > 1e-3);
+                // Nothing stands on the approach, and the walk is still fair.
+                for prop in d.blocks.iter().filter(|b| b.kind == BlockKind::Prop) {
+                    let reach = prop.size * 0.5 + Vec3::splat(CELL * 0.5);
+                    let gap = (prop.pos - s.approach).abs();
+                    assert!(gap.x >= reach.x - 1e-3 || gap.z >= reach.z - 1e-3, "{theme:?}/{seed}: prop on approach");
+                }
+                if let Err(e) = patient_walk(&d, &d.lucid_route) {
+                    panic!("{theme:?}/{seed}: walled in with a secret: {e}");
+                }
+            }
+        }
+        assert!(hidden > 100, "only {hidden} secrets across every theme");
+    }
+
+    #[test]
+    fn layouts_that_cannot_hide_a_wall_never_get_one() {
+        for theme in ALL_THEMES {
+            for seed in 0..40 {
+                let d = generate_secret(theme, seed, 3, true);
+                let kind = if is_terraced(theme, seed) {
+                    LayoutKind::Terraces
+                } else {
+                    theme.spec().layout
+                };
+                if !secret::hosts(kind) {
+                    assert!(d.secret.is_none(), "{theme:?}/{seed}: {kind:?} hid a wall");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_a_secret_dreams_replay_exactly_as_before() {
+        let key = |d: &Dream| format!("{:?}|{:?}|{:?}", d.blocks, d.route, d.patrols);
+        for theme in ALL_THEMES {
+            for seed in 0..25 {
+                let base = generate(theme, seed, 3, Some(PropKind::Pillar), true);
+                let off = generate_secret(theme, seed, 3, false);
+                assert_eq!(key(&base), key(&off), "{theme:?}/{seed}");
+                assert!(!super::secret::rolls(seed, 3, 0.0));
+            }
+        }
+    }
+
     #[test]
     fn no_shard_when_not_asked() {
         let d = generate(DreamTheme::Garden, 1, 1, None, false);
@@ -2391,6 +2508,7 @@ mod tests {
                 let goals = Goals {
                     note: true,
                     fragments: true,
+                    secret: false,
                 };
                 let d = generate_with(t, seed, 3, None, true, Pressure::default(), goals);
                 let plain = generate_with(
