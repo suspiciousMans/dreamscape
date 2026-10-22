@@ -142,7 +142,12 @@ impl Sentry {
 
     /// Turns the beam; true when it has just spotted the player.
     pub fn update(&mut self, at: Vec3, player: Vec3, dt: f32) -> bool {
-        self.angle = (self.angle + SENTRY_TURN * dt).rem_euclid(std::f32::consts::TAU);
+        self.update_scaled(at, player, dt, 1.0)
+    }
+
+    /// `update` with the turn rate scaled (tactics: x1.5 with a mimic in the beam).
+    pub fn update_scaled(&mut self, at: Vec3, player: Vec3, dt: f32, turn: f32) -> bool {
+        self.angle = (self.angle + SENTRY_TURN * turn * dt).rem_euclid(std::f32::consts::TAU);
         self.cooldown = (self.cooldown - dt).max(0.0);
         if self.cooldown <= 0.0 && sees(at, self.facing(), player) {
             self.cooldown = SENTRY_COOLDOWN;
@@ -448,6 +453,14 @@ mod tests {
             calls >= 1 && calls as f32 <= full_turns.ceil() + 1.0,
             "{calls} calls"
         );
+    }
+
+    #[test]
+    fn a_scaled_sentry_turns_faster() {
+        let (mut a, mut b) = (Sentry::new(0.0), Sentry::new(0.0));
+        a.update_scaled(Vec3::ZERO, Vec3::splat(99.0), 1.0, 1.5);
+        b.update(Vec3::ZERO, Vec3::splat(99.0), 1.0);
+        assert!((a.angle - 1.5 * b.angle).abs() < 1e-5);
     }
 
     #[test]
