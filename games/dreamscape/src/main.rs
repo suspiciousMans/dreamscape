@@ -121,6 +121,10 @@ const PROFILES_DIR: &str = "games/dreamscape/profiles";
 const SHARD_SIZE: f32 = 0.8;
 const SHARD_SPIN: f32 = 2.0;
 const BEACON_HEIGHT: f32 = 8.0;
+/// How far away a creature's sounds still carry (world units).
+const SOUND_REACH: f32 = 26.0;
+/// Seconds between pulses while one nerve is left.
+const HEARTBEAT_EVERY: f32 = 1.3;
 /// The dreamer's dark outline shell, relative to its body.
 const OUTLINE_SCALE: f32 = 1.22;
 
@@ -278,6 +282,8 @@ struct NewFoe {
     calm: Arc<GpuTexture>,
     tell: Arc<GpuTexture>,
     extras: Vec<Entity>,
+    /// What it was doing last frame, so its sounds play once: (telling, lunging/slamming, tears).
+    heard: (bool, bool, usize),
 }
 
 /// Segments of a Lullaby's slam ring.
@@ -557,6 +563,16 @@ pub struct DreamscapeGame {
     edge_fired: Vec<(edges::Edge, f32)>,
     /// This blow is a FLOURISH (set while a strike resolves).
     flourish_now: bool,
+    // === sounds ===
+    /// Every sound asked for, in order (tests listen to this).
+    #[cfg(test)]
+    played: std::cell::RefCell<Vec<Sound>>,
+    heart_timer: f32,
+    was_grounded: bool,
+    air_vy: f32,
+    /// Which abilities were ready last frame (for the recharge chime).
+    was_ready: Vec<bool>,
+    // === end sounds ===
     /// The swing's flash: (entity, age); and one waiting to be spawned.
     slashes: Vec<Slash>,
     slash_pending: Option<SlashStart>,
@@ -982,6 +998,12 @@ impl DreamscapeGame {
             lunge_dir: Vec3::ZERO,
             edge_fired: Vec::new(),
             flourish_now: false,
+            #[cfg(test)]
+            played: std::cell::RefCell::new(Vec::new()),
+            heart_timer: 0.0,
+            was_grounded: true,
+            air_vy: 0.0,
+            was_ready: Vec::new(),
             slashes: Vec::new(),
             slash_pending: None,
             newfoes: Vec::new(), // enemies-a
@@ -1953,6 +1975,26 @@ impl DreamscapeGame {
             }
         }
         // === end combat passives ===
+        // === sounds === a pulse at one nerve; a chime when an ability is ready again
+        if active && self.nerve.cur() == 1 && self.nerve.max() > 1 {
+            self.heart_timer += dt;
+            if self.heart_timer >= HEARTBEAT_EVERY {
+                self.heart_timer = 0.0;
+                self.sfx(Sound::Heartbeat);
+            }
+        } else {
+            self.heart_timer = HEARTBEAT_EVERY * 0.6;
+        }
+        let ready_now: Vec<bool> = self.run.abilities.iter().map(|a| a.cooldown <= 0.0).collect();
+        if self.was_ready.len() == ready_now.len()
+            && ready_now.iter().zip(&self.was_ready).any(|(now, was)| *now && !*was)
+            && self.mode == hud::Mode::Playing
+            && !self.autopilot
+        {
+            self.sfx(Sound::Ready);
+        }
+        self.was_ready = ready_now;
+        // === end sounds ===
         let wants = std::mem::take(&mut self.strike_request);
         if active && wants {
             let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
@@ -1976,7 +2018,8 @@ impl DreamscapeGame {
                     self.air_jumps_used -= 1;
                     self.air_refunded = true;
                 }
-                self.sfx(Sound::Strike);
+                // Every other swing comes back, a little lower.
+                self.sfx_pitched(Sound::Strike, if self.strike_count % 2 == 1 { 0.9 } else { 1.0 });
                 let arc = if self.run.count(Upgrade::WideEyes) > 0 {
                     combat::ARC_COS_WIDE
                 } else {
@@ -2232,6 +2275,7 @@ impl DreamscapeGame {
         if self.has_edge(e) {
             self.edge_fired.retain(|f| f.0 != e);
             self.edge_fired.push((e, self.dream_age));
+            self.sfx(if e == edges::Edge::Hexmark { Sound::Mark } else { Sound::EdgeFire });
         }
     }
 
@@ -2448,7 +2492,7 @@ impl DreamscapeGame {
         for k in 0..boss::UNDONE_MOTES {
             self.pending_motes.push(at + Vec3::new(1.5 * (k as f32 - 0.5), 0.0, 1.0));
         }
-        self.sfx(Sound::Unravel);
+        self.sfx(Sound::Triumph);
         self.flash.trigger([1.0, 0.9, 1.0], 0.4);
         log::info!("Nightmare undone (tier {tier})");
     }
@@ -2643,6 +2687,7 @@ impl DreamscapeGame {
             combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
         );
         self.bonus_dust += loot.dust;
+        self.sfx_pitched(Sound::Coin, 1.0 + 0.04 * loot.dust.min(5) as f32);
         if loot.mote {
             self.pending_motes.push(pos);
         }
@@ -2665,7 +2710,7 @@ impl DreamscapeGame {
                     self.nerve.last_stand(extra);
                     self.passive_fires(Upgrade::DreamAnchor);
                     self.flash.trigger([1.0, 0.8, 0.4], 0.5);
-                    self.sfx(Sound::WardBreak);
+                    self.sfx(Sound::LastStand);
                     log::info!("Last stand: {by} could not finish you");
                     return None;
                 }
@@ -2683,7 +2728,7 @@ impl DreamscapeGame {
                 let wash = if self.settings.reduce_flashing { 0.12 } else { 0.45 };
                 self.flash.trigger([1.0, 0.1, 0.15], wash);
                 self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
-                self.sfx(Sound::Caught);
+                self.sfx(Sound::Hurt);
                 if self.run.count(Upgrade::Thorns) > 0 {
                     self.thorns_bite();
                 }
@@ -2838,10 +2883,26 @@ impl DreamscapeGame {
         let player = self.player_position;
         let ps = gameplay::MOVE_SPEED;
         let reduced = self.settings.reduced_motion;
+        let count = |s: &Option<moths::Swarm>| {
+            s.as_ref().map_or((0, 0), |s| {
+                (
+                    s.moths.iter().filter(|m| matches!(m.mode, moths::Mode::Telegraph(..))).count(),
+                    s.moths.iter().filter(|m| matches!(m.mode, moths::Mode::Dive(..))).count(),
+                )
+            })
+        };
+        let before = count(&self.moth_swarm);
         if let Some(sw) = &mut self.moth_swarm {
             sw.update(dt, player, ps, held);
         }
+        let after = count(&self.moth_swarm);
         let mut sounds: Vec<Sound> = Vec::new();
+        if after.0 > before.0 {
+            sounds.push(Sound::MothTell);
+        }
+        if after.1 > before.1 {
+            sounds.push(Sound::MothDive);
+        }
         let mut touching: Vec<Entity> = Vec::new();
         let mut shaken: Vec<Entity> = Vec::new();
         for sp in &mut self.specials {
@@ -2870,6 +2931,9 @@ impl DreamscapeGame {
                     if matches!(before, mask::State::Telegraph(_)) && matches!(mk.state, mask::State::Slamming(_)) {
                         sounds.push(Sound::SlamLand);
                     }
+                    if matches!(before, mask::State::Patrol) && matches!(mk.state, mask::State::Telegraph(_)) {
+                        sounds.push(Sound::MaskTell);
+                    }
                     if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
                         t.position = mk.pos + Vec3::Y * 0.45;
                         t.rotation = Quat::from_rotation_y(mk.yaw);
@@ -2891,6 +2955,9 @@ impl DreamscapeGame {
                     if !held && !self.staggered.contains_key(&sp.entity) {
                         if lc.update(dt, player, ps).touching {
                             touching.push(sp.entity);
+                        }
+                        if lc.drain_due() {
+                            sounds.push(Sound::LeechDrain);
                         }
                         if jumped && lc.latched() && lc.on_jump() {
                             shaken.push(sp.entity);
@@ -2952,7 +3019,7 @@ impl DreamscapeGame {
         }
         lc.release(me, away);
         self.staggered.insert(entity, leech::STAGGER_SECS);
-        self.sfx(Sound::Bounce);
+        self.sfx(Sound::LeechShake);
         log::info!("A leech was shaken off");
     }
 
@@ -3516,6 +3583,7 @@ impl DreamscapeGame {
                 Hero,
             ));
             self.motes.push((e, 0.0));
+            self.sfx(Sound::Mote);
         }
         // === end combat ===
         if let Some((at, a, b)) = self.burst_pending.take() {
@@ -4397,6 +4465,7 @@ impl DreamscapeGame {
                 calm: calm_tex,
                 tell: tell_tex,
                 extras,
+                heard: (false, false, 0),
             });
         }
         Ok(())
@@ -4412,6 +4481,8 @@ impl DreamscapeGame {
         let reduced = self.settings.reduced_motion;
         let aim = self.decoy.map_or(player, |(at, _)| at);
         let yaw_of = |f: Vec3| Quat::from_rotation_y(f.x.atan2(f.z));
+        // What they do out loud this frame, played once the loop lets go of `self`.
+        let mut heard: Vec<(Sound, Vec3)> = Vec::new();
         for f in &mut self.newfoes {
             let reeling = held || self.staggered.contains_key(&f.entity);
             // The body first (one Transform borrowed at a time: hecs checks
@@ -4503,6 +4574,21 @@ impl DreamscapeGame {
             if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(f.entity) {
                 r.texture = Some(if telling { f.tell.clone() } else { f.calm.clone() });
             }
+            // === sounds === each tell, lunge, spit and slam is heard once
+            let (acting, tears) = match &f.ai {
+                NewAI::Tooth(a) => (a.armed(), 0),
+                NewAI::Weeper(a) => (false, a.tears.len()),
+                NewAI::Lullaby(a) => (matches!(a.phase(), lullaby::Phase::Slam(_)), 0),
+            };
+            let now = (telling, acting, tears);
+            for s in newfoes::cues(f.kind, f.heard, now) {
+                heard.push((s, pos));
+            }
+            f.heard = now;
+            // === end sounds ===
+        }
+        for (s, at) in heard {
+            self.sfx_at(s, at);
         }
     }
     // === end enemies-a ===
@@ -6226,7 +6312,7 @@ impl DreamscapeGame {
         }
         self.achievement_toast =
             Some((achievements::name(fresh[fresh.len() - 1]).to_string(), 0.0));
-        self.sfx(Sound::Pick);
+        self.sfx(Sound::Achievement);
         let _ = cards::save(&self.booklet_path, &self.booklet);
     }
 
@@ -6395,6 +6481,17 @@ impl DreamscapeGame {
         (rows, !goal.is_empty())
     }
 
+    /// Where the cursor sits on whichever menu is up.
+    fn menu_cursor(&self) -> usize {
+        match self.mode {
+            hud::Mode::Title => self.title_sel,
+            hud::Mode::Choice => self.choice_view.selected,
+            hud::Mode::Loadout => self.loadout_sel,
+            hud::Mode::Merge => self.merge_sel,
+            _ => 0,
+        }
+    }
+
     // === pointer ===
     /// The mouse over a menu: hovering selects, clicking does what Enter does
     /// (the key to press is returned), right-clicking steps back. Positions
@@ -6433,7 +6530,7 @@ impl DreamscapeGame {
                         let chosen = self.booklet.lore.loadout.clone();
                         if let Some(&number) = chosen.get(k) {
                             self.booklet.lore.loadout.retain(|&n| n != number);
-                            self.sfx(Sound::Pick);
+                            self.sfx(Sound::Unequip);
                             self.persist_booklet();
                         }
                         return None;
@@ -6841,7 +6938,7 @@ impl DreamscapeGame {
                                 .position(|x| x.number == a)
                                 .unwrap_or(0);
                             self.flash.trigger([1.0, 0.8, 1.0], 0.5);
-                            self.sfx(Sound::Pick);
+                            self.sfx(Sound::Merge);
                             self.persist_booklet();
                         }
                         None => self.sfx(Sound::Denied),
@@ -6884,8 +6981,12 @@ impl DreamscapeGame {
                     return;
                 };
                 let slots = self.asc_slots();
+                let was_in = self.booklet.lore.loadout.contains(&number);
                 if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
+                    self.sfx(if was_in { Sound::Unequip } else { Sound::Equip });
                     self.persist_booklet();
+                } else {
+                    self.sfx(Sound::Denied); // the slots are full
                 }
             }
             Keycode::C if !self.booklet.lore.dreamers.is_empty() => {
@@ -7538,8 +7639,17 @@ impl DreamscapeGame {
         self.sfx_pitched(sound, 1.0);
     }
 
+    /// A sound from somewhere in the dream: heard only when it is near.
+    fn sfx_at(&self, sound: Sound, at: Vec3) {
+        if at.distance(self.player_position) <= SOUND_REACH {
+            self.sfx(sound);
+        }
+    }
+
     /// Play a sound faster/slower (a ratio: 2.0 is an octave up).
     fn sfx_pitched(&self, sound: Sound, ratio: f32) {
+        #[cfg(test)]
+        self.played.borrow_mut().push(sound);
         if let (Some(audio), Some(samples)) = (&self.audio, self.sounds.get(&sound)) {
             audio.play_samples(samples, (sounds::RATE as f32 * ratio) as u32);
         }
@@ -8767,6 +8877,7 @@ impl DreamscapeGame {
         // === sanctuary === a place to breathe: nerve refills
         if self.sanctuary() {
             self.nerve.heal(self.nerve.max());
+            self.sfx(Sound::Sanctuary);
             self.dream_hint = "a quiet place · nothing here can hurt you".to_string();
         }
         // === end sanctuary ===
@@ -9316,7 +9427,11 @@ impl Game for DreamscapeGame {
                 }
                 // === pointer === hovering a choice selects it
                 if menu_pointer_mode(self.mode) && xrel.abs() + yrel.abs() > 0 {
+                    let before = self.menu_cursor();
                     self.menu_pointer(*x, *y, Pointer::Hover);
+                    if self.menu_cursor() != before {
+                        self.sfx(Sound::Tick);
+                    }
                 }
                 // === end pointer ===
                 if !self.mouse_captured && xrel.abs() + yrel.abs() > 6 {
@@ -10139,6 +10254,16 @@ impl Game for DreamscapeGame {
             body.velocity.z = v.z * walk + push.1 + knock.1 + lunge.z;
             // === end combat ===
             // === end hazards ===
+            // === sounds === a thud when a fall ends
+            if body.grounded && !self.was_grounded && self.air_vy < -4.0 && !self.autopilot {
+                let pitch = (1.25 + self.air_vy / 40.0).clamp(0.7, 1.2);
+                self.sfx_pitched(Sound::Land, pitch);
+            }
+            if !body.grounded {
+                self.air_vy = body.velocity.y;
+            }
+            self.was_grounded = body.grounded;
+            // === end sounds ===
             self.player_grounded = body.grounded;
             if body.grounded {
                 self.air_jumps_used = 0;
@@ -12384,6 +12509,109 @@ mod screen_smoke {
         assert!(words.iter().any(|w| w.contains("[esc / p] keep dreaming")), "{words:?}");
         assert!(words.iter().any(|w| w.contains("[m] back to menu")));
         assert!(!words.iter().any(|w| w.contains("[q]")), "no Q left on the pause screen");
+    }
+
+    fn heard(g: &DreamscapeGame) -> Vec<Sound> {
+        g.played.borrow().clone()
+    }
+
+    #[test]
+    fn a_hit_hurts_out_loud_and_the_last_point_is_the_old_caught_sound_from_the_fail_path() {
+        let mut g = game("snd_hurt");
+        g.take_nerve_hit("patrol");
+        assert_eq!(heard(&g), vec![Sound::Hurt]);
+        g.played.borrow_mut().clear();
+        g.nerve.tick(2.0);
+        g.take_nerve_hit("patrol");
+        g.nerve.tick(2.0);
+        g.run.take(Upgrade::DreamAnchor);
+        g.played.borrow_mut().clear();
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        assert_eq!(heard(&g), vec![Sound::LastStand], "dream anchor stands you back up");
+    }
+
+    #[test]
+    fn at_one_nerve_the_heart_beats_every_second_and_a_third_and_only_then() {
+        let mut g = fighter("snd_heart", None);
+        g.mode = hud::Mode::Playing;
+        for _ in 0..200 {
+            g.update_combat(0.05);
+        }
+        assert!(!heard(&g).contains(&Sound::Heartbeat), "full nerve: silent");
+        g.nerve.hit(2, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        assert_eq!(g.nerve.cur(), 1);
+        g.played.borrow_mut().clear();
+        for _ in 0..200 {
+            g.update_combat(0.05); // ten seconds
+        }
+        let beats = heard(&g).iter().filter(|&&s| s == Sound::Heartbeat).count();
+        assert!((6..=9).contains(&beats), "about one every 1.3s, got {beats}");
+    }
+
+    #[test]
+    fn an_ability_chimes_when_it_is_ready_again_but_not_when_it_starts_ready() {
+        let mut g = fighter("snd_ready", Some(Ability::Dash));
+        g.mode = hud::Mode::Playing;
+        g.update_combat(0.016);
+        assert!(!heard(&g).contains(&Sound::Ready), "ready from the start: no chime");
+        g.run.abilities[0].cooldown = 2.0;
+        g.update_combat(0.016);
+        assert!(!heard(&g).contains(&Sound::Ready), "going on cooldown is silent");
+        g.run.abilities[0].cooldown = 0.0;
+        g.update_combat(0.016);
+        assert_eq!(heard(&g).iter().filter(|&&s| s == Sound::Ready).count(), 1);
+        g.update_combat(0.016);
+        assert_eq!(heard(&g).iter().filter(|&&s| s == Sound::Ready).count(), 1, "once");
+    }
+
+    #[test]
+    fn edges_ring_when_they_act_and_hexmark_has_its_own_sound() {
+        let mut g = with_edge("snd_edge", edges::Edge::Flourish);
+        g.edge_fires(edges::Edge::Flourish);
+        g.edge_fires(edges::Edge::Hexmark); // not equipped: silent
+        assert_eq!(heard(&g), vec![Sound::EdgeFire]);
+        let mut h = with_edge("snd_mark", edges::Edge::Hexmark);
+        h.edge_fires(edges::Edge::Hexmark);
+        assert_eq!(heard(&h), vec![Sound::Mark]);
+    }
+
+    #[test]
+    fn a_creatures_sounds_carry_only_when_it_is_near() {
+        let far = fighter("snd_far", None);
+        far.sfx_at(Sound::ToothTell, Vec3::new(500.0, 1.0, 0.0));
+        far.sfx_at(Sound::ToothTell, Vec3::new(5.0, 1.0, 0.0));
+        assert_eq!(heard(&far), vec![Sound::ToothTell], "only the near one carries");
+    }
+
+    #[test]
+    fn an_equip_an_unequip_and_a_merge_each_have_their_own_sound() {
+        let mut g = game("snd_ui");
+        three_cards(&mut g);
+        // (An achievement may chime on the first card; only the card sounds matter here.)
+        let cards = |g: &DreamscapeGame| -> Vec<Sound> {
+            heard(g)
+                .into_iter()
+                .filter(|s| matches!(s, Sound::Equip | Sound::Unequip | Sound::Merge | Sound::Denied))
+                .collect()
+        };
+        g.open_loadout();
+        g.loadout_sel = 0;
+        g.loadout_key(Keycode::Return);
+        assert_eq!(cards(&g), vec![Sound::Equip]);
+        g.loadout_key(Keycode::Return);
+        assert_eq!(cards(&g), vec![Sound::Equip, Sound::Unequip]);
+        g.played.borrow_mut().clear();
+        g.open_merge(hud::Mode::Title);
+        g.merge_sel = 0;
+        g.merge_key(Keycode::Return);
+        g.merge_sel = 1;
+        g.merge_key(Keycode::Return);
+        assert!(cards(&g).contains(&Sound::Merge));
+        // The cursor moving is what the hover tick listens for.
+        let before = g.menu_cursor();
+        g.merge_sel = (before + 1).min(g.booklet.card_count().saturating_sub(1));
+        assert_ne!(g.menu_cursor(), before);
     }
 
     #[test]

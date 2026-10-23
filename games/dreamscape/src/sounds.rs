@@ -71,9 +71,61 @@ pub enum Sound {
     Bounce,
     /// A leech latches on.
     Latch,
+    /// A Tooth gathers itself.
+    ToothTell,
+    /// A Tooth lunges.
+    ToothLunge,
+    /// A Weeper spits a tear.
+    WeeperSpit,
+    /// A Lullaby winds up.
+    LullabyTell,
+    /// A Lullaby slams the floor.
+    LullabySlam,
+    /// A moth brightens.
+    MothTell,
+    /// A moth dives.
+    MothDive,
+    /// A mask knocks, winding up.
+    MaskTell,
+    /// A leech drains you.
+    LeechDrain,
+    /// You shake a leech off.
+    LeechShake,
+    /// A hit costs you nerve.
+    Hurt,
+    /// One nerve left: your pulse.
+    Heartbeat,
+    /// Dream anchor: a blow that should have ended you doesn't.
+    LastStand,
+    /// Landing from a fall.
+    Land,
+    /// An ability has recharged.
+    Ready,
+    /// A card's combat edge acts.
+    EdgeFire,
+    /// Hexmark brands an enemy.
+    Mark,
+    /// A menu choice under the pointer.
+    Tick,
+    /// Two cards become one.
+    Merge,
+    /// A card goes into the loadout.
+    Equip,
+    /// A card leaves it.
+    Unequip,
+    /// A quiet place: nothing here can hurt you.
+    Sanctuary,
+    /// An achievement unlocks.
+    Achievement,
+    /// Dust from an undone enemy.
+    Coin,
+    /// A nightmare comes undone.
+    Triumph,
+    /// A calm mote appears.
+    Mote,
 }
 
-pub const ALL_SOUNDS: [Sound; 45] = [
+pub const ALL_SOUNDS: [Sound; 71] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -119,6 +171,32 @@ pub const ALL_SOUNDS: [Sound; 45] = [
     Sound::Calm,
     Sound::Bounce,
     Sound::Latch,
+    Sound::ToothTell,
+    Sound::ToothLunge,
+    Sound::WeeperSpit,
+    Sound::LullabyTell,
+    Sound::LullabySlam,
+    Sound::MothTell,
+    Sound::MothDive,
+    Sound::MaskTell,
+    Sound::LeechDrain,
+    Sound::LeechShake,
+    Sound::Hurt,
+    Sound::Heartbeat,
+    Sound::LastStand,
+    Sound::Land,
+    Sound::Ready,
+    Sound::EdgeFire,
+    Sound::Mark,
+    Sound::Tick,
+    Sound::Merge,
+    Sound::Equip,
+    Sound::Unequip,
+    Sound::Sanctuary,
+    Sound::Achievement,
+    Sound::Coin,
+    Sound::Triumph,
+    Sound::Mote,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -416,6 +494,105 @@ pub fn synth(sound: Sound) -> Vec<f32> {
             v(320.0, 120.0, 0.2).noise(0.6).gain(0.3),
             v(200.0, 90.0, 0.25).gain(0.25).at(0.05),
         ],
+        ToothTell => vec![
+            v(120.0, 260.0, 0.3).wave(1).gain(0.22).curve(1.2),
+            v(60.0, 90.0, 0.3).noise(0.4).gain(0.2),
+        ],
+        ToothLunge => vec![
+            v(900.0, 200.0, 0.14).noise(0.8).gain(0.3).curve(1.5),
+            v(300.0, 120.0, 0.12).wave(1).gain(0.2),
+        ],
+        WeeperSpit => vec![
+            v(700.0, 300.0, 0.12).gain(0.3),
+            v(1000.0, 400.0, 0.08).noise(0.3).gain(0.15).at(0.02),
+        ],
+        LullabyTell => vec![
+            v(55.0, 95.0, 0.7).wave(2).gain(0.35).attack(0.15),
+            v(110.0, 190.0, 0.6).gain(0.15).attack(0.1),
+        ],
+        LullabySlam => vec![
+            v(90.0, 35.0, 0.45).gain(0.45).curve(2.5),
+            v(300.0, 60.0, 0.3).noise(0.9).gain(0.25),
+        ],
+        MothTell => vec![
+            v(1800.0, 2600.0, 0.25).wave(2).gain(0.14),
+            v(2000.0, 2900.0, 0.22).gain(0.1).at(0.04),
+        ],
+        MothDive => vec![v(2400.0, 700.0, 0.16).wave(2).gain(0.22)],
+        MaskTell => vec![
+            v(200.0, 120.0, 0.08).wave(1).gain(0.25),
+            v(190.0, 110.0, 0.08).wave(1).gain(0.25).at(0.13),
+        ],
+        LeechDrain => vec![
+            v(260.0, 110.0, 0.3).noise(0.5).gain(0.3),
+            v(150.0, 80.0, 0.3).gain(0.2).at(0.05),
+        ],
+        LeechShake => vec![
+            v(500.0, 1500.0, 0.12).wave(2).gain(0.3),
+            v(1500.0, 300.0, 0.1).noise(0.5).gain(0.2).at(0.06),
+        ],
+        Hurt => vec![
+            v(320.0, 90.0, 0.2).wave(1).gain(0.45),
+            v(1200.0, 300.0, 0.12).noise(0.7).gain(0.3),
+        ],
+        Heartbeat => vec![
+            v(70.0, 45.0, 0.14).gain(0.5).curve(2.5),
+            v(70.0, 45.0, 0.14).gain(0.38).curve(2.5).at(0.2),
+        ],
+        LastStand => vec![
+            v(392.0, 392.0, 0.3).gain(0.22),
+            v(523.0, 523.0, 0.35).gain(0.22).at(0.06),
+            v(784.0, 784.0, 0.5).gain(0.24).at(0.12),
+        ],
+        Land => vec![v(140.0, 55.0, 0.09).noise(0.3).gain(0.35)],
+        Ready => vec![
+            v(1320.0, 1320.0, 0.08).gain(0.18),
+            v(1760.0, 1760.0, 0.12).gain(0.16).at(0.06),
+        ],
+        EdgeFire => vec![
+            v(1100.0, 1500.0, 0.1).wave(2).gain(0.2),
+            v(1500.0, 1900.0, 0.1).wave(2).gain(0.15).at(0.05),
+        ],
+        Mark => vec![
+            v(600.0, 300.0, 0.18).wave(1).gain(0.2),
+            v(300.0, 600.0, 0.18).gain(0.15).at(0.1),
+        ],
+        Tick => vec![v(1400.0, 1400.0, 0.04).wave(1).gain(0.12)],
+        Merge => vec![
+            v(523.0, 523.0, 0.14).gain(0.22),
+            v(659.0, 659.0, 0.14).gain(0.22).at(0.08),
+            v(784.0, 784.0, 0.14).gain(0.22).at(0.16),
+            v(1047.0, 1047.0, 0.3).gain(0.24).at(0.24),
+        ],
+        Equip => vec![
+            v(500.0, 800.0, 0.07).gain(0.22),
+            v(800.0, 1000.0, 0.06).gain(0.2).at(0.05),
+        ],
+        Unequip => vec![v(800.0, 450.0, 0.09).gain(0.2)],
+        Sanctuary => vec![
+            v(262.0, 262.0, 1.0).gain(0.16).attack(0.1).curve(1.5),
+            v(330.0, 330.0, 1.0).gain(0.14).attack(0.1).curve(1.5).at(0.05),
+            v(392.0, 392.0, 1.0).gain(0.14).attack(0.1).curve(1.5).at(0.1),
+            v(523.0, 523.0, 0.9).gain(0.12).attack(0.1).curve(1.5).at(0.15),
+        ],
+        Achievement => vec![
+            v(659.0, 659.0, 0.12).gain(0.2),
+            v(784.0, 784.0, 0.12).gain(0.2).at(0.1),
+            v(988.0, 988.0, 0.12).gain(0.2).at(0.2),
+            v(1319.0, 1319.0, 0.35).gain(0.22).at(0.3),
+        ],
+        Coin => vec![
+            v(1568.0, 1568.0, 0.05).gain(0.2),
+            v(2093.0, 2093.0, 0.1).gain(0.2).at(0.05),
+        ],
+        Triumph => vec![
+            v(262.0, 262.0, 0.3).gain(0.22),
+            v(330.0, 330.0, 0.3).gain(0.22).at(0.1),
+            v(392.0, 392.0, 0.3).gain(0.22).at(0.2),
+            v(523.0, 523.0, 0.35).gain(0.22).at(0.3),
+            v(659.0, 659.0, 0.6).gain(0.24).at(0.4),
+        ],
+        Mote => vec![v(900.0, 1400.0, 0.2).wave(2).gain(0.15)],
     };
     render(&voices, sound as u32 * 7919 + 1)
 }
@@ -449,6 +626,33 @@ mod tests {
                 "{s:?} ends with a click"
             );
             assert_eq!(x, synth(s));
+        }
+    }
+
+    #[test]
+    fn the_new_sounds_have_the_right_character() {
+        let secs = |s: Sound| synth(s).len() as f32 / RATE as f32;
+        let peak = |s: Sound| synth(s).iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        // Ticks and clicks are tiny; fanfares and drones take their time.
+        assert!(secs(Sound::Tick) < 0.1 && secs(Sound::Land) < 0.2);
+        assert!(secs(Sound::Sanctuary) > 0.8 && secs(Sound::Triumph) > 0.7);
+        // A sound that happens every second or two must not be loud.
+        for s in [Sound::Tick, Sound::Heartbeat, Sound::Mote, Sound::Ready, Sound::Land] {
+            assert!(peak(s) < 0.8, "{s:?} peaks at {}", peak(s));
+        }
+        // A slam is the loudest thing a Lullaby does.
+        assert!(peak(Sound::LullabySlam) > peak(Sound::LullabyTell));
+        // A hit hurts more than a swing.
+        assert!(peak(Sound::Hurt) > peak(Sound::Strike) * 0.8);
+    }
+
+    #[test]
+    fn no_sound_is_louder_than_the_loudest_old_one_and_nothing_new_is_a_shout() {
+        let peak = |s: Sound| synth(s).iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        // SlamLand, the old floor-shaker, is the loudest thing in the game.
+        let ceiling = peak(Sound::SlamLand).max(peak(Sound::StrikeHit)) + 0.02;
+        for s in ALL_SOUNDS {
+            assert!(peak(s) <= ceiling, "{s:?} peaks at {} (ceiling {ceiling})", peak(s));
         }
     }
 
