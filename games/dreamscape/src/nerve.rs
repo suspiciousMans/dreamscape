@@ -51,7 +51,16 @@ pub struct Nerve {
     since_hit: f32,
     /// Unit direction (x, z) of the shove, and seconds of it left.
     knock: (f32, f32, f32),
+    /// Our own clock, and what was lost when (for REWIND).
+    clock: f32,
+    losses: [(f32, u32); LOSS_MEMORY],
 }
+
+/// How many recent losses are remembered.
+const LOSS_MEMORY: usize = 6;
+/// REWIND gives back what was lost in this window, at most this much.
+pub const REWIND_WINDOW: f32 = 5.0;
+pub const REWIND_MAX: u32 = 2;
 
 impl Default for Nerve {
     fn default() -> Self {
@@ -68,6 +77,8 @@ impl Nerve {
             iframes: 0.0,
             since_hit: f32::MAX,
             knock: (0.0, 0.0, 0.0),
+            clock: 0.0,
+            losses: [(f32::MIN, 0); LOSS_MEMORY],
         }
     }
 
@@ -93,6 +104,7 @@ impl Nerve {
         self.iframes = (self.iframes - dt).max(0.0);
         self.since_hit = (self.since_hit + dt).min(f32::MAX / 2.0);
         self.knock.2 = (self.knock.2 - dt).max(0.0);
+        self.clock += dt;
     }
 
     /// Takes `damage` from something at direction `away` (unit, x/z) from you.
@@ -109,6 +121,8 @@ impl Nerve {
             return Hit::Down;
         }
         self.cur -= damage;
+        self.losses.rotate_left(1);
+        self.losses[LOSS_MEMORY - 1] = (self.clock, damage);
         self.iframes = IFRAMES + extra_iframes.max(0.0);
         let len = (away.0 * away.0 + away.1 * away.1).sqrt();
         self.knock = if len > 1e-4 {
@@ -117,6 +131,22 @@ impl Nerve {
             (0.0, 0.0, 0.0)
         };
         Hit::Hurt
+    }
+
+    /// REWIND: gives back what was lost in the last [`REWIND_WINDOW`] seconds,
+    /// at most [`REWIND_MAX`]. Returns how much came back.
+    pub fn recover(&mut self) -> u32 {
+        let mut back = 0;
+        for (t, n) in &mut self.losses {
+            if back < REWIND_MAX && self.clock - *t <= REWIND_WINDOW && *n > 0 {
+                let take = (*n).min(REWIND_MAX - back);
+                *n -= take;
+                back += take;
+            }
+        }
+        let before = self.cur;
+        self.heal(back);
+        self.cur - before
     }
 
     /// Restores up to `n` nerve (never past the max).
@@ -226,6 +256,33 @@ mod tests {
         assert_eq!(n.cur(), 3);
         n.heal(1);
         assert_eq!(n.cur(), 3);
+    }
+
+    #[test]
+    fn rewind_gives_back_recent_losses_only_and_at_most_two() {
+        let mut n = Nerve::new(MAX);
+        n.hit(1, AWAY, 0.0);
+        n.tick(2.0);
+        n.hit(1, AWAY, 0.0);
+        n.tick(2.0);
+        n.hit(1, AWAY, 0.0);
+        assert_eq!(n.cur(), 2);
+        assert_eq!(n.recover(), 2, "three recent losses, two come back");
+        assert_eq!(n.cur(), 4);
+        assert_eq!(n.recover(), 1, "the third is still in the window");
+        n.tick(REWIND_WINDOW + 1.0);
+        n.hit(2, AWAY, 0.0);
+        n.tick(REWIND_WINDOW + 1.0);
+        assert_eq!(n.recover(), 0, "too long ago");
+    }
+
+    #[test]
+    fn rewind_never_heals_past_the_max_or_for_nothing() {
+        let mut n = Nerve::default();
+        assert_eq!(n.recover(), 0);
+        n.hit(1, AWAY, 0.0);
+        n.heal(1);
+        assert_eq!(n.recover(), 0, "already full");
     }
 
     #[test]

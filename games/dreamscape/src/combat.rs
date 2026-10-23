@@ -28,6 +28,26 @@ pub const KNOCKBACK: f32 = 0.9;
 pub const UNAWARE_MULT: f32 = 2.0;
 pub const AIRBORNE_MULT: f32 = 1.5;
 pub const STAGGERED_MULT: f32 = 2.0;
+pub const HUSH_MULT: f32 = 3.0;
+pub const GHOST_MULT: f32 = 2.0;
+pub const HIGH_GROUND_MULT: f32 = 1.5;
+/// How much higher than the target counts as high ground.
+pub const HIGH_GROUND_RISE: f32 = 0.8;
+/// BLINK: the next strike is a sneak attack for this long.
+pub const BLINK_BACKSTAB_SECS: f32 = 2.0;
+/// DASH cuts what it passes through within this reach.
+pub const DASH_CUT_REACH: f32 = 1.4;
+/// FLARE: reach and stagger of the light.
+pub const FLARE_REACH: f32 = 7.0;
+pub const FLARE_STAGGER: f32 = 1.0;
+/// DECOY bursts when it ends; ANCHOR leaves a wave behind; LEAP and SLAM shock on landing.
+pub const DECOY_BURST_REACH: f32 = 3.0;
+pub const ANCHOR_WAVE_REACH: f32 = 3.0;
+pub const LEAP_SHOCK_REACH: f32 = 2.5;
+/// WARD reflects onto the nearest enemy within this reach.
+pub const WARD_REFLECT_REACH: f32 = 3.0;
+/// SHARD CALL draws calm motes in at this speed.
+pub const MOTE_PULL_SPEED: f32 = 5.0;
 /// Seconds an unravelling enemy takes to come apart.
 pub const UNRAVEL_SECS: f32 = 0.45;
 /// Chance an unravelled enemy leaves a calm mote, and the mote's lifetime.
@@ -111,14 +131,26 @@ pub struct Ctx {
     pub unaware: bool,
     /// You are in the air.
     pub airborne: bool,
-    /// The target is already reeling.
+    /// The target is already reeling (or frozen).
     pub staggered: bool,
+    /// PHASE: you strike as a ghost.
+    pub ghost: bool,
+    /// HUSH: an unaware target takes a deeper cut.
+    pub hush: bool,
+    /// STEP: you stand above the target.
+    pub high_ground: bool,
 }
 
 pub fn damage(base: f32, ctx: Ctx) -> f32 {
     let mut d = base;
     if ctx.unaware {
-        d *= UNAWARE_MULT;
+        d *= if ctx.hush { HUSH_MULT } else { UNAWARE_MULT };
+    }
+    if ctx.ghost {
+        d *= GHOST_MULT;
+    }
+    if ctx.high_ground {
+        d *= HIGH_GROUND_MULT;
     }
     if ctx.airborne {
         d *= AIRBORNE_MULT;
@@ -297,8 +329,22 @@ mod tests {
         assert_eq!(damage(1.0, Ctx { unaware: true, ..plain }), 2.0);
         assert_eq!(damage(1.0, Ctx { airborne: true, ..plain }), 1.5);
         assert_eq!(damage(1.0, Ctx { staggered: true, ..plain }), 2.0);
-        let all = Ctx { unaware: true, airborne: true, staggered: true };
+        let all = Ctx { unaware: true, airborne: true, staggered: true, ..plain };
         assert_eq!(damage(1.0, all), 6.0);
+    }
+
+    #[test]
+    fn hush_ghost_and_high_ground_change_the_cut() {
+        let plain = Ctx::default();
+        let unaware = Ctx { unaware: true, ..plain };
+        assert_eq!(damage(1.0, Ctx { hush: true, ..unaware }), 3.0, "hush: x3 on the unaware");
+        assert_eq!(damage(1.0, Ctx { hush: true, ..plain }), 1.0, "hush needs an unaware target");
+        assert_eq!(damage(1.0, Ctx { ghost: true, ..plain }), 2.0);
+        assert_eq!(damage(1.0, Ctx { high_ground: true, ..plain }), 1.5);
+        assert_eq!(
+            damage(1.0, Ctx { ghost: true, high_ground: true, ..plain }),
+            3.0
+        );
     }
 
     #[test]

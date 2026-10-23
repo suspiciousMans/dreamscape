@@ -207,6 +207,15 @@ enum SpecialAI {
     Jester(EnemyAI),
 }
 
+/// Something a strike, a dash or a shock can hit.
+struct CombatTarget {
+    entity: Entity,
+    pos: Vec3,
+    kind: combat::Kind,
+    /// It has not noticed you.
+    unaware: bool,
+}
+
 struct SpecialEnemy {
     entity: Entity,
     kind: EnemyKind,
@@ -456,6 +465,14 @@ pub struct DreamscapeGame {
     motes: Vec<(Entity, f32)>,
     /// Where calm motes should appear (spawned where there is a GL context).
     pending_motes: Vec<Vec3>,
+    /// BLINK: until when your next strike is a sneak attack.
+    backstab_until: f32,
+    /// DASH: what this dash has already cut.
+    dash_cut: Vec<Entity>,
+    /// LEAP: you are in the air from one, and will shock on landing.
+    leap_airborne: bool,
+    /// ANCHOR: this use snapped you back (set for `combat_on_use`).
+    anchor_snapped: bool,
     /// The swing's flash: (entity, age); and one waiting to be spawned.
     slashes: Vec<(Entity, f32)>,
     slash_pending: Option<(Vec3, Vec3)>,
@@ -833,6 +850,10 @@ impl DreamscapeGame {
             unraveling: Vec::new(),
             motes: Vec::new(),
             pending_motes: Vec::new(),
+            backstab_until: 0.0,
+            dash_cut: Vec::new(),
+            leap_airborne: false,
+            anchor_snapped: false,
             slashes: Vec::new(),
             slash_pending: None,
             ability_tints: Vec::new(),
@@ -1772,6 +1793,46 @@ impl DreamscapeGame {
         if self.strike.tick(dt) {
             self.resolve_strike();
         }
+        // DASH cuts what it passes through, once each.
+        if active && self.run.active(Ability::Dash) {
+            let me = self.player_position;
+            let cut: Vec<CombatTarget> = self
+                .combat_targets()
+                .into_iter()
+                .filter(|t| t.pos.distance(me) <= combat::DASH_CUT_REACH && !self.dash_cut.contains(&t.entity))
+                .collect();
+            for t in &cut {
+                self.dash_cut.push(t.entity);
+                let dmg = combat::damage(1.0, self.strike_ctx(t));
+                self.hurt_foe(t, dmg, me, 0.0, combat::STAGGER_SECS);
+            }
+            if !cut.is_empty() {
+                self.sfx(Sound::StrikeHit);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+        }
+        // LEAP: the landing shocks what is under you.
+        if self.leap_airborne && self.player_grounded && self.dream_age > 0.2 {
+            self.leap_airborne = false;
+            if active {
+                let at = self.player_position;
+                if self.shock(at, combat::LEAP_SHOCK_REACH, 1.0, combat::STAGGER_SECS) > 0 {
+                    self.sfx(Sound::StrikeHit);
+                }
+            }
+        }
+        // SHARD CALL draws calm motes in.
+        if self.run.active(Ability::ShardCall) {
+            let me = self.player_position;
+            for (e, _) in &self.motes {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                    let d = me - t.position;
+                    if d.length() > 0.1 {
+                        t.position += d.normalize() * combat::MOTE_PULL_SPEED * dt;
+                    }
+                }
+            }
+        }
         // Special enemies recover.
         self.staggered.retain(|_, left| {
             *left -= dt;
@@ -1833,18 +1894,17 @@ impl DreamscapeGame {
         }
     }
 
-    /// The swing lands: everything in the arc takes damage.
-    fn resolve_strike(&mut self) {
-        let me = self.player_position;
-        let facing = self.flat_facing();
-        let airborne = !self.player_grounded;
+    /// Everything that can be struck right now: (entity, position, kind, unaware).
+    fn combat_targets(&self) -> Vec<CombatTarget> {
         let at = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
-        // (entity, position, kind, unaware)
-        let mut targets: Vec<(Entity, Vec3, combat::Kind, bool)> = Vec::new();
+        let mut targets = Vec::new();
         for p in &self.enemies {
             if let Some(pos) = at(&self.world, p.entity) {
-                let kind = combat::Kind::Pacer { elite: p.elite, child: p.split && p.elite == Some(Elite::Splitter) };
-                targets.push((p.entity, pos, kind, !p.ai.chasing));
+                let kind = combat::Kind::Pacer {
+                    elite: p.elite,
+                    child: p.split && p.elite == Some(Elite::Splitter),
+                };
+                targets.push(CombatTarget { entity: p.entity, pos, kind, unaware: !p.ai.chasing });
             }
         }
         for sp in &self.specials {
@@ -1857,48 +1917,182 @@ impl DreamscapeGame {
             };
             if let Some(pos) = at(&self.world, sp.entity) {
                 // Sentries see you coming; the rest are unaware until chasing.
-                targets.push((sp.entity, pos, kind, !matches!(kind, combat::Kind::Sentry)));
+                targets.push(CombatTarget {
+                    entity: sp.entity,
+                    pos,
+                    kind,
+                    unaware: !matches!(kind, combat::Kind::Sentry),
+                });
             }
         }
+        targets
+    }
+
+    /// The conditions your cards put on a strike against `t` right now.
+    fn strike_ctx(&self, t: &CombatTarget) -> combat::Ctx {
+        let me = self.player_position;
+        combat::Ctx {
+            // BLINK sets up a sneak attack; HUSH deepens it.
+            unaware: t.unaware || self.dream_age < self.backstab_until,
+            airborne: !self.player_grounded || self.run.active(Ability::Float),
+            // STILLNESS freezes: a frozen foe is a reeling one.
+            staggered: self.stunned.contains_key(&t.entity)
+                || self.staggered.contains_key(&t.entity)
+                || self.run.active(Ability::Stillness),
+            ghost: self.run.active(Ability::Phase),
+            hush: self.run.active(Ability::Hush),
+            high_ground: self.run.active(Ability::Step)
+                && me.y - t.pos.y > combat::HIGH_GROUND_RISE,
+        }
+    }
+
+    /// Damages one target: the shared end of a strike, a dash, a shock.
+    /// `knock` shoves it that far from `from` (a frozen foe cannot be shoved).
+    /// Returns true if it came undone.
+    fn hurt_foe(&mut self, t: &CombatTarget, dmg: f32, from: Vec3, knock: f32, stagger: f32) -> bool {
+        let outcome = self
+            .foes
+            .entry(t.entity)
+            .or_insert_with(|| combat::Foe::new(t.kind))
+            .hit(dmg);
+        match outcome {
+            combat::Outcome::Hurt => {
+                let away = Vec3::new(t.pos.x - from.x, 0.0, t.pos.z - from.z).normalize_or_zero();
+                if knock > 0.0 && !self.run.active(Ability::Stillness) {
+                    if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
+                        tr.position += away * knock;
+                    }
+                }
+                if matches!(t.kind, combat::Kind::Pacer { .. }) {
+                    self.stunned.insert(t.entity, stagger);
+                    if let Some(p) = self.enemies.iter_mut().find(|p| p.entity == t.entity) {
+                        p.ai.reset(); // a hit breaks its lunge
+                    }
+                } else {
+                    self.staggered.insert(t.entity, stagger);
+                }
+                false
+            }
+            combat::Outcome::Unravel => {
+                self.unravel(t.entity, t.pos);
+                true
+            }
+        }
+    }
+
+    /// An area effect: every foe within `reach` of `centre` takes `dmg`
+    /// (0 = stagger only) and reels. Returns how many were touched.
+    fn shock(&mut self, centre: Vec3, reach: f32, dmg: f32, stagger: f32) -> usize {
+        let hit: Vec<CombatTarget> = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| {
+                Vec3::new(t.pos.x - centre.x, 0.0, t.pos.z - centre.z).length() <= reach
+                    && (t.pos.y - centre.y).abs() <= combat::REACH_HEIGHT
+            })
+            .collect();
+        for t in &hit {
+            if dmg > 0.0 {
+                self.hurt_foe(t, dmg, centre, 0.0, stagger);
+            } else if matches!(t.kind, combat::Kind::Pacer { .. }) {
+                self.stunned.insert(t.entity, stagger);
+            } else {
+                self.staggered.insert(t.entity, stagger);
+            }
+        }
+        hit.len()
+    }
+
+    /// The swing lands: everything in the arc takes damage.
+    fn resolve_strike(&mut self) {
+        let me = self.player_position;
+        let facing = self.flat_facing();
         let mut struck = false;
-        for (entity, pos, kind, unaware) in targets {
-            if !combat::in_arc(me, facing, pos, combat::REACH, combat::ARC_COS) {
+        for t in self.combat_targets() {
+            if !combat::in_arc(me, facing, t.pos, combat::REACH, combat::ARC_COS) {
                 continue;
             }
             struck = true;
-            let ctx = combat::Ctx {
-                unaware,
-                airborne,
-                staggered: self.stunned.contains_key(&entity) || self.staggered.contains_key(&entity),
-            };
-            let dmg = combat::damage(1.0, ctx);
-            let outcome = self
-                .foes
-                .entry(entity)
-                .or_insert_with(|| combat::Foe::new(kind))
-                .hit(dmg);
-            let away = Vec3::new(pos.x - me.x, 0.0, pos.z - me.z).normalize_or_zero();
-            match outcome {
-                combat::Outcome::Hurt => {
-                    if let Ok(mut t) = self.world.get::<&mut Transform>(entity) {
-                        t.position += away * combat::KNOCKBACK;
-                    }
-                    if matches!(kind, combat::Kind::Pacer { .. }) {
-                        self.stunned.insert(entity, combat::STAGGER_SECS);
-                        if let Some(p) = self.enemies.iter_mut().find(|p| p.entity == entity) {
-                            p.ai.reset(); // a hit breaks its lunge
-                        }
-                    } else {
-                        self.staggered.insert(entity, combat::STAGGER_SECS);
-                    }
-                }
-                combat::Outcome::Unravel => self.unravel(entity, pos),
-            }
+            let dmg = combat::damage(1.0, self.strike_ctx(&t));
+            self.hurt_foe(&t, dmg, me, combat::KNOCKBACK, combat::STAGGER_SECS);
         }
         if struck {
             self.sfx(Sound::StrikeHit);
             self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
         }
+    }
+
+    /// Your cards' combat effects, as they are used (see the combat plan, table 6).
+    fn combat_on_use(&mut self, ability: Ability, origin: Vec3) {
+        if self.coop_active() {
+            return;
+        }
+        match ability {
+            Ability::Blink => self.backstab_until = self.dream_age + combat::BLINK_BACKSTAB_SECS,
+            Ability::Dash => self.dash_cut.clear(),
+            Ability::Leap => self.leap_airborne = true,
+            Ability::Flare => {
+                // The light blinds and staggers; Shades cannot hide in it.
+                let me = self.player_position;
+                let shades: Vec<CombatTarget> = self
+                    .combat_targets()
+                    .into_iter()
+                    .filter(|t| matches!(t.kind, combat::Kind::Pacer { elite: Some(Elite::Shade), .. }))
+                    .filter(|t| t.pos.distance(me) <= combat::FLARE_REACH)
+                    .collect();
+                self.shock(me, combat::FLARE_REACH, 0.0, combat::FLARE_STAGGER);
+                for t in &shades {
+                    self.hurt_foe(t, 1.0, me, 0.0, combat::FLARE_STAGGER);
+                }
+            }
+            Ability::Rewind => {
+                let back = self.nerve.recover();
+                if back > 0 {
+                    log::info!("Rewind gave back {back} nerve");
+                    self.sfx(Sound::Calm);
+                }
+            }
+            Ability::Anchor if self.anchor_snapped => {
+                // Snapping back leaves a wave where you stood.
+                self.shock(origin, combat::ANCHOR_WAVE_REACH, 0.0, combat::STAGGER_SECS);
+            }
+            _ => {}
+        }
+    }
+
+    /// The decoy comes undone: a small burst where it stood.
+    fn decoy_burst(&mut self, at: Vec3) {
+        if self.coop_active() {
+            return;
+        }
+        if self.shock(at, combat::DECOY_BURST_REACH, 1.0, combat::STAGGER_SECS) > 0 {
+            self.sfx(Sound::StrikeHit);
+        }
+    }
+
+    /// WARD breaks: the hit goes back at what made it.
+    fn ward_reflect(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::WARD_REFLECT_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        if let Some(t) = near {
+            self.hurt_foe(&t, 1.0, me, combat::KNOCKBACK, combat::STAGGER_SECS);
+        }
+    }
+
+    /// Is `p` inside a wall? (GUST shoves enemies into them.)
+    fn in_wall(&self, p: Vec3) -> bool {
+        self.dream.as_ref().is_some_and(|d| {
+            d.blocks.iter().any(|b| {
+                b.kind == dream::BlockKind::Wall && {
+                    let h = b.size * 0.5;
+                    (p.x - b.pos.x).abs() < h.x && (p.y - b.pos.y).abs() < h.y && (p.z - b.pos.z).abs() < h.z
+                }
+            })
+        })
     }
 
     /// An enemy comes undone: out of play at once, a short animation, loot.
@@ -3635,6 +3829,12 @@ impl DreamscapeGame {
                 let (radius, stun) =
                     upgrades::slam_power(self.slam_apex - y, std::mem::take(&mut self.slam_meteor));
                 self.rattle_enemies(radius, 0.0, stun);
+                // === combat === the smash hurts what it staggers
+                if !self.coop_active() {
+                    let at = self.player_position;
+                    self.shock(at, radius, 1.0, stun.max(combat::STAGGER_SECS));
+                }
+                // === end combat ===
                 self.alert_enemies(upgrades::SLAM_NOISE);
                 self.flash.trigger([1.0, 0.8, 0.4], 0.45);
                 self.burst_pending = Some((self.player_position, [255, 190, 90], [255, 240, 200]));
@@ -3657,6 +3857,7 @@ impl DreamscapeGame {
         };
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
+        let origin = self.player_position; // combat: where you were
         if state.cooldown > 0.0 {
             self.sfx(Sound::Denied);
             return;
@@ -3721,6 +3922,7 @@ impl DreamscapeGame {
                 }
                 Some((at, e, _)) => {
                     let _ = self.world.despawn(e);
+                    self.anchor_snapped = true; // combat
                     self.teleport_player(at);
                 }
             }
@@ -3762,6 +3964,17 @@ impl DreamscapeGame {
                 };
                 self.rattle_enemies(upgrades::GUST_RADIUS, push, stun);
                 self.alert_enemies(upgrades::GUST_NOISE);
+                // === combat === shoved into a wall hurts
+                let me = self.player_position;
+                let walled: Vec<CombatTarget> = self
+                    .combat_targets()
+                    .into_iter()
+                    .filter(|t| t.pos.distance(me) <= upgrades::GUST_RADIUS + push && self.in_wall(t.pos))
+                    .collect();
+                for t in &walled {
+                    self.hurt_foe(t, 1.0, me, 0.0, stun);
+                }
+                // === end combat ===
             }
             Ability::Dash => self.alert_enemies(upgrades::DASH_NOISE),
             Ability::Hush if combo == Some(upgrades::Combo::Sanctuary) => {
@@ -3795,6 +4008,10 @@ impl DreamscapeGame {
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            // === combat ===
+            self.combat_on_use(state.ability, origin);
+            self.anchor_snapped = false;
+            // === end combat ===
             if cracks {
                 self.open_secret();
             }
@@ -6625,6 +6842,9 @@ impl DreamscapeGame {
         self.unraveling.clear();
         self.motes.clear();
         self.pending_motes.clear();
+        self.backstab_until = 0.0;
+        self.dash_cut.clear();
+        self.leap_airborne = false;
         self.slashes.clear();
         self.slash_pending = None;
         self.strike.reset();
@@ -8692,8 +8912,9 @@ impl Game for DreamscapeGame {
             });
         }
         if !self.run.active(Ability::Decoy) {
-            if let Some((_, e)) = self.decoy.take() {
+            if let Some((at, e)) = self.decoy.take() {
                 let _ = self.world.despawn(e);
+                self.decoy_burst(at); // combat
             }
         }
         // An anchor left too long fades; so does one whose card is gone.
@@ -8821,6 +9042,7 @@ impl Game for DreamscapeGame {
         // WARD takes the hit meant for you.
         let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
             self.break_ward();
+            self.ward_reflect(); // combat
             None
         } else {
             caught_by
@@ -9859,6 +10081,143 @@ mod screen_smoke {
         a.strike_request = true;
         a.update_combat(0.0);
         assert!(a.slash_pending.is_none(), "the autopilot does not fight");
+    }
+
+    /// A game with `ability` held and running, a dreamer at (0,1,0) on the ground.
+    fn fighter(name: &str, ability: Option<Ability>) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        if let Some(a) = ability {
+            g.run.take(Upgrade::Learn(a));
+            g.run.abilities[0].active = 5.0;
+        }
+        g
+    }
+
+    #[test]
+    fn a_dash_cuts_what_it_passes_once_and_leaves_the_rest() {
+        let mut g = fighter("dash", Some(Ability::Dash));
+        let near = put_pacer(&mut g, Vec3::new(0.5, 1.0, 1.0), true);
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 8.0), true);
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&near].hp, 1.0, "cut for 1");
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&near].hp, 1.0, "only once per dash");
+        assert_eq!(g.foes.len(), 1, "the far one is untouched");
+        g.run.abilities[0].active = 0.0;
+        g.run.abilities[0].cooldown = 0.0;
+        g.combat_on_use(Ability::Dash, Vec3::ZERO); // a new dash
+        g.run.abilities[0].active = 5.0;
+        g.update_combat(0.016);
+        assert!(g.enemies.len() == 1, "the second cut finishes it");
+    }
+
+    #[test]
+    fn blink_sets_up_a_sneak_attack_even_on_an_aware_foe() {
+        let mut g = fighter("blink", None);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.combat_on_use(Ability::Blink, Vec3::ZERO);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "x2 on a 2 hp pacer");
+        assert!(g.unraveling.iter().any(|u| u.0 == e));
+        // The window ends.
+        let mut h = fighter("blink2", None);
+        put_pacer(&mut h, Vec3::new(0.0, 1.0, 2.0), true);
+        h.combat_on_use(Ability::Blink, Vec3::ZERO);
+        h.dream_age += combat::BLINK_BACKSTAB_SECS + 0.1;
+        h.resolve_strike();
+        assert_eq!(h.enemies.len(), 1);
+    }
+
+    #[test]
+    fn stillness_makes_a_foe_take_double_and_stay_put() {
+        let mut g = fighter("still", Some(Ability::Stillness));
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "frozen: x2 undoes it in one blow");
+        let mut h = fighter("still2", Some(Ability::Stillness));
+        let big = h.world.spawn((Transform { position: Vec3::new(0.0, 1.0, 2.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        let mut ai = EnemyAI::new(Vec3::ZERO, Vec3::X, 2.0, 0.0, 9.0);
+        ai.chasing = true;
+        h.enemies.push(Pacer { entity: big, ai, elite: Some(Elite::Big), a: Vec3::ZERO, b: Vec3::X, split: false });
+        h.resolve_strike();
+        let z = h.world.get::<&Transform>(big).unwrap().position.z;
+        assert_eq!(z, 2.0, "frozen things are not shoved");
+        assert_eq!(h.foes[&big].hp, 2.0, "4 hp, x2");
+        let _ = e;
+    }
+
+    #[test]
+    fn flare_staggers_what_it_lights_and_hurts_shades() {
+        let mut g = fighter("flare", None);
+        let plain = put_pacer(&mut g, Vec3::new(3.0, 1.0, 2.0), false);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 2.0), false);
+        let shade = put_pacer(&mut g, Vec3::new(-3.0, 1.0, 2.0), false);
+        g.enemies.last_mut().unwrap().elite = Some(Elite::Shade);
+        g.combat_on_use(Ability::Flare, Vec3::ZERO);
+        assert!(g.stunned.contains_key(&plain), "lit and reeling");
+        assert!(!g.stunned.contains_key(&far), "out of the light");
+        assert_eq!(g.foes[&shade].hp, 1.0, "the shade cannot hide in it");
+        assert!(!g.foes.contains_key(&plain), "plain things are staggered, not hurt");
+    }
+
+    #[test]
+    fn rewind_gives_nerve_back_through_the_ability() {
+        let mut g = fighter("rewind", None);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert_eq!(g.nerve.cur(), 1);
+        g.combat_on_use(Ability::Rewind, Vec3::ZERO);
+        assert_eq!(g.nerve.cur(), 3);
+    }
+
+    #[test]
+    fn a_decoys_end_bursts_and_a_broken_ward_reflects_and_anchor_leaves_a_wave() {
+        let mut g = fighter("burst", None);
+        let near = put_pacer(&mut g, Vec3::new(1.0, 1.0, 1.0), true);
+        let far = put_pacer(&mut g, Vec3::new(9.0, 1.0, 9.0), true);
+        g.decoy_burst(Vec3::ZERO);
+        assert_eq!(g.foes[&near].hp, 1.0);
+        assert!(!g.foes.contains_key(&far));
+        let mut w = fighter("ward", None);
+        let hit = put_pacer(&mut w, Vec3::new(1.5, 1.0, 0.0), true);
+        w.ward_reflect();
+        assert_eq!(w.foes[&hit].hp, 1.0, "the blow goes back");
+        let mut a = fighter("anchor", None);
+        let e = put_pacer(&mut a, Vec3::new(1.0, 1.0, 0.0), true);
+        a.anchor_snapped = true;
+        a.combat_on_use(Ability::Anchor, Vec3::ZERO);
+        assert!(a.stunned.contains_key(&e), "the wave staggers");
+        assert!(!a.foes.contains_key(&e), "but does not hurt");
+    }
+
+    #[test]
+    fn a_leaps_landing_shocks_once() {
+        let mut g = fighter("leap", None);
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 1.0), true);
+        g.combat_on_use(Ability::Leap, Vec3::ZERO);
+        assert!(g.leap_airborne);
+        g.player_grounded = false;
+        g.update_combat(0.016);
+        assert!(g.foes.is_empty(), "still in the air");
+        g.player_grounded = true;
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&e].hp, 1.0);
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&e].hp, 1.0, "once per leap");
+    }
+
+    #[test]
+    fn shard_call_pulls_calm_motes_to_you() {
+        let mut g = fighter("pull", Some(Ability::ShardCall));
+        let m = g.world.spawn((Transform { position: Vec3::new(8.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        g.motes = vec![(m, 0.0)];
+        g.update_combat(0.5);
+        let x = g.world.get::<&Transform>(m).unwrap().position.x;
+        assert!(x < 7.0, "drawn in, x = {x}");
     }
 
     #[test]
