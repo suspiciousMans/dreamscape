@@ -11,6 +11,8 @@ use crate::upgrades::{Ability, Upgrade};
 pub struct Power {
     pub active: Ability,
     pub passive: Upgrade,
+    /// A way of fighting some dreams also teach (see `edges.rs`).
+    pub edge: Option<crate::edges::Edge>,
     pub tint: [u8; 3],
     pub flavour: &'static str,
 }
@@ -43,6 +45,7 @@ pub fn power(theme: DreamTheme) -> Power {
     Power {
         active,
         passive,
+        edge: crate::edges::edge(theme),
         tint: theme.spec().accents[0],
         flavour,
     }

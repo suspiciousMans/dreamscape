@@ -73,6 +73,20 @@ pub fn describe(c: &Card, slot: Option<usize>) -> (String, String) {
     (active, passive)
 }
 
+/// The combat edges a card teaches: its dream's, and a fused card's second.
+pub fn edges_of(c: &Card) -> Vec<crate::edges::Edge> {
+    let mut out = Vec::new();
+    for e in [power(c.theme).edge, c.fused.and_then(|b| power(b).edge)]
+        .into_iter()
+        .flatten()
+    {
+        if !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    out
+}
+
 /// Which ability slot a chosen card's active fills, or `None` if it brings
 /// no active (the slots are full, or an earlier card teaches the same one).
 pub fn slot_of(chosen: &[&Card], number: u32) -> Option<usize> {
@@ -395,8 +409,35 @@ pub fn power_lines(
         FontId::monospace(pixel_ui::fit(info.desc, 12.0 * u, width - ipx * 10.5, 7.0)),
         rgba([160, 220, 190], 0.7),
     );
+    // The combat edges, if this dream teaches any.
+    let mut y3 = y2 + row_h + 6.0 * u;
+    for e in edges_of(c) {
+        pixel_ui::icon(
+            p,
+            Pos2::new(at.x + ipx * 4.5, y3 + ipx * 4.5),
+            icons::ability(crate::upgrades::Ability::Dash),
+            ipx,
+            e.color(),
+            pixel_ui::lighter(e.color()),
+            1.0,
+        );
+        p.text(
+            Pos2::new(tx, y3),
+            Align2::LEFT_TOP,
+            format!("EDGE: {}", e.name()),
+            FontId::monospace(pixel_ui::fit(e.name(), 15.0 * u, width - ipx * 10.5, 8.0)),
+            rgba(e.color(), 0.95),
+        );
+        p.text(
+            Pos2::new(tx, y3 + 20.0 * u),
+            Align2::LEFT_TOP,
+            e.desc(),
+            FontId::monospace(pixel_ui::fit(e.desc(), 12.0 * u, width - ipx * 10.5, 7.0)),
+            rgba([220, 190, 190], 0.75),
+        );
+        y3 += row_h + 6.0 * u;
+    }
     // The flavour, a little glitchy.
-    let y3 = y2 + row_h + 6.0 * u;
     let wob = if (time * 0.7).fract() < 0.04 {
         1.0
     } else {
