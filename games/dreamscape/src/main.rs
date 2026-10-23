@@ -10230,6 +10230,156 @@ mod screen_smoke {
         assert!(a.slash_pending.is_none(), "the autopilot does not fight");
     }
 
+    // === combat === ENEMIES-B wiring
+    fn put_special(g: &mut DreamscapeGame, kind: EnemyKind, at: Vec3, ai: SpecialAI) -> Entity {
+        let entity = g.world.spawn((
+            Transform { position: at, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        g.specials.push(SpecialEnemy { entity, kind, ai });
+        entity
+    }
+
+    fn standing(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 0.5, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g
+    }
+
+    #[test]
+    fn a_masks_shield_turns_a_front_strike_aside_but_not_one_from_behind() {
+        // The dreamer faces +Z with a mask 1.5 ahead.
+        let mut g = standing("mask_front");
+        let at = Vec3::new(0.0, 0.5, 1.5);
+        let facing_me = mask::Mask::new(at, at - Vec3::Z * 3.0); // heads for -Z: faces the dreamer
+        let m = put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(facing_me));
+        g.resolve_strike();
+        assert!(g.foes.is_empty(), "glanced: no damage");
+        assert!(!g.staggered.contains_key(&m), "and no stagger");
+        assert!(g.burst_pending.is_some(), "a spark");
+        // The same mask turned away takes the hit.
+        let mut h = standing("mask_back");
+        let turned = mask::Mask::new(at, at + Vec3::Z * 3.0);
+        let m = put_special(&mut h, EnemyKind::Mask, at, SpecialAI::Mask(turned));
+        h.resolve_strike();
+        assert_eq!(h.foes[&m].hp, 2.0, "3 hp, 1 damage");
+        assert!(h.staggered.contains_key(&m));
+        // A gust spins the first one, shield down, and then it can be hit.
+        g.rattle_b(20.0, 5.0);
+        g.resolve_strike();
+        assert_eq!(g.foes[&m_of(&g)].hp, 2.0);
+    }
+
+    fn m_of(g: &DreamscapeGame) -> Entity {
+        g.specials.iter().find(|s| matches!(s.ai, SpecialAI::Mask(_))).unwrap().entity
+    }
+
+    #[test]
+    fn a_slam_cracks_the_shield_so_a_frontal_strike_lands() {
+        let mut g = standing("mask_slam");
+        let at = Vec3::new(0.0, 0.5, 1.5);
+        let m = put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(mask::Mask::new(at, at - Vec3::Z * 3.0)));
+        g.rattle_b(20.0, 0.0);
+        g.resolve_strike();
+        assert_eq!(g.foes[&m].hp, 2.0);
+    }
+
+    #[test]
+    fn a_mask_slam_costs_one_nerve_by_name() {
+        let mut g = standing("mask_hit");
+        let at = Vec3::new(0.0, 0.5, 2.0);
+        let mut mk = mask::Mask::new(at, at - Vec3::Z * 3.0);
+        mk.state = mask::State::Slamming(mask::SLAM_ACTIVE);
+        put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(mk));
+        assert_eq!(g.threat_touching(), Some("mask"));
+        g.player_position = Vec3::new(0.0, 0.5, -5.0);
+        assert_eq!(g.threat_touching(), None, "behind it, out of reach");
+    }
+
+    #[test]
+    fn a_leech_latches_drains_through_the_nerve_path_and_three_jumps_shake_it() {
+        let mut g = standing("leech");
+        let at = Vec3::new(0.0, 0.35, 0.5);
+        let e = put_special(&mut g, EnemyKind::Leech, at, SpecialAI::Leech(leech::Leech::new(at)));
+        g.update_enemies_b(0.016, false);
+        let latched = |g: &DreamscapeGame| g.specials.iter().any(|s| matches!(&s.ai, SpecialAI::Leech(l) if l.latched()));
+        assert!(latched(&g), "touching latches");
+        assert_eq!(g.threat_touching(), None, "the latch itself costs nothing");
+        // Two seconds on: one drain, by name, through take_nerve_hit.
+        g.update_enemies_b(2.0, false);
+        assert_eq!(g.threat_touching(), Some("leech"));
+        assert_eq!(g.take_nerve_hit("leech"), None);
+        assert_eq!(g.nerve.cur(), 2);
+        g.update_enemies_b(0.016, false);
+        assert_eq!(g.threat_touching(), None, "one drain per period");
+        // Invulnerable: the next drain is ignored.
+        g.update_enemies_b(2.0, false);
+        assert_eq!(g.take_nerve_hit("leech"), None);
+        assert_eq!(g.nerve.cur(), 2, "iframes");
+        // Three jumps in two seconds.
+        for _ in 0..3 {
+            g.jump_event = true;
+            g.update_enemies_b(0.3, false);
+        }
+        assert!(!latched(&g), "shaken off");
+        assert!(g.staggered.contains_key(&e), "and reeling");
+        // After 1.5s it resumes crawling at you.
+        g.update_combat(1.6);
+        g.update_enemies_b(0.5, false);
+        assert!(!g.staggered.contains_key(&e));
+    }
+
+    #[test]
+    fn a_strike_unlatches_a_leech_and_a_second_one_unravels_it() {
+        let mut g = standing("leech_strike");
+        let at = Vec3::new(0.0, 0.35, 0.5);
+        let e = put_special(&mut g, EnemyKind::Leech, at, SpecialAI::Leech(leech::Leech::new(at)));
+        g.update_enemies_b(0.016, false);
+        g.resolve_strike();
+        assert_eq!(g.foes[&e].hp, 1.0);
+        assert!(g.specials.iter().all(|s| !matches!(&s.ai, SpecialAI::Leech(l) if l.latched())), "off you");
+        assert!(g.staggered.contains_key(&e));
+        // Staggered x2: one more finishes it, and nothing rides you.
+        g.player_position = Vec3::new(0.0, 0.5, 0.0);
+        if let Some(SpecialAI::Leech(l)) = g.specials.iter_mut().map(|s| &mut s.ai).next() {
+            l.release(Vec3::new(0.0, 0.5, 0.0), Vec3::Z);
+        }
+        g.strike.reset();
+        g.resolve_strike();
+        assert!(g.specials.is_empty(), "unravelled");
+    }
+
+    #[test]
+    fn moths_die_to_one_strike_each_and_the_swarm_forgets_them() {
+        let mut g = standing("moths");
+        let swarm = moths::Swarm::new(Vec3::ZERO);
+        let first = swarm.moths[0];
+        let ids: Vec<Entity> = swarm
+            .moths
+            .iter()
+            .map(|m| put_special(&mut g, EnemyKind::Moths, m.pos, SpecialAI::Moth(m.id)))
+            .collect();
+        g.moth_swarm = Some(swarm);
+        // Put moth 0 right in front of the dreamer.
+        g.world.get::<&mut Transform>(ids[0]).unwrap().position = Vec3::new(0.0, 0.5, 1.5);
+        let _ = first;
+        g.resolve_strike();
+        assert_eq!(g.specials.len(), 3);
+        assert_eq!(g.moth_swarm.as_ref().unwrap().alive(), 3);
+        assert!(g.unraveling.iter().any(|u| u.0 == ids[0]));
+    }
+
+    #[test]
+    fn a_gust_scatters_the_swarm() {
+        let mut g = standing("moths_gust");
+        g.moth_swarm = Some(moths::Swarm::new(Vec3::ZERO));
+        g.rattle_b(upgrades::GUST_RADIUS.max(30.0), upgrades::GUST_PUSH);
+        assert!(g.moth_swarm.as_ref().unwrap().moths.iter().all(|m| matches!(m.mode, moths::Mode::Scattered(..))));
+    }
+    // === end combat ===
+
     #[test]
     fn calm_motes_heal_when_touched_and_fade_when_ignored() {
         let mut g = game("motes");
