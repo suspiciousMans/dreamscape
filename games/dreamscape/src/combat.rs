@@ -14,6 +14,30 @@ pub const REACH: f32 = 2.4;
 pub const ARC_COS: f32 = 0.5;
 /// Targets this far above or below you are out of reach.
 pub const REACH_HEIGHT: f32 = 2.0;
+/// WIDE EYES widens the fan (cosine of the half-arc); LONG REACH stretches it.
+pub const ARC_COS_WIDE: f32 = 0.35;
+pub const LONG_REACH_PER: f32 = 0.25;
+/// ECHO STRIKE: every this-many strikes sends a second wave, this much longer.
+pub const ECHO_EVERY: u32 = 4;
+pub const ECHO_REACH: f32 = 1.7;
+/// HEAVY AIR: strikes shove further (per stack, up to two).
+pub const HEAVY_KNOCK_PER: f32 = 0.5;
+/// SPRING: how long after leaving the ground a strike still counts as aerial.
+pub const SPRING_AIR_GRACE: f32 = 0.3;
+/// CALM MIND: seconds of calm for one nerve, shorter with more stacks.
+pub const CALM_REGEN_SECS: f32 = 25.0;
+pub const CALM_REGEN_STACK: f32 = 0.8;
+/// LUCKY MEMORY: extra chance of a calm mote per stack.
+pub const LUCKY_MOTE_PER: f32 = 0.06;
+/// COUNTER: how far the attacker can be, and the pause between counters.
+pub const COUNTER_REACH: f32 = 2.5;
+pub const COUNTER_COOLDOWN: f32 = 1.0;
+pub const COUNTER_STAGGER: f32 = 1.2;
+pub const RIPOSTE_STAGGER: f32 = 2.0;
+/// THORNS bite whatever is this close when it hurts you.
+pub const THORNS_REACH: f32 = 2.5;
+/// CALM SPORE: a mote's reach on what is near.
+pub const SPORE_REACH: f32 = 4.0;
 pub const WINDUP: f32 = 0.10;
 pub const RECOVERY: f32 = 0.25;
 /// Minimum time between the starts of two strikes.
@@ -105,6 +129,16 @@ impl Strike {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+}
+
+/// Strike reach with LONG REACH stacks.
+pub fn reach_with(stacks: u32) -> f32 {
+    REACH * (1.0 + LONG_REACH_PER * stacks.min(2) as f32)
+}
+
+/// Seconds of calm that earn one nerve with CALM MIND stacks (0 = never).
+pub fn calm_interval(stacks: u32) -> Option<f32> {
+    (stacks > 0).then(|| CALM_REGEN_SECS * CALM_REGEN_STACK.powi(stacks as i32 - 1))
 }
 
 /// Is `target` inside the fan in front of `from` (facing a flat unit vector)?
@@ -231,11 +265,12 @@ fn mix(mut x: u64) -> u64 {
 }
 
 /// Loot from a seed (its own stream: it never touches the dream's RNG).
-/// `bonus_dust` adds to the dust (DUST HOARDER).
-pub fn loot(seed: u64, bonus_dust: u32) -> Loot {
+/// `bonus_dust` adds to the dust (DUST HOARDER); `mote_bonus` to the mote
+/// chance (LUCKY MEMORY).
+pub fn loot(seed: u64, bonus_dust: u32, mote_bonus: f32) -> Loot {
     let r = mix(seed ^ 0x100_7);
     let dust = 1 + (r % 3) as u32 + bonus_dust;
-    let mote = (mix(seed ^ 0x40_7e) % 10_000) as f32 / 10_000.0 < MOTE_CHANCE;
+    let mote = (mix(seed ^ 0x40_7e) % 10_000) as f32 / 10_000.0 < MOTE_CHANCE + mote_bonus;
     Loot { dust, mote }
 }
 
@@ -334,6 +369,17 @@ mod tests {
     }
 
     #[test]
+    fn long_reach_and_calm_mind_scale_with_stacks() {
+        assert_eq!(reach_with(0), REACH);
+        assert!((reach_with(1) - REACH * 1.25).abs() < 1e-5);
+        assert!((reach_with(2) - REACH * 1.5).abs() < 1e-5);
+        assert_eq!(reach_with(9), reach_with(2), "two stacks at most");
+        assert_eq!(calm_interval(0), None);
+        assert_eq!(calm_interval(1), Some(25.0));
+        assert!(calm_interval(3).unwrap() < calm_interval(2).unwrap());
+    }
+
+    #[test]
     fn hush_ghost_and_high_ground_change_the_cut() {
         let plain = Ctx::default();
         let unaware = Ctx { unaware: true, ..plain };
@@ -371,16 +417,19 @@ mod tests {
 
     #[test]
     fn loot_is_deterministic_small_and_motes_are_rare() {
-        assert_eq!(loot(7, 0), loot(7, 0));
+        assert_eq!(loot(7, 0, 0.0), loot(7, 0, 0.0));
         let mut motes = 0;
         for seed in 0..5000u64 {
-            let l = loot(seed, 0);
+            let l = loot(seed, 0, 0.0);
             assert!((1..=3).contains(&l.dust), "{l:?}");
             motes += l.mote as u32;
         }
         let rate = motes as f32 / 5000.0;
         assert!((0.08..0.16).contains(&rate), "mote rate {rate}");
-        assert_eq!(loot(7, 2).dust, loot(7, 0).dust + 2, "dust hoarder adds");
+        assert_eq!(loot(7, 2, 0.0).dust, loot(7, 0, 0.0).dust + 2, "dust hoarder adds");
+        let lucky = (0..5000u64).filter(|&s| loot(s, 0, 0.12).mote).count();
+        let plain = (0..5000u64).filter(|&s| loot(s, 0, 0.0).mote).count();
+        assert!(lucky > plain + 200, "lucky memory: more motes ({plain} -> {lucky})");
     }
 
     #[test]

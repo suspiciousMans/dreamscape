@@ -133,6 +133,13 @@ impl Nerve {
         Hit::Hurt
     }
 
+    /// DREAM ANCHOR's last stand: a lethal hit leaves you at one nerve.
+    pub fn last_stand(&mut self, extra_iframes: f32) {
+        self.cur = 1;
+        self.iframes = IFRAMES + extra_iframes.max(0.0);
+        self.since_hit = 0.0;
+    }
+
     /// REWIND: gives back what was lost in the last [`REWIND_WINDOW`] seconds,
     /// at most [`REWIND_MAX`]. Returns how much came back.
     pub fn recover(&mut self) -> u32 {
@@ -155,7 +162,6 @@ impl Nerve {
     }
 
     /// Raises the most you can hold (and heals the same amount).
-    #[allow(dead_code)] // SECOND HEARTBEAT (milestone C4)
     pub fn raise_max(&mut self, n: u32) {
         self.max = (self.max + n).min(MAX);
         self.heal(n);
@@ -274,6 +280,19 @@ mod tests {
         n.hit(2, AWAY, 0.0);
         n.tick(REWIND_WINDOW + 1.0);
         assert_eq!(n.recover(), 0, "too long ago");
+    }
+
+    #[test]
+    fn a_last_stand_leaves_one_nerve_and_a_window() {
+        let mut n = Nerve::default();
+        n.hit(1, AWAY, 0.0);
+        n.tick(2.0);
+        n.hit(1, AWAY, 0.0);
+        n.tick(2.0);
+        assert_eq!(n.hit(1, AWAY, 0.0), Hit::Down);
+        n.last_stand(0.0);
+        assert_eq!(n.cur(), 1);
+        assert!(n.invulnerable());
     }
 
     #[test]

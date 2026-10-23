@@ -473,6 +473,16 @@ pub struct DreamscapeGame {
     leap_airborne: bool,
     /// ANCHOR: this use snapped you back (set for `combat_on_use`).
     anchor_snapped: bool,
+    /// DREAM ANCHOR's last stand is once per dream.
+    last_stand_used: bool,
+    /// Strikes thrown this run (ECHO STRIKE), calm seconds (CALM MIND), the
+    /// last moment you were airborne (SPRING), an air jump refunded (DOUBLE
+    /// JUMP), and the pause between counters (COUNTER).
+    strike_count: u32,
+    calm_timer: f32,
+    air_until: f32,
+    air_refunded: bool,
+    counter_cd: f32,
     /// The swing's flash: (entity, age); and one waiting to be spawned.
     slashes: Vec<(Entity, f32)>,
     slash_pending: Option<(Vec3, Vec3)>,
@@ -854,6 +864,12 @@ impl DreamscapeGame {
             dash_cut: Vec::new(),
             leap_airborne: false,
             anchor_snapped: false,
+            last_stand_used: false,
+            strike_count: 0,
+            calm_timer: 0.0,
+            air_until: 0.0,
+            air_refunded: false,
+            counter_cd: 0.0,
             slashes: Vec::new(),
             slash_pending: None,
             ability_tints: Vec::new(),
@@ -1782,10 +1798,43 @@ impl DreamscapeGame {
             self.strike_request = true;
         }
         let active = !self.coop_active() && (!self.autopilot || dev_from.is_some());
+        // === combat passives ===
+        let want_max = (nerve::START + self.run.count(Upgrade::SecondHeartbeat)).min(nerve::MAX);
+        if want_max > self.nerve.max() {
+            self.nerve.raise_max(want_max - self.nerve.max());
+        }
+        self.counter_cd = (self.counter_cd - dt).max(0.0);
+        if !self.player_grounded {
+            self.air_until = self.dream_age;
+        } else {
+            self.air_refunded = false;
+        }
+        // CALM MIND: calm earns nerve back.
+        if let Some(every) = combat::calm_interval(self.run.count(Upgrade::CalmMind)) {
+            if self.enemies.iter().any(|p| p.ai.chasing) {
+                self.calm_timer = 0.0;
+            } else {
+                self.calm_timer += dt;
+                if self.calm_timer >= every {
+                    self.calm_timer = 0.0;
+                    self.nerve.heal(1);
+                }
+            }
+        }
+        // === end combat passives ===
         let wants = std::mem::take(&mut self.strike_request);
         if active && wants {
             let quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
             if self.strike.try_start(quick) {
+                // DOUBLE JUMP: a strike in the air gives one air jump back.
+                if !self.player_grounded
+                    && !self.air_refunded
+                    && self.run.count(Upgrade::DoubleJump) > 0
+                    && self.air_jumps_used > 0
+                {
+                    self.air_jumps_used -= 1;
+                    self.air_refunded = true;
+                }
                 self.sfx(Sound::Strike);
                 self.slash_pending = Some((self.player_position, self.flat_facing()));
             }
@@ -1803,7 +1852,7 @@ impl DreamscapeGame {
                 .collect();
             for t in &cut {
                 self.dash_cut.push(t.entity);
-                let dmg = combat::damage(1.0, self.strike_ctx(t));
+                let dmg = self.strike_damage(t);
                 self.hurt_foe(t, dmg, me, 0.0, combat::STAGGER_SECS);
             }
             if !cut.is_empty() {
@@ -1814,6 +1863,8 @@ impl DreamscapeGame {
         // LEAP: the landing shocks what is under you.
         if self.leap_airborne && self.player_grounded && self.dream_age > 0.2 {
             self.leap_airborne = false;
+        self.last_stand_used = false;
+        self.counter_cd = 0.0;
             if active {
                 let at = self.player_position;
                 if self.shock(at, combat::LEAP_SHOCK_REACH, 1.0, combat::STAGGER_SECS) > 0 {
@@ -1887,7 +1938,11 @@ impl DreamscapeGame {
             let (e, _) = self.motes.remove(k);
             let _ = self.world.despawn(e);
             if steadied {
-                self.nerve.heal(1);
+                let spore = self.run.count(Upgrade::CalmSpore) > 0;
+                self.nerve.heal(if spore { 2 } else { 1 });
+                if spore {
+                    self.shock(me, combat::SPORE_REACH, 0.0, combat::FLARE_STAGGER);
+                }
                 self.sfx(Sound::Calm);
                 self.flash.trigger([0.6, 1.0, 0.8], 0.25);
             }
@@ -1934,7 +1989,10 @@ impl DreamscapeGame {
         combat::Ctx {
             // BLINK sets up a sneak attack; HUSH deepens it.
             unaware: t.unaware || self.dream_age < self.backstab_until,
-            airborne: !self.player_grounded || self.run.active(Ability::Float),
+            airborne: !self.player_grounded
+                || self.run.active(Ability::Float)
+                || (self.run.count(Upgrade::Spring) > 0
+                    && self.dream_age - self.air_until < combat::SPRING_AIR_GRACE),
             // STILLNESS freezes: a frozen foe is a reeling one.
             staggered: self.stunned.contains_key(&t.entity)
                 || self.staggered.contains_key(&t.entity)
@@ -1944,6 +2002,19 @@ impl DreamscapeGame {
             high_ground: self.run.active(Ability::Step)
                 && me.y - t.pos.y > combat::HIGH_GROUND_RISE,
         }
+    }
+
+    /// What a strike (or a dash cut) does to `t` right now, cards included.
+    fn strike_damage(&self, t: &CombatTarget) -> f32 {
+        let ctx = self.strike_ctx(t);
+        let mut dmg = combat::damage(1.0, ctx);
+        if ctx.staggered {
+            dmg += self.run.count(Upgrade::SharpEdge) as f32;
+        }
+        if ctx.unaware && self.run.has(upgrades::Synergy::Executioner) {
+            dmg += 1.0;
+        }
+        dmg
     }
 
     /// Damages one target: the shared end of a strike, a dash, a shock.
@@ -2008,13 +2079,32 @@ impl DreamscapeGame {
         let me = self.player_position;
         let facing = self.flat_facing();
         let mut struck = false;
-        for t in self.combat_targets() {
-            if !combat::in_arc(me, facing, t.pos, combat::REACH, combat::ARC_COS) {
-                continue;
+        let reach = combat::reach_with(self.run.count(Upgrade::LongReach));
+        let arc = if self.run.count(Upgrade::WideEyes) > 0 {
+            combat::ARC_COS_WIDE
+        } else {
+            combat::ARC_COS
+        };
+        let knock = combat::KNOCKBACK
+            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+        // ECHO STRIKE: every fourth strike is followed by a longer wave.
+        self.strike_count += 1;
+        let echo = self.run.count(Upgrade::EchoStrike) > 0
+            && self.strike_count % combat::ECHO_EVERY == 0;
+        let waves: &[f32] = if echo { &[1.0, combat::ECHO_REACH] } else { &[1.0] };
+        for &stretch in waves {
+            for t in self.combat_targets() {
+                if !combat::in_arc(me, facing, t.pos, reach * stretch, arc) {
+                    continue;
+                }
+                // The wave only reaches what the first did not (it is longer).
+                if stretch > 1.0 && combat::in_arc(me, facing, t.pos, reach, arc) {
+                    continue;
+                }
+                struck = true;
+                let dmg = self.strike_damage(&t);
+                self.hurt_foe(&t, dmg, me, knock, combat::STAGGER_SECS);
             }
-            struck = true;
-            let dmg = combat::damage(1.0, self.strike_ctx(&t));
-            self.hurt_foe(&t, dmg, me, combat::KNOCKBACK, combat::STAGGER_SECS);
         }
         if struck {
             self.sfx(Sound::StrikeHit);
@@ -2079,7 +2169,44 @@ impl DreamscapeGame {
             .filter(|t| t.pos.distance(me) <= combat::WARD_REFLECT_REACH)
             .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
         if let Some(t) = near {
-            self.hurt_foe(&t, 1.0, me, combat::KNOCKBACK, combat::STAGGER_SECS);
+            let back = if self.run.has(upgrades::Synergy::Bulwark) { 2.0 } else { 1.0 };
+            self.hurt_foe(&t, back, me, combat::KNOCKBACK, combat::STAGGER_SECS);
+        }
+    }
+
+    /// COUNTER: you slipped a blow; the attacker reels (RIPOSTE cuts it too).
+    fn counter_attack(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::COUNTER_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        let Some(t) = near else {
+            return;
+        };
+        self.counter_cd = combat::COUNTER_COOLDOWN;
+        if self.run.has(upgrades::Synergy::Riposte) {
+            self.hurt_foe(&t, 1.0, me, 0.0, combat::RIPOSTE_STAGGER);
+        } else if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, combat::COUNTER_STAGGER);
+        } else {
+            self.staggered.insert(t.entity, combat::COUNTER_STAGGER);
+        }
+        self.sfx(Sound::StrikeHit);
+        self.flash.trigger([1.0, 0.8, 0.5], 0.2);
+    }
+
+    /// THORNS: what hurt you takes a bite.
+    fn thorns_bite(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::THORNS_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        if let Some(t) = near {
+            self.hurt_foe(&t, 1.0, me, 0.0, combat::STAGGER_SECS);
         }
     }
 
@@ -2115,7 +2242,11 @@ impl DreamscapeGame {
         self.unraveling.push((entity, 0.0, full));
         self.sfx(Sound::Unravel);
         let seed = (entity.id() as u64) << 20 ^ (self.dream_age * 1000.0) as u64 ^ self.director.dream_seed();
-        let loot = combat::loot(seed, self.run.count(Upgrade::DustHoarder));
+        let loot = combat::loot(
+            seed,
+            self.run.count(Upgrade::DustHoarder),
+            combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
+        );
         self.bonus_dust += loot.dust;
         if loot.mote {
             self.pending_motes.push(pos);
@@ -2131,7 +2262,19 @@ impl DreamscapeGame {
         let away = self.away_from_nearest_threat();
         let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32;
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
-            nerve::Hit::Down => Some(by),
+            nerve::Hit::Down => {
+                // DREAM ANCHOR: once a dream, a lethal blow leaves you standing.
+                if self.run.count(Upgrade::DreamAnchor) > 0 && !self.last_stand_used {
+                    self.last_stand_used = true;
+                    self.nerve.last_stand(extra);
+                    self.passive_fires(Upgrade::DreamAnchor);
+                    self.flash.trigger([1.0, 0.8, 0.4], 0.5);
+                    self.sfx(Sound::WardBreak);
+                    log::info!("Last stand: {by} could not finish you");
+                    return None;
+                }
+                Some(by)
+            }
             nerve::Hit::Ignored => None,
             nerve::Hit::Hurt => {
                 log::info!(
@@ -2143,6 +2286,9 @@ impl DreamscapeGame {
                 self.flash.trigger([1.0, 0.1, 0.15], 0.45);
                 self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
                 self.sfx(Sound::Caught);
+                if self.run.count(Upgrade::Thorns) > 0 {
+                    self.thorns_bite();
+                }
                 None
             }
         }
@@ -5774,6 +5920,8 @@ impl DreamscapeGame {
             .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
         self.nerve = nerve::Nerve::default();
+        self.strike_count = 0;
+        self.calm_timer = 0.0;
         if let Some(id) = self
             .booklet
             .lore
@@ -9039,6 +9187,18 @@ impl Game for DreamscapeGame {
             } else {
                 None
             };
+        // === combat === COUNTER: slipping a blow with a dash or phase
+        if !self.autopilot
+            && self.grace <= 0.0
+            && !self.coop_active()
+            && self.counter_cd <= 0.0
+            && self.run.count(Upgrade::Counter) > 0
+            && (self.run.active(Ability::Dash) || self.run.active(Ability::Phase))
+            && self.threat_touching().is_some()
+        {
+            self.counter_attack();
+        }
+        // === end combat ===
         // WARD takes the hit meant for you.
         let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
             self.break_ward();
@@ -10218,6 +10378,174 @@ mod screen_smoke {
         g.update_combat(0.5);
         let x = g.world.get::<&Transform>(m).unwrap().position.x;
         assert!(x < 7.0, "drawn in, x = {x}");
+    }
+
+    #[test]
+    fn second_heartbeat_raises_the_ceiling_and_heals() {
+        let mut g = fighter("heartbeat", None);
+        g.run.take(Upgrade::SecondHeartbeat);
+        g.update_combat(0.0);
+        assert_eq!((g.nerve.cur(), g.nerve.max()), (4, 4));
+        g.run.take(Upgrade::SecondHeartbeat);
+        g.update_combat(0.0);
+        assert_eq!(g.nerve.max(), 5);
+        g.update_combat(0.0);
+        assert_eq!(g.nerve.max(), 5, "never past five");
+    }
+
+    #[test]
+    fn sharp_edge_cuts_deeper_into_a_reeling_foe() {
+        let mut g = fighter("edge", None);
+        g.run.take(Upgrade::SharpEdge);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.stunned.insert(e, 1.0);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "x2 for reeling, +1 for the edge: 3 on a 2 hp pacer");
+        let mut h = fighter("edge2", None);
+        let big = put_pacer(&mut h, Vec3::new(0.0, 1.0, 2.0), true);
+        h.run.take(Upgrade::SharpEdge);
+        h.foes.insert(big, combat::Foe { hp: 4.0, max: 4.0 });
+        h.resolve_strike();
+        assert_eq!(h.foes[&big].hp, 3.0, "not reeling: the edge adds nothing");
+    }
+
+    #[test]
+    fn long_reach_and_wide_eyes_stretch_and_widen_the_strike() {
+        let far = Vec3::new(0.0, 1.0, 2.9);
+        let mut g = fighter("reach", None);
+        put_pacer(&mut g, far, true);
+        g.resolve_strike();
+        assert!(g.foes.is_empty(), "2.9 is out of a 2.4 reach");
+        g.run.take(Upgrade::LongReach);
+        g.resolve_strike();
+        assert_eq!(g.foes.len(), 1, "3.0 reaches it");
+        // 60 degrees off the facing: outside the 120 degree fan's edge.
+        let side = Vec3::new(1.9, 1.0, 1.1); // about 60 deg off, distance 2.2
+        let mut w = fighter("wide", None);
+        put_pacer(&mut w, Vec3::new(2.1, 1.0, 0.9), true);
+        w.resolve_strike();
+        assert!(w.foes.is_empty(), "65 degrees is outside");
+        w.run.take(Upgrade::WideEyes);
+        w.resolve_strike();
+        assert_eq!(w.foes.len(), 1, "wide eyes see further round");
+        let _ = side;
+    }
+
+    #[test]
+    fn every_fourth_strike_sends_an_echo_further() {
+        let mut g = fighter("echo", None);
+        g.run.take(Upgrade::EchoStrike);
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 3.6), true);
+        for _ in 0..3 {
+            g.resolve_strike();
+        }
+        assert!(g.foes.is_empty(), "3.6 is past a plain reach");
+        g.resolve_strike();
+        assert_eq!(g.foes.len(), 1, "the fourth wave reaches it");
+    }
+
+    #[test]
+    fn heavy_air_shoves_further() {
+        let mut a = fighter("heavy0", None);
+        let e = put_pacer(&mut a, Vec3::new(0.0, 1.0, 2.0), true);
+        a.resolve_strike();
+        let plain = a.world.get::<&Transform>(e).unwrap().position.z - 2.0;
+        let mut b = fighter("heavy1", None);
+        b.run.take(Upgrade::HeavyAir);
+        let e = put_pacer(&mut b, Vec3::new(0.0, 1.0, 2.0), true);
+        b.resolve_strike();
+        let heavy = b.world.get::<&Transform>(e).unwrap().position.z - 2.0;
+        assert!(heavy > plain * 1.3, "{plain} -> {heavy}");
+    }
+
+    #[test]
+    fn dream_anchor_is_a_last_stand_once_a_dream() {
+        let mut g = fighter("stand", None);
+        g.run.take(Upgrade::DreamAnchor);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), None, "stood back up");
+        assert_eq!(g.nerve.cur(), 1);
+        g.nerve.tick(3.0);
+        assert_eq!(g.take_nerve_hit("patrol"), Some("patrol"), "only once");
+        g.last_stand_used = false; // a new dream
+        g.nerve.tick(3.0);
+        g.nerve.heal(0);
+        let cur = g.nerve.cur();
+        assert!(cur >= 1);
+    }
+
+    #[test]
+    fn thorns_bite_what_hurts_you_and_counter_and_riposte_answer_a_slipped_blow() {
+        let mut g = fighter("thorns", None);
+        g.run.take(Upgrade::Thorns);
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        assert_eq!(g.foes[&e].hp, 1.0, "bitten");
+        let mut c = fighter("counter", None);
+        let e = put_pacer(&mut c, Vec3::new(1.0, 1.0, 0.0), true);
+        c.counter_attack();
+        assert!(c.stunned.contains_key(&e) && !c.foes.contains_key(&e), "reels, unhurt");
+        assert!(c.counter_cd > 0.0);
+        let mut r = fighter("riposte", None);
+        r.run.take(Upgrade::Learn(Ability::Dash));
+        r.run.take(Upgrade::Counter);
+        assert!(r.run.has(upgrades::Synergy::Riposte));
+        let e = put_pacer(&mut r, Vec3::new(1.0, 1.0, 0.0), true);
+        r.counter_attack();
+        assert_eq!(r.foes[&e].hp, 1.0, "riposte cuts as well");
+    }
+
+    #[test]
+    fn calm_mind_regenerates_only_in_calm_and_executioner_cuts_deeper() {
+        let mut g = fighter("calm", None);
+        g.run.take(Upgrade::CalmMind);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        let e = put_pacer(&mut g, Vec3::new(9.0, 1.0, 9.0), true);
+        g.update_combat(26.0);
+        assert_eq!(g.nerve.cur(), 2, "a chaser is near: no calm");
+        g.enemies.clear();
+        g.world.despawn(e).ok();
+        g.update_combat(26.0);
+        assert_eq!(g.nerve.cur(), 3, "calm earned one");
+        let mut x = fighter("exec", None);
+        x.run.take(Upgrade::Learn(Ability::Hush));
+        x.run.take(Upgrade::SharpEdge);
+        assert!(x.run.has(upgrades::Synergy::Executioner));
+        let big = put_pacer(&mut x, Vec3::new(0.0, 1.0, 2.0), false);
+        x.foes.insert(big, combat::Foe { hp: 6.0, max: 6.0 });
+        x.resolve_strike();
+        assert_eq!(x.foes[&big].hp, 3.0, "x2 unaware, +1 executioner");
+    }
+
+    #[test]
+    fn calm_spore_heals_two_and_staggers_what_is_near_and_a_strike_in_air_refunds_a_jump() {
+        let mut g = fighter("spore", None);
+        g.run.take(Upgrade::CalmSpore);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        let mote = g.world.spawn((Transform { position: Vec3::new(0.4, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        let e = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), true);
+        g.motes = vec![(mote, 0.0)];
+        g.update_combat(0.016);
+        assert_eq!(g.nerve.cur(), 3, "1 + 2");
+        assert!(g.stunned.contains_key(&e), "the spores stagger what is near");
+        let mut j = fighter("jump", None);
+        j.run.take(Upgrade::DoubleJump);
+        j.player_grounded = false;
+        j.air_jumps_used = 1;
+        j.strike_request = true;
+        j.update_combat(0.0);
+        assert_eq!(j.air_jumps_used, 0, "refunded");
+        j.air_jumps_used = 1;
+        j.strike_request = true;
+        j.update_combat(1.0);
+        j.strike_request = true;
+        j.update_combat(0.0);
+        assert_eq!(j.air_jumps_used, 1, "once per airtime");
     }
 
     #[test]
