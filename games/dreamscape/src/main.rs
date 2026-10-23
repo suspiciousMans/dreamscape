@@ -57,6 +57,10 @@ mod hand;
 mod hud;
 mod hunter;
 mod combat;
+mod foespawn;
+mod leech;
+mod mask;
+mod moths;
 mod loadout_ui;
 mod nerve;
 mod lore;
@@ -205,6 +209,11 @@ enum SpecialAI {
     Sentry(specials::Sentry, Entity),
     Drifter(EnemyAI),
     Jester(EnemyAI),
+    // ENEMIES-B (added at the bottom)
+    /// One moth of the dream's swarm (`moth_swarm`), by id.
+    Moth(usize),
+    Mask(mask::Mask),
+    Leech(leech::Leech),
 }
 
 struct SpecialEnemy {
@@ -459,6 +468,14 @@ pub struct DreamscapeGame {
     /// The swing's flash: (entity, age); and one waiting to be spawned.
     slashes: Vec<(Entity, f32)>,
     slash_pending: Option<(Vec3, Vec3)>,
+    // === end combat ===
+    // === combat === ENEMIES-B
+    /// The dream's moth group, when it has one.
+    moth_swarm: Option<moths::Swarm>,
+    /// Textures that change with an enemy's state (dim/bright moth, mask tells).
+    b_tex: HashMap<&'static str, Arc<GpuTexture>>,
+    /// The dreamer left the ground this frame (ground or air jump).
+    jump_event: bool,
     // === end combat ===
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
@@ -835,6 +852,9 @@ impl DreamscapeGame {
             pending_motes: Vec::new(),
             slashes: Vec::new(),
             slash_pending: None,
+            moth_swarm: None,
+            b_tex: HashMap::new(),
+            jump_event: false,
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
@@ -1854,10 +1874,13 @@ impl DreamscapeGame {
                 EnemyKind::Drifter => combat::Kind::Drifter,
                 EnemyKind::Jester => combat::Kind::Jester,
                 EnemyKind::Mimic => continue, // it is only you
+                EnemyKind::Moths => combat::Kind::Moth,
+                EnemyKind::Mask => combat::Kind::Mask,
+                EnemyKind::Leech => combat::Kind::Leech,
             };
             if let Some(pos) = at(&self.world, sp.entity) {
                 // Sentries see you coming; the rest are unaware until chasing.
-                targets.push((sp.entity, pos, kind, !matches!(kind, combat::Kind::Sentry)));
+                targets.push((sp.entity, pos, kind, !matches!(kind, combat::Kind::Sentry | combat::Kind::Moth | combat::Kind::Mask | combat::Kind::Leech)));
             }
         }
         let mut struck = false;
@@ -1865,6 +1888,12 @@ impl DreamscapeGame {
             if !combat::in_arc(me, facing, pos, combat::REACH, combat::ARC_COS) {
                 continue;
             }
+            // === combat === a mask's shield turns the blow aside
+            if kind == combat::Kind::Mask && self.mask_glances(entity, me) {
+                self.mask_glance(pos);
+                continue;
+            }
+            // === end combat ===
             struck = true;
             let ctx = combat::Ctx {
                 unaware,
@@ -1891,6 +1920,11 @@ impl DreamscapeGame {
                     } else {
                         self.staggered.insert(entity, combat::STAGGER_SECS);
                     }
+                    // === combat === a strike on a latched leech knocks it off
+                    if kind == combat::Kind::Leech {
+                        self.shake_leech(entity);
+                    }
+                    // === end combat ===
                 }
                 combat::Outcome::Unravel => self.unravel(entity, pos),
             }
@@ -1912,6 +1946,16 @@ impl DreamscapeGame {
             if let SpecialAI::Sentry(_, beam) = sp.ai {
                 let _ = self.world.despawn(beam);
             }
+            // === combat === a dead moth leaves the ring; a dead leech lets go
+            if let SpecialAI::Moth(id) = sp.ai {
+                if let Some(s) = &mut self.moth_swarm {
+                    s.kill(id);
+                    if s.alive() == 0 {
+                        self.moth_swarm = None;
+                    }
+                }
+            }
+            // === end combat ===
         }
         let full = self
             .world
@@ -1972,6 +2016,305 @@ impl DreamscapeGame {
                 let n = d.normalize();
                 (n.x, n.z)
             })
+    }
+    // === end combat ===
+
+    // === combat === ENEMIES-B: moths, mask, leech
+    /// Puts the dream's new enemies in (placement and gates: `foespawn`,
+    /// `moths`, `mask`, `leech`). DREAMSCAPE_ENEMY=Moths|Mask|Leech forces
+    /// that one into every dream (and past the depth gate).
+    fn spawn_enemies_b(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() {
+            return Ok(());
+        }
+        let forced = crate::dev::var("DREAMSCAPE_ENEMY").ok();
+        let (depth, nightmare) = if forced.is_some() {
+            (99, false)
+        } else {
+            (dream.depth, self.director.nightmare)
+        };
+        let theme = self.director.theme;
+        let floor = shard_rules::floor_cells(&dream.blocks);
+        let route: Vec<Vec3> = dream
+            .lucid_route
+            .iter()
+            .chain(dream.route.iter())
+            .map(|w| w.pos)
+            .collect();
+        let mut keep = vec![dream.spawn, dream.portal];
+        keep.extend(dream.shard);
+        let mut taken: Vec<Vec3> = Vec::new();
+        let mut hints: Vec<&'static str> = Vec::new();
+        for kind in [EnemyKind::Moths, EnemyKind::Mask, EnemyKind::Leech] {
+            if taken.len() >= foespawn::MAX_NEW {
+                break;
+            }
+            if forced.as_deref().is_some_and(|f| f != format!("{kind:?}")) {
+                continue;
+            }
+            let plan = match kind {
+                EnemyKind::Moths => moths::spawn_plan(depth, theme, dream.seed, nightmare),
+                EnemyKind::Mask => mask::spawn_plan(depth, theme, dream.seed, nightmare),
+                _ => leech::spawn_plan(depth, theme, dream.seed, nightmare),
+            };
+            let Some(&seed) = plan.first() else {
+                continue;
+            };
+            let Some(at) = foespawn::place(seed, 0, &floor, &route, &keep, &taken) else {
+                log::info!("No room for {kind:?}");
+                continue;
+            };
+            taken.push(at);
+            match kind {
+                EnemyKind::Moths => {
+                    let orb = self.mesh(Shape::Orb)?;
+                    let dim = self.texture(gl, [190, 165, 255, 255]);
+                    let bright = self.texture(gl, [255, 255, 225, 255]);
+                    self.b_tex.insert("moth", dim.clone());
+                    self.b_tex.insert("moth_bright", bright);
+                    let swarm = moths::Swarm::new(at);
+                    for m in &swarm.moths {
+                        let entity = self.world.spawn((
+                            Transform { position: m.pos, rotation: Quat::IDENTITY, scale: Vec3::splat(0.45) },
+                            MeshRenderer { mesh: orb.clone(), texture: Some(dim.clone()) },
+                            Lit,
+                            Spin(5.0),
+                        ));
+                        self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Moth(m.id) });
+                    }
+                    self.moth_swarm = Some(swarm);
+                }
+                EnemyKind::Mask => {
+                    let cube = self.mesh(Shape::Cube)?;
+                    for (key, color) in [
+                        ("mask", [232, 226, 205, 255]),
+                        ("mask_tell", [255, 110, 80, 255]),
+                        ("mask_down", [110, 120, 150, 255]),
+                    ] {
+                        let t = self.texture(gl, color);
+                        self.b_tex.insert(key, t);
+                    }
+                    let a = at + Vec3::Y * 0.5;
+                    let b = foespawn::neighbour(seed, at, &floor, &route).map_or(a, |n| n + Vec3::Y * 0.5);
+                    let m = mask::Mask::new(a, b);
+                    let entity = self.world.spawn((
+                        Transform { position: a + Vec3::Y * 0.45, rotation: Quat::from_rotation_y(m.yaw), scale: Vec3::new(1.3, 1.9, 0.4) },
+                        MeshRenderer { mesh: cube, texture: self.b_tex.get("mask").cloned() },
+                        Lit,
+                    ));
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Mask(m) });
+                }
+                _ => {
+                    let blob = self.mesh(Shape::Orb)?;
+                    let tex = self.texture(gl, [170, 25, 55, 255]);
+                    let pos = at + Vec3::Y * 0.35;
+                    let entity = self.world.spawn((
+                        Transform { position: pos, rotation: Quat::IDENTITY, scale: Vec3::new(0.9, 0.4, 0.55) },
+                        MeshRenderer { mesh: blob, texture: Some(tex) },
+                        Lit,
+                    ));
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Leech(leech::Leech::new(pos)) });
+                }
+            }
+            log::info!("New enemy: {kind:?} at {at:?} (depth {})", dream.depth);
+            if !self.seen_kinds.contains(&kind) {
+                self.seen_kinds.push(kind);
+                hints.push(kind.hint());
+            }
+        }
+        if !hints.is_empty() {
+            let more = hints.join(" · ");
+            self.dream_hint = if self.dream_hint.is_empty() {
+                more
+            } else {
+                format!("{} · {more}", self.dream_hint)
+            };
+        }
+        Ok(())
+    }
+
+    /// Moths, masks and leeches, once per frame (called by `update_specials`).
+    fn update_enemies_b(&mut self, dt: f32, held: bool) {
+        let jumped = std::mem::take(&mut self.jump_event);
+        if self.specials.is_empty() {
+            return;
+        }
+        let player = self.player_position;
+        let ps = gameplay::MOVE_SPEED;
+        let reduced = self.settings.reduced_motion;
+        if let Some(sw) = &mut self.moth_swarm {
+            sw.update(dt, player, ps, held);
+        }
+        let mut sounds: Vec<Sound> = Vec::new();
+        let mut touching: Vec<Entity> = Vec::new();
+        let mut shaken: Vec<Entity> = Vec::new();
+        for sp in &mut self.specials {
+            match &mut sp.ai {
+                SpecialAI::Moth(id) => {
+                    let Some(m) = self.moth_swarm.as_ref().and_then(|s| s.moths.iter().find(|m| m.id == *id)) else {
+                        continue;
+                    };
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = m.pos;
+                        // The tell: brighten, and (unless reduced motion) swell.
+                        let swell = if reduced { 0.0 } else { 0.9 };
+                        t.scale = Vec3::splat(0.45 * (1.0 + swell * m.glow()));
+                    }
+                    let key = if m.glow() > 0.25 { "moth_bright" } else { "moth" };
+                    if let (Ok(mut r), Some(tex)) = (self.world.get::<&mut MeshRenderer>(sp.entity), self.b_tex.get(key)) {
+                        r.texture = Some(tex.clone());
+                    }
+                }
+                SpecialAI::Mask(mk) => {
+                    let reeling = self.staggered.contains_key(&sp.entity);
+                    let before = mk.state;
+                    if !held && !reeling {
+                        mk.update(dt, player, ps);
+                    }
+                    if matches!(before, mask::State::Telegraph(_)) && matches!(mk.state, mask::State::Slamming(_)) {
+                        sounds.push(Sound::SlamLand);
+                    }
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = mk.pos + Vec3::Y * 0.45;
+                        t.rotation = Quat::from_rotation_y(mk.yaw);
+                        let lean = if reduced { 0.0 } else { 0.25 };
+                        t.scale = Vec3::new(1.3, 1.9, 0.4) * (1.0 + lean * mk.glow());
+                    }
+                    let key = if mk.glow() > 0.0 {
+                        "mask_tell"
+                    } else if !mk.shield_up() {
+                        "mask_down"
+                    } else {
+                        "mask"
+                    };
+                    if let (Ok(mut r), Some(tex)) = (self.world.get::<&mut MeshRenderer>(sp.entity), self.b_tex.get(key)) {
+                        r.texture = Some(tex.clone());
+                    }
+                }
+                SpecialAI::Leech(lc) => {
+                    if !held && !self.staggered.contains_key(&sp.entity) {
+                        if lc.update(dt, player, ps).touching {
+                            touching.push(sp.entity);
+                        }
+                        if jumped && lc.latched() && lc.on_jump() {
+                            shaken.push(sp.entity);
+                        }
+                    }
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = lc.pos;
+                        t.rotation = Quat::from_rotation_y(mask::yaw_toward(lc.pos, player));
+                        // It swells as the next drain nears.
+                        let swell = if reduced { 0.0 } else { 0.5 * lc.drain_progress() };
+                        t.scale = Vec3::new(0.9, 0.4, 0.55) * (1.0 + swell);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in sounds {
+            self.sfx(s);
+        }
+        for e in shaken {
+            self.knock_leech(e, false);
+        }
+        // A touch latches, unless you are untouchable; WARD blocks it.
+        let can = !self.autopilot
+            && self.grace <= 0.0
+            && !self.run.active(Ability::Dash)
+            && !self.run.active(Ability::Phase)
+            && !self.coop_ghost();
+        for e in touching {
+            if !can {
+                continue;
+            }
+            if self.run.active(Ability::Ward) {
+                self.break_ward();
+                self.knock_leech(e, false);
+                continue;
+            }
+            if let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == e).map(|s| &mut s.ai) {
+                lc.latch_on();
+            }
+            self.sfx(Sound::Latch);
+            if !reduced {
+                self.flash.trigger([0.7, 0.1, 0.3], 0.2);
+            }
+            log::info!("A leech latched on (depth {})", self.director.depth);
+        }
+    }
+
+    /// Throws a leech off you: it lands a step away and reels 1.5s. With
+    /// `only_latched`, a leech that is not on you is left alone.
+    fn knock_leech(&mut self, entity: Entity, only_latched: bool) {
+        let me = self.player_position;
+        let away = -self.flat_facing();
+        let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == entity).map(|s| &mut s.ai) else {
+            return;
+        };
+        if only_latched && !lc.latched() {
+            return;
+        }
+        lc.release(me, away);
+        self.staggered.insert(entity, leech::STAGGER_SECS);
+        self.sfx(Sound::Bounce);
+        log::info!("A leech was shaken off");
+    }
+
+    /// A strike landed on a leech: if it was riding you, it lets go.
+    fn shake_leech(&mut self, entity: Entity) {
+        self.knock_leech(entity, true);
+    }
+
+    /// Being caught (the respawn) shakes every leech off.
+    fn release_leeches(&mut self) {
+        let latched: Vec<Entity> = self
+            .specials
+            .iter()
+            .filter(|s| matches!(&s.ai, SpecialAI::Leech(l) if l.latched()))
+            .map(|s| s.entity)
+            .collect();
+        for e in latched {
+            self.knock_leech(e, true);
+        }
+    }
+
+    /// Would the mask's shield turn a strike from `me` aside?
+    fn mask_glances(&self, entity: Entity, me: Vec3) -> bool {
+        self.specials
+            .iter()
+            .any(|s| s.entity == entity && matches!(&s.ai, SpecialAI::Mask(m) if m.blocks(me)))
+    }
+
+    /// The blow glances off: a spark, a bounce, a flash. No damage, no stagger.
+    fn mask_glance(&mut self, at: Vec3) {
+        self.sfx(Sound::Bounce);
+        self.burst_pending = Some((at + Vec3::Y * 0.6, [255, 235, 150], [255, 255, 255]));
+        if !self.settings.reduced_motion {
+            self.flash.trigger([1.0, 0.95, 0.7], 0.12);
+        }
+    }
+
+    /// Gust (push > 0) scatters moths and spins masks; Slam (no push) cracks
+    /// mask shields.
+    fn rattle_b(&mut self, radius: f32, push: f32) {
+        let p = self.player_position;
+        if push > 0.0 {
+            if let Some(s) = &mut self.moth_swarm {
+                s.scatter(p, radius);
+            }
+        }
+        for sp in &mut self.specials {
+            if let SpecialAI::Mask(m) = &mut sp.ai {
+                let d = m.pos - p;
+                if Vec3::new(d.x, 0.0, d.z).length() < radius {
+                    if push > 0.0 {
+                        m.gust();
+                    } else {
+                        m.crack();
+                    }
+                }
+            }
+        }
     }
     // === end combat ===
 
@@ -3085,6 +3428,8 @@ impl DreamscapeGame {
                     Vec3::new(0.9, 0.9, 0.3),
                     [255, 120, 255, 255],
                 ),
+                // === combat === ENEMIES-B are built by `spawn_enemies_b`
+                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
             };
             let mesh = self.mesh(shape)?;
             let texture = match sp.kind {
@@ -3151,6 +3496,7 @@ impl DreamscapeGame {
                 EnemyKind::Jester => {
                     SpecialAI::Jester(EnemyAI::new(sp.a, sp.b, pacer_speed * 0.6, 0.0, 0.0))
                 }
+                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
             };
             log::info!("Special enemy: {:?} at {:?}", sp.kind, sp.at);
             self.specials.push(SpecialEnemy {
@@ -3189,6 +3535,7 @@ impl DreamscapeGame {
     fn update_specials(&mut self, dt: f32, held: bool) -> anyhow::Result<()> {
         let player = self.player_position;
         self.trail.push(self.dream_age, player);
+        self.update_enemies_b(dt, held); // === combat ===
         self.jester_cooldown = (self.jester_cooldown - dt).max(0.0);
         let strangeness = self.visual_strangeness();
         let eclipse = self
@@ -3280,6 +3627,9 @@ impl DreamscapeGame {
                         ai.update(&mut t.position, player, dt);
                     }
                 }
+                // === combat === ENEMIES-B run in `update_enemies_b`
+                SpecialAI::Moth(_) | SpecialAI::Mask(_) | SpecialAI::Leech(_) => {}
+                // === end combat ===
             }
         }
         for at in calls {
@@ -3451,6 +3801,8 @@ impl DreamscapeGame {
                 }
                 SpecialAI::Drifter(_) => true,
                 SpecialAI::Sentry(..) | SpecialAI::Jester(_) => false,
+                // === combat === these three have their own touches (below)
+                SpecialAI::Moth(_) | SpecialAI::Mask(_) | SpecialAI::Leech(_) => false,
             };
             armed
                 && at(sp.entity)
@@ -3466,6 +3818,11 @@ impl DreamscapeGame {
             specials::gate_closed(self.dream_age, phase) && specials::gate_blocks(at, dir, player)
         });
         let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
+        // === combat === ENEMIES-B
+        let moth = self.moth_swarm.as_ref().is_some_and(|s| s.connected());
+        let mask = self.specials.iter().any(|sp| matches!(&sp.ai, SpecialAI::Mask(m) if m.slam_hits(player)));
+        let leech = self.specials.iter().any(|sp| matches!(&sp.ai, SpecialAI::Leech(l) if l.drain_due()));
+        // === end combat ===
         [
             (pacers, "patrol"),
             (hunter, "hunter"),
@@ -3473,6 +3830,9 @@ impl DreamscapeGame {
             (special, "special enemy"),
             (gate, "gate"),
             (beat, "beat tile"),
+            (moth, "moth"),
+            (mask, "mask"),
+            (leech, "leech"),
         ]
         .into_iter()
         .find_map(|(hit, what)| hit.then_some(what))
@@ -3565,6 +3925,7 @@ impl DreamscapeGame {
                 }
             }
         }
+        self.rattle_b(radius, push); // === combat ===
     }
 
     /// Loud abilities carry: every enemy within `radius` that isn't reeling
@@ -6586,6 +6947,8 @@ impl DreamscapeGame {
         }
         self.enemies.clear();
         self.specials.clear();
+        self.moth_swarm = None; // === combat ===
+        self.jump_event = false;
         self.crumbles.clear();
         self.trail.clear();
         self.mimic_awake_at = specials::MIMIC_DELAY;
@@ -7194,6 +7557,7 @@ impl DreamscapeGame {
             s.angle = a;
         }
         // === end shards ===
+        self.spawn_enemies_b(gl, &dream)?; // === combat ===
         // === hazards ===
         self.theme_rule = self.hazard_rule_state();
         if self.theme_rule.is_some() {
@@ -8531,6 +8895,7 @@ impl Game for DreamscapeGame {
             }
             if wants_jump && body.grounded {
                 body.velocity.y = jump_speed;
+                self.jump_event = true; // === combat === a leech counts it
                 if jump_pressed {
                     self.sfx(Sound::Jump);
                     fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::Spring);
@@ -8538,6 +8903,7 @@ impl Game for DreamscapeGame {
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
                 body.velocity.y = jump_speed;
+                self.jump_event = true; // === combat === a leech counts it
                 self.sfx(Sound::AirJump);
                 fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::DoubleJump);
             }
@@ -8832,6 +9198,9 @@ impl Game for DreamscapeGame {
         };
         // === end combat ===
         let caught = caught_by.is_some();
+        if caught {
+            self.release_leeches(); // === combat === the respawn shakes them off
+        }
         if let Some(by) = caught_by {
             log::info!(
                 "Caught by: {by} (depth {}, {:.1}s into the dream)",

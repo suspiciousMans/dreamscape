@@ -67,9 +67,13 @@ pub enum Sound {
     Unravel,
     /// A calm mote steadies you.
     Calm,
+    /// A strike glances off a mask's shield.
+    Bounce,
+    /// A leech latches on.
+    Latch,
 }
 
-pub const ALL_SOUNDS: [Sound; 43] = [
+pub const ALL_SOUNDS: [Sound; 45] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -113,6 +117,8 @@ pub const ALL_SOUNDS: [Sound; 43] = [
     Sound::StrikeHit,
     Sound::Unravel,
     Sound::Calm,
+    Sound::Bounce,
+    Sound::Latch,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -401,6 +407,14 @@ pub fn synth(sound: Sound) -> Vec<f32> {
         Calm => vec![
             v(523.0, 523.0, 0.2).gain(0.25),
             v(784.0, 784.0, 0.3).gain(0.22).at(0.09),
+        ],
+        Bounce => vec![
+            v(1500.0, 900.0, 0.08).wave(2).gain(0.3),
+            v(260.0, 140.0, 0.1).noise(0.4).gain(0.25).at(0.01),
+        ],
+        Latch => vec![
+            v(320.0, 120.0, 0.2).noise(0.6).gain(0.3),
+            v(200.0, 90.0, 0.25).gain(0.25).at(0.05),
         ],
     };
     render(&voices, sound as u32 * 7919 + 1)

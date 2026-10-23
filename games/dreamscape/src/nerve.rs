@@ -211,6 +211,9 @@ mod tests {
         assert_eq!(damage_from("patrol"), 1);
         assert_eq!(damage_from("hunter"), 2);
         assert_eq!(damage_from("boss attack"), 2);
+        for new in ["moth", "mask", "leech"] {
+            assert_eq!(damage_from(new), 1, "{new}");
+        }
         let mut n = Nerve::default();
         assert_eq!(n.hit(2, AWAY, 0.0), Hit::Hurt);
         assert_eq!(n.cur(), 1);

@@ -138,6 +138,11 @@ pub enum Kind {
     Sentry,
     Drifter,
     Jester,
+    // ENEMIES-B (added at the bottom).
+    /// One moth of a group (its swarm is `moths::Swarm`).
+    Moth,
+    Mask,
+    Leech,
 }
 
 /// Hit points by kind (see the combat plan).
@@ -150,6 +155,9 @@ pub fn base_hp(kind: Kind) -> f32 {
         Kind::Sentry => 4.0,
         Kind::Drifter => 2.0,
         Kind::Jester => 1.0,
+        Kind::Moth => crate::moths::HP,
+        Kind::Mask => crate::mask::HP,
+        Kind::Leech => crate::leech::HP,
     }
 }
 
