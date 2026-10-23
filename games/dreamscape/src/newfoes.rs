@@ -106,8 +106,60 @@ pub fn place(plan: &[(Kind, usize)], lairs: &[Vec3], seed: u64) -> Vec<(Kind, Ve
     out
 }
 
+/// What a new enemy says out loud when its state changes: `was` and `now` are
+/// (telling, lunging or slamming, tears in the air). Pure, so each tell, lunge
+/// and spit is heard once.
+pub fn cues(kind: crate::combat::Kind, was: (bool, bool, usize), now: (bool, bool, usize)) -> Vec<crate::sounds::Sound> {
+    use crate::combat::Kind;
+    use crate::sounds::Sound;
+    let mut out = Vec::new();
+    match kind {
+        Kind::Tooth => {
+            if now.0 && !was.0 {
+                out.push(Sound::ToothTell);
+            }
+            if now.1 && !was.1 {
+                out.push(Sound::ToothLunge);
+            }
+        }
+        Kind::Weeper => {
+            if now.2 > was.2 {
+                out.push(Sound::WeeperSpit);
+            }
+        }
+        Kind::Lullaby => {
+            if now.0 && !was.0 {
+                out.push(Sound::LullabyTell);
+            }
+            if now.1 && !was.1 {
+                out.push(Sound::LullabySlam);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::combat::Kind;
+    use crate::sounds::Sound;
+
+    #[test]
+    fn each_tell_lunge_slam_and_spit_is_heard_once_when_it_begins() {
+        let idle = (false, false, 0);
+        assert_eq!(cues(Kind::Tooth, idle, (true, false, 0)), vec![Sound::ToothTell]);
+        assert!(cues(Kind::Tooth, (true, false, 0), (true, false, 0)).is_empty(), "still telling: silent");
+        assert_eq!(cues(Kind::Tooth, (true, false, 0), (false, true, 0)), vec![Sound::ToothLunge]);
+        assert_eq!(cues(Kind::Lullaby, idle, (true, false, 0)), vec![Sound::LullabyTell]);
+        assert_eq!(cues(Kind::Lullaby, (true, false, 0), (false, true, 0)), vec![Sound::LullabySlam]);
+        assert_eq!(cues(Kind::Weeper, idle, (true, false, 0)), Vec::<Sound>::new(), "its tell is silent");
+        assert_eq!(cues(Kind::Weeper, idle, (false, false, 1)), vec![Sound::WeeperSpit]);
+        assert!(cues(Kind::Weeper, (false, false, 2), (false, false, 1)).is_empty(), "a tear landing is not a spit");
+        assert!(cues(Kind::Mask, idle, (true, true, 3)).is_empty(), "other enemies are not its business");
+    }
+
     use super::*;
     use crate::dream::ALL_THEMES;
 
