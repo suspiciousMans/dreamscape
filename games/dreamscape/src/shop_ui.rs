@@ -496,7 +496,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 rgba(col, dim.max(0.6)),
             );
         }
-        y += slot + 20.0;
+        y += slot + 18.0;
     }
 
     // Preview + details, right.

@@ -459,7 +459,7 @@ fn design_size(v: &HudView) -> Option<(f32, f32)> {
 /// `design_size` from just the screen and tab (the mouse needs it too).
 pub fn design_for(mode: Mode, store_tab: usize) -> Option<(f32, f32)> {
     match mode {
-        Mode::Store if store_tab == 0 => Some((1100.0, 600.0)),
+        Mode::Store if store_tab == 0 => Some((1100.0, 680.0)),
         Mode::Store => Some((800.0, 450.0)),
         Mode::Loadout => Some((800.0, 450.0)),
         Mode::Booklet => Some((1100.0, 112.0 + crate::booklet_ui::CARD_SIZE.y + 170.0)),

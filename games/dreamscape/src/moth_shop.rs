@@ -31,7 +31,7 @@ pub const SHOP_EVERY: u32 = 3;
 
 /// A moth line for the shelf (flagged for the user's approval).
 pub const TITLE: &str = "THE MOTH'S ROOM";
-pub const SUBTITLE: &str = "everything here is for dust. the moth is not sentimental.";
+pub const SUBTITLE: &str = "everything here is for dust";
 pub const EMPTY: &str = "THE MOTH HAS NOTHING LEFT FOR YOU";
 
 /// Dust price of a card of this tier; curses are never for sale.

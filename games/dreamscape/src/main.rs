@@ -5644,7 +5644,7 @@ impl DreamscapeGame {
         let last = cards.len() - 1;
         self.choice_view = upgrade_ui::ChoiceView {
             title: moth_shop::TITLE.into(),
-            subtitle: format!("{} · you have {} dust", moth_shop::SUBTITLE, self.bonus_dust),
+            subtitle: format!("you have {} dust · {}", self.bonus_dust, moth_shop::SUBTITLE),
             cards,
             selected: selected.min(last),
             age: 0.0,
@@ -13441,6 +13441,17 @@ mod screen_smoke {
                 assert!(shapes(&g) > 0);
             }
         }
+    }
+    #[test]
+    fn the_fullest_moth_shelf_fits_the_screen() {
+        let mut g = game("shop_fit");
+        g.director.depth = 9;
+        g.bonus_dust = 40;
+        g.perks = vec![store::Perk::DeepShelves];
+        g.enter_moth_shop_for_test();
+        assert_eq!(g.mode, hud::Mode::Choice);
+        let bad = overflows(&g, "MothShop");
+        assert!(bad.is_empty(), "{bad:?}");
     }
     // === end shop ===
 
