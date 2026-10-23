@@ -9458,18 +9458,24 @@ impl Game for DreamscapeGame {
                     }
                     return;
                 }
-                (hud::Mode::Playing, Keycode::Escape) => {
+                // P pauses too: a browser keeps Escape for itself (it lets go of
+                // the mouse and leaves fullscreen), so it can't be the only key.
+                (hud::Mode::Playing, Keycode::Escape | Keycode::P)
+                    if key == Keycode::Escape || self.settings.action_for(key).is_none() =>
+                {
                     ctx.platform.sdl.mouse().set_relative_mouse_mode(false);
                     self.mouse_captured = false;
                     self.mode = hud::Mode::Paused;
                     self.input = PlayerInputState::default();
                     return;
                 }
-                (hud::Mode::Paused, Keycode::Escape) => {
+                (hud::Mode::Paused, Keycode::Escape | Keycode::P) => {
                     self.mode = hud::Mode::Playing;
                     return;
                 }
-                (hud::Mode::Paused, Keycode::Q) => {
+                // M, not Q: Q on the title menu quits (on the web that reloads
+                // the page), so one more tap of Q must never follow this one.
+                (hud::Mode::Paused, Keycode::M) => {
                     self.dream = None;
                     self.mode = hud::Mode::Title;
                     return;
@@ -9486,7 +9492,7 @@ impl Game for DreamscapeGame {
                     self.mode = hud::Mode::PackPick;
                     return;
                 }
-                (hud::Mode::Reveal, Keycode::R | Keycode::B | Keycode::L | Keycode::Escape)
+                (hud::Mode::Reveal, Keycode::R | Keycode::B | Keycode::L | Keycode::Escape | Keycode::W)
                     if self.pick.picks_left > 0 =>
                 {
                     return;
@@ -9516,7 +9522,8 @@ impl Game for DreamscapeGame {
                     self.open_store();
                     return;
                 }
-                (hud::Mode::Reveal, Keycode::Escape) if revealed => {
+                // W wakes (Escape still does natively; a browser eats it).
+                (hud::Mode::Reveal, Keycode::Escape | Keycode::W) if revealed => {
                     self.dream = None;
                     self.mode = hud::Mode::Title;
                     return;
@@ -9669,6 +9676,9 @@ impl Game for DreamscapeGame {
                     self.open_booklet();
                     return;
                 }
+                // Quitting a web page only reloads it, so there Q and Escape do
+                // nothing on the title; "stay awake" is still in the menu.
+                #[cfg(not(target_os = "emscripten"))]
                 (hud::Mode::Title, Keycode::Q | Keycode::Escape) => {
                     ctx.should_quit = true;
                     return;
@@ -12350,6 +12360,30 @@ mod screen_smoke {
         let mut f = cards::card_from(&cards::tests::record(DreamTheme::SynesthesiaHall, 6, 3, 0.4, false));
         f.fused = Some(DreamTheme::NightmareFactory);
         assert_eq!(loadout_ui::edges_of(&f), vec![edges::Edge::Flourish, edges::Edge::Rending]);
+    }
+
+    #[test]
+    fn going_to_the_menu_and_waking_use_different_keys_and_q_leaves_nothing() {
+        let mut g = game("web_keys");
+        // Paused: M goes to the menu; Q does not (a second Q on the title would quit).
+        g.mode = hud::Mode::Paused;
+        let (hud_pause, hud_wake) = (
+            "[m] back to menu",
+            "[w] wake",
+        );
+        assert_ne!(hud_pause, hud_wake);
+        assert_eq!(pad::key_for(engine::sdl2::controller::Button::Y, hud::Mode::Paused, &g.settings), Some(Keycode::M));
+        assert_eq!(pad::key_for(engine::sdl2::controller::Button::B, hud::Mode::Reveal, &g.settings), Some(Keycode::W));
+        // The prompts a controller player sees still name real buttons.
+        let s = settings::Settings::default();
+        assert_eq!(pad::prompt("[m] back to menu", hud::Mode::Paused, &s, true), "[Y] back to menu");
+        assert_eq!(pad::prompt("[w] wake", hud::Mode::Reveal, &s, true), "[B] wake");
+        // Every screen's own words use the new keys.
+        let paused = frame_with(&g, 1280.0, 720.0, &|_| {});
+        let words: Vec<String> = texts(&paused).into_iter().map(|t| t.0).collect();
+        assert!(words.iter().any(|w| w.contains("[esc / p] keep dreaming")), "{words:?}");
+        assert!(words.iter().any(|w| w.contains("[m] back to menu")));
+        assert!(!words.iter().any(|w| w.contains("[q]")), "no Q left on the pause screen");
     }
 
     #[test]

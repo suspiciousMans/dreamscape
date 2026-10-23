@@ -756,9 +756,9 @@ fn draw_reveal_scene(
     }
     if done {
         let keys = if pk.pressed {
-            "[b] booklet   [l] lucid store   [r] dream again   [esc] wake"
+            "[b] booklet   [l] lucid store   [r] dream again   [w] wake"
         } else {
-            "[s] press into booklet   [r] dream again   [esc] wake"
+            "[s] press into booklet   [r] dream again   [w] wake"
         };
         let keys = v.k(keys);
         p.text(

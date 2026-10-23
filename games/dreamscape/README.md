@@ -38,7 +38,10 @@ Serve `dist/` over HTTP. Saves, settings and the booklet persist in the browser 
 
 Every movement and ability key can be rebound in **settings**, which also has music and sound volume, grain and vignette strength, reduced motion and fullscreen.
 | R | title screen: toggle run length (short / long) |
-| Esc | pause (Q to quit from pause) |
+| Esc / P | pause and resume (P because a browser keeps Esc for itself) |
+| M (paused) | back to the menu |
+| W (after a run) | wake: back to the menu from the journal |
+| Q / Esc (title) | quit; on the web they do nothing, since quitting only reloads the page |
 | L / B | Lucid Store / dream booklet (title screen, pause, after waking) |
 | F1 | overhead camera |
 | F2 | toggle tunnel vision + film grain |

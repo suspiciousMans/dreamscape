@@ -40,6 +40,14 @@
     statusEl.textContent = "Dreamscape needs WebGL2, which this browser doesn't support.";
   }
   canvas.addEventListener("pointerdown", function () { canvas.focus(); });
+  // The game owns these keys while it has focus: without this the browser
+  // moves focus off the canvas on Tab, goes back a page on Backspace, and
+  // scrolls on Space and the arrows.
+  canvas.addEventListener("keydown", function (e) {
+    if (["Tab", "Backspace", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.key) >= 0) {
+      e.preventDefault();
+    }
+  });
   new ResizeObserver(function () { window.dispatchEvent(new Event("resize")); }).observe(canvas);
 </script>
 <script src="dreamscape.js"></script>

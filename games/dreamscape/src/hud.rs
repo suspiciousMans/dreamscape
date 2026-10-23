@@ -1418,14 +1418,14 @@ fn pause_veil(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         c + Vec2::new(0.0, 24.0),
         Align2::CENTER_TOP,
-        v.k("[esc] keep dreaming"),
+        v.k(if v.pad { "[esc] keep dreaming" } else { "[esc / p] keep dreaming" }),
         FontId::monospace(22.0),
         rgba(ink(v), 0.8),
     );
     p.text(
         c + Vec2::new(0.0, 52.0),
         Align2::CENTER_TOP,
-        v.k("[q] back to menu"),
+        v.k("[m] back to menu"),
         FontId::monospace(22.0),
         rgba(ink(v), 0.5),
     );
@@ -1497,9 +1497,9 @@ fn journal(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     let keys = if v.journal_status.is_some() {
-        "[b] booklet   [r] dream again   [esc] wake for real"
+        "[b] booklet   [r] dream again   [w] wake for real"
     } else {
-        "[s] press into booklet   [b] booklet   [r] dream again   [esc] wake"
+        "[s] press into booklet   [b] booklet   [r] dream again   [w] wake"
     };
     let keys = v.k(keys);
     p.text(
