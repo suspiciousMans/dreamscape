@@ -1,7 +1,7 @@
-//! The hand: the equipped cards that hold abilities, fanned down the right
-//! edge of the screen like cards held in a hand: overlapping, each tilted a
-//! little more than the last. A card straightens, leaps toward the centre,
-//! flashes and rings when its ability is used.
+//! The hand: the equipped cards that hold abilities, fanned along the bottom
+//! centre of the screen like cards held in a hand: overlapping, each tilted a
+//! little more than the last. A card straightens, rises, flashes and rings
+//! when its ability is used.
 //!
 //! Layout, tilt and timing are pure and unit-tested; `draw` only paints them.
 
@@ -20,10 +20,10 @@ pub const RING_SECS: f32 = 0.5;
 /// `since_use` for a card that has not been used (this dream).
 pub const NEVER: f32 = f32::MAX;
 
-/// Card size at 720p, and how much of each card the next one leaves showing.
+/// Card size at 720p, and how much of each card's width the next leaves showing.
 const CARD_W: f32 = 92.0;
 const CARD_H: f32 = 118.0;
-const VISIBLE: f32 = 0.7;
+const VISIBLE: f32 = 0.82;
 /// Tilt between neighbouring cards, in radians (about 6 degrees).
 const TILT_STEP: f32 = 0.105;
 
@@ -69,50 +69,45 @@ pub fn ring(since: f32) -> Option<f32> {
 }
 
 /// How far card `i` of `n` leans at rest (radians, clockwise positive):
-/// the top card leans back, the bottom one forward, the middle stands.
+/// the left cards lean left, the right ones lean right, the middle stands.
 pub fn tilt(i: usize, n: usize) -> f32 {
     (i as f32 - (n as f32 - 1.0) / 2.0) * TILT_STEP
 }
 
-/// Where each of `n` cards rests (before tilt): overlapped down the right
-/// edge, the middle ones bowed toward the centre, like a hand held out.
+/// Where each of `n` cards rests (before tilt): overlapped along the bottom
+/// centre, the middle ones held a little higher, like a hand of cards.
 pub fn layout(screen: Rect, n: usize) -> Vec<Rect> {
     if n == 0 {
         return Vec::new();
     }
     let u = crate::pixel_ui::scale(screen);
     let (w, h) = (CARD_W * u, CARD_H * u);
-    let top_min = screen.top() + 150.0 * u;
-    let bottom_max = screen.bottom() - 40.0 * u;
-    let room = (bottom_max - top_min).max(h);
-    let mut step = h * VISIBLE;
-    let mut total = h + (n as f32 - 1.0) * step;
-    if total > room && n > 1 {
-        step = (room - h) / (n as f32 - 1.0);
-        total = h + (n as f32 - 1.0) * step;
+    let room = (screen.width() * 0.55).max(w);
+    let mut step = w * VISIBLE;
+    if w + (n as f32 - 1.0) * step > room && n > 1 {
+        step = (room - w) / (n as f32 - 1.0);
     }
-    let top = (screen.center().y - total / 2.0).clamp(top_min, (bottom_max - total).max(top_min));
+    let total = w + (n as f32 - 1.0) * step;
+    let left = screen.center().x - total / 2.0;
+    let base = screen.bottom() - 26.0 * u - h;
     let mid = (n as f32 - 1.0) / 2.0;
     (0..n)
         .map(|i| {
             let t = if mid > 0.0 { (i as f32 - mid) / mid } else { 0.0 };
-            let bow = -16.0 * u * (1.0 - t * t);
-            Rect::from_min_size(
-                Pos2::new(screen.right() - 26.0 * u - w + bow, top + i as f32 * step),
-                Vec2::new(w, h),
-            )
+            let sag = 14.0 * u * t * t;
+            Rect::from_min_size(Pos2::new(left + i as f32 * step, base + sag), Vec2::new(w, h))
         })
         .collect()
 }
 
-/// The card's rect while popped: toward the centre and a little larger.
+/// The card's rect while popped: up toward the screen and a little larger.
 /// Reduced motion keeps it in place.
 pub fn popped(rest: Rect, amount: f32, u: f32, reduced: bool) -> Rect {
     if reduced || amount <= 0.0 {
         return rest;
     }
     let grown = Rect::from_center_size(rest.center(), rest.size() * (1.0 + 0.16 * amount));
-    grown.translate(Vec2::new(-120.0 * u * amount, 0.0))
+    grown.translate(Vec2::new(0.0, -130.0 * u * amount))
 }
 
 /// A card's four corners after turning `angle` about its centre.
@@ -267,19 +262,24 @@ fn draw_card(
 
     let inner = body.shrink(cell * 2.5);
     let font = |base: f32| (base * u * k).max(7.0);
+    // Resting cards are overlapped on the right, so their words keep to the
+    // part that shows; a popped card has nothing on top of it.
+    let shown = (CARD_W * u * k * VISIBLE - cell * 3.0).min(inner.width());
+    let text_w = shown + (inner.width() - shown) * amount;
+    let text_x = inner.left() + text_w / 2.0;
 
     // The card's name across the top, on up to two lines.
     let name = c.card.as_ref().map_or(c.ability, |card| card.name.as_str());
     let name_h = 24.0 * u * k;
     let name_size = (10.0 * u * k).max(7.0);
-    let per_line = (inner.width() / (name_size * 0.6)).floor().max(4.0) as usize;
+    let per_line = (text_w / (name_size * 0.6)).floor().max(4.0) as usize;
     let lines = name_lines(name, per_line);
     let line_h = name_h / 2.0;
     let first = if lines.1.is_some() { 0.0 } else { 0.5 };
     for (n, line) in std::iter::once(&lines.0).chain(lines.1.iter()).enumerate() {
         x.text(
             p,
-            Vec2::new(0.0, inner.top() + line_h * (first + n as f32) + line_h / 2.0),
+            Vec2::new(text_x, inner.top() + line_h * (first + n as f32) + line_h / 2.0),
             line,
             name_size,
             rgba(edge, 1.0),
@@ -313,11 +313,11 @@ fn draw_card(
     }
     x.outline(p, art, 1.0, rgba(edge, 0.8));
 
-    // The key, as a badge on the art's top-right corner.
+    // The key, as a badge on the art's top-left corner (the right is covered).
     let key_size = font(10.0);
     let key_w = (c.key.chars().count() as f32 * key_size * 0.6 + 6.0 * u * k).max(14.0 * u * k);
     let key_box = Rect::from_min_size(
-        Pos2::new(art.right() - key_w - 2.0 * u, art.top() + 2.0 * u),
+        Pos2::new(art.left() + 2.0 * u, art.top() + 2.0 * u),
         Vec2::new(key_w, key_size + 4.0 * u),
     );
     x.quad(p, key_box, rgba([22, 14, 44], 0.92));
@@ -347,7 +347,7 @@ fn draw_card(
     let ability_size = crate::pixel_ui::fit(c.ability, font(12.0), inner.width(), 6.0);
     x.text(
         p,
-        Vec2::new(0.0, (lower + inner.bottom()) / 2.0),
+        Vec2::new(text_x, (lower + inner.bottom()) / 2.0),
         c.ability,
         ability_size,
         rgba(if lit { [255, 245, 255] } else { [170, 150, 200] }, 0.95),
@@ -453,31 +453,40 @@ mod tests {
                 assert_eq!(rects.len(), n);
                 for (i, r) in rects.iter().enumerate() {
                     for c in corners(*r, tilt(i, n)) {
-                        assert!(c.x <= s.right(), "{n} cards at {w}x{h}: off the right");
-                        assert!(c.x > s.center().x, "{n} cards at {w}x{h}: past the middle");
+                        assert!(c.x >= s.left() && c.x <= s.right(), "{n} at {w}x{h}: {c:?}");
                         assert!(c.y >= s.top() && c.y <= s.bottom(), "{n} at {w}x{h}: {c:?}");
+                        assert!(c.y > s.center().y, "{n} at {w}x{h}: stays in the lower half");
                     }
                 }
                 for pair in rects.windows(2) {
-                    assert!(pair[1].top() > pair[0].top());
+                    assert!(pair[1].left() > pair[0].left());
                 }
             }
         }
     }
 
     #[test]
-    fn cards_overlap_like_a_held_hand_but_the_top_stays_readable() {
-        let rects = layout(screen(), crate::lore::MAX_SLOTS);
-        for pair in rects.windows(2) {
-            let shown = pair[1].top() - pair[0].top();
-            assert!(shown < pair[0].height(), "cards should overlap");
-            // The name, art and recharge strip (the top 60%) always show.
-            assert!(shown >= pair[0].height() * 0.6, "shown {shown}");
+    fn the_hand_is_centred_along_the_bottom() {
+        for n in 1..=crate::lore::MAX_SLOTS {
+            let rects = layout(screen(), n);
+            let l = rects.iter().map(|r| r.left()).fold(f32::MAX, f32::min);
+            let r = rects.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+            assert!(((l + r) / 2.0 - screen().center().x).abs() < 0.5, "n = {n}");
         }
     }
 
     #[test]
-    fn the_hand_fans_from_leaning_back_to_leaning_forward() {
+    fn cards_overlap_like_a_held_hand_but_the_left_edge_stays_readable() {
+        let rects = layout(screen(), crate::lore::MAX_SLOTS);
+        for pair in rects.windows(2) {
+            let shown = pair[1].left() - pair[0].left();
+            assert!(shown < pair[0].width(), "cards should overlap");
+            assert!(shown >= pair[0].width() * 0.6, "shown {shown}");
+        }
+    }
+
+    #[test]
+    fn the_hand_fans_from_leaning_left_to_leaning_right() {
         assert_eq!(tilt(0, 1), 0.0);
         assert_eq!(tilt(1, 3), 0.0);
         assert!(tilt(0, 3) < 0.0 && tilt(2, 3) > 0.0);
@@ -486,18 +495,19 @@ mod tests {
     }
 
     #[test]
-    fn the_middle_card_bows_toward_the_centre() {
+    fn the_middle_card_is_held_highest() {
         let rects = layout(screen(), 3);
-        assert!(rects[1].left() < rects[0].left());
-        assert!(rects[1].left() < rects[2].left());
-        assert_eq!(rects[0].left(), rects[2].left());
+        assert!(rects[1].top() < rects[0].top());
+        assert!(rects[1].top() < rects[2].top());
+        assert_eq!(rects[0].top(), rects[2].top());
     }
 
     #[test]
-    fn popping_moves_toward_the_centre_and_grows() {
+    fn popping_rises_and_grows() {
         let rest = layout(screen(), 2)[0];
         let up = popped(rest, 1.0, 1.0, false);
-        assert!(up.center().x < rest.center().x);
+        assert!(up.center().y < rest.center().y);
+        assert_eq!(up.center().x, rest.center().x);
         assert!(up.width() > rest.width());
         assert_eq!(popped(rest, 0.0, 1.0, false), rest);
     }

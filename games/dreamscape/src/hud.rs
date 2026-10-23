@@ -342,6 +342,10 @@ fn px_cells(
 }
 
 const EYE_PX: f32 = 6.0;
+/// The eye's centre, down from the top of the screen.
+const EYE_TOP: f32 = 78.0;
+/// How far under the eye its pips end (plates and prompts sit below).
+const EYE_BELOW: f32 = 9.0 * EYE_PX + 22.0;
 const ARROW_PX: f32 = 4.0;
 
 /// The HUD's signature: text laid out letter by letter so each letter can
@@ -459,7 +463,7 @@ pub fn draw(
     }
     if let (Mode::Playing, Some(line)) = (v.mode, &v.coop_line) {
         p.text(
-            Pos2::new(screen.center().x, screen.top() + 64.0),
+            Pos2::new(screen.center().x, screen.top() + EYE_TOP + EYE_BELOW + 14.0),
             Align2::CENTER_TOP,
             line,
             FontId::monospace(16.0),
@@ -605,7 +609,7 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
     let Some((name, taken, total, warning)) = &v.boss else {
         return;
     };
-    let top = screen.center_top() + Vec2::new(0.0, 22.0);
+    let top = screen.center_top() + Vec2::new(0.0, EYE_TOP + EYE_BELOW + 14.0);
     p.text(
         top,
         Align2::CENTER_TOP,
@@ -653,7 +657,6 @@ fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
         return;
     }
     let rows = crate::pad::controls(v.pad, v.first_person);
-    // Sit above the ability boxes (bottom -84, 56 tall) when there are any.
     let floor = 36.0;
     let mut at = Pos2::new(
         screen.left() + 28.0,
@@ -709,7 +712,7 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
     // The lists stop above the bottom margin and fold the rest
     // into "+N more", so a long run never runs off the screen.
     // (and above the eye's speech plate while it is talking).
-    let floor = if v.eye_line.is_some() { 96.0 + 8.0 * EYE_PX + 44.0 } else { 40.0 };
+    let floor = 40.0;
     let room = ((screen.bottom() - floor - (screen.top() + 20.0 + y)) / 20.0).floor().max(1.0) as usize;
     let rows: Vec<(String, [u8; 3])> = v
         .perks
@@ -921,8 +924,9 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
 
     // Entrance: the eye falls from above the screen to its place.
-    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (screen.height() - 96.0 + 8.0 * EYE_PX);
-    let c = Pos2::new(screen.center().x, screen.bottom() - 96.0 - fall);
+    // The eye sits top middle; it drops in from above the screen.
+    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (EYE_TOP + 8.0 * EYE_PX);
+    let c = Pos2::new(screen.center().x, screen.top() + EYE_TOP - fall);
 
     let lucid = v.lucidity >= v.lucid_target;
     let look = eye_look(v);
@@ -938,8 +942,8 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
 
     if v.ask_eye {
         p.text(
-            Pos2::new(screen.center().x, screen.bottom() - 28.0),
-            Align2::CENTER_BOTTOM,
+            Pos2::new(screen.center().x, c.y + EYE_BELOW + 4.0),
+            Align2::CENTER_TOP,
             v.k("[enter] ask the eye"),
             FontId::monospace(18.0),
             rgba(ink(v), 0.55 + 0.3 * (v.time * 2.0).sin()),
@@ -962,9 +966,10 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
             let font = FontId::proportional(crate::pixel_ui::fit(&text, 24.0, screen.width() - 60.0, 10.0));
             let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
 
-            let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
+            // Under the shard pips, so the plate never covers the eye.
+            let at = c + Vec2::new(0.0, EYE_BELOW);
             let plate = Rect::from_center_size(
-                at - Vec2::new(0.0, full.size().y * 0.5),
+                at + Vec2::new(0.0, full.size().y * 0.5 + 6.0),
                 full.size() + Vec2::new(28.0, 12.0),
             );
             p.rect_filled(plate, 4.0, rgba([8, 4, 18], 0.72 * a));
@@ -1235,7 +1240,7 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
     } else {
         ink(v)
     };
-    let y = screen.top() + screen.height() * 0.2;
+    let y = screen.top() + screen.height() * 0.3;
     let card_w = screen.width() - 40.0;
     glitch_text(
         p,
