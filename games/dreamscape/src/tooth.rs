@@ -22,8 +22,6 @@ pub const LUNGE_SECS: f32 = 0.5;
 pub const LUNGE_SPEED: f32 = LUNGE_DIST / LUNGE_SECS;
 /// Seconds spent staggered after a lunge.
 pub const RECOVER: f32 = 1.5;
-/// Damage multiplier for a strike that lands during the recovery.
-pub const RECOVER_MULT: f32 = 2.0;
 /// Creeping speed as a fraction of yours.
 pub const CREEP: f32 = 0.6;
 /// It notices you inside this many world units.
@@ -63,6 +61,7 @@ impl Tooth {
         Self { home, player_speed, phase: Phase::Idle, dir: Vec3::Z }
     }
 
+    #[cfg(test)]
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -206,7 +205,7 @@ mod tests {
         assert_eq!(HP, 2.0);
         assert_eq!(TELEGRAPH, 0.5);
         assert_eq!(RECOVER, 1.5);
-        assert_eq!(RECOVER_MULT, 2.0);
+        assert_eq!(crate::combat::STAGGERED_MULT, 2.0, "a recovering tooth takes the staggered double");
         assert_eq!(LUNGE_DIST, 7.5);
         assert!(CREEP < 1.0);
         assert!(LUNGE_SPEED > PS, "the lunge is the danger");

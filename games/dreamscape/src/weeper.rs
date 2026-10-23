@@ -122,6 +122,7 @@ impl Weeper {
         })
     }
 
+    #[cfg(test)]
     pub fn update(&mut self, pos: &mut Vec3, player: Vec3, walls: &[Wall], dt: f32) {
         self.update_aimed(pos, player, player, walls, dt);
     }

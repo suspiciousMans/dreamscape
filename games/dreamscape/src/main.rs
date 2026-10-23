@@ -3291,7 +3291,20 @@ impl DreamscapeGame {
             .filter(|b| b.kind == BlockKind::Wall)
             .map(|b| (b.pos - b.size * 0.5, b.pos + b.size * 0.5))
             .collect();
-        for (kind, lair) in newfoes::place(&plan, &dream.lairs, dream.seed) {
+        // With the dev switch, crowd them near the spawn so a screenshot sees them.
+        let mut lairs = dream.lairs.clone();
+        if dev.is_some() {
+            lairs.sort_by(|a, b| {
+                (*a - dream.spawn).length().total_cmp(&(*b - dream.spawn).length())
+            });
+            lairs.truncate(4);
+            // DREAMSCAPE_ENEMY_NEAR=1 (screenshots): right in front of the spawn.
+            if crate::dev::var("DREAMSCAPE_ENEMY_NEAR").is_ok() {
+                let s = dream.spawn;
+                lairs = vec![s + Vec3::new(-2.0, 0.0, 8.0), s + Vec3::new(5.0, 0.0, 10.0)];
+            }
+        }
+        for (kind, lair) in newfoes::place(&plan, &lairs, dream.seed) {
             let (shape, base, calm, tell) = match kind {
                 combat::Kind::Tooth => (
                     Shape::Cone,
@@ -3378,26 +3391,44 @@ impl DreamscapeGame {
         let yaw_of = |f: Vec3| Quat::from_rotation_y(f.x.atan2(f.z));
         for f in &mut self.newfoes {
             let reeling = held || self.staggered.contains_key(&f.entity);
-            let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) else {
-                continue;
+            // The body first (one Transform borrowed at a time: hecs checks
+            // borrows per component column, not per entity).
+            let (telling, pos) = {
+                let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) else {
+                    continue;
+                };
+                let telling = match &mut f.ai {
+                    NewAI::Tooth(a) => {
+                        if !held {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.eye_lit()
+                    }
+                    NewAI::Weeper(a) => {
+                        if !reeling {
+                            a.update_aimed(&mut t.position, player, aim, &self.foe_walls, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.telling()
+                    }
+                    NewAI::Lullaby(a) => {
+                        if !reeling {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        matches!(a.phase(), lullaby::Phase::Telegraph(_))
+                    }
+                };
+                (telling, t.position)
             };
-            let telling;
-            match &mut f.ai {
-                NewAI::Tooth(a) => {
-                    if !held {
-                        a.update(&mut t.position, player, dt);
-                    }
-                    telling = a.eye_lit();
-                    t.scale = f.base * a.scale_mult(reduced);
-                    t.rotation = yaw_of(a.facing());
-                }
+            // Then what it carries: tears, plate, marker, ring.
+            match &f.ai {
+                NewAI::Tooth(_) => {}
                 NewAI::Weeper(a) => {
-                    if !reeling {
-                        a.update_aimed(&mut t.position, player, aim, &self.foe_walls, dt);
-                    }
-                    telling = a.telling();
-                    t.scale = f.base * a.scale_mult(reduced);
-                    t.rotation = yaw_of(a.facing());
                     for (k, e) in f.extras.iter().enumerate() {
                         if let Ok(mut te) = self.world.get::<&mut Transform>(*e) {
                             match a.tears.get(k) {
@@ -3411,20 +3442,14 @@ impl DreamscapeGame {
                     }
                 }
                 NewAI::Lullaby(a) => {
-                    if !reeling {
-                        a.update(&mut t.position, player, dt);
-                    }
-                    telling = matches!(a.phase(), lullaby::Phase::Telegraph(_));
-                    t.scale = f.base * a.scale_mult(reduced);
-                    t.rotation = yaw_of(a.facing());
-                    let centre = Vec3::new(t.position.x, f.floor_y, t.position.z);
+                    let centre = Vec3::new(pos.x, f.floor_y, pos.z);
                     for (k, e) in f.extras.iter().enumerate() {
                         let Ok(mut te) = self.world.get::<&mut Transform>(*e) else {
                             continue;
                         };
                         match k {
                             0 => {
-                                te.position = t.position + a.facing() * (f.base.x * 0.5 + 0.1);
+                                te.position = pos + a.facing() * (f.base.x * 0.5 + 0.1);
                                 te.rotation = yaw_of(a.facing());
                                 te.scale = Vec3::new(1.5, 1.7, 0.25);
                             }
@@ -3452,7 +3477,6 @@ impl DreamscapeGame {
                     }
                 }
             }
-            drop(t);
             if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(f.entity) {
                 r.texture = Some(if telling { f.tell.clone() } else { f.calm.clone() });
             }
