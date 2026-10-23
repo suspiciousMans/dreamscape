@@ -29,6 +29,8 @@ pub const CALM_REGEN_SECS: f32 = 25.0;
 pub const CALM_REGEN_STACK: f32 = 0.8;
 /// LUCKY MEMORY: extra chance of a calm mote per stack.
 pub const LUCKY_MOTE_PER: f32 = 0.06;
+/// Most new-style enemies (Tooth, Weeper, Lullaby, Moths, Mask, Leech) in one dream.
+pub const MAX_NEW_FOES: usize = 5;
 /// WIDE EYES shows hit points on any enemy this near.
 pub const EYES_PIP_REACH: f32 = 10.0;
 /// COUNTER: how far the attacker can be, and the pause between counters.
@@ -216,6 +218,11 @@ pub enum Kind {
     Sentry,
     Drifter,
     Jester,
+    // ENEMIES-B (added at the bottom).
+    /// One moth of a group (its swarm is `moths::Swarm`).
+    Moth,
+    Mask,
+    Leech,
 }
 
 /// Hit points by kind (see the combat plan).
@@ -231,6 +238,9 @@ pub fn base_hp(kind: Kind) -> f32 {
         Kind::Sentry => 4.0,
         Kind::Drifter => 2.0,
         Kind::Jester => 1.0,
+        Kind::Moth => crate::moths::HP,
+        Kind::Mask => crate::mask::HP,
+        Kind::Leech => crate::leech::HP,
     }
 }
 
