@@ -507,6 +507,7 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
+    crate::hand::draw(ctx, &p, screen, &v.hand, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);
@@ -820,7 +821,6 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             rgba(rgb, 0.95),
         );
     }
-    crate::hand::draw(p, screen, &v.hand, v.time, v.settings_snapshot.reduced_motion);
 }
 
 /// Classic gap between shard pips, and the tightest we'll squeeze them.

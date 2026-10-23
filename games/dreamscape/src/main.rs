@@ -457,7 +457,7 @@ pub struct DreamscapeGame {
     /// When each ability was last used (dream age), for the hand's pop.
     ability_used: Vec<(Ability, f32)>,
     /// Names of the cards that hold the abilities, for the hand.
-    hand_names: Vec<(Ability, String)>,
+    hand_cards: Vec<(Ability, cards::Card)>,
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -798,7 +798,7 @@ impl DreamscapeGame {
             anchor: None,
             last_ability: None,
             ability_used: Vec::new(),
-            hand_names: Vec::new(),
+            hand_cards: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1668,11 +1668,11 @@ impl DreamscapeGame {
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
                 hand::HandCard {
                     ability: a.ability.name(),
-                    card_name: self
-                        .hand_names
+                    card: self
+                        .hand_cards
                         .iter()
                         .find(|n| n.0 == a.ability)
-                        .map_or_else(String::new, |n| n.1.clone()),
+                        .map(|n| n.1.clone()),
                     key: upgrades::SLOT_KEYS[k],
                     charge: a.charge(self.run.cooldown_for(a.ability)),
                     active: a.is_active()
@@ -5188,9 +5188,9 @@ impl DreamscapeGame {
             self.run.power(),
             self.loadout_scale
         );
-        self.hand_names = cards
+        self.hand_cards = cards
             .iter()
-            .map(|c| (powers::power(c.theme).active, c.name.clone()))
+            .map(|c| (powers::power(c.theme).active, c.clone()))
             .collect();
         self.ability_tints = cards
             .iter()
@@ -9311,7 +9311,7 @@ mod screen_smoke {
     fn card(ability: &'static str, since_use: f32) -> hand::HandCard {
         hand::HandCard {
             ability,
-            card_name: "a card".into(),
+            card: None,
             key: "1",
             charge: 0.5,
             active: false,
@@ -9340,7 +9340,15 @@ mod screen_smoke {
         assert!(rest(2, 0.1) > rest(2, hand::NEVER), "a used card rings and flashes");
         for (w, h) in [(960.0, 540.0), (1280.0, 800.0), (1920.0, 1080.0)] {
             frame_with(&g, w, h, &|v| {
-                v.hand = vec![card("DASH", 0.05), card("BLINK", hand::NEVER)];
+                let mut with_art = card("DASH", 0.05);
+                with_art.card = Some(cards::card_from(&cards::tests::record(
+                    dream::DreamTheme::Garden,
+                    9,
+                    3,
+                    0.4,
+                    false,
+                )));
+                v.hand = vec![with_art, card("BLINK", hand::NEVER)];
             });
         }
     }

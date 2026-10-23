@@ -16,7 +16,7 @@ pub struct CardArt {
 }
 
 impl CardArt {
-    fn texture(&mut self, ctx: &egui::Context, card: &Card) -> egui::TextureId {
+    pub(crate) fn texture(&mut self, ctx: &egui::Context, card: &Card) -> egui::TextureId {
         self.cache
             .entry(card.seed)
             .or_insert_with(|| {

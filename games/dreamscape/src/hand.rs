@@ -18,10 +18,9 @@ pub const RING_SECS: f32 = 0.5;
 pub const NEVER: f32 = f32::MAX;
 
 /// One card in the hand, as the HUD sees it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HandCard {
     pub ability: &'static str,
-    pub card_name: String,
     pub key: &'static str,
     /// 0..1 recharge.
     pub charge: f32,
@@ -32,6 +31,8 @@ pub struct HandCard {
     pub tint2: [u8; 3],
     /// Seconds since the ability was used; [`NEVER`] if it has not been.
     pub since_use: f32,
+    /// The equipped card itself: its artwork fills the face.
+    pub card: Option<crate::cards::Card>,
 }
 
 /// 0 at rest, 1 at the top of the pop: quick out, short hold, slow back.
@@ -103,7 +104,15 @@ fn rgba(rgb: [u8; 3], a: f32) -> Color32 {
 }
 
 /// Paints the hand. `time` drives the ready-pulse only.
-pub fn draw(p: &egui::Painter, screen: Rect, cards: &[HandCard], time: f32, reduced: bool) {
+pub fn draw(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    screen: Rect,
+    cards: &[HandCard],
+    time: f32,
+    reduced: bool,
+    art: &mut crate::booklet_ui::CardArt,
+) {
     let rests = layout(screen, cards.len());
     let u = crate::pixel_ui::scale(screen);
     // Rest order, then whichever is mid-pop on top.
@@ -125,14 +134,29 @@ pub fn draw(p: &egui::Painter, screen: Rect, cards: &[HandCard], time: f32, redu
                 Stroke::new(2.0 * u, rgba(c.tint, 0.8 * (1.0 - t))),
             );
         }
-        draw_card(p, r, c, amount, time, u);
+        draw_card(ctx, p, r, c, amount, time, u, art);
     }
 }
 
-fn draw_card(p: &egui::Painter, r: Rect, c: &HandCard, amount: f32, time: f32, u: f32) {
+#[allow(clippy::too_many_arguments)]
+fn draw_card(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    r: Rect,
+    c: &HandCard,
+    amount: f32,
+    time: f32,
+    u: f32,
+    art_cache: &mut crate::booklet_ui::CardArt,
+) {
     let ready = c.charge >= 1.0;
     let lit = ready || c.active || amount > 0.0;
-    let edge = if lit { c.tint } else { [120, 100, 150] };
+    // The frame is the card's own (rarity); the tint is for the ring and flash.
+    let frame = c
+        .card
+        .as_ref()
+        .map_or(c.tint, |card| crate::booklet_ui::card_frame(card, time));
+    let edge = if lit { frame } else { frame.map(|v| v / 2 + 40) };
     let cell = (3.0 * u).round().max(2.0);
     crate::pixel_ui::panel(
         p,
@@ -142,34 +166,34 @@ fn draw_card(p: &egui::Painter, r: Rect, c: &HandCard, amount: f32, time: f32, u
         cell,
         if lit { 1.0 } else { 0.7 },
     );
-    // The art window: bands from the card's tint to its second colour.
+    // The card's own artwork fills the window; a card we can't find falls
+    // back to bands in its tints.
     let inner = r.shrink(cell * 2.5);
-    let art = Rect::from_min_size(inner.min, Vec2::new(inner.width(), inner.height() * 0.58));
-    let bands = 6;
-    for b in 0..bands {
-        let f = b as f32 / (bands - 1) as f32;
-        let mix = |k: usize| (c.tint[k] as f32 * (1.0 - f) + c.tint2[k] as f32 * f) as u8;
-        let band = Rect::from_min_size(
-            Pos2::new(art.left(), art.top() + art.height() * b as f32 / bands as f32),
-            Vec2::new(art.width(), art.height() / bands as f32 + 0.5),
-        );
-        p.rect_filled(band, 0.0, rgba([mix(0), mix(1), mix(2)], if lit { 0.45 } else { 0.22 }));
-    }
-    // The ability's icon, large, in the window.
-    if let Some(&a) = crate::upgrades::ALL_ABILITIES
-        .iter()
-        .find(|a| a.name() == c.ability)
-    {
-        let tone = if lit { [255, 245, 255] } else { [160, 140, 190] };
-        crate::pixel_ui::icon(
-            p,
-            art.center(),
-            crate::pixels::icons::ability(a),
-            (3.0 * u).max(2.0),
-            tone,
-            crate::pixel_ui::lighter(c.tint),
-            if lit { 1.0 } else { 0.65 },
-        );
+    let art = Rect::from_min_size(inner.min, Vec2::new(inner.width(), inner.height() * 0.62));
+    match &c.card {
+        Some(card) => {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, art.height() / art.width()));
+            let dim = if lit { 255 } else { 150 };
+            p.image(
+                art_cache.texture(ctx, card),
+                art,
+                uv,
+                Color32::from_rgb(dim, dim, dim),
+            );
+            p.rect_stroke(art, 0.0, Stroke::new(1.0_f32, rgba(edge, 0.8)));
+        }
+        None => {
+            let bands = 6;
+            for b in 0..bands {
+                let f = b as f32 / (bands - 1) as f32;
+                let mix = |k: usize| (c.tint[k] as f32 * (1.0 - f) + c.tint2[k] as f32 * f) as u8;
+                let band = Rect::from_min_size(
+                    Pos2::new(art.left(), art.top() + art.height() * b as f32 / bands as f32),
+                    Vec2::new(art.width(), art.height() / bands as f32 + 0.5),
+                );
+                p.rect_filled(band, 0.0, rgba([mix(0), mix(1), mix(2)], if lit { 0.45 } else { 0.22 }));
+            }
+        }
     }
     // Name, then the key on a cap.
     let name_y = art.bottom() + 4.0 * u;
@@ -184,7 +208,7 @@ fn draw_card(p: &egui::Painter, r: Rect, c: &HandCard, amount: f32, time: f32, u
     crate::pixel_ui::keycap(
         p,
         Pos2::new(inner.left() + 12.0 * u, art.top() + 11.0 * u),
-        &format!("{}", c.key),
+        c.key,
         (11.0 * u).max(8.0),
         2.0,
         edge,
