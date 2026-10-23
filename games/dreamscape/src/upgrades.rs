@@ -312,6 +312,9 @@ pub struct AbilityState {
     pub cooldown: f32,
     /// Seconds of effect left.
     pub active: f32,
+    /// Deck hands: the card was used and is on its way back; the state only
+    /// stays to finish its effect (or to wait for the slot to draw again).
+    pub spent: bool,
 }
 
 /// Seconds between uses, as actually applied: however fast it recharges,
@@ -326,6 +329,7 @@ impl AbilityState {
             ability,
             cooldown: 0.0,
             active: 0.0,
+            spent: false,
         }
     }
 
@@ -337,7 +341,7 @@ impl AbilityState {
     /// Fires if ready. `cooldown_mult` < 1 shortens the recharge;
     /// `duration_mult` stretches the effect.
     pub fn try_use(&mut self, cooldown_mult: f32, duration_mult: f32) -> bool {
-        if self.cooldown > 0.0 {
+        if self.cooldown > 0.0 || self.spent {
             return false;
         }
         self.active = self.ability.duration() * duration_mult;
@@ -848,6 +852,9 @@ pub struct RunUpgrades {
     pub taken: Vec<Upgrade>,
     /// Held abilities, slot order (shift, e).
     pub abilities: Vec<AbilityState>,
+    /// Deck hands (`deck.rs`): how many of `abilities` are hand slots; the
+    /// rest are spent ghosts finishing their effect. 0 = the fixed kit.
+    pub deck_slots: usize,
     /// DREAM ANCHOR charges spent.
     pub anchors_used: u32,
     /// Rerolls spent this run.
@@ -963,12 +970,22 @@ impl RunUpgrades {
     /// fused card adds its second dream's passive too, and a resonant one
     /// one more stack. Passives stop at their caps.
     pub fn from_loadout(cards: &[crate::cards::Card]) -> Self {
+        Self::build_kit(cards, true)
+    }
+
+    /// Just the passives of these cards (the deck hand adds its own slots).
+    fn from_loadout_passives(cards: &[crate::cards::Card]) -> Self {
+        Self::build_kit(cards, false)
+    }
+
+    fn build_kit(cards: &[crate::cards::Card], abilities: bool) -> Self {
         use crate::cards::Rarity;
         use crate::powers::power;
         let mut run = Self::default();
         for c in cards {
             let p = power(c.theme);
-            if run.abilities.len() < ABILITY_SLOTS
+            if abilities
+                && run.abilities.len() < ABILITY_SLOTS
                 && !run.abilities.iter().any(|a| a.ability == p.active)
             {
                 run.take(Upgrade::Learn(p.active));
@@ -1004,7 +1021,7 @@ impl RunUpgrades {
                 Tier::Cursed => 0.0,
             })
             .sum();
-        2.0 * self.abilities.len() as f32 + passives
+        2.0 * self.abilities.iter().filter(|a| !a.spent).count() as f32 + passives
     }
 
     /// A collected dreamer rides along: their boon, and their burden.
@@ -1082,6 +1099,10 @@ impl RunUpgrades {
     /// QUICKEN never shows up with no ability to quicken.
     pub fn available(&self, u: Upgrade) -> bool {
         if self.count(u) >= u.info().max {
+            return false;
+        }
+        // A deck hand's abilities come from its cards, never from picks.
+        if self.deck_slots > 0 && u.is_ability() {
             return false;
         }
         let mut after = self.clone();
@@ -1263,7 +1284,69 @@ impl RunUpgrades {
         for a in &mut self.abilities {
             a.tick(dt);
         }
+        if self.deck_slots > 0 && self.abilities.len() > self.deck_slots {
+            let slots = self.deck_slots;
+            let before = self.abilities.len();
+            let mut i = 0;
+            self.abilities.retain(|a| {
+                i += 1;
+                i <= slots || a.is_active()
+            });
+            if self.abilities.len() != before {
+                self.sync_learned();
+            }
+        }
     }
+
+    // === deck ===
+    /// Keeps `taken`'s learned-ability entries equal to the abilities now
+    /// held (hand slots and ghosts), once each. Deck hands only.
+    pub fn sync_learned(&mut self) {
+        let held: Vec<Ability> = self.abilities.iter().map(|a| a.ability).collect();
+        self.taken
+            .retain(|u| !matches!(u, Upgrade::Learn(a) if !held.contains(a)));
+        for a in held {
+            if !self.taken.contains(&Upgrade::Learn(a)) {
+                self.taken.push(Upgrade::Learn(a));
+            }
+        }
+    }
+
+    /// A deck's draw lands in `slot`: the new card's ability, carrying the
+    /// card's cooldown. The old state stays on as a ghost while its effect
+    /// is still running.
+    pub fn deck_draw(&mut self, slot: usize, ability: Ability, cooldown: f32) {
+        let mut fresh = AbilityState::new(ability);
+        fresh.cooldown = cooldown.max(0.0);
+        if slot >= self.deck_slots {
+            return;
+        }
+        if slot < self.abilities.len() {
+            let old = std::mem::replace(&mut self.abilities[slot], fresh);
+            if old.is_active() {
+                let mut ghost = old;
+                ghost.spent = true;
+                self.abilities.push(ghost);
+            }
+        } else {
+            self.abilities.push(fresh);
+        }
+        self.sync_learned();
+    }
+
+    /// A hand of cards at the start of a deck run: one ability per card
+    /// (repeats allowed), then the passives as [`Self::from_loadout`] gives.
+    pub fn from_hand(cards: &[crate::cards::Card]) -> Self {
+        let mut run = Self::from_loadout_passives(cards);
+        for c in cards.iter().take(HAND_SIZE) {
+            run.abilities
+                .push(AbilityState::new(crate::powers::power(c.theme).active));
+        }
+        run.deck_slots = run.abilities.len();
+        run.sync_learned();
+        run
+    }
+    // === end deck ===
 
     pub fn active(&self, ability: Ability) -> bool {
         self.abilities
@@ -1636,6 +1719,84 @@ mod tests {
         assert_eq!(held, vec![Ability::Blink, Ability::Phase]);
         assert!(r.available(Upgrade::Learn(Ability::Dash)), "can relearn it");
         assert!(!r.available(Upgrade::Learn(Ability::Blink)));
+    }
+
+    fn hand_of(abilities: &[Ability]) -> RunUpgrades {
+        let mut r = RunUpgrades::default();
+        r.deck_slots = abilities.len();
+        for &a in abilities {
+            r.abilities.push(AbilityState::new(a));
+        }
+        r.sync_learned();
+        r
+    }
+
+    #[test]
+    fn a_deck_hand_holds_a_third_ability_and_mirrors_it_in_taken() {
+        let r = hand_of(&[Ability::Dash, Ability::Blink, Ability::Phase]);
+        assert_eq!(r.abilities.len(), HAND_SIZE);
+        assert!(r.count(Upgrade::Learn(Ability::Phase)) == 1);
+        assert!(r.has(Synergy::GhostStep), "dash + phase in the hand");
+    }
+
+    #[test]
+    fn a_spent_slot_cannot_fire_and_is_not_counted_in_the_kits_power() {
+        let mut r = hand_of(&[Ability::Dash, Ability::Blink]);
+        let before = r.power();
+        r.abilities[0].spent = true;
+        assert!(!r.abilities[0].try_use(1.0, 1.0));
+        assert!(r.power() < before);
+    }
+
+    #[test]
+    fn drawing_into_a_slot_swaps_the_ability_and_the_learned_entry() {
+        let mut r = hand_of(&[Ability::Dash, Ability::Blink]);
+        r.abilities[0].spent = true;
+        r.deck_draw(0, Ability::Phase, 3.0);
+        assert_eq!(r.abilities[0].ability, Ability::Phase);
+        assert!(!r.abilities[0].spent);
+        assert_eq!(r.abilities[0].cooldown, 3.0, "the card's cooldown came with it");
+        assert_eq!(r.count(Upgrade::Learn(Ability::Dash)), 0);
+        assert_eq!(r.count(Upgrade::Learn(Ability::Phase)), 1);
+        assert_eq!(r.abilities.len(), 2);
+    }
+
+    #[test]
+    fn a_used_abilitys_effect_outlives_its_card() {
+        let mut r = hand_of(&[Ability::Ward, Ability::Blink]);
+        assert!(r.abilities[0].try_use(1.0, 1.0));
+        r.abilities[0].spent = true;
+        r.deck_draw(0, Ability::Dash, 0.0);
+        assert!(r.active(Ability::Ward), "the ward still stands");
+        assert_eq!(r.abilities.len(), 3, "kept as a ghost beyond the hand");
+        r.tick(Ability::Ward.duration() + 0.1);
+        assert!(!r.active(Ability::Ward));
+        assert_eq!(r.abilities.len(), 2, "ghost gone once it ends");
+        assert_eq!(r.count(Upgrade::Learn(Ability::Ward)), 0);
+    }
+
+    #[test]
+    fn a_deck_run_is_not_offered_abilities_to_learn() {
+        let r = hand_of(&[Ability::Dash, Ability::Blink, Ability::Phase]);
+        assert!(!r.available(Upgrade::Learn(Ability::Stillness)));
+        let legacy = RunUpgrades::default();
+        assert!(legacy.available(Upgrade::Learn(Ability::Stillness)));
+    }
+
+    #[test]
+    fn from_hand_fills_slots_and_passives_from_the_cards() {
+        use crate::cards::{card_from, tests::record};
+        use crate::dream::DreamTheme::*;
+        let cards: Vec<_> = [TheTunnel, Garden, TheTunnel]
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| card_from(&record(t, i as u64 + 1, 1, 0.1, false)))
+            .collect();
+        let r = RunUpgrades::from_hand(&cards);
+        assert_eq!(r.abilities.len(), 3);
+        assert_eq!(r.deck_slots, 3);
+        assert_eq!(r.abilities[0].ability, r.abilities[2].ability, "repeats allowed");
+        assert!(r.taken.iter().any(|u| !u.is_ability()), "passives came too");
     }
 
     #[test]
