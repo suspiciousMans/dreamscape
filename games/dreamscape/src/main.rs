@@ -2267,6 +2267,34 @@ impl DreamscapeGame {
         })
     }
 
+    /// Hit-point pips for the enemies that have been struck (and, with WIDE
+    /// EYES, for any enemy nearby): screen position (0..1) plus pips.
+    fn foe_pips(&self, view_proj: Mat4) -> Vec<hud::FoePips> {
+        let me = self.player_position;
+        let eyes = self.run.count(Upgrade::WideEyes) > 0;
+        let mut out = Vec::new();
+        for t in self.combat_targets() {
+            let foe = self.foes.get(&t.entity).copied().unwrap_or_else(|| combat::Foe::new(t.kind));
+            let struck = foe.hp < foe.max;
+            if !struck && !(eyes && t.pos.distance(me) <= combat::EYES_PIP_REACH) {
+                continue;
+            }
+            let clip = view_proj * (t.pos + Vec3::Y * 1.7).extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            out.push(hud::FoePips {
+                at: [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w],
+                hp: foe.hp,
+                max: foe.max,
+            });
+            if out.len() >= 8 {
+                break;
+            }
+        }
+        out
+    }
+
     /// An enemy comes undone: out of play at once, a short animation, loot.
     fn unravel(&mut self, entity: Entity, pos: Vec3) {
         self.foes.remove(&entity);
@@ -2650,6 +2678,7 @@ impl DreamscapeGame {
                 .collect(),
             hand: self.hand_view(),
             hand_links: self.hand_links(),
+            foe_pips: Vec::new(),
             boss_hp: self.hunter.as_ref().map(|(_, b, _)| (b.hp / b.max_hp, b.vulnerable())),
             // === combat ===
             nerve: if self.coop_active() { (0, 0) } else { (self.nerve.cur(), self.nerve.max()) },
@@ -9521,7 +9550,7 @@ impl Game for DreamscapeGame {
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        let hud_view = self.hud_view();
+        let mut hud_view = self.hud_view();
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
@@ -9857,6 +9886,13 @@ impl Game for DreamscapeGame {
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
+        // === combat === hit-point pips over enemies, projected to the screen
+        if hud_view.mode == hud::Mode::Playing && !fp && !self.coop_active() {
+            let view_proj = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
+                * Mat4::look_at_rh(eye, target, up);
+            hud_view.foe_pips = self.foe_pips(view_proj);
+        }
+        // === end combat ===
         let card_art = &mut self.card_art;
         let pack = &self.pack;
         let pick = &self.pick;
@@ -10648,6 +10684,30 @@ mod screen_smoke {
         assert!(n(Some((0.5, false))) > n(None), "the bar draws");
         n(Some((0.0, true)));
         n(Some((1.0, true)));
+    }
+
+    #[test]
+    fn hit_point_pips_show_for_struck_enemies_and_for_any_nearby_with_wide_eyes() {
+        let mut g = fighter("pips", None);
+        let struck = put_pacer(&mut g, Vec3::new(0.0, 1.0, 3.0), true);
+        put_pacer(&mut g, Vec3::new(2.0, 1.0, 3.0), true);
+        put_pacer(&mut g, Vec3::new(40.0, 1.0, 3.0), true);
+        g.foes.insert(struck, combat::Foe { hp: 1.0, max: 2.0 });
+        let pips = g.foe_pips(Mat4::IDENTITY);
+        assert_eq!(pips.len(), 1, "only the struck one");
+        assert_eq!((pips[0].hp, pips[0].max), (1.0, 2.0));
+        g.run.take(Upgrade::WideEyes);
+        assert_eq!(g.foe_pips(Mat4::IDENTITY).len(), 2, "wide eyes: the near unstruck one too, not the far one");
+        // Frames with pips draw more than frames without, at several sizes.
+        g.mode = hud::Mode::Playing;
+        for (w, h) in [(960.0, 540.0), (1280.0, 720.0), (1920.0, 1080.0)] {
+            let bare = frame_with(&g, w, h, &|_| {}).len();
+            let with = frame_with(&g, w, h, &|v| {
+                v.foe_pips = vec![hud::FoePips { at: [0.5, 0.4], hp: 1.0, max: 3.0 }];
+            })
+            .len();
+            assert!(with > bare, "{w}x{h}");
+        }
     }
 
     #[test]

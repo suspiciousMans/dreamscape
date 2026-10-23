@@ -29,6 +29,8 @@ pub const CALM_REGEN_SECS: f32 = 25.0;
 pub const CALM_REGEN_STACK: f32 = 0.8;
 /// LUCKY MEMORY: extra chance of a calm mote per stack.
 pub const LUCKY_MOTE_PER: f32 = 0.06;
+/// WIDE EYES shows hit points on any enemy this near.
+pub const EYES_PIP_REACH: f32 = 10.0;
 /// COUNTER: how far the attacker can be, and the pause between counters.
 pub const COUNTER_REACH: f32 = 2.5;
 pub const COUNTER_COOLDOWN: f32 = 1.0;

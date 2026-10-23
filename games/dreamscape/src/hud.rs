@@ -68,6 +68,14 @@ pub fn install_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Hit points of one enemy, at a screen position (0..1 each way).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoePips {
+    pub at: [f32; 2],
+    pub hp: f32,
+    pub max: f32,
+}
+
 /// Everything the HUD needs for one frame (a snapshot, so drawing never
 /// borrows the game).
 #[derive(Clone, Debug)]
@@ -164,6 +172,8 @@ pub struct HudView {
     pub nerve: (u32, u32),
     /// A nightmare's remaining hp (0..1) and whether it can be hurt now.
     pub boss_hp: Option<(f32, bool)>,
+    /// Hit-point pips over enemies (filled in at draw time from the camera).
+    pub foe_pips: Vec<FoePips>,
     /// 1 the instant of a hit, easing to 0: the eye flinches, a heart breaks.
     pub nerve_flinch: f32,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
@@ -519,6 +529,9 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
+    // === combat ===
+    foe_pips(&p, screen, v);
+    // === end combat ===
     crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
@@ -796,6 +809,29 @@ fn pressure_bar(p: &egui::Painter, screen: Rect, lid: f32, warn: bool, time: f32
     }
 }
 // === end pressure ===
+
+/// Little pips over an enemy's head: one per hit point, the lost ones hollow.
+fn foe_pips(p: &egui::Painter, screen: Rect, v: &HudView) {
+    for f in &v.foe_pips {
+        let n = f.max.ceil().clamp(1.0, 8.0) as i32;
+        let left = f.hp.ceil() as i32;
+        let (w, gap) = (6.0, 2.0);
+        let total = n as f32 * w + (n - 1) as f32 * gap;
+        let c = screen.min + Vec2::new(f.at[0] * screen.width(), f.at[1] * screen.height());
+        for i in 0..n {
+            let r = Rect::from_min_size(
+                Pos2::new(c.x - total / 2.0 + i as f32 * (w + gap), c.y),
+                Vec2::splat(w),
+            );
+            p.rect_filled(r, 0.0, rgba([10, 4, 20], 0.8));
+            if i < left {
+                p.rect_filled(r.shrink(1.0), 0.0, rgba([255, 90, 140], 0.95));
+            } else {
+                p.rect_stroke(r.shrink(0.5), 0.0, egui::Stroke::new(1.0_f32, rgba([200, 150, 190], 0.6)));
+            }
+        }
+    }
+}
 
 /// Nerve as pixel hearts: full, the one that just broke (flashing white),
 /// and empty outlines. At one nerve the last heart beats.
