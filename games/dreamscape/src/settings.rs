@@ -91,6 +91,10 @@ pub struct Settings {
     pub keys: Vec<(Action, String)>,
     /// The last co-op host joined.
     pub coop_address: String,
+    /// Card sort per screen (`sorting.rs`); default = the booklet's own order.
+    pub sort_booklet: crate::sorting::Sort,
+    pub sort_merge: crate::sorting::Sort,
+    pub sort_loadout: crate::sorting::Sort,
 }
 
 impl Default for Settings {
@@ -112,6 +116,9 @@ impl Default for Settings {
                 .map(|&a| (a, a.default_key().to_string()))
                 .collect(),
             coop_address: "127.0.0.1".into(),
+            sort_booklet: Default::default(),
+            sort_merge: Default::default(),
+            sort_loadout: Default::default(),
         }
     }
 }

@@ -25,9 +25,9 @@ pub struct Sort {
 }
 
 impl Default for Sort {
-    /// Today's order: newest card first.
+    /// Today's order: the booklet lists cards in the order they were made (oldest first).
     fn default() -> Self {
-        Sort { key: SortKey::Number, dir: Dir::Desc }
+        Sort { key: SortKey::Number, dir: Dir::Asc }
     }
 }
 
@@ -96,12 +96,6 @@ pub fn order(cards: &[Card], sort: Sort) -> Vec<usize> {
     idx
 }
 
-/// Position of the card with `number` within the sorted order (for keeping a selection
-/// on the same card when the sort changes).
-pub fn position_of(cards: &[Card], sort: Sort, number: u32) -> Option<usize> {
-    order(cards, sort).iter().position(|&i| cards[i].number == number)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,7 +130,7 @@ mod tests {
         assert_eq!(nums(&c, s), vec![4, 3, 2, 1]);
         s.flip();
         assert_eq!(nums(&c, s), vec![1, 2, 3, 4]);
-        assert_eq!(Sort::default(), Sort { key: SortKey::Number, dir: Dir::Desc });
+        assert_eq!(Sort::default(), Sort { key: SortKey::Number, dir: Dir::Asc });
     }
 
     #[test]
@@ -218,15 +212,5 @@ mod tests {
         assert_eq!(k, start);
         s.cycle_key();
         assert_eq!(s.key, SortKey::Dream);
-    }
-
-    #[test]
-    fn position_follows_the_card() {
-        let c = sample();
-        let mut s = Sort::default();
-        assert_eq!(position_of(&c, s, 4), Some(0));
-        s.flip();
-        assert_eq!(position_of(&c, s, 4), Some(3));
-        assert_eq!(position_of(&c, s, 99), None);
     }
 }

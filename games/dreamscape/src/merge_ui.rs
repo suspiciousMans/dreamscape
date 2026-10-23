@@ -20,6 +20,8 @@ pub struct MergeView {
     pub status: Option<String>,
     /// Which of the `fusion::RESONANT` pairs have been merged before, in order.
     pub resonant_found: Vec<bool>,
+    /// The sort label shown in the hint bar (empty = none).
+    pub sort: String,
 }
 
 /// What the two cards would make, if they can merge.
@@ -497,11 +499,11 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     }
 
     let hint = if m.first.is_some() {
-        "[click / enter] merge   [tab] use this as the first   [backspace] clear   [esc] back"
+        format!("[enter] merge  [tab] use as first  [backspace] clear  [t] sort: {}  [r] flip  [esc] back", m.sort)
     } else {
-        "[click / enter] pick the first card   [a/d/w/s] browse   [esc] back"
+        format!("[enter] pick the first card  [a/d/w/s] browse  [t] sort: {}  [r] flip  [esc] back", m.sort)
     };
-    hint_bar(p, screen, v, hint);
+    hint_bar(p, screen, v, &hint);
     pixel_ui::scanlines(p, screen, c, 10);
 }
 
