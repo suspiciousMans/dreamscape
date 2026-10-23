@@ -156,8 +156,8 @@ pub struct HudView {
     pub perks: Vec<&'static str>,
     /// Run upgrades taken so far ("SWIFT FEET x2").
     pub upgrades: Vec<String>,
-    /// Held abilities: (name, key, charge 0..1, active).
-    pub abilities: Vec<(&'static str, &'static str, f32, bool)>,
+    /// The hand, drawn down the right edge.
+    pub hand: Vec<crate::hand::HandCard>,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
     pub twist: String,
     pub twist_blurb: String,
@@ -653,7 +653,7 @@ fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
     }
     let rows = crate::pad::controls(v.pad, v.first_person);
     // Sit above the ability boxes (bottom -84, 56 tall) when there are any.
-    let floor = if v.abilities.is_empty() { 36.0 } else { 96.0 };
+    let floor = 36.0;
     let mut at = Pos2::new(
         screen.left() + 28.0,
         screen.bottom() - floor - 26.0 * rows.len() as f32,
@@ -705,10 +705,10 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
         y += 22.0;
     }
-    // The lists stop above the ability boxes (bottom left) and fold the rest
+    // The lists stop above the bottom margin and fold the rest
     // into "+N more", so a long run never runs off the screen.
     // (and above the eye's speech plate while it is talking).
-    let floor = if v.eye_line.is_some() { 96.0 + 8.0 * EYE_PX + 44.0 } else { 96.0 };
+    let floor = if v.eye_line.is_some() { 96.0 + 8.0 * EYE_PX + 44.0 } else { 40.0 };
     let room = ((screen.bottom() - floor - (screen.top() + 20.0 + y)) / 20.0).floor().max(1.0) as usize;
     let rows: Vec<(String, [u8; 3])> = v
         .perks
@@ -768,7 +768,7 @@ fn pressure_bar(p: &egui::Painter, screen: Rect, lid: f32, warn: bool, time: f32
 }
 // === end pressure ===
 
-/// Top right: the dream's twist and HURRIED timer. Bottom left: abilities.
+/// Top right: the dream's twist and HURRIED timer. The hand (held ability cards) sits down the right edge.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     let right = screen.right_top() + Vec2::new(-28.0, 22.0);
     let mut y = 0.0;
@@ -820,116 +820,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             rgba(rgb, 0.95),
         );
     }
-    for (k, &(name, key, charge, active)) in v.abilities.iter().enumerate() {
-        ability_box(p, screen, v, k, name, key, charge, active);
-    }
-}
-
-/// One held ability, bottom left: its icon, key, name, and a segmented
-/// recharge bar. Pixel panel, chipped corners, like a card.
-#[allow(clippy::too_many_arguments)]
-fn ability_box(
-    p: &egui::Painter,
-    screen: Rect,
-    v: &HudView,
-    k: usize,
-    name: &str,
-    key: &str,
-    charge: f32,
-    active: bool,
-) {
-    let r = Rect::from_min_size(
-        screen.left_bottom() + Vec2::new(28.0 + k as f32 * 150.0, -84.0),
-        Vec2::new(136.0, 56.0),
-    );
-    let ready = charge >= 1.0;
-    let rgb = if active {
-        hue(v.time * 0.8)
-    } else if ready {
-        [255, 150, 255]
-    } else {
-        [120, 100, 150]
-    };
-    let c = 3.0;
-    crate::pixel_ui::panel(
-        p,
-        r,
-        rgb,
-        rgba([12, 6, 28], 0.78),
-        c,
-        if ready || active { 1.0 } else { 0.7 },
-    );
-    // The ability's icon, tinted like its card; dim while recharging.
-    let ability = crate::upgrades::ALL_ABILITIES
-        .iter()
-        .find(|a| a.name() == name);
-    let centre = r.left_top() + Vec2::new(c * 2.0 + 15.0, 22.0);
-    if let Some(&a) = ability {
-        let tone = if ready || active { rgb } else { [150, 130, 180] };
-        crate::pixel_ui::icon(
-            p,
-            centre,
-            crate::pixels::icons::ability(a),
-            3.0,
-            tone,
-            crate::pixel_ui::lighter(tone),
-            if ready || active { 1.0 } else { 0.6 },
-        );
-    }
-    // Name, and the key on a little cap.
-    let tx = r.left() + c * 2.0 + 33.0;
-    let size = crate::pixel_ui::fit(name, 14.0, r.right() - tx - c * 2.0, 8.0);
-    if active {
-        crate::pixel_ui::split_text(
-            p,
-            Pos2::new(tx, r.top() + 10.0),
-            Align2::LEFT_TOP,
-            name,
-            size,
-            rgba(rgb, 1.0),
-            1.0,
-            1.0,
-        );
-    } else {
-        p.text(
-            Pos2::new(tx, r.top() + 10.0),
-            Align2::LEFT_TOP,
-            name,
-            FontId::monospace(size),
-            rgba(rgb, 1.0),
-        );
-    }
-    let key_text = v.k(&format!("[{key}]"));
-    let key_w = key_text.chars().count() as f32 * 11.0 * 0.6;
-    crate::pixel_ui::keycap(
-        p,
-        Pos2::new(tx + key_w * 0.5 + 4.0, r.top() + 33.0),
-        &key_text,
-        11.0,
-        2.0,
-        rgb,
-        if ready || active { 1.0 } else { 0.7 },
-    );
-    // Recharge: ten cells fill left to right; ready ones pulse.
-    let cells = 10;
-    let lit = (charge.clamp(0.0, 1.0) * cells as f32).floor() as i32;
-    let cw = (r.width() - c * 4.0) / cells as f32;
-    for i in 0..cells {
-        let cell = Rect::from_min_size(
-            Pos2::new(r.left() + c * 2.0 + i as f32 * cw, r.bottom() - c * 2.0 - 5.0),
-            Vec2::new(cw - 1.0, 5.0),
-        );
-        if i < lit || ready {
-            let pulse = if ready { 0.7 + 0.3 * (v.time * 5.0 + i as f32 * 0.5).sin() } else { 0.9 };
-            p.rect_filled(cell, 0.0, rgba(rgb, pulse));
-        } else {
-            p.rect_filled(cell, 0.0, rgba(rgb, 0.15));
-        }
-    }
-    // Just became ready: a sparkle on the icon.
-    if ready && !active && (v.time * 2.0).fract() < 0.5 {
-        crate::pixel_ui::sparkle(p, centre + Vec2::new(14.0, -14.0), 2.0, rgba([255, 255, 255], 0.9));
-    }
+    crate::hand::draw(p, screen, &v.hand, v.time, v.settings_snapshot.reduced_motion);
 }
 
 /// Classic gap between shard pips, and the tightest we'll squeeze them.

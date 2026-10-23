@@ -53,6 +53,7 @@ mod worth;
 mod fpv;
 mod fusion;
 mod gameplay;
+mod hand;
 mod hud;
 mod hunter;
 mod loadout_ui;
@@ -453,6 +454,10 @@ pub struct DreamscapeGame {
     anchor: Option<(Vec3, Entity, f32)>,
     /// The last ability used and when (dream seconds), for combos.
     last_ability: Option<(Ability, f32)>,
+    /// When each ability was last used (dream age), for the hand's pop.
+    ability_used: Vec<(Ability, f32)>,
+    /// Names of the cards that hold the abilities, for the hand.
+    hand_names: Vec<(Ability, String)>,
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -792,6 +797,8 @@ impl DreamscapeGame {
             decoy: None,
             anchor: None,
             last_ability: None,
+            ability_used: Vec::new(),
+            hand_names: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1642,6 +1649,42 @@ impl DreamscapeGame {
             .context("mesh not uploaded")
     }
 
+    /// The equipped cards that hold abilities, with how long ago each was used.
+    fn hand_view(&self) -> Vec<hand::HandCard> {
+        self.run
+            .abilities
+            .iter()
+            .enumerate()
+            .map(|(k, a)| {
+                let (tint, tint2) = self
+                    .ability_tints
+                    .iter()
+                    .find(|t| t.0 == a.ability)
+                    .map_or(([200, 150, 255], [120, 100, 150]), |&(_, x, y)| (x, y));
+                let since_use = self
+                    .ability_used
+                    .iter()
+                    .find(|u| u.0 == a.ability)
+                    .map_or(hand::NEVER, |u| self.dream_age - u.1);
+                hand::HandCard {
+                    ability: a.ability.name(),
+                    card_name: self
+                        .hand_names
+                        .iter()
+                        .find(|n| n.0 == a.ability)
+                        .map_or_else(String::new, |n| n.1.clone()),
+                    key: upgrades::SLOT_KEYS[k],
+                    charge: a.charge(self.run.cooldown_for(a.ability)),
+                    active: a.is_active()
+                        || (a.ability == Ability::Anchor && self.anchor.is_some()),
+                    tint,
+                    tint2,
+                    since_use,
+                }
+            })
+            .collect()
+    }
+
     fn hud_view(&self) -> hud::HudView {
         let target = self.objective_target();
         hud::HudView {
@@ -1893,21 +1936,7 @@ impl DreamscapeGame {
                         .map(|s| format!("= {}", s.name())),
                 )
                 .collect(),
-            abilities: self
-                .run
-                .abilities
-                .iter()
-                .enumerate()
-                .map(|(k, a)| {
-                    (
-                        a.ability.name(),
-                        upgrades::SLOT_KEYS[k],
-                        a.charge(self.run.cooldown_for(a.ability)),
-                        a.is_active()
-                            || (a.ability == Ability::Anchor && self.anchor.is_some()),
-                    )
-                })
-                .collect(),
+            hand: self.hand_view(),
             twist: {
                 // === shards ===
                 let t = self.twists.label();
@@ -3470,6 +3499,8 @@ impl DreamscapeGame {
                 Ability::Gust => Sound::Gust,
             });
             self.last_ability = Some((state.ability, self.dream_age));
+            self.ability_used.retain(|u| u.0 != state.ability);
+            self.ability_used.push((state.ability, self.dream_age));
             if let Some(c) = combo {
                 log::info!("Combo: {}", c.name());
                 self.achievement_toast =
@@ -5157,6 +5188,10 @@ impl DreamscapeGame {
             self.run.power(),
             self.loadout_scale
         );
+        self.hand_names = cards
+            .iter()
+            .map(|c| (powers::power(c.theme).active, c.name.clone()))
+            .collect();
         self.ability_tints = cards
             .iter()
             .map(|c| {
@@ -6182,6 +6217,7 @@ impl DreamscapeGame {
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.anchor = None;
         self.last_ability = None;
+        self.ability_used.clear();
         self.slam_apex = 0.0;
         self.slam_meteor = false;
         self.caches.clear();
@@ -9270,6 +9306,43 @@ mod screen_smoke {
             assert!(shapes(&g) > 50, "age {age}");
         }
         assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
+    }
+
+    fn card(ability: &'static str, since_use: f32) -> hand::HandCard {
+        hand::HandCard {
+            ability,
+            card_name: "a card".into(),
+            key: "1",
+            charge: 0.5,
+            active: false,
+            tint: [255, 120, 200],
+            tint2: [90, 200, 255],
+            since_use,
+        }
+    }
+
+    #[test]
+    fn the_hand_draws_at_rest_and_popping_adds_a_ring_without_panicking() {
+        let mut g = game("hand");
+        g.mode = hud::Mode::Playing;
+        let bare = shapes(&g);
+        let rest = |n: usize, since: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.hand = ["DASH", "BLINK", "PHASE", "FLARE", "FLOAT"][..n]
+                    .iter()
+                    .map(|a| card(a, since))
+                    .collect();
+            })
+            .len()
+        };
+        assert!(rest(1, hand::NEVER) > bare, "a held card draws");
+        assert!(rest(5, hand::NEVER) > rest(1, hand::NEVER));
+        assert!(rest(2, 0.1) > rest(2, hand::NEVER), "a used card rings and flashes");
+        for (w, h) in [(960.0, 540.0), (1280.0, 800.0), (1920.0, 1080.0)] {
+            frame_with(&g, w, h, &|v| {
+                v.hand = vec![card("DASH", 0.05), card("BLINK", hand::NEVER)];
+            });
+        }
     }
 
     #[test]
