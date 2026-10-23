@@ -38,6 +38,7 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::A => s.key_for(Action::Jump),
             P::LeftShoulder | P::RightShoulder => s.key_for(Action::Ability1),
             P::X | P::Y => s.key_for(Action::Ability2),
+            P::B => s.key_for(Action::Strike),
             P::Start => Some(Keycode::Escape),
             // Arrows turn the head in first-person dreams.
             _ => dpad.filter(|&k| k == Keycode::Left || k == Keycode::Right),
@@ -262,10 +263,16 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
         [
             ("LB/RB", "ability 1"),
             ("X/Y", "ability 2"),
+            ("B", "strike"),
             ("START", "pause"),
         ]
     } else {
-        [("SHIFT", "ability 1"), ("E", "ability 2"), ("ESC", "pause")]
+        [
+            ("SHIFT", "ability 1"),
+            ("E", "ability 2"),
+            ("F", "strike"),
+            ("ESC", "pause"),
+        ]
     });
     v.push(("", "touch shards to wake · the portal goes deeper"));
     v

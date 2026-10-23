@@ -61,9 +61,15 @@ pub enum Sound {
     Climb,
     /// The shard hops away from you.
     Flinch,
+    /// STRIKE: the swing, the hit, and an enemy coming undone.
+    Strike,
+    StrikeHit,
+    Unravel,
+    /// A calm mote steadies you.
+    Calm,
 }
 
-pub const ALL_SOUNDS: [Sound; 39] = [
+pub const ALL_SOUNDS: [Sound; 43] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -103,6 +109,10 @@ pub const ALL_SOUNDS: [Sound; 39] = [
     Sound::CacheGet,
     Sound::Climb,
     Sound::Flinch,
+    Sound::Strike,
+    Sound::StrikeHit,
+    Sound::Unravel,
+    Sound::Calm,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -377,6 +387,20 @@ pub fn synth(sound: Sound) -> Vec<f32> {
         Flinch => vec![
             v(1760.0, 880.0, 0.16).gain(0.26),
             v(880.0, 1760.0, 0.2).gain(0.24).at(0.1),
+        ],
+        Strike => vec![v(900.0, 260.0, 0.12).noise(0.7).gain(0.28).curve(1.6)],
+        StrikeHit => vec![
+            v(180.0, 70.0, 0.14).gain(0.45),
+            v(1400.0, 600.0, 0.06).noise(0.5).gain(0.3),
+        ],
+        Unravel => vec![
+            v(1200.0, 300.0, 0.4).wave(2).gain(0.22),
+            v(1800.0, 500.0, 0.36).gain(0.16).at(0.04),
+            v(900.0, 200.0, 0.3).noise(1.0).gain(0.1).at(0.02),
+        ],
+        Calm => vec![
+            v(523.0, 523.0, 0.2).gain(0.25),
+            v(784.0, 784.0, 0.3).gain(0.22).at(0.09),
         ],
     };
     render(&voices, sound as u32 * 7919 + 1)
