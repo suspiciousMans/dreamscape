@@ -23,6 +23,29 @@ pub const MAX_WISPS: usize = 4;
 pub const ECLIPSE_TIME: f32 = 3.0;
 pub const ECLIPSE_SIGHT: f32 = 0.55;
 
+/// Hit points of a nightmare by tier; only a resting one can be hurt.
+pub fn hp_for(tier: u32) -> f32 {
+    6.0 + 2.0 * tier as f32
+}
+
+/// How far a strike's reach extends past the hunter's centre (it is big).
+pub const HUNTER_BODY: f32 = 1.0;
+/// A struck wisp comes undone if within this of the strike's reach.
+pub const WISP_BODY: f32 = 0.5;
+/// Dust for undoing a nightmare, per tier; and calm motes it leaves.
+pub const UNDONE_DUST_PER_TIER: u32 = 15;
+pub const UNDONE_MOTES: usize = 2;
+
+/// What a blow did to the hunter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blow {
+    /// It was hunting: the blow glanced off.
+    Deflected,
+    Hurt,
+    /// Its last point: it comes undone.
+    Undone,
+}
+
 pub fn tier(depth: u32) -> u32 {
     depth / crate::dream::NIGHTMARE_EVERY
 }
@@ -91,6 +114,10 @@ pub struct Boss {
     gap: f32,
     next: usize,
     player_speed: f32,
+    pub hp: f32,
+    pub max_hp: f32,
+    /// Undone: it no longer hunts, attacks or touches.
+    pub defeated: bool,
 }
 
 fn flat(v: Vec3) -> Vec3 {
@@ -114,10 +141,16 @@ impl Boss {
             gap: attack_gap(tier),
             next: 0,
             player_speed,
+            hp: hp_for(tier),
+            max_hp: hp_for(tier),
+            defeated: false,
         }
     }
 
     pub fn update(&mut self, pos: &mut Vec3, player: Vec3, dt: f32) -> Vec<Event> {
+        if self.defeated {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         self.hunter.update(pos, player, dt);
         let step = WISP_SPEED * self.player_speed * dt;
@@ -197,6 +230,9 @@ impl Boss {
     }
 
     pub fn hits(&self, player: Vec3) -> bool {
+        if self.defeated {
+            return false;
+        }
         let ring = matches!(self.attack, Some(Attack::Ring { centre, radius }) if ring_hits(centre, radius, player));
         ring || self
             .wisps
@@ -221,6 +257,36 @@ impl Boss {
             }),
             _ => None,
         }
+    }
+
+    /// Resting is the only time it can be hurt (it shrinks: the tell).
+    pub fn vulnerable(&self) -> bool {
+        !self.defeated && self.hunter.phase == Phase::Rest
+    }
+
+    /// A blow lands. Hunting, it glances off; resting, it hurts.
+    pub fn hurt(&mut self, dmg: f32) -> Blow {
+        if !self.vulnerable() {
+            return Blow::Deflected;
+        }
+        self.hp = (self.hp - dmg).max(0.0);
+        if self.hp <= 0.0 {
+            self.defeated = true;
+            self.attack = None;
+            self.wisps.clear();
+            Blow::Undone
+        } else {
+            Blow::Hurt
+        }
+    }
+
+    /// Undoes every wisp within `reach` of `from` in the fan in front of
+    /// `facing`. Returns how many.
+    pub fn strike_wisps(&mut self, from: Vec3, facing: Vec3, reach: f32, arc_cos: f32) -> usize {
+        let before = self.wisps.len();
+        self.wisps
+            .retain(|w| !crate::combat::in_arc(from, facing, Vec3::new(w.pos.x, from.y, w.pos.z), reach + WISP_BODY, arc_cos));
+        before - self.wisps.len()
     }
 
     /// It caught you: it backs off and everything in flight is dropped.
@@ -248,6 +314,52 @@ mod tests {
             out.extend(b.update(&mut pos, player, DT).into_iter().map(|e| (t, e)));
         }
         out
+    }
+
+    #[test]
+    fn only_a_resting_nightmare_can_be_hurt_and_the_last_point_undoes_it() {
+        let mut b = Boss::new(10, MOVE_SPEED);
+        assert_eq!(b.hp, hp_for(2));
+        b.hunter.phase = Phase::Stalk;
+        assert_eq!(b.hurt(1.0), Blow::Deflected, "hunting: it glances off");
+        assert_eq!(b.hp, hp_for(2));
+        b.hunter.rest();
+        assert_eq!(b.hurt(1.0), Blow::Hurt);
+        assert_eq!(b.hp, hp_for(2) - 1.0);
+        assert_eq!(b.hurt(99.0), Blow::Undone);
+        assert!(b.defeated && !b.vulnerable());
+        assert_eq!(b.hurt(1.0), Blow::Deflected, "already undone");
+    }
+
+    #[test]
+    fn an_undone_nightmare_does_nothing_and_touches_nothing() {
+        let mut b = Boss::new(15, MOVE_SPEED);
+        b.wisps.push(Wisp { pos: Vec3::ZERO, life: 5.0 });
+        b.hunter.rest();
+        b.hurt(99.0);
+        let mut pos = Vec3::new(0.0, 0.9, 0.0);
+        for _ in 0..600 {
+            assert!(b.update(&mut pos, Vec3::new(0.0, 0.5, 60.0), DT).is_empty());
+        }
+        assert_eq!(pos, Vec3::new(0.0, 0.9, 0.0), "it never moved");
+        assert!(!b.hits(Vec3::new(0.0, 0.5, 0.0)));
+        assert!(b.wisps.is_empty());
+    }
+
+    #[test]
+    fn nightmares_get_tougher_with_depth() {
+        assert!(hp_for(1) < hp_for(2) && hp_for(2) < hp_for(4));
+    }
+
+    #[test]
+    fn a_strike_undoes_the_wisps_in_front_and_leaves_the_rest() {
+        let mut b = Boss::new(15, MOVE_SPEED);
+        b.wisps.push(Wisp { pos: Vec3::new(0.0, 0.0, 2.0), life: 5.0 });
+        b.wisps.push(Wisp { pos: Vec3::new(0.0, 0.0, -2.0), life: 5.0 });
+        b.wisps.push(Wisp { pos: Vec3::new(0.0, 0.0, 9.0), life: 5.0 });
+        let n = b.strike_wisps(Vec3::new(0.0, 1.0, 0.0), Vec3::Z, crate::combat::REACH, crate::combat::ARC_COS);
+        assert_eq!(n, 1);
+        assert_eq!(b.wisps.len(), 2);
     }
 
     #[test]

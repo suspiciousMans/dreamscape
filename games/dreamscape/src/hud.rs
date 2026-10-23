@@ -162,6 +162,8 @@ pub struct HudView {
     pub hand_links: Vec<crate::hand::HandLink>,
     /// Nerve: (now, most). (0, 0) hides the hearts (co-op).
     pub nerve: (u32, u32),
+    /// A nightmare's remaining hp (0..1) and whether it can be hurt now.
+    pub boss_hp: Option<(f32, bool)>,
     /// 1 the instant of a hit, easing to 0: the eye flinches, a heart breaks.
     pub nerve_flinch: f32,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
@@ -634,10 +636,21 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
         };
         p.rect_filled(r, 0.0, rgba(rgb, 0.9));
     }
+    // === combat === its strength; bright while it rests and can be hurt
+    if let Some((frac, open)) = v.boss_hp {
+        let w = 200.0;
+        let bar = Rect::from_center_size(Pos2::new(top.x, top.y + 64.0), Vec2::new(w, 6.0));
+        p.rect_filled(bar, 0.0, rgba([30, 10, 30], 0.8));
+        let lit = if open && (v.time * 8.0) as i32 % 2 == 0 { [255, 255, 255] } else if open { [120, 255, 240] } else { [255, 70, 120] };
+        let fill = Rect::from_min_size(bar.min, Vec2::new(w * frac.clamp(0.0, 1.0), 6.0));
+        p.rect_filled(fill, 0.0, rgba(lit, 0.95));
+        p.rect_stroke(bar, 0.0, egui::Stroke::new(1.0_f32, rgba([255, 200, 230], 0.6)));
+    }
+    // === end combat ===
     if let Some(msg) = warning {
         if (v.time * 6.0) as i32 % 2 == 0 {
             p.text(
-                top + Vec2::new(0.0, 64.0),
+                top + Vec2::new(0.0, 80.0),
                 Align2::CENTER_TOP,
                 *msg,
                 FontId::monospace(crate::pixel_ui::fit(msg, 28.0, screen.width() - 40.0, 12.0)),

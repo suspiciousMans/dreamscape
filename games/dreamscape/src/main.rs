@@ -2106,10 +2106,55 @@ impl DreamscapeGame {
                 self.hurt_foe(&t, dmg, me, knock, combat::STAGGER_SECS);
             }
         }
+        // === combat === the nightmare: wisps fall to a blow; the hunter only
+        // can be hurt while it rests.
+        if let Some((entity, b, _)) = self.hunter.as_mut() {
+            if b.strike_wisps(me, facing, reach, arc) > 0 {
+                struck = true;
+            }
+            let hunter_at = self.world.get::<&Transform>(*entity).ok().map(|t| t.position);
+            if let Some(hp) = hunter_at {
+                if combat::in_arc(me, facing, hp, reach + boss::HUNTER_BODY, arc) {
+                    let dmg = 1.0 + self.run.count(Upgrade::SharpEdge) as f32 * f32::from(b.vulnerable());
+                    match b.hurt(dmg) {
+                        boss::Blow::Deflected => {
+                            if !b.defeated {
+                                self.sfx(Sound::Denied);
+                            }
+                        }
+                        boss::Blow::Hurt => {
+                            struck = true;
+                            if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                                let away = Vec3::new(hp.x - me.x, 0.0, hp.z - me.z).normalize_or_zero();
+                                t.position += away * combat::KNOCKBACK * 0.5;
+                            }
+                        }
+                        boss::Blow::Undone => {
+                            struck = true;
+                            let tier = b.tier;
+                            self.undo_nightmare(tier, hp);
+                        }
+                    }
+                }
+            }
+        }
+        // === end combat ===
         if struck {
             self.sfx(Sound::StrikeHit);
             self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
         }
+    }
+
+    /// The nightmare comes undone: dust and calm motes. (The portal still
+    /// wants every sigil.)
+    fn undo_nightmare(&mut self, tier: u32, at: Vec3) {
+        self.bonus_dust += boss::UNDONE_DUST_PER_TIER * tier;
+        for k in 0..boss::UNDONE_MOTES {
+            self.pending_motes.push(at + Vec3::new(1.5 * (k as f32 - 0.5), 0.0, 1.0));
+        }
+        self.sfx(Sound::Unravel);
+        self.flash.trigger([1.0, 0.9, 1.0], 0.4);
+        log::info!("Nightmare undone (tier {tier})");
     }
 
     /// Your cards' combat effects, as they are used (see the combat plan, table 6).
@@ -2605,6 +2650,7 @@ impl DreamscapeGame {
                 .collect(),
             hand: self.hand_view(),
             hand_links: self.hand_links(),
+            boss_hp: self.hunter.as_ref().map(|(_, b, _)| (b.hp / b.max_hp, b.vulnerable())),
             // === combat ===
             nerve: if self.coop_active() { (0, 0) } else { (self.nerve.cur(), self.nerve.max()) },
             nerve_flinch: self.nerve.flinch(),
@@ -3775,7 +3821,7 @@ impl DreamscapeGame {
                 };
             at(p.entity).is_some_and(|pos| gameplay::touches(pos, player, reach))
         });
-        let hunter = self.hunter.iter().any(|(e, _, _)| {
+        let hunter = self.hunter.iter().filter(|(_, b, _)| !b.defeated).any(|(e, _, _)| {
             at(*e).is_some_and(|pos| {
                 // Flat distance: it's too big to jump over.
                 let d = pos - player;
@@ -9077,7 +9123,13 @@ impl Game for DreamscapeGame {
         self.update_features();
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
-            if !held && !puppet {
+            if b.defeated {
+                // === combat === undone: it comes apart where it stands
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                    t.scale *= (1.0 - 4.0 * dt).max(0.0);
+                }
+                // === end combat ===
+            } else if !held && !puppet {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
                     let target = if hunted.is_empty() {
                         target
@@ -10546,6 +10598,56 @@ mod screen_smoke {
         j.strike_request = true;
         j.update_combat(0.0);
         assert_eq!(j.air_jumps_used, 1, "once per airtime");
+    }
+
+    #[test]
+    fn the_hunter_glances_off_a_blow_until_it_rests_and_wisps_fall_in_one() {
+        let mut g = fighter("hunter", None);
+        let e = g.world.spawn((
+            Transform { position: Vec3::new(0.0, 1.0, 2.5), rotation: Quat::IDENTITY, scale: Vec3::splat(2.0) },
+            Spin(1.0),
+        ));
+        let mut b = boss::Boss::new(10, 6.0);
+        b.hunter.phase = hunter::Phase::Stalk;
+        b.wisps.push(boss::Wisp { pos: Vec3::new(0.0, 0.0, 1.5), life: 5.0 });
+        g.hunter = Some((e, b, Vec3::ZERO));
+        let hp0 = g.hunter.as_ref().unwrap().1.hp;
+        g.resolve_strike();
+        assert_eq!(g.hunter.as_ref().unwrap().1.hp, hp0, "hunting: glances off");
+        assert!(g.hunter.as_ref().unwrap().1.wisps.is_empty(), "the wisp fell in one blow");
+        g.hunter.as_mut().unwrap().1.hunter.rest();
+        g.resolve_strike();
+        let b = &g.hunter.as_ref().unwrap().1;
+        assert_eq!(b.hp, hp0 - 1.0, "resting: it hurts");
+        assert!(!b.defeated);
+        // Pushed back a little by the blow.
+        let z = g.world.get::<&Transform>(e).unwrap().position.z;
+        assert!(z > 2.5);
+        // A last blow undoes it and pays out.
+        g.hunter.as_mut().unwrap().1.hp = 1.0;
+        g.player_position = Vec3::new(0.0, 1.0, z - 2.0);
+        let dust = g.bonus_dust;
+        g.resolve_strike();
+        assert!(g.hunter.as_ref().unwrap().1.defeated);
+        assert_eq!(g.bonus_dust, dust + boss::UNDONE_DUST_PER_TIER * 2);
+        assert_eq!(g.pending_motes.len(), boss::UNDONE_MOTES);
+        assert!(g.threat_touching().is_none(), "an undone nightmare touches nothing");
+    }
+
+    #[test]
+    fn the_nightmares_strength_bar_draws_and_flashes_when_it_can_be_hurt() {
+        let mut g = game("bossbar");
+        g.mode = hud::Mode::Playing;
+        let n = |hp: Option<(f32, bool)>| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.boss = Some(("THE HUNTER".into(), 1, 3, None));
+                v.boss_hp = hp;
+            })
+            .len()
+        };
+        assert!(n(Some((0.5, false))) > n(None), "the bar draws");
+        n(Some((0.0, true)));
+        n(Some((1.0, true)));
     }
 
     #[test]
