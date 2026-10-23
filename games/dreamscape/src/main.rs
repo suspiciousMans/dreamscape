@@ -456,6 +456,8 @@ pub struct DreamscapeGame {
     last_ability: Option<(Ability, f32)>,
     /// When each ability was last used (dream age), for the hand's pop.
     ability_used: Vec<(Ability, f32)>,
+    /// When each passive last did something (dream age), for the hand's pulse.
+    passive_fired: Vec<(Upgrade, f32)>,
     /// Names of the cards that hold the abilities, for the hand.
     hand_cards: Vec<(Ability, cards::Card)>,
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
@@ -744,6 +746,16 @@ pub struct DreamscapeGame {
     ability_requests: [bool; upgrades::ABILITY_SLOTS],
 }
 
+/// Notes that a passive just did its work (only if the run holds it), so its
+/// card in the hand can pulse.
+fn fire_passive(fired: &mut Vec<(Upgrade, f32)>, run: &RunUpgrades, age: f32, u: Upgrade) {
+    if run.count(u) == 0 {
+        return;
+    }
+    fired.retain(|f| f.0 != u);
+    fired.push((u, age));
+}
+
 impl DreamscapeGame {
     pub fn new(run_seed: u64) -> Self {
         Self {
@@ -798,6 +810,7 @@ impl DreamscapeGame {
             anchor: None,
             last_ability: None,
             ability_used: Vec::new(),
+            passive_fired: Vec::new(),
             hand_cards: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
@@ -1666,7 +1679,21 @@ impl DreamscapeGame {
                     .iter()
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
+                let passive = self
+                    .hand_cards
+                    .iter()
+                    .find(|n| n.0 == a.ability)
+                    .map(|n| powers::power(n.1.theme).passive);
                 hand::HandCard {
+                    passive: passive.map(|u| (u.info().name, u.info().color)),
+                    passive_since: passive
+                        .and_then(|u| self.passive_fired.iter().find(|f| f.0 == u))
+                        .map_or(hand::NEVER, |f| self.dream_age - f.1),
+                    cracked: self
+                        .run
+                        .taken
+                        .iter()
+                        .any(|u| matches!(u, Upgrade::Cursed(_))),
                     ability: a.ability.name(),
                     card: self
                         .hand_cards
@@ -1681,6 +1708,43 @@ impl DreamscapeGame {
                     tint2,
                     since_use,
                 }
+            })
+            .collect()
+    }
+
+    /// A passive just did its work: its card in the hand pulses.
+    fn passive_fires(&mut self, u: Upgrade) {
+        fire_passive(&mut self.passive_fired, &self.run, self.dream_age, u);
+    }
+
+    /// Which cards of the hand make each active synergy (by what they give:
+    /// the card's ability and its passive). Halves that came from a pick
+    /// instead of a card have nothing to link.
+    fn hand_links(&self) -> Vec<hand::HandLink> {
+        let gives = |i: usize, u: Upgrade| {
+            let Some(a) = self.run.abilities.get(i).map(|s| s.ability) else {
+                return false;
+            };
+            let card = self.hand_cards.iter().find(|n| n.0 == a).map(|n| &n.1);
+            u == Upgrade::Learn(a)
+                || card.is_some_and(|c| {
+                    powers::power(c.theme).passive == u
+                        || c.fused.is_some_and(|b| powers::power(b).passive == u)
+                })
+        };
+        let n = self.run.abilities.len();
+        self.run
+            .synergies()
+            .into_iter()
+            .filter_map(|s| {
+                let [(u1, _), (u2, _)] = s.parts();
+                let a = (0..n).find(|&i| gives(i, u1))?;
+                let b = (0..n).find(|&i| i != a && gives(i, u2)).or_else(|| gives(a, u2).then_some(a))?;
+                Some(hand::HandLink {
+                    a: a.min(b),
+                    b: a.max(b),
+                    name: s.name(),
+                })
             })
             .collect()
     }
@@ -1937,6 +2001,7 @@ impl DreamscapeGame {
                 )
                 .collect(),
             hand: self.hand_view(),
+            hand_links: self.hand_links(),
             twist: {
                 // === shards ===
                 let t = self.twists.label();
@@ -6218,6 +6283,7 @@ impl DreamscapeGame {
         self.anchor = None;
         self.last_ability = None;
         self.ability_used.clear();
+        self.passive_fired.clear();
         self.slam_apex = 0.0;
         self.slam_meteor = false;
         self.caches.clear();
@@ -8112,11 +8178,13 @@ impl Game for DreamscapeGame {
                 body.velocity.y = jump_speed;
                 if jump_pressed {
                     self.sfx(Sound::Jump);
+                    fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::Spring);
                 }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
                 body.velocity.y = jump_speed;
                 self.sfx(Sound::AirJump);
+                fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::DoubleJump);
             }
         }
 
@@ -8437,6 +8505,7 @@ impl Game for DreamscapeGame {
             }
             if anchored {
                 self.run.anchors_used += 1;
+                self.passive_fires(Upgrade::DreamAnchor);
                 log::info!("Dream anchor: the shard stays with you");
             }
             let forgiven = forgiven || anchored;
@@ -9318,7 +9387,53 @@ mod screen_smoke {
             tint: [255, 120, 200],
             tint2: [90, 200, 255],
             since_use,
+            passive: Some(("SPRING", [120, 255, 200])),
+            passive_since: hand::NEVER,
+            cracked: false,
         }
+    }
+
+    fn themed(theme: dream::DreamTheme, seed: u64) -> cards::Card {
+        cards::card_from(&cards::tests::record(theme, seed, 3, 0.4, false))
+    }
+
+    #[test]
+    fn two_cards_that_make_a_synergy_are_linked_and_one_that_does_not_is_not() {
+        let mut g = game("links");
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        g.run.take(Upgrade::Learn(Ability::Phase));
+        g.hand_cards = vec![
+            (Ability::Dash, themed(dream::DreamTheme::TheTunnel, 1)),
+            (Ability::Phase, themed(dream::DreamTheme::LiminalOffice, 2)),
+        ];
+        let links = g.hand_links();
+        assert_eq!(
+            links,
+            vec![hand::HandLink { a: 0, b: 1, name: "GHOST STEP" }]
+        );
+        // Without the second half there is nothing to link.
+        g.run = RunUpgrades::default();
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        assert!(g.hand_links().is_empty());
+    }
+
+    #[test]
+    fn a_passive_pulses_only_if_the_run_holds_it_and_curses_crack_the_hand() {
+        let mut g = game("pulse");
+        g.dream_age = 10.0;
+        g.passive_fires(Upgrade::DoubleJump);
+        assert!(g.passive_fired.is_empty(), "not held, so it cannot fire");
+        g.run.take(Upgrade::DoubleJump);
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        g.hand_cards = vec![(Ability::Dash, themed(dream::DreamTheme::SkyStairs, 3))];
+        // SkyStairs gives DoubleJump as its passive.
+        assert_eq!(hand::pulse(g.hand_view()[0].passive_since), 0.0);
+        g.passive_fires(Upgrade::DoubleJump);
+        g.dream_age = 10.2;
+        assert!(hand::pulse(g.hand_view()[0].passive_since) > 0.0);
+        assert!(!g.hand_view()[0].cracked);
+        g.run.take(Upgrade::Cursed(upgrades::Curse::Greed));
+        assert!(g.hand_view()[0].cracked);
     }
 
     #[test]
@@ -9338,6 +9453,22 @@ mod screen_smoke {
         assert!(rest(1, hand::NEVER) > bare, "a held card draws");
         assert!(rest(5, hand::NEVER) > rest(1, hand::NEVER));
         assert!(rest(2, 0.1) > rest(2, hand::NEVER), "a used card rings and flashes");
+        let shapes_with = |links: Vec<hand::HandLink>, cracked: bool, since: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.hand = vec![card("DASH", hand::NEVER), card("PHASE", hand::NEVER)];
+                for c in &mut v.hand {
+                    c.cracked = cracked;
+                    c.passive_since = since;
+                }
+                v.hand_links = links.clone();
+            })
+            .len()
+        };
+        let plain = shapes_with(vec![], false, hand::NEVER);
+        let link = hand::HandLink { a: 0, b: 1, name: "GHOST STEP" };
+        assert!(shapes_with(vec![link], false, hand::NEVER) > plain, "a link draws an arc");
+        assert!(shapes_with(vec![], true, hand::NEVER) > plain, "a curse draws cracks");
+        assert!(shapes_with(vec![], false, 0.2) > plain, "a passive pulse draws");
         for (w, h) in [(960.0, 540.0), (1280.0, 800.0), (1920.0, 1080.0)] {
             frame_with(&g, w, h, &|v| {
                 let mut with_art = card("DASH", 0.05);

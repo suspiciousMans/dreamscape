@@ -158,6 +158,8 @@ pub struct HudView {
     pub upgrades: Vec<String>,
     /// The hand, drawn down the right edge.
     pub hand: Vec<crate::hand::HandCard>,
+    /// Synergies the hand's cards make together.
+    pub hand_links: Vec<crate::hand::HandLink>,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
     pub twist: String,
     pub twist_blurb: String,
@@ -511,7 +513,7 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
-    crate::hand::draw(ctx, &p, screen, &v.hand, v.time, v.settings_snapshot.reduced_motion, art);
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);

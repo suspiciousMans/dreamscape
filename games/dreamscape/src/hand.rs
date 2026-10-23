@@ -43,6 +43,43 @@ pub struct HandCard {
     pub since_use: f32,
     /// The equipped card itself: its artwork and name fill the face.
     pub card: Option<crate::cards::Card>,
+    /// The passive this card gives: name and colour.
+    pub passive: Option<(&'static str, [u8; 3])>,
+    /// Seconds since that passive last did something; [`NEVER`] if it has not.
+    pub passive_since: f32,
+    /// The run holds a curse: the card shows cracks.
+    pub cracked: bool,
+}
+
+/// Two cards (or one, if `a == b`) that make a synergy together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandLink {
+    pub a: usize,
+    pub b: usize,
+    pub name: &'static str,
+}
+
+/// Seconds a passive's pulse and its floating name last.
+pub const PULSE_SECS: f32 = 0.9;
+
+/// 1 the moment a passive fires, easing to 0.
+pub fn pulse(since: f32) -> f32 {
+    if !(0.0..PULSE_SECS).contains(&since) {
+        return 0.0;
+    }
+    let t = since / PULSE_SECS;
+    (1.0 - t) * (1.0 - t)
+}
+
+/// A curve from `a` to `b` bowed up by `lift`, as `n + 1` points.
+pub fn arc(a: Pos2, b: Pos2, lift: f32, n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let line = a + (b - a) * t;
+            Pos2::new(line.x, line.y - lift * 4.0 * t * (1.0 - t))
+        })
+        .collect()
 }
 
 /// 0 at rest, 1 at the top of the pop: quick out, short hold, slow back.
@@ -198,12 +235,14 @@ pub fn draw(
     p: &egui::Painter,
     screen: Rect,
     cards: &[HandCard],
+    links: &[HandLink],
     time: f32,
     reduced: bool,
     art: &mut crate::booklet_ui::CardArt,
 ) {
     let rests = layout(screen, cards.len());
     let u = crate::pixel_ui::scale(screen);
+    draw_links(p, &rests, cards, links, time, u);
     // Rest order (later cards lie on top), then whichever is mid-pop above all.
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by(|&a, &b| {
@@ -226,6 +265,80 @@ pub fn draw(
             );
         }
         draw_card(ctx, p, r, angle, c, amount, time, u, art);
+        // The passive's name floats up off the card and fades.
+        let pu = pulse(c.passive_since);
+        if let (Some((name, rgb)), true) = (c.passive, pu > 0.0) {
+            let rise = if reduced { 0.0 } else { 22.0 * u * (1.0 - pu) };
+            p.text(
+                Pos2::new(r.center().x, r.top() - 10.0 * u - rise),
+                egui::Align2::CENTER_BOTTOM,
+                name,
+                FontId::monospace((12.0 * u).max(8.0)),
+                rgba(rgb, pu.min(1.0)),
+            );
+        }
+    }
+}
+
+/// Synergies: a glowing arc between the two cards that make one, with its
+/// name above; one card that makes it alone just shimmers its name.
+fn draw_links(
+    p: &egui::Painter,
+    rests: &[Rect],
+    cards: &[HandCard],
+    links: &[HandLink],
+    time: f32,
+    u: f32,
+) {
+    for (k, l) in links.iter().enumerate() {
+        let (Some(ra), Some(rb)) = (rests.get(l.a), rests.get(l.b)) else {
+            continue;
+        };
+        let pop_a = cards.get(l.a).map_or(0.0, |c| pop(c.since_use));
+        let pop_b = cards.get(l.b).map_or(0.0, |c| pop(c.since_use));
+        if pop_a > 0.0 || pop_b > 0.0 {
+            continue; // a card in the air: let it have the screen
+        }
+        let rgb = crate::hud::hue(time * 0.25 + k as f32 * 0.37);
+        let glow = 0.55 + 0.25 * (time * 3.0 + k as f32).sin();
+        let lift = 18.0 * u + 6.0 * u * k as f32;
+        let pa = Pos2::new(ra.center().x, ra.top() - 3.0 * u);
+        let pb = Pos2::new(rb.center().x, rb.top() - 3.0 * u);
+        let label_at = if l.a == l.b {
+            Pos2::new(pa.x, pa.y - 4.0 * u)
+        } else {
+            let pts = arc(pa, pb, lift, 14);
+            p.add(Shape::line(pts.clone(), Stroke::new(4.0 * u, rgba(rgb, glow * 0.25))));
+            p.add(Shape::line(pts, Stroke::new(1.5 * u, rgba(rgb, glow + 0.2))));
+            for end in [pa, pb] {
+                p.circle_filled(end, 2.5 * u, rgba(rgb, 0.95));
+            }
+            Pos2::new((pa.x + pb.x) / 2.0, pa.y.min(pb.y) - lift - 2.0 * u)
+        };
+        p.text(
+            label_at,
+            egui::Align2::CENTER_BOTTOM,
+            l.name,
+            FontId::monospace((10.0 * u).max(7.0)),
+            rgba(rgb, glow + 0.2),
+        );
+    }
+}
+
+/// Jagged cracks across a card face, in local coordinates (the same on every
+/// card, so they do not shimmer).
+fn draw_cracks(p: &egui::Painter, x: &Xf, body: Rect, u: f32, k: f32) {
+    let w = body.width();
+    let h = body.height();
+    let spine = [(-0.16, -0.5), (-0.04, -0.3), (-0.2, -0.12), (0.02, 0.08), (-0.1, 0.28), (0.06, 0.5)];
+    let branch = [(-0.04, -0.3), (0.16, -0.22), (0.3, -0.04)];
+    for line in [&spine[..], &branch[..]] {
+        let pts: Vec<Pos2> = line
+            .iter()
+            .map(|&(fx, fy)| x.at(Vec2::new(fx * w, fy * h)))
+            .collect();
+        p.add(Shape::line(pts.clone(), Stroke::new(3.5 * u * k, rgba([255, 40, 70], 0.28))));
+        p.add(Shape::line(pts, Stroke::new(1.3 * u * k, rgba([6, 0, 10], 0.95))));
     }
 }
 
@@ -250,6 +363,11 @@ fn draw_card(
         .as_ref()
         .map_or(c.tint, |card| crate::booklet_ui::card_frame(card, time));
     let edge = if lit { frame } else { frame.map(|v| v / 2 + 40) };
+    let edge = if c.cracked {
+        [0, 1, 2].map(|i| (edge[i] as u16 * 3 / 5 + [255u16, 40, 70][i] * 2 / 5) as u8)
+    } else {
+        edge
+    };
     let k = r.width() / (CARD_W * u); // 1.0 at rest, a little more popped
     let cell = (3.0 * u * k).round().max(2.0);
     let body = Rect::from_center_size(Pos2::ZERO, r.size());
@@ -324,6 +442,21 @@ fn draw_card(
     x.outline(p, key_box, 1.0, rgba(edge, 0.9));
     x.text(p, key_box.center().to_vec2(), c.key, key_size, rgba(edge, 1.0), angle);
 
+    // The passive: a small diamond on the art's bottom-left, flaring when it fires.
+    if let Some((_, rgb)) = c.passive {
+        let pu = pulse(c.passive_since);
+        let s = (3.5 + 3.0 * pu) * u * k;
+        let at = Pos2::new(art.left() + 7.0 * u * k, art.bottom() - 7.0 * u * k).to_vec2();
+        let diamond = Rect::from_center_size(at.to_pos2(), Vec2::splat(s * 2.0));
+        x.quad(p, diamond.expand(1.5 * u), rgba([10, 4, 20], 0.9));
+        let turn = Xf::new(x.at(at), angle + std::f32::consts::FRAC_PI_4);
+        let sq = Rect::from_center_size(Pos2::ZERO, Vec2::splat(s * 1.3));
+        turn.quad(p, sq, rgba(rgb, 0.75 + 0.25 * pu));
+        if pu > 0.0 {
+            turn.outline(p, sq.expand(10.0 * u * (1.0 - pu)), 1.5, rgba(rgb, pu));
+        }
+    }
+
     // Recharge: a strip under the art, eight cells; ready ones pulse.
     let cells = 8;
     let filled = (c.charge.clamp(0.0, 1.0) * cells as f32).floor() as i32;
@@ -353,6 +486,10 @@ fn draw_card(
         rgba(if lit { [255, 245, 255] } else { [170, 150, 200] }, 0.95),
         angle,
     );
+
+    if c.cracked {
+        draw_cracks(p, &x, body, u, k);
+    }
 
     // The flash: a tinted wash that fades with the pop.
     if amount > 0.0 {
@@ -538,5 +675,25 @@ mod tests {
         let (a, b) = name_lines("supercalifragilistic", 8);
         assert_eq!(b, None);
         assert_eq!(a.chars().count(), 8);
+    }
+
+    #[test]
+    fn a_passive_pulse_flares_then_fades() {
+        assert_eq!(pulse(NEVER), 0.0);
+        assert_eq!(pulse(-0.5), 0.0);
+        assert_eq!(pulse(0.0), 1.0);
+        assert!(pulse(0.3) > pulse(0.6) && pulse(0.6) > 0.0);
+        assert_eq!(pulse(PULSE_SECS), 0.0);
+    }
+
+    #[test]
+    fn a_link_arc_starts_and_ends_on_its_cards_and_bows_upward() {
+        let (a, b) = (Pos2::new(100.0, 500.0), Pos2::new(220.0, 520.0));
+        let pts = arc(a, b, 20.0, 10);
+        assert_eq!(pts.len(), 11);
+        assert_eq!(pts[0], a);
+        assert_eq!(pts[10], b);
+        let top = pts.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        assert!(top < (a.y + b.y) / 2.0 - 19.0, "bows up by the lift at the middle");
     }
 }
