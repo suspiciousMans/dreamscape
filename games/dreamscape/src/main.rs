@@ -90,6 +90,7 @@ mod settings;
 mod secrets;
 mod settings_ui;
 mod shop_ui;
+mod sorting;
 mod sounds;
 mod specials;
 mod steam;
