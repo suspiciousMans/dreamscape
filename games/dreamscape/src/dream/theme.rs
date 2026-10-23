@@ -148,6 +148,14 @@ pub enum EnemyKind {
     Drifter,
     /// Harmless, but its touch throws you somewhere else.
     Jester,
+    // ENEMIES-B (added at the bottom; not in `ALL_ENEMY_KINDS`: they spawn
+    // through `foespawn`, not through the theme lists).
+    /// One moth of a ringing group.
+    Moths,
+    /// A shielded patroller.
+    Mask,
+    /// Latches on and drains.
+    Leech,
 }
 
 pub const ALL_ENEMY_KINDS: [EnemyKind; 5] = [
@@ -167,6 +175,9 @@ impl EnemyKind {
             EnemyKind::Sentry => "a light is searching for you. it will call the others.",
             EnemyKind::Drifter => "something drifts across the gaps. time your jumps.",
             EnemyKind::Jester => "a jester. it won't hurt you, but it will move you.",
+            EnemyKind::Moths => "pale moths circle. one dives at a time. strike them, or hold still.",
+            EnemyKind::Mask => "a mask. strike it from the side. its face shrugs off blows.",
+            EnemyKind::Leech => "something latches on. jump three times to shake it off.",
         }
     }
 }

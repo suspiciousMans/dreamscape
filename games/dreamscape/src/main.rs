@@ -53,9 +53,20 @@ mod worth;
 mod fpv;
 mod fusion;
 mod gameplay;
+mod hand;
 mod hud;
 mod hunter;
+mod combat;
+mod lullaby;
+mod newfoes;
+mod tooth;
+mod weeper;
+mod foespawn;
+mod leech;
+mod mask;
+mod moths;
 mod loadout_ui;
+mod nerve;
 mod lore;
 mod memories_ui;
 mod merge_ui;
@@ -202,6 +213,44 @@ enum SpecialAI {
     Sentry(specials::Sentry, Entity),
     Drifter(EnemyAI),
     Jester(EnemyAI),
+    // ENEMIES-B (added at the bottom)
+    /// One moth of the dream's swarm (`moth_swarm`), by id.
+    Moth(usize),
+    Mask(mask::Mask),
+    Leech(leech::Leech),
+}
+
+/// A swing's flash in flight: a fan of rays swept across the strike's arc.
+struct Slash {
+    /// Each ray's pieces (see `combat::SLASH_SEGMENTS`), and the flying sparks.
+    rays: Vec<[Entity; 3]>,
+    sparks: Vec<Entity>,
+    age: f32,
+    facing: Vec3,
+    reach: f32,
+    half_arc: f32,
+    flip: bool,
+}
+
+/// What a swing asks for, until the next frame spawns it.
+struct SlashStart {
+    facing: Vec3,
+    reach: f32,
+    half_arc: f32,
+    flip: bool,
+}
+
+/// Something a strike, a dash or a shock can hit.
+struct CombatTarget {
+    entity: Entity,
+    pos: Vec3,
+    kind: combat::Kind,
+    /// It has not noticed you.
+    unaware: bool,
+    /// Struck on armour (a Lullaby's front).
+    guarded: bool,
+    /// In a vulnerable recovery (a Tooth after its lunge).
+    recovering: bool,
 }
 
 struct SpecialEnemy {
@@ -209,6 +258,30 @@ struct SpecialEnemy {
     kind: EnemyKind,
     ai: SpecialAI,
 }
+
+// === enemies-a ===
+enum NewAI {
+    Tooth(tooth::Tooth),
+    Weeper(weeper::Weeper),
+    Lullaby(lullaby::Lullaby),
+}
+
+/// Tooth, Weeper or Lullaby, with the entities that dress it (tears, the
+/// armour plate, the slam marker and ring), all despawned with it.
+struct NewFoe {
+    entity: Entity,
+    kind: combat::Kind,
+    ai: NewAI,
+    base: Vec3,
+    floor_y: f32,
+    calm: Arc<GpuTexture>,
+    tell: Arc<GpuTexture>,
+    extras: Vec<Entity>,
+}
+
+/// Segments of a Lullaby's slam ring.
+const SLAM_SEGMENTS: usize = 32;
+// === end enemies-a ===
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Crumble {
@@ -435,6 +508,59 @@ pub struct DreamscapeGame {
     new_records: Vec<(progress::NewRecord, u32)>,
     /// PHASE: the dreamer is drawn see-through.
     phased: bool,
+    // === combat ===
+    /// How many hits the dreamer can take (see `nerve.rs`).
+    nerve: nerve::Nerve,
+    /// The dreamer is drawn faint while invulnerable after a hit.
+    hurt_ghost: bool,
+    /// The dreamer's strike (swing timing) and a request to start one.
+    strike: combat::Strike,
+    strike_request: bool,
+    /// Hit points of enemies that have been struck (made on first hit).
+    foes: HashMap<Entity, combat::Foe>,
+    /// Special enemies reeling from a strike: seconds left (pacers use `stunned`).
+    staggered: HashMap<Entity, f32>,
+    /// Enemies coming undone: (entity, age, full scale).
+    unraveling: Vec<(Entity, f32, Vec3)>,
+    /// Calm motes lying about: (entity, age).
+    motes: Vec<(Entity, f32)>,
+    /// Where calm motes should appear (spawned where there is a GL context).
+    pending_motes: Vec<Vec3>,
+    /// BLINK: until when your next strike is a sneak attack.
+    backstab_until: f32,
+    /// DASH: what this dash has already cut.
+    dash_cut: Vec<Entity>,
+    /// LEAP: you are in the air from one, and will shock on landing.
+    leap_airborne: bool,
+    /// ANCHOR: this use snapped you back (set for `combat_on_use`).
+    anchor_snapped: bool,
+    /// DREAM ANCHOR's last stand is once per dream.
+    last_stand_used: bool,
+    /// Strikes thrown this run (ECHO STRIKE), calm seconds (CALM MIND), the
+    /// last moment you were airborne (SPRING), an air jump refunded (DOUBLE
+    /// JUMP), and the pause between counters (COUNTER).
+    strike_count: u32,
+    calm_timer: f32,
+    air_until: f32,
+    air_refunded: bool,
+    counter_cd: f32,
+    /// The swing's flash: (entity, age); and one waiting to be spawned.
+    slashes: Vec<Slash>,
+    slash_pending: Option<SlashStart>,
+    // === end combat ===
+    // === enemies-a ===
+    newfoes: Vec<NewFoe>,
+    /// Wall boxes tears die on.
+    foe_walls: Vec<weeper::Wall>,
+    // === end enemies-a ===
+    // === combat === ENEMIES-B
+    /// The dream's moth group, when it has one.
+    moth_swarm: Option<moths::Swarm>,
+    /// Textures that change with an enemy's state (dim/bright moth, mask tells).
+    b_tex: HashMap<&'static str, Arc<GpuTexture>>,
+    /// The dreamer left the ground this frame (ground or air jump).
+    jump_event: bool,
+    // === end combat ===
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
     /// An ability just fired: burst here, in these colours (spawned next update).
@@ -453,6 +579,12 @@ pub struct DreamscapeGame {
     anchor: Option<(Vec3, Entity, f32)>,
     /// The last ability used and when (dream seconds), for combos.
     last_ability: Option<(Ability, f32)>,
+    /// When each ability was last used (dream age), for the hand's pop.
+    ability_used: Vec<(Ability, f32)>,
+    /// When each passive last did something (dream age), for the hand's pulse.
+    passive_fired: Vec<(Upgrade, f32)>,
+    /// Names of the cards that hold the abilities, for the hand.
+    hand_cards: Vec<(Ability, cards::Card)>,
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -739,6 +871,16 @@ pub struct DreamscapeGame {
     ability_requests: [bool; upgrades::ABILITY_SLOTS],
 }
 
+/// Notes that a passive just did its work (only if the run holds it), so its
+/// card in the hand can pulse.
+fn fire_passive(fired: &mut Vec<(Upgrade, f32)>, run: &RunUpgrades, age: f32, u: Upgrade) {
+    if run.count(u) == 0 {
+        return;
+    }
+    fired.retain(|f| f.0 != u);
+    fired.push((u, age));
+}
+
 impl DreamscapeGame {
     pub fn new(run_seed: u64) -> Self {
         Self {
@@ -783,6 +925,32 @@ impl DreamscapeGame {
             chilled: Vec::new(),
             new_records: Vec::new(),
             phased: false,
+            nerve: nerve::Nerve::default(),
+            hurt_ghost: false,
+            strike: combat::Strike::default(),
+            strike_request: false,
+            foes: HashMap::new(),
+            staggered: HashMap::new(),
+            unraveling: Vec::new(),
+            motes: Vec::new(),
+            pending_motes: Vec::new(),
+            backstab_until: 0.0,
+            dash_cut: Vec::new(),
+            leap_airborne: false,
+            anchor_snapped: false,
+            last_stand_used: false,
+            strike_count: 0,
+            calm_timer: 0.0,
+            air_until: 0.0,
+            air_refunded: false,
+            counter_cd: 0.0,
+            slashes: Vec::new(),
+            slash_pending: None,
+            newfoes: Vec::new(), // enemies-a
+            foe_walls: Vec::new(), // enemies-a
+            moth_swarm: None,
+            b_tex: HashMap::new(),
+            jump_event: false,
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
@@ -792,6 +960,9 @@ impl DreamscapeGame {
             decoy: None,
             anchor: None,
             last_ability: None,
+            ability_used: Vec::new(),
+            passive_fired: Vec::new(),
+            hand_cards: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1642,6 +1813,1122 @@ impl DreamscapeGame {
             .context("mesh not uploaded")
     }
 
+    /// The equipped cards that hold abilities, with how long ago each was used.
+    fn hand_view(&self) -> Vec<hand::HandCard> {
+        self.run
+            .abilities
+            .iter()
+            .enumerate()
+            .map(|(k, a)| {
+                let (tint, tint2) = self
+                    .ability_tints
+                    .iter()
+                    .find(|t| t.0 == a.ability)
+                    .map_or(([200, 150, 255], [120, 100, 150]), |&(_, x, y)| (x, y));
+                let since_use = self
+                    .ability_used
+                    .iter()
+                    .find(|u| u.0 == a.ability)
+                    .map_or(hand::NEVER, |u| self.dream_age - u.1);
+                let passive = self
+                    .hand_cards
+                    .iter()
+                    .find(|n| n.0 == a.ability)
+                    .map(|n| powers::power(n.1.theme).passive);
+                hand::HandCard {
+                    passive: passive.map(|u| (u.info().name, u.info().color)),
+                    passive_since: passive
+                        .and_then(|u| self.passive_fired.iter().find(|f| f.0 == u))
+                        .map_or(hand::NEVER, |f| self.dream_age - f.1),
+                    cracked: self
+                        .run
+                        .taken
+                        .iter()
+                        .any(|u| matches!(u, Upgrade::Cursed(_))),
+                    ability: a.ability.name(),
+                    card: self
+                        .hand_cards
+                        .iter()
+                        .find(|n| n.0 == a.ability)
+                        .map(|n| n.1.clone()),
+                    key: upgrades::SLOT_KEYS[k],
+                    charge: a.charge(self.run.cooldown_for(a.ability)),
+                    active: a.is_active()
+                        || (a.ability == Ability::Anchor && self.anchor.is_some()),
+                    tint,
+                    tint2,
+                    since_use,
+                }
+            })
+            .collect()
+    }
+
+    // === combat ===
+    /// Strike, stagger timers, unravelling enemies, calm motes, the flash.
+    fn update_combat(&mut self, dt: f32) {
+        // Dev: DREAMSCAPE_STRIKE=<secs> lets the autopilot swing, over and
+        // over, from that many seconds in (for screenshots).
+        let dev_from = if self.autopilot {
+            crate::dev::var("DREAMSCAPE_STRIKE").ok().and_then(|v| v.parse::<f32>().ok())
+        } else {
+            None
+        };
+        if dev_from.is_some_and(|from| self.dream_age >= from) {
+            self.strike_request = true;
+        }
+        let active = !self.coop_active() && (!self.autopilot || dev_from.is_some());
+        // === combat passives ===
+        let want_max = (nerve::START + self.run.count(Upgrade::SecondHeartbeat)).min(nerve::MAX);
+        if want_max > self.nerve.max() {
+            self.nerve.raise_max(want_max - self.nerve.max());
+        }
+        self.counter_cd = (self.counter_cd - dt).max(0.0);
+        if !self.player_grounded {
+            self.air_until = self.dream_age;
+        } else {
+            self.air_refunded = false;
+        }
+        // CALM MIND: calm earns nerve back.
+        if let Some(every) = combat::calm_interval(self.run.count(Upgrade::CalmMind)) {
+            if self.enemies.iter().any(|p| p.ai.chasing) {
+                self.calm_timer = 0.0;
+            } else {
+                self.calm_timer += dt;
+                if self.calm_timer >= every {
+                    self.calm_timer = 0.0;
+                    self.nerve.heal(1);
+                }
+            }
+        }
+        // === end combat passives ===
+        let wants = std::mem::take(&mut self.strike_request);
+        if active && wants {
+            let quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
+            if self.strike.try_start(quick) {
+                // DOUBLE JUMP: a strike in the air gives one air jump back.
+                if !self.player_grounded
+                    && !self.air_refunded
+                    && self.run.count(Upgrade::DoubleJump) > 0
+                    && self.air_jumps_used > 0
+                {
+                    self.air_jumps_used -= 1;
+                    self.air_refunded = true;
+                }
+                self.sfx(Sound::Strike);
+                let arc = if self.run.count(Upgrade::WideEyes) > 0 {
+                    combat::ARC_COS_WIDE
+                } else {
+                    combat::ARC_COS
+                };
+                self.slash_pending = Some(SlashStart {
+                    facing: self.flat_facing(),
+                    reach: combat::reach_with(self.run.count(Upgrade::LongReach)),
+                    half_arc: arc.acos(),
+                    flip: self.strike_count % 2 == 1, // every other swing comes back
+                });
+            }
+        }
+        if self.strike.tick(dt) {
+            self.resolve_strike();
+        }
+        // DASH cuts what it passes through, once each.
+        if active && self.run.active(Ability::Dash) {
+            let me = self.player_position;
+            let cut: Vec<CombatTarget> = self
+                .combat_targets()
+                .into_iter()
+                .filter(|t| t.pos.distance(me) <= combat::DASH_CUT_REACH && !self.dash_cut.contains(&t.entity))
+                .collect();
+            for t in &cut {
+                self.dash_cut.push(t.entity);
+                let dmg = self.strike_damage(t);
+                self.hurt_foe(t, dmg, me, 0.0, combat::STAGGER_SECS);
+            }
+            if !cut.is_empty() {
+                self.sfx(Sound::StrikeHit);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+        }
+        // LEAP: the landing shocks what is under you.
+        if self.leap_airborne && self.player_grounded && self.dream_age > 0.2 {
+            self.leap_airborne = false;
+        self.last_stand_used = false;
+        self.counter_cd = 0.0;
+            if active {
+                let at = self.player_position;
+                if self.shock(at, combat::LEAP_SHOCK_REACH, 1.0, combat::STAGGER_SECS) > 0 {
+                    self.sfx(Sound::StrikeHit);
+                }
+            }
+        }
+        // SHARD CALL draws calm motes in.
+        if self.run.active(Ability::ShardCall) {
+            let me = self.player_position;
+            for (e, _) in &self.motes {
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                    let d = me - t.position;
+                    if d.length() > 0.1 {
+                        t.position += d.normalize() * combat::MOTE_PULL_SPEED * dt;
+                    }
+                }
+            }
+        }
+        // Special enemies recover.
+        self.staggered.retain(|_, left| {
+            *left -= dt;
+            *left > 0.0
+        });
+        // Unravelling: swell, shrink, gone.
+        let mut gone = Vec::new();
+        for (k, (e, age, full)) in self.unraveling.iter_mut().enumerate() {
+            *age += dt;
+            if *age >= combat::UNRAVEL_SECS {
+                gone.push(k);
+            } else if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                t.scale = *full * combat::unravel_scale(*age);
+            }
+        }
+        for k in gone.into_iter().rev() {
+            let (e, _, _) = self.unraveling.remove(k);
+            let _ = self.world.despawn(e);
+        }
+        // The swing's flash: a fan sweeps across the arc from the dreamer's
+        // centre, then narrows away, throwing sparks off its leading edge.
+        let me = self.player_position;
+        let reduced = self.settings.reduced_motion;
+        let mut done = Vec::new();
+        for (k, s) in self.slashes.iter_mut().enumerate() {
+            s.age += dt;
+            if s.age >= combat::SLASH_LIFE.max(combat::SLASH_SWEEP + combat::SPARK_LIFE) {
+                done.push(k);
+                continue;
+            }
+            let heading = |angle: f32| {
+                let (sin, cos) = angle.sin_cos();
+                // Positive angles lean to the right of the facing.
+                Vec3::new(
+                    s.facing.x * cos + s.facing.z * sin,
+                    0.0,
+                    -s.facing.x * sin + s.facing.z * cos,
+                )
+            };
+            let n = s.rays.len();
+            for (i, pieces) in s.rays.iter().enumerate() {
+                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced);
+                for (j, e) in pieces.iter().enumerate() {
+                    let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
+                        continue;
+                    };
+                    let Some(r) = ray else {
+                        t.scale = Vec3::ZERO;
+                        continue;
+                    };
+                    let (from, to, wide) = combat::SLASH_SEGMENTS[j];
+                    let dir = heading(r.angle);
+                    let len = s.reach * r.length;
+                    t.position = me + dir * (len * (from + to) / 2.0) + Vec3::Y * 0.25;
+                    t.rotation = Quat::from_rotation_arc(Vec3::Z, dir);
+                    t.scale = Vec3::new((0.1 + 0.4 * r.width) * wide, 0.012, len * (to - from));
+                }
+            }
+            for (k2, e) in s.sparks.iter().enumerate() {
+                let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
+                    continue;
+                };
+                match combat::slash_spark(k2, s.age, s.half_arc, s.flip).filter(|_| !reduced) {
+                    Some((angle, dist, size)) => {
+                        t.position = me + heading(angle) * (s.reach * dist) + Vec3::Y * 0.4;
+                        t.scale = Vec3::splat(0.34 * size);
+                    }
+                    None => t.scale = Vec3::ZERO,
+                }
+            }
+        }
+        for k in done.into_iter().rev() {
+            let s = self.slashes.remove(k);
+            for e in s.rays.into_iter().flatten().chain(s.sparks) {
+                let _ = self.world.despawn(e);
+            }
+        }
+        // Calm motes bob; touching one steadies you.
+        let coop = self.coop_active();
+        let mut taken = Vec::new();
+        for (k, (e, age)) in self.motes.iter_mut().enumerate() {
+            *age += dt;
+            let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
+                taken.push((k, false));
+                continue;
+            };
+            t.position.y += combat::mote_bob(*age) - combat::mote_bob(*age - dt);
+            if *age > combat::MOTE_LIFE {
+                taken.push((k, false));
+            } else if t.position.distance(me) < combat::MOTE_PICKUP && !coop {
+                taken.push((k, true));
+            }
+        }
+        for (k, steadied) in taken.into_iter().rev() {
+            let (e, _) = self.motes.remove(k);
+            let _ = self.world.despawn(e);
+            if steadied {
+                let spore = self.run.count(Upgrade::CalmSpore) > 0;
+                self.nerve.heal(if spore { 2 } else { 1 });
+                if spore {
+                    self.shock(me, combat::SPORE_REACH, 0.0, combat::FLARE_STAGGER);
+                }
+                self.sfx(Sound::Calm);
+                self.flash.trigger([0.6, 1.0, 0.8], 0.25);
+            }
+        }
+    }
+
+    /// Everything that can be struck right now: (entity, position, kind, unaware).
+    fn combat_targets(&self) -> Vec<CombatTarget> {
+        let at = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
+        let mut targets = Vec::new();
+        let me = self.player_position;
+        // === enemies-a === (armoured front, recovering) per new enemy
+        for f in &self.newfoes {
+            let Some(pos) = at(&self.world, f.entity) else { continue };
+            let (unaware, guarded, recovering) = match &f.ai {
+                NewAI::Tooth(a) => (a.unaware(pos, me), false, a.vulnerable()),
+                NewAI::Weeper(a) => (a.unaware(pos, me), false, false),
+                NewAI::Lullaby(a) => (a.unaware(pos, me), a.guarded_against(pos, me), false),
+            };
+            targets.push(CombatTarget { entity: f.entity, pos, kind: f.kind, unaware, guarded, recovering });
+        }
+        // === end enemies-a ===
+        for p in &self.enemies {
+            if let Some(pos) = at(&self.world, p.entity) {
+                let kind = combat::Kind::Pacer {
+                    elite: p.elite,
+                    child: p.split && p.elite == Some(Elite::Splitter),
+                };
+                targets.push(CombatTarget { entity: p.entity, pos, kind, unaware: !p.ai.chasing, guarded: false, recovering: false });
+            }
+        }
+        for sp in &self.specials {
+            let kind = match sp.kind {
+                EnemyKind::Stalker => combat::Kind::Stalker,
+                EnemyKind::Sentry => combat::Kind::Sentry,
+                EnemyKind::Drifter => combat::Kind::Drifter,
+                EnemyKind::Jester => combat::Kind::Jester,
+                EnemyKind::Mimic => continue, // it is only you
+                EnemyKind::Moths => combat::Kind::Moth,
+                EnemyKind::Mask => combat::Kind::Mask,
+                EnemyKind::Leech => combat::Kind::Leech,
+            };
+            if let Some(pos) = at(&self.world, sp.entity) {
+                // Sentries see you coming; the rest are unaware until chasing.
+                targets.push(CombatTarget {
+                    entity: sp.entity,
+                    pos,
+                    kind,
+                    unaware: !matches!(
+                        kind,
+                        combat::Kind::Sentry | combat::Kind::Moth | combat::Kind::Mask | combat::Kind::Leech
+                    ),
+                    guarded: false,
+                    recovering: false,
+                });
+            }
+        }
+        targets
+    }
+
+    /// The conditions your cards put on a strike against `t` right now.
+    fn strike_ctx(&self, t: &CombatTarget) -> combat::Ctx {
+        let me = self.player_position;
+        combat::Ctx {
+            // BLINK sets up a sneak attack; HUSH deepens it.
+            unaware: t.unaware || self.dream_age < self.backstab_until,
+            airborne: !self.player_grounded
+                || self.run.active(Ability::Float)
+                || (self.run.count(Upgrade::Spring) > 0
+                    && self.dream_age - self.air_until < combat::SPRING_AIR_GRACE),
+            // STILLNESS freezes: a frozen foe is a reeling one.
+            staggered: self.stunned.contains_key(&t.entity)
+                || self.staggered.contains_key(&t.entity)
+                || t.recovering
+                || self.run.active(Ability::Stillness),
+            guarded: t.guarded,
+            ghost: self.run.active(Ability::Phase),
+            hush: self.run.active(Ability::Hush),
+            high_ground: self.run.active(Ability::Step)
+                && me.y - t.pos.y > combat::HIGH_GROUND_RISE,
+        }
+    }
+
+    /// What a strike (or a dash cut) does to `t` right now, cards included.
+    fn strike_damage(&self, t: &CombatTarget) -> f32 {
+        let ctx = self.strike_ctx(t);
+        let mut dmg = combat::damage(1.0, ctx);
+        if ctx.staggered {
+            dmg += self.run.count(Upgrade::SharpEdge) as f32;
+        }
+        if ctx.unaware && self.run.has(upgrades::Synergy::Executioner) {
+            dmg += 1.0;
+        }
+        dmg
+    }
+
+    /// Damages one target: the shared end of a strike, a dash, a shock.
+    /// `knock` shoves it that far from `from` (a frozen foe cannot be shoved).
+    /// Returns true if it came undone.
+    fn hurt_foe(&mut self, t: &CombatTarget, dmg: f32, from: Vec3, knock: f32, stagger: f32) -> bool {
+        let outcome = self
+            .foes
+            .entry(t.entity)
+            .or_insert_with(|| combat::Foe::new(t.kind))
+            .hit(dmg);
+        match outcome {
+            combat::Outcome::Hurt => {
+                let away = Vec3::new(t.pos.x - from.x, 0.0, t.pos.z - from.z).normalize_or_zero();
+                if knock > 0.0 && !self.run.active(Ability::Stillness) {
+                    if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
+                        tr.position += away * knock;
+                    }
+                }
+                // === combat === a strike on a latched leech knocks it off
+                if t.kind == combat::Kind::Leech {
+                    self.shake_leech(t.entity);
+                }
+                // === end combat ===
+                // === enemies-a ===
+                if let Some(f) = self.newfoes.iter_mut().find(|f| f.entity == t.entity) {
+                    match &mut f.ai {
+                        // Its recovery is its own clock: no extra reel.
+                        NewAI::Tooth(a) => a.hurt(),
+                        NewAI::Weeper(a) => {
+                            a.hurt();
+                            self.staggered.insert(t.entity, stagger);
+                        }
+                        NewAI::Lullaby(a) => {
+                            a.stagger();
+                            self.staggered.insert(t.entity, stagger);
+                        }
+                    }
+                } else
+                // === end enemies-a ===
+                if matches!(t.kind, combat::Kind::Pacer { .. }) {
+                    self.stunned.insert(t.entity, stagger);
+                    if let Some(p) = self.enemies.iter_mut().find(|p| p.entity == t.entity) {
+                        p.ai.reset(); // a hit breaks its lunge
+                    }
+                } else {
+                    self.staggered.insert(t.entity, stagger);
+                }
+                false
+            }
+            combat::Outcome::Unravel => {
+                self.unravel(t.entity, t.pos);
+                true
+            }
+        }
+    }
+
+    /// An area effect: every foe within `reach` of `centre` takes `dmg`
+    /// (0 = stagger only) and reels. Returns how many were touched.
+    fn shock(&mut self, centre: Vec3, reach: f32, dmg: f32, stagger: f32) -> usize {
+        let hit: Vec<CombatTarget> = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| {
+                Vec3::new(t.pos.x - centre.x, 0.0, t.pos.z - centre.z).length() <= reach
+                    && (t.pos.y - centre.y).abs() <= combat::REACH_HEIGHT
+            })
+            .collect();
+        for t in &hit {
+            if dmg > 0.0 {
+                self.hurt_foe(t, dmg, centre, 0.0, stagger);
+            } else if matches!(t.kind, combat::Kind::Pacer { .. }) {
+                self.stunned.insert(t.entity, stagger);
+            } else {
+                self.staggered.insert(t.entity, stagger);
+            }
+        }
+        hit.len()
+    }
+
+    /// The swing lands: everything in the arc takes damage.
+    fn resolve_strike(&mut self) {
+        let me = self.player_position;
+        let facing = self.flat_facing();
+        let mut struck = false;
+        let reach = combat::reach_with(self.run.count(Upgrade::LongReach));
+        let arc = if self.run.count(Upgrade::WideEyes) > 0 {
+            combat::ARC_COS_WIDE
+        } else {
+            combat::ARC_COS
+        };
+        let knock = combat::KNOCKBACK
+            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+        // ECHO STRIKE: every fourth strike is followed by a longer wave.
+        self.strike_count += 1;
+        let echo = self.run.count(Upgrade::EchoStrike) > 0
+            && self.strike_count % combat::ECHO_EVERY == 0;
+        let waves: &[f32] = if echo { &[1.0, combat::ECHO_REACH] } else { &[1.0] };
+        for &stretch in waves {
+            for t in self.combat_targets() {
+                if !combat::in_arc(me, facing, t.pos, reach * stretch, arc) {
+                    continue;
+                }
+                // The wave only reaches what the first did not (it is longer).
+                if stretch > 1.0 && combat::in_arc(me, facing, t.pos, reach, arc) {
+                    continue;
+                }
+                // === combat === a mask's shield turns the blow aside
+                if t.kind == combat::Kind::Mask && self.mask_glances(t.entity, me) {
+                    self.mask_glance(t.pos);
+                    continue;
+                }
+                // === end combat ===
+                struck = true;
+                self.burst_pending = Some((t.pos + Vec3::Y * 0.5, [255, 150, 230], [255, 255, 255]));
+                let dmg = self.strike_damage(&t);
+                self.hurt_foe(&t, dmg, me, knock, combat::STAGGER_SECS);
+            }
+        }
+        // === combat === the nightmare: wisps fall to a blow; the hunter only
+        // can be hurt while it rests.
+        if let Some((entity, b, _)) = self.hunter.as_mut() {
+            if b.strike_wisps(me, facing, reach, arc) > 0 {
+                struck = true;
+            }
+            let hunter_at = self.world.get::<&Transform>(*entity).ok().map(|t| t.position);
+            if let Some(hp) = hunter_at {
+                if combat::in_arc(me, facing, hp, reach + boss::HUNTER_BODY, arc) {
+                    let dmg = 1.0 + self.run.count(Upgrade::SharpEdge) as f32 * f32::from(b.vulnerable());
+                    match b.hurt(dmg) {
+                        boss::Blow::Deflected => {
+                            if !b.defeated {
+                                self.sfx(Sound::Denied);
+                            }
+                        }
+                        boss::Blow::Hurt => {
+                            struck = true;
+                            if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                                let away = Vec3::new(hp.x - me.x, 0.0, hp.z - me.z).normalize_or_zero();
+                                t.position += away * combat::KNOCKBACK * 0.5;
+                            }
+                        }
+                        boss::Blow::Undone => {
+                            struck = true;
+                            let tier = b.tier;
+                            self.undo_nightmare(tier, hp);
+                        }
+                    }
+                }
+            }
+        }
+        // === end combat ===
+        if struck {
+            self.sfx(Sound::StrikeHit);
+            self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+        }
+    }
+
+    /// The nightmare comes undone: dust and calm motes. (The portal still
+    /// wants every sigil.)
+    fn undo_nightmare(&mut self, tier: u32, at: Vec3) {
+        self.bonus_dust += boss::UNDONE_DUST_PER_TIER * tier;
+        for k in 0..boss::UNDONE_MOTES {
+            self.pending_motes.push(at + Vec3::new(1.5 * (k as f32 - 0.5), 0.0, 1.0));
+        }
+        self.sfx(Sound::Unravel);
+        self.flash.trigger([1.0, 0.9, 1.0], 0.4);
+        log::info!("Nightmare undone (tier {tier})");
+    }
+
+    /// Your cards' combat effects, as they are used (see the combat plan, table 6).
+    fn combat_on_use(&mut self, ability: Ability, origin: Vec3) {
+        if self.coop_active() {
+            return;
+        }
+        match ability {
+            Ability::Blink => self.backstab_until = self.dream_age + combat::BLINK_BACKSTAB_SECS,
+            Ability::Dash => self.dash_cut.clear(),
+            Ability::Leap => self.leap_airborne = true,
+            Ability::Flare => {
+                // The light blinds and staggers; Shades cannot hide in it.
+                let me = self.player_position;
+                let shades: Vec<CombatTarget> = self
+                    .combat_targets()
+                    .into_iter()
+                    .filter(|t| matches!(t.kind, combat::Kind::Pacer { elite: Some(Elite::Shade), .. }))
+                    .filter(|t| t.pos.distance(me) <= combat::FLARE_REACH)
+                    .collect();
+                self.shock(me, combat::FLARE_REACH, 0.0, combat::FLARE_STAGGER);
+                for t in &shades {
+                    self.hurt_foe(t, 1.0, me, 0.0, combat::FLARE_STAGGER);
+                }
+            }
+            Ability::Rewind => {
+                let back = self.nerve.recover();
+                if back > 0 {
+                    log::info!("Rewind gave back {back} nerve");
+                    self.sfx(Sound::Calm);
+                }
+            }
+            Ability::Anchor if self.anchor_snapped => {
+                // Snapping back leaves a wave where you stood.
+                self.shock(origin, combat::ANCHOR_WAVE_REACH, 0.0, combat::STAGGER_SECS);
+            }
+            _ => {}
+        }
+    }
+
+    /// The decoy comes undone: a small burst where it stood.
+    fn decoy_burst(&mut self, at: Vec3) {
+        if self.coop_active() {
+            return;
+        }
+        if self.shock(at, combat::DECOY_BURST_REACH, 1.0, combat::STAGGER_SECS) > 0 {
+            self.sfx(Sound::StrikeHit);
+        }
+    }
+
+    /// WARD breaks: the hit goes back at what made it.
+    fn ward_reflect(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::WARD_REFLECT_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        if let Some(t) = near {
+            let back = if self.run.has(upgrades::Synergy::Bulwark) { 2.0 } else { 1.0 };
+            self.hurt_foe(&t, back, me, combat::KNOCKBACK, combat::STAGGER_SECS);
+        }
+    }
+
+    /// COUNTER: you slipped a blow; the attacker reels (RIPOSTE cuts it too).
+    fn counter_attack(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::COUNTER_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        let Some(t) = near else {
+            return;
+        };
+        self.counter_cd = combat::COUNTER_COOLDOWN;
+        if self.run.has(upgrades::Synergy::Riposte) {
+            self.hurt_foe(&t, 1.0, me, 0.0, combat::RIPOSTE_STAGGER);
+        } else if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, combat::COUNTER_STAGGER);
+        } else {
+            self.staggered.insert(t.entity, combat::COUNTER_STAGGER);
+        }
+        self.sfx(Sound::StrikeHit);
+        self.flash.trigger([1.0, 0.8, 0.5], 0.2);
+    }
+
+    /// THORNS: what hurt you takes a bite.
+    fn thorns_bite(&mut self) {
+        let me = self.player_position;
+        let near = self
+            .combat_targets()
+            .into_iter()
+            .filter(|t| t.pos.distance(me) <= combat::THORNS_REACH)
+            .min_by(|a, b| a.pos.distance(me).total_cmp(&b.pos.distance(me)));
+        if let Some(t) = near {
+            self.hurt_foe(&t, 1.0, me, 0.0, combat::STAGGER_SECS);
+        }
+    }
+
+    /// Is `p` inside a wall? (GUST shoves enemies into them.)
+    fn in_wall(&self, p: Vec3) -> bool {
+        self.dream.as_ref().is_some_and(|d| {
+            d.blocks.iter().any(|b| {
+                b.kind == dream::BlockKind::Wall && {
+                    let h = b.size * 0.5;
+                    (p.x - b.pos.x).abs() < h.x && (p.y - b.pos.y).abs() < h.y && (p.z - b.pos.z).abs() < h.z
+                }
+            })
+        })
+    }
+
+    /// Hit-point pips for the enemies that have been struck (and, with WIDE
+    /// EYES, for any enemy nearby): screen position (0..1) plus pips.
+    fn foe_pips(&self, view_proj: Mat4) -> Vec<hud::FoePips> {
+        let me = self.player_position;
+        let eyes = self.run.count(Upgrade::WideEyes) > 0;
+        let mut out = Vec::new();
+        for t in self.combat_targets() {
+            let foe = self.foes.get(&t.entity).copied().unwrap_or_else(|| combat::Foe::new(t.kind));
+            let struck = foe.hp < foe.max;
+            if !struck && !(eyes && t.pos.distance(me) <= combat::EYES_PIP_REACH) {
+                continue;
+            }
+            let clip = view_proj * (t.pos + Vec3::Y * 1.7).extend(1.0);
+            if clip.w <= 0.0 {
+                continue;
+            }
+            out.push(hud::FoePips {
+                at: [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w],
+                hp: foe.hp,
+                max: foe.max,
+            });
+            if out.len() >= 8 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// An enemy comes undone: out of play at once, a short animation, loot.
+    fn unravel(&mut self, entity: Entity, pos: Vec3) {
+        self.foes.remove(&entity);
+        self.stunned.remove(&entity);
+        self.staggered.remove(&entity);
+        self.enemies.retain(|p| p.entity != entity);
+        // === enemies-a === its tears, plate, marker and ring go with it
+        if let Some(k) = self.newfoes.iter().position(|f| f.entity == entity) {
+            let f = self.newfoes.remove(k);
+            for e in f.extras {
+                let _ = self.world.despawn(e);
+            }
+        }
+        // === end enemies-a ===
+        if let Some(k) = self.specials.iter().position(|s| s.entity == entity) {
+            let sp = self.specials.remove(k);
+            if let SpecialAI::Sentry(_, beam) = sp.ai {
+                let _ = self.world.despawn(beam);
+            }
+            // === combat === a dead moth leaves the ring; a dead leech lets go
+            if let SpecialAI::Moth(id) = sp.ai {
+                if let Some(s) = &mut self.moth_swarm {
+                    s.kill(id);
+                    if s.alive() == 0 {
+                        self.moth_swarm = None;
+                    }
+                }
+            }
+            // === end combat ===
+        }
+        let full = self
+            .world
+            .get::<&Transform>(entity)
+            .map_or(Vec3::ONE, |t| t.scale);
+        // Take away its collider-like presence: it no longer touches anyone.
+        self.unraveling.push((entity, 0.0, full));
+        self.sfx(Sound::Unravel);
+        let seed = (entity.id() as u64) << 20 ^ (self.dream_age * 1000.0) as u64 ^ self.director.dream_seed();
+        let loot = combat::loot(
+            seed,
+            self.run.count(Upgrade::DustHoarder),
+            combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
+        );
+        self.bonus_dust += loot.dust;
+        if loot.mote {
+            self.pending_motes.push(pos);
+        }
+        log::info!("Unravelled (+{} dust{})", loot.dust, if loot.mote { ", a calm mote" } else { "" });
+    }
+
+    // === end combat ===
+    // === combat ===
+    /// Something touched the dreamer. Costs nerve; returns the source only
+    /// when that was the last point (the old *caught* flow then runs).
+    fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
+        let away = self.away_from_nearest_threat();
+        let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
+            + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
+        match self.nerve.hit(nerve::damage_from(by), away, extra) {
+            nerve::Hit::Down => {
+                // DREAM ANCHOR: once a dream, a lethal blow leaves you standing.
+                if self.run.count(Upgrade::DreamAnchor) > 0 && !self.last_stand_used {
+                    self.last_stand_used = true;
+                    self.nerve.last_stand(extra);
+                    self.passive_fires(Upgrade::DreamAnchor);
+                    self.flash.trigger([1.0, 0.8, 0.4], 0.5);
+                    self.sfx(Sound::WardBreak);
+                    log::info!("Last stand: {by} could not finish you");
+                    return None;
+                }
+                Some(by)
+            }
+            nerve::Hit::Ignored => None,
+            nerve::Hit::Hurt => {
+                log::info!(
+                    "Hurt by: {by} (nerve {}/{}, depth {})",
+                    self.nerve.cur(),
+                    self.nerve.max(),
+                    self.director.depth
+                );
+                // Reduce flashing: the red wash is a quarter as strong.
+                let wash = if self.settings.reduce_flashing { 0.12 } else { 0.45 };
+                self.flash.trigger([1.0, 0.1, 0.15], wash);
+                self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
+                self.sfx(Sound::Caught);
+                if self.run.count(Upgrade::Thorns) > 0 {
+                    self.thorns_bite();
+                }
+                None
+            }
+        }
+    }
+
+    /// Unit direction (x, z) from the closest enemy to the dreamer; zero when
+    /// the hit came from the dream itself (a gate, a beat tile).
+    fn away_from_nearest_threat(&self) -> (f32, f32) {
+        let me = self.player_position;
+        let at = |e: Entity| self.world.get::<&Transform>(e).ok().map(|t| t.position);
+        let pacers = self.enemies.iter().filter_map(|p| at(p.entity));
+        let specials = self.specials.iter().filter_map(|s| at(s.entity));
+        let hunter = self.hunter.iter().filter_map(|(e, _, _)| at(*e));
+        let fresh = self.newfoes.iter().filter_map(|f| at(f.entity)); // enemies-a
+        pacers
+            .chain(specials)
+            .chain(hunter)
+            .chain(fresh)
+            .map(|p| Vec3::new(me.x - p.x, 0.0, me.z - p.z))
+            .filter(|d| d.length() > 1e-3)
+            .min_by(|a, b| a.length().total_cmp(&b.length()))
+            .map_or((0.0, 0.0), |d| {
+                let n = d.normalize();
+                (n.x, n.z)
+            })
+    }
+    // === end combat ===
+
+    // === combat === ENEMIES-B: moths, mask, leech
+    /// Puts the dream's new enemies in (placement and gates: `foespawn`,
+    /// `moths`, `mask`, `leech`). DREAMSCAPE_ENEMY=Moths|Mask|Leech forces
+    /// that one into every dream (and past the depth gate).
+    fn spawn_enemies_b(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() || self.sanctuary() {
+            return Ok(());
+        }
+        let forced = crate::dev::var("DREAMSCAPE_ENEMY").ok();
+        let (depth, nightmare) = if forced.is_some() {
+            (99, false)
+        } else {
+            (dream.depth, self.director.nightmare)
+        };
+        let theme = self.director.theme;
+        let floor = shard_rules::floor_cells(&dream.blocks);
+        let route: Vec<Vec3> = dream
+            .lucid_route
+            .iter()
+            .chain(dream.route.iter())
+            .map(|w| w.pos)
+            .collect();
+        let mut keep = vec![dream.spawn, dream.portal];
+        keep.extend(dream.shard);
+        let mut taken: Vec<Vec3> = Vec::new();
+        let mut hints: Vec<&'static str> = Vec::new();
+        for kind in [EnemyKind::Moths, EnemyKind::Mask, EnemyKind::Leech] {
+            if taken.len() >= foespawn::MAX_NEW {
+                break;
+            }
+            if forced.as_deref().is_some_and(|f| f != format!("{kind:?}")) {
+                continue;
+            }
+            let plan = match kind {
+                EnemyKind::Moths => moths::spawn_plan(depth, theme, dream.seed, nightmare),
+                EnemyKind::Mask => mask::spawn_plan(depth, theme, dream.seed, nightmare),
+                _ => leech::spawn_plan(depth, theme, dream.seed, nightmare),
+            };
+            let Some(&seed) = plan.first() else {
+                continue;
+            };
+            let Some(at) = foespawn::place(seed, 0, &floor, &route, &keep, &taken) else {
+                log::info!("No room for {kind:?}");
+                continue;
+            };
+            taken.push(at);
+            match kind {
+                EnemyKind::Moths => {
+                    let orb = self.mesh(Shape::Orb)?;
+                    let dim = self.texture(gl, [190, 165, 255, 255]);
+                    let bright = self.texture(gl, [255, 255, 225, 255]);
+                    self.b_tex.insert("moth", dim.clone());
+                    self.b_tex.insert("moth_bright", bright);
+                    let swarm = moths::Swarm::new(at);
+                    for m in &swarm.moths {
+                        let entity = self.world.spawn((
+                            Transform { position: m.pos, rotation: Quat::IDENTITY, scale: Vec3::splat(0.45) },
+                            MeshRenderer { mesh: orb.clone(), texture: Some(dim.clone()) },
+                            Lit,
+                            Spin(5.0),
+                        ));
+                        self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Moth(m.id) });
+                    }
+                    self.moth_swarm = Some(swarm);
+                }
+                EnemyKind::Mask => {
+                    let cube = self.mesh(Shape::Cube)?;
+                    for (key, color) in [
+                        ("mask", [232, 226, 205, 255]),
+                        ("mask_tell", [255, 110, 80, 255]),
+                        ("mask_down", [110, 120, 150, 255]),
+                    ] {
+                        let t = self.texture(gl, color);
+                        self.b_tex.insert(key, t);
+                    }
+                    let a = at + Vec3::Y * 0.5;
+                    let b = foespawn::neighbour(seed, at, &floor, &route).map_or(a, |n| n + Vec3::Y * 0.5);
+                    let m = mask::Mask::new(a, b);
+                    let entity = self.world.spawn((
+                        Transform { position: a + Vec3::Y * 0.45, rotation: Quat::from_rotation_y(m.yaw), scale: Vec3::new(1.3, 1.9, 0.4) },
+                        MeshRenderer { mesh: cube, texture: self.b_tex.get("mask").cloned() },
+                        Lit,
+                    ));
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Mask(m) });
+                }
+                _ => {
+                    let blob = self.mesh(Shape::Orb)?;
+                    let tex = self.texture(gl, [170, 25, 55, 255]);
+                    let pos = at + Vec3::Y * 0.35;
+                    let entity = self.world.spawn((
+                        Transform { position: pos, rotation: Quat::IDENTITY, scale: Vec3::new(0.9, 0.4, 0.55) },
+                        MeshRenderer { mesh: blob, texture: Some(tex) },
+                        Lit,
+                    ));
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Leech(leech::Leech::new(pos)) });
+                }
+            }
+            log::info!("New enemy: {kind:?} at {at:?} (depth {})", dream.depth);
+            if !self.seen_kinds.contains(&kind) {
+                self.seen_kinds.push(kind);
+                hints.push(kind.hint());
+            }
+        }
+        if !hints.is_empty() {
+            let more = hints.join(" · ");
+            self.dream_hint = if self.dream_hint.is_empty() {
+                more
+            } else {
+                format!("{} · {more}", self.dream_hint)
+            };
+        }
+        Ok(())
+    }
+
+    /// Moths, masks and leeches, once per frame (called by `update_specials`).
+    fn update_enemies_b(&mut self, dt: f32, held: bool) {
+        let jumped = std::mem::take(&mut self.jump_event);
+        if self.specials.is_empty() {
+            return;
+        }
+        let player = self.player_position;
+        let ps = gameplay::MOVE_SPEED;
+        let reduced = self.settings.reduced_motion;
+        if let Some(sw) = &mut self.moth_swarm {
+            sw.update(dt, player, ps, held);
+        }
+        let mut sounds: Vec<Sound> = Vec::new();
+        let mut touching: Vec<Entity> = Vec::new();
+        let mut shaken: Vec<Entity> = Vec::new();
+        for sp in &mut self.specials {
+            match &mut sp.ai {
+                SpecialAI::Moth(id) => {
+                    let Some(m) = self.moth_swarm.as_ref().and_then(|s| s.moths.iter().find(|m| m.id == *id)) else {
+                        continue;
+                    };
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = m.pos;
+                        // The tell: brighten, and (unless reduced motion) swell.
+                        let swell = if reduced { 0.0 } else { 0.9 };
+                        t.scale = Vec3::splat(0.45 * (1.0 + swell * m.glow()));
+                    }
+                    let key = if m.glow() > 0.25 { "moth_bright" } else { "moth" };
+                    if let (Ok(mut r), Some(tex)) = (self.world.get::<&mut MeshRenderer>(sp.entity), self.b_tex.get(key)) {
+                        r.texture = Some(tex.clone());
+                    }
+                }
+                SpecialAI::Mask(mk) => {
+                    let reeling = self.staggered.contains_key(&sp.entity);
+                    let before = mk.state;
+                    if !held && !reeling {
+                        mk.update(dt, player, ps);
+                    }
+                    if matches!(before, mask::State::Telegraph(_)) && matches!(mk.state, mask::State::Slamming(_)) {
+                        sounds.push(Sound::SlamLand);
+                    }
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = mk.pos + Vec3::Y * 0.45;
+                        t.rotation = Quat::from_rotation_y(mk.yaw);
+                        let lean = if reduced { 0.0 } else { 0.25 };
+                        t.scale = Vec3::new(1.3, 1.9, 0.4) * (1.0 + lean * mk.glow());
+                    }
+                    let key = if mk.glow() > 0.0 {
+                        "mask_tell"
+                    } else if !mk.shield_up() {
+                        "mask_down"
+                    } else {
+                        "mask"
+                    };
+                    if let (Ok(mut r), Some(tex)) = (self.world.get::<&mut MeshRenderer>(sp.entity), self.b_tex.get(key)) {
+                        r.texture = Some(tex.clone());
+                    }
+                }
+                SpecialAI::Leech(lc) => {
+                    if !held && !self.staggered.contains_key(&sp.entity) {
+                        if lc.update(dt, player, ps).touching {
+                            touching.push(sp.entity);
+                        }
+                        if jumped && lc.latched() && lc.on_jump() {
+                            shaken.push(sp.entity);
+                        }
+                    }
+                    if let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) {
+                        t.position = lc.pos;
+                        t.rotation = Quat::from_rotation_y(mask::yaw_toward(lc.pos, player));
+                        // It swells as the next drain nears.
+                        let swell = if reduced { 0.0 } else { 0.5 * lc.drain_progress() };
+                        t.scale = Vec3::new(0.9, 0.4, 0.55) * (1.0 + swell);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in sounds {
+            self.sfx(s);
+        }
+        for e in shaken {
+            self.knock_leech(e, false);
+        }
+        // A touch latches, unless you are untouchable; WARD blocks it.
+        let can = !self.autopilot
+            && self.grace <= 0.0
+            && !self.run.active(Ability::Dash)
+            && !self.run.active(Ability::Phase)
+            && !self.coop_ghost();
+        for e in touching {
+            if !can {
+                continue;
+            }
+            if self.run.active(Ability::Ward) {
+                self.break_ward();
+                self.knock_leech(e, false);
+                continue;
+            }
+            if let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == e).map(|s| &mut s.ai) {
+                lc.latch_on();
+            }
+            self.sfx(Sound::Latch);
+            if !reduced {
+                self.flash.trigger([0.7, 0.1, 0.3], 0.2);
+            }
+            log::info!("A leech latched on (depth {})", self.director.depth);
+        }
+    }
+
+    /// Throws a leech off you: it lands a step away and reels 1.5s. With
+    /// `only_latched`, a leech that is not on you is left alone.
+    fn knock_leech(&mut self, entity: Entity, only_latched: bool) {
+        let me = self.player_position;
+        let away = -self.flat_facing();
+        let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == entity).map(|s| &mut s.ai) else {
+            return;
+        };
+        if only_latched && !lc.latched() {
+            return;
+        }
+        lc.release(me, away);
+        self.staggered.insert(entity, leech::STAGGER_SECS);
+        self.sfx(Sound::Bounce);
+        log::info!("A leech was shaken off");
+    }
+
+    /// A strike landed on a leech: if it was riding you, it lets go.
+    fn shake_leech(&mut self, entity: Entity) {
+        self.knock_leech(entity, true);
+    }
+
+    /// Being caught (the respawn) shakes every leech off.
+    fn release_leeches(&mut self) {
+        let latched: Vec<Entity> = self
+            .specials
+            .iter()
+            .filter(|s| matches!(&s.ai, SpecialAI::Leech(l) if l.latched()))
+            .map(|s| s.entity)
+            .collect();
+        for e in latched {
+            self.knock_leech(e, true);
+        }
+    }
+
+    /// Would the mask's shield turn a strike from `me` aside?
+    fn mask_glances(&self, entity: Entity, me: Vec3) -> bool {
+        self.specials
+            .iter()
+            .any(|s| s.entity == entity && matches!(&s.ai, SpecialAI::Mask(m) if m.blocks(me)))
+    }
+
+    /// The blow glances off: a spark, a bounce, a flash. No damage, no stagger.
+    fn mask_glance(&mut self, at: Vec3) {
+        self.sfx(Sound::Bounce);
+        self.burst_pending = Some((at + Vec3::Y * 0.6, [255, 235, 150], [255, 255, 255]));
+        if !self.settings.reduced_motion {
+            self.flash.trigger([1.0, 0.95, 0.7], 0.12);
+        }
+    }
+
+    /// Gust (push > 0) scatters moths and spins masks; Slam (no push) cracks
+    /// mask shields.
+    fn rattle_b(&mut self, radius: f32, push: f32) {
+        let p = self.player_position;
+        if push > 0.0 {
+            if let Some(s) = &mut self.moth_swarm {
+                s.scatter(p, radius);
+            }
+        }
+        for sp in &mut self.specials {
+            if let SpecialAI::Mask(m) = &mut sp.ai {
+                let d = m.pos - p;
+                if Vec3::new(d.x, 0.0, d.z).length() < radius {
+                    if push > 0.0 {
+                        m.gust();
+                    } else {
+                        m.crack();
+                    }
+                }
+            }
+        }
+    }
+    // === end combat ===
+
+    /// A passive just did its work: its card in the hand pulses.
+    fn passive_fires(&mut self, u: Upgrade) {
+        fire_passive(&mut self.passive_fired, &self.run, self.dream_age, u);
+    }
+
+    /// Which cards of the hand make each active synergy (by what they give:
+    /// the card's ability and its passive). Halves that came from a pick
+    /// instead of a card have nothing to link.
+    fn hand_links(&self) -> Vec<hand::HandLink> {
+        let gives = |i: usize, u: Upgrade| {
+            let Some(a) = self.run.abilities.get(i).map(|s| s.ability) else {
+                return false;
+            };
+            let card = self.hand_cards.iter().find(|n| n.0 == a).map(|n| &n.1);
+            u == Upgrade::Learn(a)
+                || card.is_some_and(|c| {
+                    powers::power(c.theme).passive == u
+                        || c.fused.is_some_and(|b| powers::power(b).passive == u)
+                })
+        };
+        let n = self.run.abilities.len();
+        self.run
+            .synergies()
+            .into_iter()
+            .filter_map(|s| {
+                let [(u1, _), (u2, _)] = s.parts();
+                let a = (0..n).find(|&i| gives(i, u1))?;
+                let b = (0..n).find(|&i| i != a && gives(i, u2)).or_else(|| gives(a, u2).then_some(a))?;
+                Some(hand::HandLink {
+                    a: a.min(b),
+                    b: a.max(b),
+                    name: s.name(),
+                })
+            })
+            .collect()
+    }
+
     fn hud_view(&self) -> hud::HudView {
         let target = self.objective_target();
         hud::HudView {
@@ -1893,21 +3180,14 @@ impl DreamscapeGame {
                         .map(|s| format!("= {}", s.name())),
                 )
                 .collect(),
-            abilities: self
-                .run
-                .abilities
-                .iter()
-                .enumerate()
-                .map(|(k, a)| {
-                    (
-                        a.ability.name(),
-                        upgrades::SLOT_KEYS[k],
-                        a.charge(self.run.cooldown_for(a.ability)),
-                        a.is_active()
-                            || (a.ability == Ability::Anchor && self.anchor.is_some()),
-                    )
-                })
-                .collect(),
+            hand: self.hand_view(),
+            hand_links: self.hand_links(),
+            foe_pips: Vec::new(),
+            boss_hp: self.hunter.as_ref().map(|(_, b, _)| (b.hp / b.max_hp, b.vulnerable())),
+            // === combat ===
+            nerve: if self.coop_active() { (0, 0) } else { (self.nerve.cur(), self.nerve.max()) },
+            nerve_flinch: self.nerve.flinch(),
+            // === end combat ===
             twist: {
                 // === shards ===
                 let t = self.twists.label();
@@ -2035,6 +3315,87 @@ impl DreamscapeGame {
     /// An ability's ring of cubes in its card's colours, fading out.
     fn update_bursts(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
         let now = self.dream_age;
+        // === combat === the swing's flash
+        if let Some(start) = self.slash_pending.take() {
+            let cube = self.mesh(Shape::Cube)?;
+            let spark_mesh = self.mesh(Shape::Octahedron)?;
+            // Dim violet at the dreamer, pink in the middle, white at the tip.
+            let tex = [
+                self.texture(gl, [150, 110, 255, 255]),
+                self.texture(gl, [255, 170, 240, 255]),
+                self.texture(gl, [255, 255, 255, 255]),
+            ];
+            let spark_tex = self.texture(gl, [255, 245, 200, 255]);
+            let rays = (0..combat::SLASH_RAYS)
+                .map(|_| {
+                    [0, 1, 2].map(|j| {
+                        let mut b = hecs::EntityBuilder::new();
+                        b.add(Transform {
+                            position: self.player_position,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        });
+                        b.add(MeshRenderer {
+                            mesh: cube.clone(),
+                            texture: Some(tex[j].clone()),
+                        });
+                        b.add(Lit);
+                        // The dim and pink pieces glow (see-through); the tip is solid.
+                        if j < 2 {
+                            b.add(Translucent);
+                        }
+                        self.world.spawn(b.build())
+                    })
+                })
+                .collect();
+            let sparks = (0..combat::SLASH_SPARKS)
+                .map(|_| {
+                    self.world.spawn((
+                        Transform {
+                            position: self.player_position,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        },
+                        MeshRenderer {
+                            mesh: spark_mesh.clone(),
+                            texture: Some(spark_tex.clone()),
+                        },
+                        Spin(9.0),
+                        Lit,
+                        Translucent,
+                    ))
+                })
+                .collect();
+            self.slashes.push(Slash {
+                rays,
+                sparks,
+                age: 0.0,
+                facing: start.facing,
+                reach: start.reach,
+                half_arc: start.half_arc,
+                flip: start.flip,
+            });
+        }
+        for at in std::mem::take(&mut self.pending_motes) {
+            let mesh = self.mesh(Shape::Octahedron)?;
+            let tex = self.texture(gl, [150, 255, 210, 255]);
+            let e = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * 0.5,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::splat(0.35),
+                },
+                MeshRenderer {
+                    mesh,
+                    texture: Some(tex),
+                },
+                Spin(2.5),
+                Lit,
+                Hero,
+            ));
+            self.motes.push((e, 0.0));
+        }
+        // === end combat ===
         if let Some((at, a, b)) = self.burst_pending.take() {
             let cube = self.mesh(Shape::Cube)?;
             for i in 0..gameplay::BURST_CUBES {
@@ -2209,10 +3570,21 @@ impl DreamscapeGame {
             }
             if phasing {
                 let _ = self.world.insert_one(player, Translucent);
-            } else {
+            } else if !self.hurt_ghost {
                 let _ = self.world.remove_one::<Translucent>(player);
             }
         }
+        // === combat === faint while invulnerable after a hit
+        let faint = self.nerve.faint(self.time, self.settings.reduced_motion);
+        if faint != self.hurt_ghost {
+            self.hurt_ghost = faint;
+            if faint {
+                let _ = self.world.insert_one(player, Translucent);
+            } else if !self.phased {
+                let _ = self.world.remove_one::<Translucent>(player);
+            }
+        }
+        // === end combat ===
         Ok(())
     }
 
@@ -2590,6 +3962,7 @@ impl DreamscapeGame {
             self.director.theme,
             self.director.depth,
             !self.director.nightmare
+                && !self.sanctuary()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.theme != DreamTheme::Awakening,
@@ -2674,6 +4047,8 @@ impl DreamscapeGame {
                     Vec3::new(0.9, 0.9, 0.3),
                     [255, 120, 255, 255],
                 ),
+                // === combat === ENEMIES-B are built by `spawn_enemies_b`
+                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
             };
             let mesh = self.mesh(shape)?;
             let texture = match sp.kind {
@@ -2740,6 +4115,7 @@ impl DreamscapeGame {
                 EnemyKind::Jester => {
                     SpecialAI::Jester(EnemyAI::new(sp.a, sp.b, pacer_speed * 0.6, 0.0, 0.0))
                 }
+                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
             };
             log::info!("Special enemy: {:?} at {:?}", sp.kind, sp.at);
             self.specials.push(SpecialEnemy {
@@ -2774,10 +4150,246 @@ impl DreamscapeGame {
         Ok(())
     }
 
+    // === enemies-a ===
+    /// Puts the dream's Tooth, Weeper and Lullaby in their lairs.
+    fn spawn_newfoes(
+        &mut self,
+        gl: &engine::glow::Context,
+        dream: &Dream,
+        player_speed: f32,
+    ) -> anyhow::Result<()> {
+        // Dev switch: DREAMSCAPE_ENEMY=Tooth|Weeper|Lullaby in every dream.
+        let dev = crate::dev::var("DREAMSCAPE_ENEMY")
+            .ok()
+            .and_then(|n| newfoes::forced(&n));
+        let allowed = !self.coop_active()
+            && self.prologue.is_none()
+            && !self.director.nightmare
+            && !self.sanctuary()
+            && (!self.autopilot || dev.is_some());
+        if !allowed {
+            return Ok(());
+        }
+        let plan = match dev {
+            Some(k) => newfoes::forced_plan(k),
+            None => newfoes::plan(dream.depth, dream.theme, dream.seed, false),
+        };
+        self.foe_walls = dream
+            .blocks
+            .iter()
+            .filter(|b| b.kind == BlockKind::Wall)
+            .map(|b| (b.pos - b.size * 0.5, b.pos + b.size * 0.5))
+            .collect();
+        // With the dev switch, crowd them near the spawn so a screenshot sees them.
+        let mut lairs = dream.lairs.clone();
+        if dev.is_some() {
+            lairs.sort_by(|a, b| {
+                (*a - dream.spawn).length().total_cmp(&(*b - dream.spawn).length())
+            });
+            lairs.truncate(4);
+            // DREAMSCAPE_ENEMY_NEAR=1 (screenshots): right in front of the spawn.
+            if crate::dev::var("DREAMSCAPE_ENEMY_NEAR").is_ok() {
+                let s = dream.spawn;
+                lairs = vec![s + Vec3::new(-2.0, 0.0, 8.0), s + Vec3::new(5.0, 0.0, 10.0)];
+            }
+        }
+        // The two enemy sets share one budget (the moths, mask and leech were
+        // placed first).
+        let b_count = self
+            .specials
+            .iter()
+            .filter(|s| matches!(s.kind, EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech))
+            .count();
+        let room = if crate::dev::var("DREAMSCAPE_ENEMY").is_ok() {
+            usize::MAX
+        } else {
+            combat::MAX_NEW_FOES.saturating_sub(b_count)
+        };
+        for (kind, lair) in newfoes::place(&plan, &lairs, dream.seed).into_iter().take(room) {
+            let (shape, base, calm, tell) = match kind {
+                combat::Kind::Tooth => (
+                    Shape::Cone,
+                    Vec3::new(0.8, 1.3, 0.8),
+                    [235, 228, 200, 255],
+                    [255, 50, 40, 255],
+                ),
+                combat::Kind::Weeper => (
+                    Shape::Cylinder,
+                    Vec3::new(0.7, 1.9, 0.7),
+                    [110, 150, 235, 255],
+                    [225, 245, 255, 255],
+                ),
+                _ => (
+                    Shape::Cube,
+                    Vec3::new(1.9, 2.4, 1.9),
+                    [140, 90, 170, 255],
+                    [255, 200, 110, 255],
+                ),
+            };
+            let calm_tex = self.texture(gl, calm);
+            let tell_tex = self.texture(gl, tell);
+            let at = Vec3::new(lair.x, lair.y + (base.y * 0.5).max(0.5), lair.z);
+            let entity = self.world.spawn((
+                Transform { position: at, rotation: Quat::IDENTITY, scale: base },
+                MeshRenderer { mesh: self.mesh(shape)?, texture: Some(calm_tex.clone()) },
+                Lit,
+            ));
+            let mut extras = Vec::new();
+            let part = |g: &mut Self, shape: Shape, color: [u8; 4], translucent: bool| -> anyhow::Result<Entity> {
+                let tex = g.texture(gl, color);
+                let e = g.world.spawn((
+                    Transform { position: at, rotation: Quat::IDENTITY, scale: Vec3::ZERO },
+                    MeshRenderer { mesh: g.mesh(shape)?, texture: Some(tex) },
+                    Lit,
+                ));
+                if translucent {
+                    g.world.insert_one(e, Translucent)?;
+                }
+                Ok(e)
+            };
+            let ai = match kind {
+                combat::Kind::Tooth => NewAI::Tooth(tooth::Tooth::new(at, player_speed)),
+                combat::Kind::Weeper => {
+                    for _ in 0..weeper::MAX_TEARS {
+                        extras.push(part(self, Shape::Orb, [90, 230, 255, 255], false)?);
+                    }
+                    NewAI::Weeper(weeper::Weeper::new(at, player_speed))
+                }
+                _ => {
+                    // The armour plate on its front, the slam marker, the ring.
+                    extras.push(part(self, Shape::Cube, [235, 200, 110, 255], false)?);
+                    extras.push(part(self, Shape::Torus, [255, 110, 80, 255], true)?);
+                    for _ in 0..SLAM_SEGMENTS {
+                        extras.push(part(self, Shape::Cube, [255, 90, 150, 255], false)?);
+                    }
+                    NewAI::Lullaby(lullaby::Lullaby::new(at, player_speed))
+                }
+            };
+            log::info!("New enemy: {kind:?} at {at:?}");
+            self.newfoes.push(NewFoe {
+                entity,
+                kind,
+                ai,
+                base,
+                floor_y: lair.y,
+                calm: calm_tex,
+                tell: tell_tex,
+                extras,
+            });
+        }
+        Ok(())
+    }
+
+    /// Thinks for each new enemy and mirrors it (and its tears, plate,
+    /// marker and ring) onto its entities.
+    fn update_newfoes(&mut self, dt: f32, held: bool) {
+        if self.newfoes.is_empty() {
+            return;
+        }
+        let player = self.player_position;
+        let reduced = self.settings.reduced_motion;
+        let aim = self.decoy.map_or(player, |(at, _)| at);
+        let yaw_of = |f: Vec3| Quat::from_rotation_y(f.x.atan2(f.z));
+        for f in &mut self.newfoes {
+            let reeling = held || self.staggered.contains_key(&f.entity);
+            // The body first (one Transform borrowed at a time: hecs checks
+            // borrows per component column, not per entity).
+            let (telling, pos) = {
+                let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) else {
+                    continue;
+                };
+                let telling = match &mut f.ai {
+                    NewAI::Tooth(a) => {
+                        if !held {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.eye_lit()
+                    }
+                    NewAI::Weeper(a) => {
+                        if !reeling {
+                            a.update_aimed(&mut t.position, player, aim, &self.foe_walls, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.telling()
+                    }
+                    NewAI::Lullaby(a) => {
+                        if !reeling {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        matches!(a.phase(), lullaby::Phase::Telegraph(_))
+                    }
+                };
+                (telling, t.position)
+            };
+            // Then what it carries: tears, plate, marker, ring.
+            match &f.ai {
+                NewAI::Tooth(_) => {}
+                NewAI::Weeper(a) => {
+                    for (k, e) in f.extras.iter().enumerate() {
+                        if let Ok(mut te) = self.world.get::<&mut Transform>(*e) {
+                            match a.tears.get(k) {
+                                Some(tear) => {
+                                    te.position = tear.pos;
+                                    te.scale = Vec3::splat(0.55);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            }
+                        }
+                    }
+                }
+                NewAI::Lullaby(a) => {
+                    let centre = Vec3::new(pos.x, f.floor_y, pos.z);
+                    for (k, e) in f.extras.iter().enumerate() {
+                        let Ok(mut te) = self.world.get::<&mut Transform>(*e) else {
+                            continue;
+                        };
+                        match k {
+                            0 => {
+                                te.position = pos + a.facing() * (f.base.x * 0.5 + 0.1);
+                                te.rotation = yaw_of(a.facing());
+                                te.scale = Vec3::new(1.5, 1.7, 0.25);
+                            }
+                            1 => match a.marker() {
+                                Some(r) => {
+                                    te.position = centre + Vec3::Y * 0.06;
+                                    te.rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+                                    te.scale = Vec3::new(2.0 * r, 2.0 * r, 0.05);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            },
+                            _ => match a.ring() {
+                                Some(radius) => {
+                                    let n = SLAM_SEGMENTS;
+                                    let ang = std::f32::consts::TAU * (k - 2) as f32 / n as f32;
+                                    let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+                                    let arc = std::f32::consts::TAU * radius / n as f32;
+                                    te.position = centre + out * radius + Vec3::Y * boss::RING_H * 0.5;
+                                    te.rotation = Quat::from_rotation_y(-ang + std::f32::consts::FRAC_PI_2);
+                                    te.scale = Vec3::new(arc * 1.05, boss::RING_H, boss::RING_T);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            },
+                        }
+                    }
+                }
+            }
+            if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(f.entity) {
+                r.texture = Some(if telling { f.tell.clone() } else { f.calm.clone() });
+            }
+        }
+    }
+    // === end enemies-a ===
+
     /// Specials, crumbling floor and the jester, once per frame.
     fn update_specials(&mut self, dt: f32, held: bool) -> anyhow::Result<()> {
         let player = self.player_position;
         self.trail.push(self.dream_age, player);
+        self.update_enemies_b(dt, held); // === combat ===
         self.jester_cooldown = (self.jester_cooldown - dt).max(0.0);
         let strangeness = self.visual_strangeness();
         let eclipse = self
@@ -2822,6 +4434,14 @@ impl DreamscapeGame {
             let Ok(mut t) = self.world.get::<&mut Transform>(sp.entity) else {
                 continue;
             };
+            // === combat === a struck special reels in place
+            if self.staggered.contains_key(&sp.entity) && !matches!(sp.ai, SpecialAI::Mimic) {
+                if let SpecialAI::Stalker(s) = &mut sp.ai {
+                    s.moving = false;
+                }
+                continue;
+            }
+            // === end combat ===
             match &mut sp.ai {
                 SpecialAI::Stalker(s) => {
                     if !held {
@@ -2861,6 +4481,9 @@ impl DreamscapeGame {
                         ai.update(&mut t.position, player, dt);
                     }
                 }
+                // === combat === ENEMIES-B run in `update_enemies_b`
+                SpecialAI::Moth(_) | SpecialAI::Mask(_) | SpecialAI::Leech(_) => {}
+                // === end combat ===
             }
         }
         for at in calls {
@@ -3016,7 +4639,7 @@ impl DreamscapeGame {
                 };
             at(p.entity).is_some_and(|pos| gameplay::touches(pos, player, reach))
         });
-        let hunter = self.hunter.iter().any(|(e, _, _)| {
+        let hunter = self.hunter.iter().filter(|(_, b, _)| !b.defeated).any(|(e, _, _)| {
             at(*e).is_some_and(|pos| {
                 // Flat distance: it's too big to jump over.
                 let d = pos - player;
@@ -3032,6 +4655,8 @@ impl DreamscapeGame {
                 }
                 SpecialAI::Drifter(_) => true,
                 SpecialAI::Sentry(..) | SpecialAI::Jester(_) => false,
+                // === combat === these three have their own touches (below)
+                SpecialAI::Moth(_) | SpecialAI::Mask(_) | SpecialAI::Leech(_) => false,
             };
             armed
                 && at(sp.entity)
@@ -3047,13 +4672,39 @@ impl DreamscapeGame {
             specials::gate_closed(self.dream_age, phase) && specials::gate_blocks(at, dir, player)
         });
         let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
+        // === enemies-a ===
+        let tooth = self.newfoes.iter().any(|f| {
+            matches!(&f.ai, NewAI::Tooth(t) if t.armed())
+                && at(f.entity).is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
+        });
+        let tear = self
+            .newfoes
+            .iter()
+            .any(|f| matches!(&f.ai, NewAI::Weeper(w) if w.touching(player)));
+        let slam = self.newfoes.iter().any(|f| {
+            matches!(&f.ai, NewAI::Lullaby(l) if at(f.entity).is_some_and(|pos| {
+                l.hits(Vec3::new(pos.x, 0.0, pos.z), player - Vec3::Y * f.floor_y)
+            }))
+        });
+        // === end enemies-a ===
+        // === combat === ENEMIES-B
+        let moth = self.moth_swarm.as_ref().is_some_and(|s| s.connected());
+        let mask = self.specials.iter().any(|sp| matches!(&sp.ai, SpecialAI::Mask(m) if m.slam_hits(player)));
+        let leech = self.specials.iter().any(|sp| matches!(&sp.ai, SpecialAI::Leech(l) if l.drain_due()));
+        // === end combat ===
         [
             (pacers, "patrol"),
             (hunter, "hunter"),
             (boss_fx, "boss attack"),
+            (slam, "slam"), // enemies-a
+            (tooth, "tooth"), // enemies-a
+            (tear, "tear"), // enemies-a
             (special, "special enemy"),
             (gate, "gate"),
             (beat, "beat tile"),
+            (moth, "moth"),
+            (mask, "mask"),
+            (leech, "leech"),
         ]
         .into_iter()
         .find_map(|(hit, what)| hit.then_some(what))
@@ -3146,6 +4797,29 @@ impl DreamscapeGame {
                 }
             }
         }
+        // === enemies-a === the new enemies reel too
+        for f in &mut self.newfoes {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) {
+                let d = t.position - player;
+                let flat = Vec3::new(d.x, 0.0, d.z);
+                if flat.length() < radius {
+                    t.position += flat.normalize_or_zero() * push;
+                    match &mut f.ai {
+                        NewAI::Tooth(a) => a.hurt(),
+                        NewAI::Weeper(a) => {
+                            a.hurt();
+                            self.staggered.insert(f.entity, stun);
+                        }
+                        NewAI::Lullaby(a) => {
+                            a.stagger();
+                            self.staggered.insert(f.entity, stun);
+                        }
+                    }
+                }
+            }
+        }
+        // === end enemies-a ===
+        self.rattle_b(radius, push); // === combat ===
     }
 
     /// Loud abilities carry: every enemy within `radius` that isn't reeling
@@ -3216,6 +4890,12 @@ impl DreamscapeGame {
                 let (radius, stun) =
                     upgrades::slam_power(self.slam_apex - y, std::mem::take(&mut self.slam_meteor));
                 self.rattle_enemies(radius, 0.0, stun);
+                // === combat === the smash hurts what it staggers
+                if !self.coop_active() {
+                    let at = self.player_position;
+                    self.shock(at, radius, 1.0, stun.max(combat::STAGGER_SECS));
+                }
+                // === end combat ===
                 self.alert_enemies(upgrades::SLAM_NOISE);
                 self.flash.trigger([1.0, 0.8, 0.4], 0.45);
                 self.burst_pending = Some((self.player_position, [255, 190, 90], [255, 240, 200]));
@@ -3238,6 +4918,7 @@ impl DreamscapeGame {
         };
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
+        let origin = self.player_position; // combat: where you were
         if state.cooldown > 0.0 {
             self.sfx(Sound::Denied);
             return;
@@ -3302,6 +4983,7 @@ impl DreamscapeGame {
                 }
                 Some((at, e, _)) => {
                     let _ = self.world.despawn(e);
+                    self.anchor_snapped = true; // combat
                     self.teleport_player(at);
                 }
             }
@@ -3343,6 +5025,17 @@ impl DreamscapeGame {
                 };
                 self.rattle_enemies(upgrades::GUST_RADIUS, push, stun);
                 self.alert_enemies(upgrades::GUST_NOISE);
+                // === combat === shoved into a wall hurts
+                let me = self.player_position;
+                let walled: Vec<CombatTarget> = self
+                    .combat_targets()
+                    .into_iter()
+                    .filter(|t| t.pos.distance(me) <= upgrades::GUST_RADIUS + push && self.in_wall(t.pos))
+                    .collect();
+                for t in &walled {
+                    self.hurt_foe(t, 1.0, me, 0.0, stun);
+                }
+                // === end combat ===
             }
             Ability::Dash => self.alert_enemies(upgrades::DASH_NOISE),
             Ability::Hush if combo == Some(upgrades::Combo::Sanctuary) => {
@@ -3376,6 +5069,10 @@ impl DreamscapeGame {
         }
         if self.run.abilities[slot].try_use(mult, stretch) {
             log::info!("Ability: {:?}", state.ability);
+            // === combat ===
+            self.combat_on_use(state.ability, origin);
+            self.anchor_snapped = false;
+            // === end combat ===
             if cracks {
                 self.open_secret();
             }
@@ -3470,6 +5167,8 @@ impl DreamscapeGame {
                 Ability::Gust => Sound::Gust,
             });
             self.last_ability = Some((state.ability, self.dream_age));
+            self.ability_used.retain(|u| u.0 != state.ability);
+            self.ability_used.push((state.ability, self.dream_age));
             if let Some(c) = combo {
                 log::info!("Combo: {}", c.name());
                 self.achievement_toast =
@@ -5135,6 +6834,13 @@ impl DreamscapeGame {
         self.run = RunUpgrades::from_loadout(&cards)
             .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
+        self.nerve = if self.settings.gentle_nerve {
+            nerve::Nerve::new(nerve::GENTLE_START)
+        } else {
+            nerve::Nerve::default()
+        };
+        self.strike_count = 0;
+        self.calm_timer = 0.0;
         if let Some(id) = self
             .booklet
             .lore
@@ -5157,6 +6863,10 @@ impl DreamscapeGame {
             self.run.power(),
             self.loadout_scale
         );
+        self.hand_cards = cards
+            .iter()
+            .map(|c| (powers::power(c.theme).active, c.clone()))
+            .collect();
         self.ability_tints = cards
             .iter()
             .map(|c| {
@@ -5441,6 +7151,11 @@ impl DreamscapeGame {
 
     /// Begin melting toward `pending`. Ignored if a melt is already running
     /// (so touching the portal for several frames can't queue two descents).
+    /// A quiet place: the dream after a nightmare, where nothing can hurt you.
+    fn sanctuary(&self) -> bool {
+        self.prologue.is_none() && self.director.sanctuary()
+    }
+
     // === pressure ===
     /// Normal dreams only: no nightmares, the awakening, the prologue or co-op.
     fn pressure_applies(&self) -> bool {
@@ -5449,6 +7164,7 @@ impl DreamscapeGame {
             && !self.director.nightmare
             && self.director.theme != DreamTheme::Awakening
             && self.director.theme != DreamTheme::Lobby
+            && !self.sanctuary()
     }
 
     /// Per frame (Playing only): tick the clock, stir the pacers, speak,
@@ -5522,6 +7238,7 @@ impl DreamscapeGame {
                     self.director.descend();
                     self.coop_broadcast_plan();
                 }
+                self.nerve.heal(1); // combat: a portal steadies you
                 self.offer_upgrade = self.prologue.is_none();
                 self.load_dream(ctx)
             }
@@ -5948,7 +7665,7 @@ impl DreamscapeGame {
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let theme = self.director.theme;
         let spec = theme.spec();
-        self.twists = if self.director.nightmare || self.prologue.is_some() {
+        self.twists = if self.director.nightmare || self.prologue.is_some() || self.sanctuary() {
             Twists::default()
         } else {
             dream::roll_twists(
@@ -6024,6 +7741,12 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        // === sanctuary === nothing here can hurt you
+        if self.sanctuary() {
+            dream.calm();
+            log::info!("Sanctuary: a quiet place at depth {}", self.director.depth);
+        }
+        // === end sanctuary ===
         if let Some(b) = self.director.blend {
             dream::blend_surfaces(&mut dream.surfaces, b);
             log::info!("Fused dream: {theme:?} with {b:?}");
@@ -6060,6 +7783,7 @@ impl DreamscapeGame {
         self.guard_angle = None;
         if let Some(shard) = dream.shard {
             let eligible = !self.director.nightmare
+                && !self.sanctuary()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.depth >= shard_rules::MIN_DEPTH
@@ -6159,6 +7883,10 @@ impl DreamscapeGame {
         }
         self.enemies.clear();
         self.specials.clear();
+        self.newfoes.clear(); // enemies-a
+        self.foe_walls.clear(); // enemies-a
+        self.moth_swarm = None; // === combat ===
+        self.jump_event = false;
         self.crumbles.clear();
         self.trail.clear();
         self.mimic_awake_at = specials::MIMIC_DELAY;
@@ -6182,6 +7910,8 @@ impl DreamscapeGame {
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.anchor = None;
         self.last_ability = None;
+        self.ability_used.clear();
+        self.passive_fired.clear();
         self.slam_apex = 0.0;
         self.slam_meteor = false;
         self.caches.clear();
@@ -6190,6 +7920,20 @@ impl DreamscapeGame {
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
+        // === combat ===
+        self.foes.clear();
+        self.staggered.clear();
+        self.unraveling.clear();
+        self.motes.clear();
+        self.pending_motes.clear();
+        self.backstab_until = 0.0;
+        self.dash_cut.clear();
+        self.leap_airborne = false;
+        self.slashes.clear();
+        self.slash_pending = None;
+        self.strike.reset();
+        self.strike_request = false;
+        // === end combat ===
         self.slam = 0;
         self.step_pending = None;
         self.steps.clear();
@@ -6747,6 +8491,7 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        self.spawn_newfoes(gl, &dream, player_speed)?; // enemies-a
         // === shards ===
         if let (Some(a), Some(SpecialEnemy { ai: SpecialAI::Sentry(s, _), .. })) =
             (self.guard_angle, self.specials.last_mut())
@@ -6754,6 +8499,13 @@ impl DreamscapeGame {
             s.angle = a;
         }
         // === end shards ===
+        self.spawn_enemies_b(gl, &dream)?; // === combat ===
+        // === sanctuary === a place to breathe: nerve refills
+        if self.sanctuary() {
+            self.nerve.heal(self.nerve.max());
+            self.dream_hint = "a quiet place · nothing here can hurt you".to_string();
+        }
+        // === end sanctuary ===
         // === hazards ===
         self.theme_rule = self.hazard_rule_state();
         if self.theme_rule.is_some() {
@@ -7649,6 +9401,7 @@ impl Game for DreamscapeGame {
             Some(Action::Jump) => self.input.jump = down,
             Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
             Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            Some(Action::Strike) if down && !repeat => self.strike_request = true,
             _ => {}
         }
         match key {
@@ -7746,6 +9499,7 @@ impl Game for DreamscapeGame {
         self.time += dt;
         self.flash.tick(dt);
         self.grace = (self.grace - dt).max(0.0);
+        self.nerve.tick(dt);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
         }
@@ -7963,6 +9717,9 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === combat ===
+        self.update_combat(dt);
+        // === end combat ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
@@ -8065,8 +9822,20 @@ impl Game for DreamscapeGame {
             };
             // === hazards ===
             let push = self.theme_rule.map_or((0.0, 0.0), |r| r.effect().push);
-            body.velocity.x = v.x + push.0;
-            body.velocity.z = v.z + push.1;
+            // === combat === the shove from a hit
+            let knock = self.nerve.knock_velocity();
+            let walk = if self.strike.recovering() {
+                if self.run.count(Upgrade::SwiftFeet) > 0 {
+                    combat::RECOVERY_WALK_SWIFT
+                } else {
+                    combat::RECOVERY_WALK
+                }
+            } else {
+                1.0
+            };
+            body.velocity.x = v.x * walk + push.0 + knock.0;
+            body.velocity.z = v.z * walk + push.1 + knock.1;
+            // === end combat ===
             // === end hazards ===
             self.player_grounded = body.grounded;
             if body.grounded {
@@ -8074,13 +9843,17 @@ impl Game for DreamscapeGame {
             }
             if wants_jump && body.grounded {
                 body.velocity.y = jump_speed;
+                self.jump_event = true; // === combat === a leech counts it
                 if jump_pressed {
                     self.sfx(Sound::Jump);
+                    fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::Spring);
                 }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
                 body.velocity.y = jump_speed;
+                self.jump_event = true; // === combat === a leech counts it
                 self.sfx(Sound::AirJump);
+                fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::DoubleJump);
             }
         }
 
@@ -8233,8 +10006,9 @@ impl Game for DreamscapeGame {
             });
         }
         if !self.run.active(Ability::Decoy) {
-            if let Some((_, e)) = self.decoy.take() {
+            if let Some((at, e)) = self.decoy.take() {
                 let _ = self.world.despawn(e);
+                self.decoy_burst(at); // combat
             }
         }
         // An anchor left too long fades; so does one whose card is gone.
@@ -8246,10 +10020,17 @@ impl Game for DreamscapeGame {
             }
         }
         self.update_specials(dt, held)?;
+        self.update_newfoes(dt, held); // enemies-a
         self.update_features();
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
-            if !held && !puppet {
+            if b.defeated {
+                // === combat === undone: it comes apart where it stands
+                if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
+                    t.scale *= (1.0 - 4.0 * dt).max(0.0);
+                }
+                // === end combat ===
+            } else if !held && !puppet {
                 if let Ok(mut t) = self.world.get::<&mut Transform>(*entity) {
                     let target = if hunted.is_empty() {
                         target
@@ -8350,21 +10131,45 @@ impl Game for DreamscapeGame {
         }
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
-        let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
+        let untouchable = self.run.active(Ability::Dash)
+            || self.run.active(Ability::Phase)
+            || self.nerve.invulnerable();
         let caught_by =
             if !self.autopilot && self.grace <= 0.0 && !untouchable && !self.coop_ghost() {
                 self.threat_touching()
             } else {
                 None
             };
+        // === combat === COUNTER: slipping a blow with a dash or phase
+        if !self.autopilot
+            && self.grace <= 0.0
+            && !self.coop_active()
+            && self.counter_cd <= 0.0
+            && self.run.count(Upgrade::Counter) > 0
+            && (self.run.active(Ability::Dash) || self.run.active(Ability::Phase))
+            && self.threat_touching().is_some()
+        {
+            self.counter_attack();
+        }
+        // === end combat ===
         // WARD takes the hit meant for you.
         let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
             self.break_ward();
+            self.ward_reflect(); // combat
             None
         } else {
             caught_by
         };
+        // === combat === a touch costs nerve; only the last point is a catch
+        let caught_by = match caught_by {
+            Some(by) if !self.coop_active() => self.take_nerve_hit(by),
+            other => other,
+        };
+        // === end combat ===
         let caught = caught_by.is_some();
+        if caught {
+            self.release_leeches(); // === combat === the respawn shakes them off
+        }
         if let Some(by) = caught_by {
             log::info!(
                 "Caught by: {by} (depth {}, {:.1}s into the dream)",
@@ -8401,6 +10206,7 @@ impl Game for DreamscapeGame {
             }
             if anchored {
                 self.run.anchors_used += 1;
+                self.passive_fires(Upgrade::DreamAnchor);
                 log::info!("Dream anchor: the shard stays with you");
             }
             let forgiven = forgiven || anchored;
@@ -8619,7 +10425,7 @@ impl Game for DreamscapeGame {
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        let hud_view = self.hud_view();
+        let mut hud_view = self.hud_view();
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
@@ -8955,6 +10761,13 @@ impl Game for DreamscapeGame {
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
+        // === combat === hit-point pips over enemies, projected to the screen
+        if hud_view.mode == hud::Mode::Playing && !fp && !self.coop_active() {
+            let view_proj = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
+                * Mat4::look_at_rh(eye, target, up);
+            hud_view.foe_pips = self.foe_pips(view_proj);
+        }
+        // === end combat ===
         let card_art = &mut self.card_art;
         let pack = &self.pack;
         let pick = &self.pick;
@@ -9270,6 +11083,804 @@ mod screen_smoke {
             assert!(shapes(&g) > 50, "age {age}");
         }
         assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
+    }
+
+    fn card(ability: &'static str, since_use: f32) -> hand::HandCard {
+        hand::HandCard {
+            ability,
+            card: None,
+            key: "1",
+            charge: 0.5,
+            active: false,
+            tint: [255, 120, 200],
+            tint2: [90, 200, 255],
+            since_use,
+            passive: Some(("SPRING", [120, 255, 200])),
+            passive_since: hand::NEVER,
+            cracked: false,
+        }
+    }
+
+    fn themed(theme: dream::DreamTheme, seed: u64) -> cards::Card {
+        cards::card_from(&cards::tests::record(theme, seed, 3, 0.4, false))
+    }
+
+    #[test]
+    fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {
+        let mut g = game("nerve");
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        assert_eq!(g.nerve.cur(), 2);
+        assert!(g.nerve.invulnerable());
+        assert_eq!(g.take_nerve_hit("patrol"), None, "still invulnerable");
+        assert_eq!(g.nerve.cur(), 2);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), Some("patrol"), "nerve gone: caught");
+        assert_eq!(g.nerve.cur(), nerve::REFILL);
+    }
+
+    /// A pacer standing `ahead` units in front of a dreamer at the origin.
+    fn put_pacer(g: &mut DreamscapeGame, at: Vec3, chasing: bool) -> Entity {
+        let entity = g.world.spawn((
+            Transform {
+                position: at,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            Spin(1.0),
+        ));
+        let mut ai = EnemyAI::new(at, at + Vec3::X * 3.0, 2.0, 0.0, 9.0);
+        ai.chasing = chasing;
+        g.enemies.push(Pacer {
+            entity,
+            ai,
+            elite: None,
+            a: at,
+            b: at + Vec3::X * 3.0,
+            split: false,
+        });
+        entity
+    }
+
+    #[test]
+    fn a_strike_unravels_an_unaware_pacer_in_one_blow_and_pays_dust() {
+        let mut g = game("strike1");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), false);
+        let dust = g.bonus_dust;
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "sneak attack: x2 damage undoes a 2 hp pacer");
+        assert_eq!(g.unraveling.len(), 1);
+        assert_eq!(g.unraveling[0].0, e);
+        assert!(g.bonus_dust > dust, "it left dust");
+    }
+
+    #[test]
+    fn an_aware_pacer_takes_two_blows_and_is_staggered_between() {
+        let mut g = game("strike2");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.resolve_strike();
+        assert_eq!(g.enemies.len(), 1, "one blow does not undo it");
+        assert_eq!(g.foes[&e].hp, 1.0);
+        assert!(g.stunned.contains_key(&e), "it reels");
+        assert!(!g.enemies[0].ai.chasing, "the lunge is broken");
+        // It was shoved back; step to meet it. A reeling enemy takes double.
+        let pos = g.world.get::<&Transform>(e).unwrap().position;
+        assert!(pos.z > 2.5, "knocked back, got {pos:?}");
+        g.player_position = Vec3::new(0.0, 1.0, pos.z - 1.5);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "the second blow finishes it");
+    }
+
+    #[test]
+    fn a_strike_misses_what_is_behind_or_far_and_never_hits_the_mimic() {
+        let mut g = game("strike3");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, -2.0), true); // behind
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 6.0), true); // far
+        g.resolve_strike();
+        assert_eq!(g.enemies.len(), 2);
+        assert!(g.foes.is_empty() && g.stunned.is_empty());
+    }
+
+    #[test]
+    fn pressing_strike_swings_once_per_cooldown_and_not_in_co_op_or_autopilot() {
+        let mut g = game("strike4");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.strike_request = true;
+        g.update_combat(0.0);
+        assert!(g.slash_pending.is_some(), "a swing started");
+        assert!(!g.strike_request, "the press was used");
+        g.slash_pending = None;
+        g.strike_request = true;
+        g.update_combat(0.05);
+        assert!(g.slash_pending.is_none(), "no second swing mid-swing");
+        let mut a = game("strike5");
+        a.autopilot = true;
+        a.strike_request = true;
+        a.update_combat(0.0);
+        assert!(a.slash_pending.is_none(), "the autopilot does not fight");
+    }
+
+    /// A game with `ability` held and running, a dreamer at (0,1,0) on the ground.
+    fn fighter(name: &str, ability: Option<Ability>) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        if let Some(a) = ability {
+            g.run.take(Upgrade::Learn(a));
+            g.run.abilities[0].active = 5.0;
+        }
+        g
+    }
+
+    // === combat === ENEMIES-B wiring
+    fn put_special(g: &mut DreamscapeGame, kind: EnemyKind, at: Vec3, ai: SpecialAI) -> Entity {
+        let entity = g.world.spawn((
+            Transform { position: at, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        g.specials.push(SpecialEnemy { entity, kind, ai });
+        entity
+    }
+
+    fn standing(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 0.5, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g
+    }
+
+    #[test]
+    fn a_dash_cuts_what_it_passes_once_and_leaves_the_rest() {
+        let mut g = fighter("dash", Some(Ability::Dash));
+        let near = put_pacer(&mut g, Vec3::new(0.5, 1.0, 1.0), true);
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 8.0), true);
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&near].hp, 1.0, "cut for 1");
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&near].hp, 1.0, "only once per dash");
+        assert_eq!(g.foes.len(), 1, "the far one is untouched");
+        g.run.abilities[0].active = 0.0;
+        g.run.abilities[0].cooldown = 0.0;
+        g.combat_on_use(Ability::Dash, Vec3::ZERO); // a new dash
+        g.run.abilities[0].active = 5.0;
+        g.update_combat(0.016);
+        assert!(g.enemies.len() == 1, "the second cut finishes it");
+    }
+
+    #[test]
+    fn blink_sets_up_a_sneak_attack_even_on_an_aware_foe() {
+        let mut g = fighter("blink", None);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.combat_on_use(Ability::Blink, Vec3::ZERO);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "x2 on a 2 hp pacer");
+        assert!(g.unraveling.iter().any(|u| u.0 == e));
+        // The window ends.
+        let mut h = fighter("blink2", None);
+        put_pacer(&mut h, Vec3::new(0.0, 1.0, 2.0), true);
+        h.combat_on_use(Ability::Blink, Vec3::ZERO);
+        h.dream_age += combat::BLINK_BACKSTAB_SECS + 0.1;
+        h.resolve_strike();
+        assert_eq!(h.enemies.len(), 1);
+    }
+
+    #[test]
+    fn stillness_makes_a_foe_take_double_and_stay_put() {
+        let mut g = fighter("still", Some(Ability::Stillness));
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "frozen: x2 undoes it in one blow");
+        let mut h = fighter("still2", Some(Ability::Stillness));
+        let big = h.world.spawn((Transform { position: Vec3::new(0.0, 1.0, 2.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        let mut ai = EnemyAI::new(Vec3::ZERO, Vec3::X, 2.0, 0.0, 9.0);
+        ai.chasing = true;
+        h.enemies.push(Pacer { entity: big, ai, elite: Some(Elite::Big), a: Vec3::ZERO, b: Vec3::X, split: false });
+        h.resolve_strike();
+        let z = h.world.get::<&Transform>(big).unwrap().position.z;
+        assert_eq!(z, 2.0, "frozen things are not shoved");
+        assert_eq!(h.foes[&big].hp, 2.0, "4 hp, x2");
+        let _ = e;
+    }
+
+    #[test]
+    fn flare_staggers_what_it_lights_and_hurts_shades() {
+        let mut g = fighter("flare", None);
+        let plain = put_pacer(&mut g, Vec3::new(3.0, 1.0, 2.0), false);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 2.0), false);
+        let shade = put_pacer(&mut g, Vec3::new(-3.0, 1.0, 2.0), false);
+        g.enemies.last_mut().unwrap().elite = Some(Elite::Shade);
+        g.combat_on_use(Ability::Flare, Vec3::ZERO);
+        assert!(g.stunned.contains_key(&plain), "lit and reeling");
+        assert!(!g.stunned.contains_key(&far), "out of the light");
+        assert_eq!(g.foes[&shade].hp, 1.0, "the shade cannot hide in it");
+        assert!(!g.foes.contains_key(&plain), "plain things are staggered, not hurt");
+    }
+
+    #[test]
+    fn rewind_gives_nerve_back_through_the_ability() {
+        let mut g = fighter("rewind", None);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert_eq!(g.nerve.cur(), 1);
+        g.combat_on_use(Ability::Rewind, Vec3::ZERO);
+        assert_eq!(g.nerve.cur(), 3);
+    }
+
+    #[test]
+    fn a_decoys_end_bursts_and_a_broken_ward_reflects_and_anchor_leaves_a_wave() {
+        let mut g = fighter("burst", None);
+        let near = put_pacer(&mut g, Vec3::new(1.0, 1.0, 1.0), true);
+        let far = put_pacer(&mut g, Vec3::new(9.0, 1.0, 9.0), true);
+        g.decoy_burst(Vec3::ZERO);
+        assert_eq!(g.foes[&near].hp, 1.0);
+        assert!(!g.foes.contains_key(&far));
+        let mut w = fighter("ward", None);
+        let hit = put_pacer(&mut w, Vec3::new(1.5, 1.0, 0.0), true);
+        w.ward_reflect();
+        assert_eq!(w.foes[&hit].hp, 1.0, "the blow goes back");
+        let mut a = fighter("anchor", None);
+        let e = put_pacer(&mut a, Vec3::new(1.0, 1.0, 0.0), true);
+        a.anchor_snapped = true;
+        a.combat_on_use(Ability::Anchor, Vec3::ZERO);
+        assert!(a.stunned.contains_key(&e), "the wave staggers");
+        assert!(!a.foes.contains_key(&e), "but does not hurt");
+    }
+
+    #[test]
+    fn a_leaps_landing_shocks_once() {
+        let mut g = fighter("leap", None);
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 1.0), true);
+        g.combat_on_use(Ability::Leap, Vec3::ZERO);
+        assert!(g.leap_airborne);
+        g.player_grounded = false;
+        g.update_combat(0.016);
+        assert!(g.foes.is_empty(), "still in the air");
+        g.player_grounded = true;
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&e].hp, 1.0);
+        g.update_combat(0.016);
+        assert_eq!(g.foes[&e].hp, 1.0, "once per leap");
+    }
+
+    #[test]
+    fn shard_call_pulls_calm_motes_to_you() {
+        let mut g = fighter("pull", Some(Ability::ShardCall));
+        let m = g.world.spawn((Transform { position: Vec3::new(8.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        g.motes = vec![(m, 0.0)];
+        g.update_combat(0.5);
+        let x = g.world.get::<&Transform>(m).unwrap().position.x;
+        assert!(x < 7.0, "drawn in, x = {x}");
+    }
+
+    #[test]
+    fn second_heartbeat_raises_the_ceiling_and_heals() {
+        let mut g = fighter("heartbeat", None);
+        g.run.take(Upgrade::SecondHeartbeat);
+        g.update_combat(0.0);
+        assert_eq!((g.nerve.cur(), g.nerve.max()), (4, 4));
+        g.run.take(Upgrade::SecondHeartbeat);
+        g.update_combat(0.0);
+        assert_eq!(g.nerve.max(), 5);
+        g.update_combat(0.0);
+        assert_eq!(g.nerve.max(), 5, "never past five");
+    }
+
+    #[test]
+    fn sharp_edge_cuts_deeper_into_a_reeling_foe() {
+        let mut g = fighter("edge", None);
+        g.run.take(Upgrade::SharpEdge);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.stunned.insert(e, 1.0);
+        g.resolve_strike();
+        assert!(g.enemies.is_empty(), "x2 for reeling, +1 for the edge: 3 on a 2 hp pacer");
+        let mut h = fighter("edge2", None);
+        let big = put_pacer(&mut h, Vec3::new(0.0, 1.0, 2.0), true);
+        h.run.take(Upgrade::SharpEdge);
+        h.foes.insert(big, combat::Foe { hp: 4.0, max: 4.0 });
+        h.resolve_strike();
+        assert_eq!(h.foes[&big].hp, 3.0, "not reeling: the edge adds nothing");
+    }
+
+    #[test]
+    fn long_reach_and_wide_eyes_stretch_and_widen_the_strike() {
+        let far = Vec3::new(0.0, 1.0, 2.9);
+        let mut g = fighter("reach", None);
+        put_pacer(&mut g, far, true);
+        g.resolve_strike();
+        assert!(g.foes.is_empty(), "2.9 is out of a 2.4 reach");
+        g.run.take(Upgrade::LongReach);
+        g.resolve_strike();
+        assert_eq!(g.foes.len(), 1, "3.0 reaches it");
+        // 60 degrees off the facing: outside the 120 degree fan's edge.
+        let side = Vec3::new(1.9, 1.0, 1.1); // about 60 deg off, distance 2.2
+        let mut w = fighter("wide", None);
+        put_pacer(&mut w, Vec3::new(2.1, 1.0, 0.9), true);
+        w.resolve_strike();
+        assert!(w.foes.is_empty(), "65 degrees is outside");
+        w.run.take(Upgrade::WideEyes);
+        w.resolve_strike();
+        assert_eq!(w.foes.len(), 1, "wide eyes see further round");
+        let _ = side;
+    }
+
+    #[test]
+    fn every_fourth_strike_sends_an_echo_further() {
+        let mut g = fighter("echo", None);
+        g.run.take(Upgrade::EchoStrike);
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 3.6), true);
+        for _ in 0..3 {
+            g.resolve_strike();
+        }
+        assert!(g.foes.is_empty(), "3.6 is past a plain reach");
+        g.resolve_strike();
+        assert_eq!(g.foes.len(), 1, "the fourth wave reaches it");
+    }
+
+    #[test]
+    fn heavy_air_shoves_further() {
+        let mut a = fighter("heavy0", None);
+        let e = put_pacer(&mut a, Vec3::new(0.0, 1.0, 2.0), true);
+        a.resolve_strike();
+        let plain = a.world.get::<&Transform>(e).unwrap().position.z - 2.0;
+        let mut b = fighter("heavy1", None);
+        b.run.take(Upgrade::HeavyAir);
+        let e = put_pacer(&mut b, Vec3::new(0.0, 1.0, 2.0), true);
+        b.resolve_strike();
+        let heavy = b.world.get::<&Transform>(e).unwrap().position.z - 2.0;
+        assert!(heavy > plain * 1.3, "{plain} -> {heavy}");
+    }
+
+    #[test]
+    fn dream_anchor_is_a_last_stand_once_a_dream() {
+        let mut g = fighter("stand", None);
+        g.run.take(Upgrade::DreamAnchor);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), None, "stood back up");
+        assert_eq!(g.nerve.cur(), 1);
+        g.nerve.tick(3.0);
+        assert_eq!(g.take_nerve_hit("patrol"), Some("patrol"), "only once");
+        g.last_stand_used = false; // a new dream
+        g.nerve.tick(3.0);
+        g.nerve.heal(0);
+        let cur = g.nerve.cur();
+        assert!(cur >= 1);
+    }
+
+    #[test]
+    fn thorns_bite_what_hurts_you_and_counter_and_riposte_answer_a_slipped_blow() {
+        let mut g = fighter("thorns", None);
+        g.run.take(Upgrade::Thorns);
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        assert_eq!(g.foes[&e].hp, 1.0, "bitten");
+        let mut c = fighter("counter", None);
+        let e = put_pacer(&mut c, Vec3::new(1.0, 1.0, 0.0), true);
+        c.counter_attack();
+        assert!(c.stunned.contains_key(&e) && !c.foes.contains_key(&e), "reels, unhurt");
+        assert!(c.counter_cd > 0.0);
+        let mut r = fighter("riposte", None);
+        r.run.take(Upgrade::Learn(Ability::Dash));
+        r.run.take(Upgrade::Counter);
+        assert!(r.run.has(upgrades::Synergy::Riposte));
+        let e = put_pacer(&mut r, Vec3::new(1.0, 1.0, 0.0), true);
+        r.counter_attack();
+        assert_eq!(r.foes[&e].hp, 1.0, "riposte cuts as well");
+    }
+
+    #[test]
+    fn calm_mind_regenerates_only_in_calm_and_executioner_cuts_deeper() {
+        let mut g = fighter("calm", None);
+        g.run.take(Upgrade::CalmMind);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        let e = put_pacer(&mut g, Vec3::new(9.0, 1.0, 9.0), true);
+        g.update_combat(26.0);
+        assert_eq!(g.nerve.cur(), 2, "a chaser is near: no calm");
+        g.enemies.clear();
+        g.world.despawn(e).ok();
+        g.update_combat(26.0);
+        assert_eq!(g.nerve.cur(), 3, "calm earned one");
+        let mut x = fighter("exec", None);
+        x.run.take(Upgrade::Learn(Ability::Hush));
+        x.run.take(Upgrade::SharpEdge);
+        assert!(x.run.has(upgrades::Synergy::Executioner));
+        let big = put_pacer(&mut x, Vec3::new(0.0, 1.0, 2.0), false);
+        x.foes.insert(big, combat::Foe { hp: 6.0, max: 6.0 });
+        x.resolve_strike();
+        assert_eq!(x.foes[&big].hp, 3.0, "x2 unaware, +1 executioner");
+    }
+
+    #[test]
+    fn calm_spore_heals_two_and_staggers_what_is_near_and_a_strike_in_air_refunds_a_jump() {
+        let mut g = fighter("spore", None);
+        g.run.take(Upgrade::CalmSpore);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        let mote = g.world.spawn((Transform { position: Vec3::new(0.4, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        let e = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), true);
+        g.motes = vec![(mote, 0.0)];
+        g.update_combat(0.016);
+        assert_eq!(g.nerve.cur(), 3, "1 + 2");
+        assert!(g.stunned.contains_key(&e), "the spores stagger what is near");
+        let mut j = fighter("jump", None);
+        j.run.take(Upgrade::DoubleJump);
+        j.player_grounded = false;
+        j.air_jumps_used = 1;
+        j.strike_request = true;
+        j.update_combat(0.0);
+        assert_eq!(j.air_jumps_used, 0, "refunded");
+        j.air_jumps_used = 1;
+        j.strike_request = true;
+        j.update_combat(1.0);
+        j.strike_request = true;
+        j.update_combat(0.0);
+        assert_eq!(j.air_jumps_used, 1, "once per airtime");
+    }
+
+    #[test]
+    fn the_hunter_glances_off_a_blow_until_it_rests_and_wisps_fall_in_one() {
+        let mut g = fighter("hunter", None);
+        let e = g.world.spawn((
+            Transform { position: Vec3::new(0.0, 1.0, 2.5), rotation: Quat::IDENTITY, scale: Vec3::splat(2.0) },
+            Spin(1.0),
+        ));
+        let mut b = boss::Boss::new(10, 6.0);
+        b.hunter.phase = hunter::Phase::Stalk;
+        b.wisps.push(boss::Wisp { pos: Vec3::new(0.0, 0.0, 1.5), life: 5.0 });
+        g.hunter = Some((e, b, Vec3::ZERO));
+        let hp0 = g.hunter.as_ref().unwrap().1.hp;
+        g.resolve_strike();
+        assert_eq!(g.hunter.as_ref().unwrap().1.hp, hp0, "hunting: glances off");
+        assert!(g.hunter.as_ref().unwrap().1.wisps.is_empty(), "the wisp fell in one blow");
+        g.hunter.as_mut().unwrap().1.hunter.rest();
+        g.resolve_strike();
+        let b = &g.hunter.as_ref().unwrap().1;
+        assert_eq!(b.hp, hp0 - 1.0, "resting: it hurts");
+        assert!(!b.defeated);
+        // Pushed back a little by the blow.
+        let z = g.world.get::<&Transform>(e).unwrap().position.z;
+        assert!(z > 2.5);
+        // A last blow undoes it and pays out.
+        g.hunter.as_mut().unwrap().1.hp = 1.0;
+        g.player_position = Vec3::new(0.0, 1.0, z - 2.0);
+        let dust = g.bonus_dust;
+        g.resolve_strike();
+        assert!(g.hunter.as_ref().unwrap().1.defeated);
+        assert_eq!(g.bonus_dust, dust + boss::UNDONE_DUST_PER_TIER * 2);
+        assert_eq!(g.pending_motes.len(), boss::UNDONE_MOTES);
+        assert!(g.threat_touching().is_none(), "an undone nightmare touches nothing");
+    }
+
+    #[test]
+    fn the_nightmares_strength_bar_draws_and_flashes_when_it_can_be_hurt() {
+        let mut g = game("bossbar");
+        g.mode = hud::Mode::Playing;
+        let n = |hp: Option<(f32, bool)>| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.boss = Some(("THE HUNTER".into(), 1, 3, None));
+                v.boss_hp = hp;
+            })
+            .len()
+        };
+        assert!(n(Some((0.5, false))) > n(None), "the bar draws");
+        n(Some((0.0, true)));
+        n(Some((1.0, true)));
+    }
+
+    #[test]
+    fn hit_point_pips_show_for_struck_enemies_and_for_any_nearby_with_wide_eyes() {
+        let mut g = fighter("pips", None);
+        let struck = put_pacer(&mut g, Vec3::new(0.0, 1.0, 3.0), true);
+        put_pacer(&mut g, Vec3::new(2.0, 1.0, 3.0), true);
+        put_pacer(&mut g, Vec3::new(40.0, 1.0, 3.0), true);
+        g.foes.insert(struck, combat::Foe { hp: 1.0, max: 2.0 });
+        let pips = g.foe_pips(Mat4::IDENTITY);
+        assert_eq!(pips.len(), 1, "only the struck one");
+        assert_eq!((pips[0].hp, pips[0].max), (1.0, 2.0));
+        g.run.take(Upgrade::WideEyes);
+        assert_eq!(g.foe_pips(Mat4::IDENTITY).len(), 2, "wide eyes: the near unstruck one too, not the far one");
+        // Frames with pips draw more than frames without, at several sizes.
+        g.mode = hud::Mode::Playing;
+        for (w, h) in [(960.0, 540.0), (1280.0, 720.0), (1920.0, 1080.0)] {
+            let bare = frame_with(&g, w, h, &|_| {}).len();
+            let with = frame_with(&g, w, h, &|v| {
+                v.foe_pips = vec![hud::FoePips { at: [0.5, 0.4], hp: 1.0, max: 3.0 }];
+            })
+            .len();
+            assert!(with > bare, "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_masks_shield_turns_a_front_strike_aside_but_not_one_from_behind() {
+        // The dreamer faces +Z with a mask 1.5 ahead.
+        let mut g = standing("mask_front");
+        let at = Vec3::new(0.0, 0.5, 1.5);
+        let facing_me = mask::Mask::new(at, at - Vec3::Z * 3.0); // heads for -Z: faces the dreamer
+        let m = put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(facing_me));
+        g.resolve_strike();
+        assert!(g.foes.is_empty(), "glanced: no damage");
+        assert!(!g.staggered.contains_key(&m), "and no stagger");
+        assert!(g.burst_pending.is_some(), "a spark");
+        // The same mask turned away takes the hit.
+        let mut h = standing("mask_back");
+        let turned = mask::Mask::new(at, at + Vec3::Z * 3.0);
+        let m = put_special(&mut h, EnemyKind::Mask, at, SpecialAI::Mask(turned));
+        h.resolve_strike();
+        assert_eq!(h.foes[&m].hp, 2.0, "3 hp, 1 damage");
+        assert!(h.staggered.contains_key(&m));
+        // A gust spins the first one, shield down, and then it can be hit.
+        g.rattle_b(20.0, 5.0);
+        g.resolve_strike();
+        assert_eq!(g.foes[&m_of(&g)].hp, 2.0);
+    }
+
+    fn m_of(g: &DreamscapeGame) -> Entity {
+        g.specials.iter().find(|s| matches!(s.ai, SpecialAI::Mask(_))).unwrap().entity
+    }
+
+    #[test]
+    fn a_slam_cracks_the_shield_so_a_frontal_strike_lands() {
+        let mut g = standing("mask_slam");
+        let at = Vec3::new(0.0, 0.5, 1.5);
+        let m = put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(mask::Mask::new(at, at - Vec3::Z * 3.0)));
+        g.rattle_b(20.0, 0.0);
+        g.resolve_strike();
+        assert_eq!(g.foes[&m].hp, 2.0);
+    }
+
+    #[test]
+    fn a_mask_slam_costs_one_nerve_by_name() {
+        let mut g = standing("mask_hit");
+        let at = Vec3::new(0.0, 0.5, 2.0);
+        let mut mk = mask::Mask::new(at, at - Vec3::Z * 3.0);
+        mk.state = mask::State::Slamming(mask::SLAM_ACTIVE);
+        put_special(&mut g, EnemyKind::Mask, at, SpecialAI::Mask(mk));
+        assert_eq!(g.threat_touching(), Some("mask"));
+        g.player_position = Vec3::new(0.0, 0.5, -5.0);
+        assert_eq!(g.threat_touching(), None, "behind it, out of reach");
+    }
+
+    #[test]
+    fn a_leech_latches_drains_through_the_nerve_path_and_three_jumps_shake_it() {
+        let mut g = standing("leech");
+        let at = Vec3::new(0.0, 0.35, 0.5);
+        let e = put_special(&mut g, EnemyKind::Leech, at, SpecialAI::Leech(leech::Leech::new(at)));
+        g.update_enemies_b(0.016, false);
+        let latched = |g: &DreamscapeGame| g.specials.iter().any(|s| matches!(&s.ai, SpecialAI::Leech(l) if l.latched()));
+        assert!(latched(&g), "touching latches");
+        assert_eq!(g.threat_touching(), None, "the latch itself costs nothing");
+        // Two seconds on: one drain, by name, through take_nerve_hit.
+        g.update_enemies_b(2.0, false);
+        assert_eq!(g.threat_touching(), Some("leech"));
+        assert_eq!(g.take_nerve_hit("leech"), None);
+        assert_eq!(g.nerve.cur(), 2);
+        g.update_enemies_b(0.016, false);
+        assert_eq!(g.threat_touching(), None, "one drain per period");
+        // Invulnerable: the next drain is ignored.
+        g.update_enemies_b(2.0, false);
+        assert_eq!(g.take_nerve_hit("leech"), None);
+        assert_eq!(g.nerve.cur(), 2, "iframes");
+        // Three jumps in two seconds.
+        for _ in 0..3 {
+            g.jump_event = true;
+            g.update_enemies_b(0.3, false);
+        }
+        assert!(!latched(&g), "shaken off");
+        assert!(g.staggered.contains_key(&e), "and reeling");
+        // After 1.5s it resumes crawling at you.
+        g.update_combat(1.6);
+        g.update_enemies_b(0.5, false);
+        assert!(!g.staggered.contains_key(&e));
+    }
+
+    #[test]
+    fn a_strike_unlatches_a_leech_and_a_second_one_unravels_it() {
+        let mut g = standing("leech_strike");
+        let at = Vec3::new(0.0, 0.35, 0.5);
+        let e = put_special(&mut g, EnemyKind::Leech, at, SpecialAI::Leech(leech::Leech::new(at)));
+        g.update_enemies_b(0.016, false);
+        g.resolve_strike();
+        assert_eq!(g.foes[&e].hp, 1.0);
+        assert!(g.specials.iter().all(|s| !matches!(&s.ai, SpecialAI::Leech(l) if l.latched())), "off you");
+        assert!(g.staggered.contains_key(&e));
+        // Staggered x2: one more finishes it, and nothing rides you.
+        g.player_position = Vec3::new(0.0, 0.5, 0.0);
+        if let Some(SpecialAI::Leech(l)) = g.specials.iter_mut().map(|s| &mut s.ai).next() {
+            l.release(Vec3::new(0.0, 0.5, 0.0), Vec3::Z);
+        }
+        g.strike.reset();
+        g.resolve_strike();
+        assert!(g.specials.is_empty(), "unravelled");
+    }
+
+    #[test]
+    fn moths_die_to_one_strike_each_and_the_swarm_forgets_them() {
+        let mut g = standing("moths");
+        let swarm = moths::Swarm::new(Vec3::ZERO);
+        let first = swarm.moths[0];
+        let ids: Vec<Entity> = swarm
+            .moths
+            .iter()
+            .map(|m| put_special(&mut g, EnemyKind::Moths, m.pos, SpecialAI::Moth(m.id)))
+            .collect();
+        g.moth_swarm = Some(swarm);
+        // Put moth 0 right in front of the dreamer.
+        g.world.get::<&mut Transform>(ids[0]).unwrap().position = Vec3::new(0.0, 0.5, 1.5);
+        let _ = first;
+        g.resolve_strike();
+        assert_eq!(g.specials.len(), 3);
+        assert_eq!(g.moth_swarm.as_ref().unwrap().alive(), 3);
+        assert!(g.unraveling.iter().any(|u| u.0 == ids[0]));
+    }
+
+    #[test]
+    fn a_gust_scatters_the_swarm() {
+        let mut g = standing("moths_gust");
+        g.moth_swarm = Some(moths::Swarm::new(Vec3::ZERO));
+        g.rattle_b(upgrades::GUST_RADIUS.max(30.0), upgrades::GUST_PUSH);
+        assert!(g.moth_swarm.as_ref().unwrap().moths.iter().all(|m| matches!(m.mode, moths::Mode::Scattered(..))));
+    }
+    // === end combat ===
+
+    #[test]
+    fn a_sanctuary_has_no_hazards_no_clock_and_a_nerve_refill_waits_in_it() {
+        let mut g = game("sanct");
+        // A hazard dream at a depth that is not a sanctuary...
+        g.director.theme = DreamTheme::NightmareFactory;
+        g.director.depth = 8;
+        let normal = g.hazard_rule_state().is_some();
+        assert!(normal, "the factory has a rule at depth 8");
+        assert!(!g.sanctuary());
+        // ...and the dream right after a nightmare.
+        g.director.depth = 11;
+        assert!(g.sanctuary());
+        assert!(g.hazard_rule_state().is_none(), "no hazard in a sanctuary");
+        assert!(!g.pressure_applies(), "no clock either");
+        // The prologue is never one, nor a nightmare.
+        g.director.nightmare = true;
+        assert!(!g.sanctuary());
+    }
+
+    #[test]
+    fn calm_motes_heal_when_touched_and_fade_when_ignored() {
+        let mut g = game("motes");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        let near = g.world.spawn((
+            Transform { position: Vec3::new(0.5, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        let far = g.world.spawn((
+            Transform { position: Vec3::new(9.0, 1.0, 9.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert_eq!(g.nerve.cur(), 2);
+        g.motes = vec![(near, 0.0), (far, 0.0)];
+        g.update_combat(0.016);
+        assert_eq!(g.nerve.cur(), 3, "the near mote steadied you");
+        assert_eq!(g.motes.len(), 1);
+        g.update_combat(combat::MOTE_LIFE + 1.0);
+        assert!(g.motes.is_empty(), "the far one faded");
+    }
+
+    #[test]
+    fn the_hearts_draw_and_a_broken_one_flashes() {
+        let mut g = game("hearts");
+        g.mode = hud::Mode::Playing;
+        let n = |cur, flinch| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.nerve = (cur, 3);
+                v.nerve_flinch = flinch;
+            })
+            .len()
+        };
+        let hidden = frame_with(&g, 1280.0, 720.0, &|v| v.nerve = (0, 0)).len();
+        assert!(n(3, 0.0) > hidden, "hearts draw");
+        assert!(n(1, 0.0) > 0);
+        // co-op hides them
+        assert_eq!(hidden, frame_with(&g, 1280.0, 720.0, &|v| v.nerve = (0, 0)).len());
+        // nerve cap: every heart row still fits the screen
+        n(5, 0.5);
+    }
+
+    #[test]
+    fn two_cards_that_make_a_synergy_are_linked_and_one_that_does_not_is_not() {
+        let mut g = game("links");
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        g.run.take(Upgrade::Learn(Ability::Phase));
+        g.hand_cards = vec![
+            (Ability::Dash, themed(dream::DreamTheme::TheTunnel, 1)),
+            (Ability::Phase, themed(dream::DreamTheme::LiminalOffice, 2)),
+        ];
+        let links = g.hand_links();
+        assert_eq!(
+            links,
+            vec![hand::HandLink { a: 0, b: 1, name: "GHOST STEP" }]
+        );
+        // Without the second half there is nothing to link.
+        g.run = RunUpgrades::default();
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        assert!(g.hand_links().is_empty());
+    }
+
+    #[test]
+    fn a_passive_pulses_only_if_the_run_holds_it_and_curses_crack_the_hand() {
+        let mut g = game("pulse");
+        g.dream_age = 10.0;
+        g.passive_fires(Upgrade::DoubleJump);
+        assert!(g.passive_fired.is_empty(), "not held, so it cannot fire");
+        g.run.take(Upgrade::DoubleJump);
+        g.run.take(Upgrade::Learn(Ability::Dash));
+        g.hand_cards = vec![(Ability::Dash, themed(dream::DreamTheme::SkyStairs, 3))];
+        // SkyStairs gives DoubleJump as its passive.
+        assert_eq!(hand::pulse(g.hand_view()[0].passive_since), 0.0);
+        g.passive_fires(Upgrade::DoubleJump);
+        g.dream_age = 10.2;
+        assert!(hand::pulse(g.hand_view()[0].passive_since) > 0.0);
+        assert!(!g.hand_view()[0].cracked);
+        g.run.take(Upgrade::Cursed(upgrades::Curse::Greed));
+        assert!(g.hand_view()[0].cracked);
+    }
+
+    #[test]
+    fn the_hand_draws_at_rest_and_popping_adds_a_ring_without_panicking() {
+        let mut g = game("hand");
+        g.mode = hud::Mode::Playing;
+        let bare = shapes(&g);
+        let rest = |n: usize, since: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.hand = ["DASH", "BLINK", "PHASE", "FLARE", "FLOAT"][..n]
+                    .iter()
+                    .map(|a| card(a, since))
+                    .collect();
+            })
+            .len()
+        };
+        assert!(rest(1, hand::NEVER) > bare, "a held card draws");
+        assert!(rest(5, hand::NEVER) > rest(1, hand::NEVER));
+        assert!(rest(2, 0.1) > rest(2, hand::NEVER), "a used card rings and flashes");
+        let shapes_with = |links: Vec<hand::HandLink>, cracked: bool, since: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.hand = vec![card("DASH", hand::NEVER), card("PHASE", hand::NEVER)];
+                for c in &mut v.hand {
+                    c.cracked = cracked;
+                    c.passive_since = since;
+                }
+                v.hand_links = links.clone();
+            })
+            .len()
+        };
+        let plain = shapes_with(vec![], false, hand::NEVER);
+        let link = hand::HandLink { a: 0, b: 1, name: "GHOST STEP" };
+        assert!(shapes_with(vec![link], false, hand::NEVER) > plain, "a link draws an arc");
+        assert!(shapes_with(vec![], true, hand::NEVER) > plain, "a curse draws cracks");
+        assert!(shapes_with(vec![], false, 0.2) > plain, "a passive pulse draws");
+        for (w, h) in [(960.0, 540.0), (1280.0, 800.0), (1920.0, 1080.0)] {
+            frame_with(&g, w, h, &|v| {
+                let mut with_art = card("DASH", 0.05);
+                with_art.card = Some(cards::card_from(&cards::tests::record(
+                    dream::DreamTheme::Garden,
+                    9,
+                    3,
+                    0.4,
+                    false,
+                )));
+                v.hand = vec![with_art, card("BLINK", hand::NEVER)];
+            });
+        }
     }
 
     #[test]

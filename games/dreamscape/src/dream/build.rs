@@ -59,6 +59,18 @@ pub struct Atmosphere {
     pub fog_end: f32,
 }
 
+impl Dream {
+    /// A sanctuary: nothing in it can hurt you. Every enemy, gate and beat
+    /// tile is gone; the floor, the route, the shard and the portal stay.
+    pub fn calm(&mut self) {
+        self.patrols.clear();
+        self.lairs.clear();
+        self.specials.clear();
+        self.gates.clear();
+        self.beat_tiles.clear();
+    }
+}
+
 pub struct Dream {
     pub theme: DreamTheme,
     pub seed: u64,
@@ -70,6 +82,11 @@ pub struct Dream {
     pub route: Vec<Waypoint>,
     /// Enemy patrol endpoints (y = 0.5).
     pub patrols: Vec<(Vec3, Vec3)>,
+    // === enemies-a ===
+    /// Safe places for Tooth, Weeper and Lullaby: floor off the route, clear
+    /// of the spawn, portal and shard, and not under crumbling floor.
+    pub lairs: Vec<Vec3>,
+    // === end enemies-a ===
     pub atmosphere: Atmosphere,
     /// Where the previous dream's motif prop was placed, if any.
     pub motif_at: Option<Vec3>,
@@ -473,6 +490,15 @@ pub fn generate_with(
                 .collect()
         },
         patrols: patrols.clone(),
+        // === enemies-a ===
+        lairs: lairs(
+            grid,
+            &on_path,
+            &[layout.spawn, layout.portal, shard_cell.unwrap_or(layout.spawn)],
+            &single,
+            &patrols,
+        ),
+        // === end enemies-a ===
         atmosphere: atmosphere(&spec, &mut rng),
         motif_at,
         strangeness: spec.strangeness,
@@ -746,6 +772,7 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
         route: waypoints(&path),
         lucid_route: waypoints(&lucid),
         patrols: Vec::new(),
+        lairs: Vec::new(), // enemies-a
         atmosphere: atmos,
         motif_at: None,
         strangeness: spec.strangeness,
@@ -1103,6 +1130,29 @@ fn crumble_cells(spec: &ThemeSpec, path: &[(P, bool)], depth: u32, rng: &mut Std
     out
 }
 
+/// Floor cells where the combat enemies may stand: never on the route (or the
+/// shard detour), never within 3 cells of the spawn, portal or shard, never on
+/// floor that crumbles away, and not on a pacer's patrol. Draws no randomness.
+fn lairs(
+    grid: &Grid,
+    needed: &HashSet<P>,
+    keep_clear: &[P],
+    single: &HashSet<P>,
+    patrols: &[(Vec3, Vec3)],
+) -> Vec<Vec3> {
+    grid.cells_of(Cell::Floor)
+        .into_iter()
+        .filter(|c| !needed.contains(c) && !single.contains(c))
+        .filter(|&c| {
+            let at = grid.world(c);
+            let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
+            keep_clear.iter().all(|&k| flat(at, grid.world(k)) >= crate::newfoes::KEEP_CLEAR)
+                && patrols.iter().all(|&(a, b)| flat(at, a) > 1.0 && flat(at, b) > 1.0)
+        })
+        .map(|c| grid.world(c))
+        .collect()
+}
+
 /// Slow fog pockets, kept clear of the spawn, the portal and the shard.
 fn fog_pockets(
     grid: &Grid,
@@ -1251,6 +1301,8 @@ fn specials(
                     }
                 })
             }
+            // ENEMIES-B come from `foespawn`, never from the theme lists.
+            EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => None,
             // Jesters pace between two floor cells anywhere; they're harmless.
             EnemyKind::Jester => far_cell(rng, &used).and_then(|c| {
                 let next = grid
@@ -1370,6 +1422,27 @@ mod tests {
         palette
             .iter()
             .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
+    }
+
+    #[test]
+    fn a_calmed_dream_has_nothing_that_can_hurt_and_keeps_its_way_through() {
+        for theme in crate::dream::ALL_THEMES {
+            for seed in 0..6u64 {
+                let mut d = generate(theme, seed, 11, None, true);
+                let (route, shard, portal, blocks) =
+                    (d.route.len(), d.shard, d.portal, d.blocks.len());
+                d.calm();
+                assert!(
+                    d.patrols.is_empty()
+                        && d.lairs.is_empty()
+                        && d.specials.is_empty()
+                        && d.gates.is_empty()
+                        && d.beat_tiles.is_empty(),
+                    "{theme:?} {seed}"
+                );
+                assert_eq!((d.route.len(), d.shard, d.portal, d.blocks.len()), (route, shard, portal, blocks));
+            }
+        }
     }
 
     #[test]
@@ -1599,6 +1672,33 @@ mod tests {
             }
         }
     }
+
+    // === enemies-a ===
+    #[test]
+    fn lairs_are_off_the_route_and_three_cells_from_spawn_portal_and_shard() {
+        let mut any = false;
+        for theme in ALL_THEMES {
+            for seed in 0..40 {
+                let d = generate(theme, seed, 8, None, true);
+                for &l in &d.lairs {
+                    any = true;
+                    let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
+                    for w in d.route.iter().chain(d.lucid_route.iter()) {
+                        assert!(flat(l, w.pos) > 0.5, "{theme:?}/{seed}: a lair on the route at {l}");
+                    }
+                    for k in [d.spawn, d.portal].into_iter().chain(d.shard) {
+                        assert!(flat(l, k) >= 3.0 * CELL - 1e-3, "{theme:?}/{seed}: lair {l} near {k}");
+                    }
+                    for c in &d.crumbles {
+                        assert!(flat(l, *c) > 0.5, "lair on a crumbling tile");
+                    }
+                }
+                assert_eq!(d.lairs, generate(theme, seed, 8, None, true).lairs);
+            }
+        }
+        assert!(any, "some dream has a lair");
+    }
+    // === end enemies-a ===
 
     #[test]
     fn a_patrol_never_covers_more_than_one_route_cell() {

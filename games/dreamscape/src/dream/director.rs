@@ -13,6 +13,9 @@ pub const LONG_LUCIDITY: u32 = 6;
 pub const DEEPER_SHARDS: u32 = 3;
 /// Every this-many dreams, the next one is a nightmare arena.
 pub const NIGHTMARE_EVERY: u32 = 5;
+/// Sanctuaries need nightmares at least this far apart (else every other
+/// dream would be one).
+pub const SANCTUARY_MIN_EVERY: u32 = 4;
 
 /// Chance a (non-lucid) descent dream hides a lucidity shard.
 pub const SHARD_CHANCE: f64 = 0.6;
@@ -147,6 +150,21 @@ impl DreamDirector {
 
     pub fn is_nightmare_depth(&self, depth: u32) -> bool {
         depth.is_multiple_of(self.nightmare_every.max(2))
+    }
+
+    /// The dream after every nightmare is a sanctuary: a quiet place where
+    /// nothing can hurt you. Worked out from the depth alone, so a co-op
+    /// client and a resumed run agree without sending anything.
+    pub fn is_sanctuary_depth(&self, depth: u32) -> bool {
+        let every = self.nightmare_every;
+        every >= SANCTUARY_MIN_EVERY && depth > 1 && depth % every == 1
+    }
+
+    /// The current dream is a sanctuary (never a nightmare, the Lobby or the waking).
+    pub fn sanctuary(&self) -> bool {
+        !self.nightmare
+            && !matches!(self.theme, DreamTheme::Awakening | DreamTheme::Lobby)
+            && self.is_sanctuary_depth(self.depth)
     }
 
     /// Points the portal at a due card dream, unless the next dream is a
@@ -324,6 +342,37 @@ mod tests {
             seq.push(d.descend().expect("descent never ends on its own"));
         }
         seq
+    }
+
+    #[test]
+    fn the_dream_after_every_nightmare_is_a_sanctuary_and_no_other() {
+        let mut d = DreamDirector::new(7);
+        let mut seen = Vec::new();
+        for _ in 0..22 {
+            if d.descend().is_none() {
+                break;
+            }
+            if d.sanctuary() {
+                seen.push(d.depth);
+                assert!(!d.nightmare, "a nightmare is never a sanctuary");
+            }
+            d.lucidity = 0; // keep climbing: never wake
+        }
+        assert_eq!(seen, vec![6, 11, 16, 21], "{seen:?}");
+        assert!(!DreamDirector::new(1).sanctuary(), "not the lobby");
+    }
+
+    #[test]
+    fn short_nightmare_gaps_and_the_waking_never_make_a_sanctuary() {
+        let mut d = DreamDirector::new(3);
+        d.nightmare_every = 3;
+        assert!((0..40).all(|n| !d.is_sanctuary_depth(n)), "too close together");
+        d.nightmare_every = 5;
+        d.depth = 6;
+        d.theme = DreamTheme::Awakening;
+        assert!(!d.sanctuary(), "the waking is its own calm");
+        d.wake();
+        assert!(!d.sanctuary());
     }
 
     #[test]

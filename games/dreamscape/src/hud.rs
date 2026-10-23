@@ -68,6 +68,14 @@ pub fn install_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Hit points of one enemy, at a screen position (0..1 each way).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoePips {
+    pub at: [f32; 2],
+    pub hp: f32,
+    pub max: f32,
+}
+
 /// Everything the HUD needs for one frame (a snapshot, so drawing never
 /// borrows the game).
 #[derive(Clone, Debug)]
@@ -156,8 +164,18 @@ pub struct HudView {
     pub perks: Vec<&'static str>,
     /// Run upgrades taken so far ("SWIFT FEET x2").
     pub upgrades: Vec<String>,
-    /// Held abilities: (name, key, charge 0..1, active).
-    pub abilities: Vec<(&'static str, &'static str, f32, bool)>,
+    /// The hand, drawn down the right edge.
+    pub hand: Vec<crate::hand::HandCard>,
+    /// Synergies the hand's cards make together.
+    pub hand_links: Vec<crate::hand::HandLink>,
+    /// Nerve: (now, most). (0, 0) hides the hearts (co-op).
+    pub nerve: (u32, u32),
+    /// A nightmare's remaining hp (0..1) and whether it can be hurt now.
+    pub boss_hp: Option<(f32, bool)>,
+    /// Hit-point pips over enemies (filled in at draw time from the camera).
+    pub foe_pips: Vec<FoePips>,
+    /// 1 the instant of a hit, easing to 0: the eye flinches, a heart breaks.
+    pub nerve_flinch: f32,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
     pub twist: String,
     pub twist_blurb: String,
@@ -342,6 +360,10 @@ fn px_cells(
 }
 
 const EYE_PX: f32 = 6.0;
+/// The eye's centre, down from the top of the screen.
+const EYE_TOP: f32 = 78.0;
+/// How far under the eye its pips end (plates and prompts sit below).
+const EYE_BELOW: f32 = 9.0 * EYE_PX + 22.0;
 const ARROW_PX: f32 = 4.0;
 
 /// The HUD's signature: text laid out letter by letter so each letter can
@@ -459,7 +481,7 @@ pub fn draw(
     }
     if let (Mode::Playing, Some(line)) = (v.mode, &v.coop_line) {
         p.text(
-            Pos2::new(screen.center().x, screen.top() + 64.0),
+            Pos2::new(screen.center().x, screen.top() + EYE_TOP + EYE_BELOW + 54.0),
             Align2::CENTER_TOP,
             line,
             FontId::monospace(16.0),
@@ -507,6 +529,10 @@ pub fn draw(
     lucidity_eye(&p, screen, v);
     title_card(&p, screen, v);
     run_status(&p, screen, v);
+    // === combat ===
+    foe_pips(&p, screen, v);
+    // === end combat ===
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);
@@ -604,7 +630,7 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
     let Some((name, taken, total, warning)) = &v.boss else {
         return;
     };
-    let top = screen.center_top() + Vec2::new(0.0, 22.0);
+    let top = screen.center_top() + Vec2::new(0.0, EYE_TOP + EYE_BELOW + 54.0);
     p.text(
         top,
         Align2::CENTER_TOP,
@@ -623,10 +649,21 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
         };
         p.rect_filled(r, 0.0, rgba(rgb, 0.9));
     }
+    // === combat === its strength; bright while it rests and can be hurt
+    if let Some((frac, open)) = v.boss_hp {
+        let w = 200.0;
+        let bar = Rect::from_center_size(Pos2::new(top.x, top.y + 64.0), Vec2::new(w, 6.0));
+        p.rect_filled(bar, 0.0, rgba([30, 10, 30], 0.8));
+        let lit = if open && (v.time * 8.0) as i32 % 2 == 0 { [255, 255, 255] } else if open { [120, 255, 240] } else { [255, 70, 120] };
+        let fill = Rect::from_min_size(bar.min, Vec2::new(w * frac.clamp(0.0, 1.0), 6.0));
+        p.rect_filled(fill, 0.0, rgba(lit, 0.95));
+        p.rect_stroke(bar, 0.0, egui::Stroke::new(1.0_f32, rgba([255, 200, 230], 0.6)));
+    }
+    // === end combat ===
     if let Some(msg) = warning {
         if (v.time * 6.0) as i32 % 2 == 0 {
             p.text(
-                top + Vec2::new(0.0, 64.0),
+                top + Vec2::new(0.0, 80.0),
                 Align2::CENTER_TOP,
                 *msg,
                 FontId::monospace(crate::pixel_ui::fit(msg, 28.0, screen.width() - 40.0, 12.0)),
@@ -652,8 +689,7 @@ fn controls_legend(p: &egui::Painter, screen: Rect, v: &HudView) {
         return;
     }
     let rows = crate::pad::controls(v.pad, v.first_person);
-    // Sit above the ability boxes (bottom -84, 56 tall) when there are any.
-    let floor = if v.abilities.is_empty() { 36.0 } else { 96.0 };
+    let floor = 36.0;
     let mut at = Pos2::new(
         screen.left() + 28.0,
         screen.bottom() - floor - 26.0 * rows.len() as f32,
@@ -705,10 +741,16 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
         y += 22.0;
     }
-    // The lists stop above the ability boxes (bottom left) and fold the rest
+    // === combat === nerve hearts
+    if v.nerve.1 > 0 {
+        hearts(p, at + Vec2::new(2.0, y), v);
+        y += 28.0;
+    }
+    // === end combat ===
+    // The lists stop above the bottom margin and fold the rest
     // into "+N more", so a long run never runs off the screen.
     // (and above the eye's speech plate while it is talking).
-    let floor = if v.eye_line.is_some() { 96.0 + 8.0 * EYE_PX + 44.0 } else { 96.0 };
+    let floor = 40.0;
     let room = ((screen.bottom() - floor - (screen.top() + 20.0 + y)) / 20.0).floor().max(1.0) as usize;
     let rows: Vec<(String, [u8; 3])> = v
         .perks
@@ -768,7 +810,65 @@ fn pressure_bar(p: &egui::Painter, screen: Rect, lid: f32, warn: bool, time: f32
 }
 // === end pressure ===
 
-/// Top right: the dream's twist and HURRIED timer. Bottom left: abilities.
+/// Little pips over an enemy's head: one per hit point, the lost ones hollow.
+fn foe_pips(p: &egui::Painter, screen: Rect, v: &HudView) {
+    for f in &v.foe_pips {
+        let n = f.max.ceil().clamp(1.0, 8.0) as i32;
+        let left = f.hp.ceil() as i32;
+        let (w, gap) = (6.0, 2.0);
+        let total = n as f32 * w + (n - 1) as f32 * gap;
+        let c = screen.min + Vec2::new(f.at[0] * screen.width(), f.at[1] * screen.height());
+        for i in 0..n {
+            let r = Rect::from_min_size(
+                Pos2::new(c.x - total / 2.0 + i as f32 * (w + gap), c.y),
+                Vec2::splat(w),
+            );
+            p.rect_filled(r, 0.0, rgba([10, 4, 20], 0.8));
+            if i < left {
+                p.rect_filled(r.shrink(1.0), 0.0, rgba([255, 90, 140], 0.95));
+            } else {
+                p.rect_stroke(r.shrink(0.5), 0.0, egui::Stroke::new(1.0_f32, rgba([200, 150, 190], 0.6)));
+            }
+        }
+    }
+}
+
+/// Nerve as pixel hearts: full, the one that just broke (flashing white),
+/// and empty outlines. At one nerve the last heart beats.
+fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
+    use crate::pixels::icons;
+    let (now, max) = v.nerve;
+    let px = 2.0;
+    let step = 9.0 * px + 6.0;
+    for i in 0..max {
+        let centre = at + Vec2::new(i as f32 * step + 4.5 * px, 4.5 * px);
+        let full = i < now;
+        let just_broke = !full && i == now && v.nerve_flinch > 0.0;
+        let beat = if full && now == 1 {
+            1.0 + 0.18 * (v.time * 6.0).sin().max(0.0)
+        } else {
+            1.0
+        };
+        let (rgb, alpha) = if full {
+            ([255, 80, 120], 1.0)
+        } else if just_broke {
+            ([255, 255, 255], v.nerve_flinch)
+        } else {
+            ([110, 80, 130], 0.55)
+        };
+        crate::pixel_ui::icon(
+            p,
+            centre,
+            &icons::HEART,
+            px * beat,
+            rgb,
+            crate::pixel_ui::lighter(rgb),
+            alpha,
+        );
+    }
+}
+
+/// Top right: the dream's twist and HURRIED timer. The hand (held ability cards) sits down the right edge.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     let right = screen.right_top() + Vec2::new(-28.0, 22.0);
     let mut y = 0.0;
@@ -819,116 +919,6 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
             FontId::monospace(30.0),
             rgba(rgb, 0.95),
         );
-    }
-    for (k, &(name, key, charge, active)) in v.abilities.iter().enumerate() {
-        ability_box(p, screen, v, k, name, key, charge, active);
-    }
-}
-
-/// One held ability, bottom left: its icon, key, name, and a segmented
-/// recharge bar. Pixel panel, chipped corners, like a card.
-#[allow(clippy::too_many_arguments)]
-fn ability_box(
-    p: &egui::Painter,
-    screen: Rect,
-    v: &HudView,
-    k: usize,
-    name: &str,
-    key: &str,
-    charge: f32,
-    active: bool,
-) {
-    let r = Rect::from_min_size(
-        screen.left_bottom() + Vec2::new(28.0 + k as f32 * 150.0, -84.0),
-        Vec2::new(136.0, 56.0),
-    );
-    let ready = charge >= 1.0;
-    let rgb = if active {
-        hue(v.time * 0.8)
-    } else if ready {
-        [255, 150, 255]
-    } else {
-        [120, 100, 150]
-    };
-    let c = 3.0;
-    crate::pixel_ui::panel(
-        p,
-        r,
-        rgb,
-        rgba([12, 6, 28], 0.78),
-        c,
-        if ready || active { 1.0 } else { 0.7 },
-    );
-    // The ability's icon, tinted like its card; dim while recharging.
-    let ability = crate::upgrades::ALL_ABILITIES
-        .iter()
-        .find(|a| a.name() == name);
-    let centre = r.left_top() + Vec2::new(c * 2.0 + 15.0, 22.0);
-    if let Some(&a) = ability {
-        let tone = if ready || active { rgb } else { [150, 130, 180] };
-        crate::pixel_ui::icon(
-            p,
-            centre,
-            crate::pixels::icons::ability(a),
-            3.0,
-            tone,
-            crate::pixel_ui::lighter(tone),
-            if ready || active { 1.0 } else { 0.6 },
-        );
-    }
-    // Name, and the key on a little cap.
-    let tx = r.left() + c * 2.0 + 33.0;
-    let size = crate::pixel_ui::fit(name, 14.0, r.right() - tx - c * 2.0, 8.0);
-    if active {
-        crate::pixel_ui::split_text(
-            p,
-            Pos2::new(tx, r.top() + 10.0),
-            Align2::LEFT_TOP,
-            name,
-            size,
-            rgba(rgb, 1.0),
-            1.0,
-            1.0,
-        );
-    } else {
-        p.text(
-            Pos2::new(tx, r.top() + 10.0),
-            Align2::LEFT_TOP,
-            name,
-            FontId::monospace(size),
-            rgba(rgb, 1.0),
-        );
-    }
-    let key_text = v.k(&format!("[{key}]"));
-    let key_w = key_text.chars().count() as f32 * 11.0 * 0.6;
-    crate::pixel_ui::keycap(
-        p,
-        Pos2::new(tx + key_w * 0.5 + 4.0, r.top() + 33.0),
-        &key_text,
-        11.0,
-        2.0,
-        rgb,
-        if ready || active { 1.0 } else { 0.7 },
-    );
-    // Recharge: ten cells fill left to right; ready ones pulse.
-    let cells = 10;
-    let lit = (charge.clamp(0.0, 1.0) * cells as f32).floor() as i32;
-    let cw = (r.width() - c * 4.0) / cells as f32;
-    for i in 0..cells {
-        let cell = Rect::from_min_size(
-            Pos2::new(r.left() + c * 2.0 + i as f32 * cw, r.bottom() - c * 2.0 - 5.0),
-            Vec2::new(cw - 1.0, 5.0),
-        );
-        if i < lit || ready {
-            let pulse = if ready { 0.7 + 0.3 * (v.time * 5.0 + i as f32 * 0.5).sin() } else { 0.9 };
-            p.rect_filled(cell, 0.0, rgba(rgb, pulse));
-        } else {
-            p.rect_filled(cell, 0.0, rgba(rgb, 0.15));
-        }
-    }
-    // Just became ready: a sparkle on the icon.
-    if ready && !active && (v.time * 2.0).fract() < 0.5 {
-        crate::pixel_ui::sparkle(p, centre + Vec2::new(14.0, -14.0), 2.0, rgba([255, 255, 255], 0.9));
     }
 }
 
@@ -1030,15 +1020,18 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     use crate::pixels;
 
     // Entrance: the eye falls from above the screen to its place.
-    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (screen.height() - 96.0 + 8.0 * EYE_PX);
-    let c = Pos2::new(screen.center().x, screen.bottom() - 96.0 - fall);
+    // The eye sits top middle; it drops in from above the screen.
+    let fall = entrance_of(v).map_or(0.0, |e| e.height()) * (EYE_TOP + 8.0 * EYE_PX);
+    let c = Pos2::new(screen.center().x, screen.top() + EYE_TOP - fall);
 
     let lucid = v.lucidity >= v.lucid_target;
     let look = eye_look(v);
     let gaze = look.gaze;
 
     // Breath + blink on top of whatever the lid is doing.
-    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time);
+    // A hit narrows the lid for an instant (nerve).
+    let flinch = 1.0 - 0.7 * v.nerve_flinch;
+    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time) * flinch;
 
     let cells = pixels::eye_pixels(open, gaze, lucid);
     let iris = iris_color(v, lucid);
@@ -1047,8 +1040,8 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
 
     if v.ask_eye {
         p.text(
-            Pos2::new(screen.center().x, screen.bottom() - 28.0),
-            Align2::CENTER_BOTTOM,
+            Pos2::new(screen.center().x, c.y + EYE_BELOW + 4.0),
+            Align2::CENTER_TOP,
             v.k("[enter] ask the eye"),
             FontId::monospace(18.0),
             rgba(ink(v), 0.55 + 0.3 * (v.time * 2.0).sin()),
@@ -1071,9 +1064,10 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
             let font = FontId::proportional(crate::pixel_ui::fit(&text, 24.0, screen.width() - 60.0, 10.0));
             let full = p.layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
 
-            let at = c + Vec2::new(0.0, -8.0 * EYE_PX);
+            // Under the shard pips, so the plate never covers the eye.
+            let at = c + Vec2::new(0.0, EYE_BELOW);
             let plate = Rect::from_center_size(
-                at - Vec2::new(0.0, full.size().y * 0.5),
+                at + Vec2::new(0.0, full.size().y * 0.5 + 6.0),
                 full.size() + Vec2::new(28.0, 12.0),
             );
             p.rect_filled(plate, 4.0, rgba([8, 4, 18], 0.72 * a));
@@ -1344,7 +1338,7 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
     } else {
         ink(v)
     };
-    let y = screen.top() + screen.height() * 0.2;
+    let y = screen.top() + screen.height() * 0.36;
     let card_w = screen.width() - 40.0;
     glitch_text(
         p,

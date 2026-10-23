@@ -28,12 +28,13 @@ Serve `dist/` over HTTP. Saves, settings and the booklet persist in the browser 
 | WASD | move |
 | Space | jump (again in mid-air with DOUBLE JUMP) |
 | Shift / E | use ability slot 1 / 2 |
+| F | strike (controller: B). Enemies have hit points and come undone; a touch costs one nerve (the hearts under the depth). Three nerve at the start, five at most, one back per portal; at zero you are caught as before. See `plans/2026-10-23-combat-system-plan.md` |
 | 1 / 2 / 3 or A/D + Enter | pick an upgrade (or WAKE / GO DEEPER at the wake door) |
 | R / X (on a pick) | reroll the cards (once a run) / skip for dust |
 | C / T / X / O (title) | continue a saved run / today's dream / codex / settings |
 | A / D (title, on ascension) | pick an ascension level |
 | P (booklet) | save the cards on this page as PNG images (`games/dreamscape/cards/`) |
-| controller | left stick moves, A jumps, shoulders / X / Y use abilities, Start pauses, d-pad drives menus |
+| controller | left stick moves, A jumps, shoulders / X / Y use abilities, B strikes, Start pauses, d-pad drives menus |
 
 Every movement and ability key can be rebound in **settings**, which also has music and sound volume, grain and vignette strength, reduced motion and fullscreen.
 | R | title screen: toggle run length (short / long) |

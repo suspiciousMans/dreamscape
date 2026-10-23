@@ -372,6 +372,22 @@ pub enum Upgrade {
     LucidHeart,
     /// Mythic: one more card at every pick.
     WideChoice,
+    // === combat === picks only (the card table is unchanged)
+    /// One more nerve.
+    SecondHeartbeat,
+    /// Strikes cut deeper into a reeling enemy.
+    SharpEdge,
+    /// A longer strike.
+    LongReach,
+    /// Slipping a blow with a dash or phase staggers the attacker.
+    Counter,
+    /// Every fourth strike sends a second wave.
+    EchoStrike,
+    /// Whatever hurts you is hurt back.
+    Thorns,
+    /// Calm motes heal more and steady what is near.
+    CalmSpore,
+    // === end combat ===
     Learn(Ability),
     /// Strong, with a price.
     Cursed(Curse),
@@ -403,7 +419,7 @@ pub const ALL_CURSES: [Curse; 5] = [
 /// Chance one card of a pick is swapped for a cursed one.
 pub const CURSE_CHANCE: f64 = 0.2;
 
-pub const PASSIVES: [Upgrade; 14] = [
+pub const PASSIVES: [Upgrade; 21] = [
     Upgrade::SwiftFeet,
     Upgrade::Spring,
     Upgrade::WideEyes,
@@ -418,6 +434,15 @@ pub const PASSIVES: [Upgrade; 14] = [
     Upgrade::Quicken,
     Upgrade::LucidHeart,
     Upgrade::WideChoice,
+    // === combat ===
+    Upgrade::SecondHeartbeat,
+    Upgrade::SharpEdge,
+    Upgrade::LongReach,
+    Upgrade::Counter,
+    Upgrade::EchoStrike,
+    Upgrade::Thorns,
+    Upgrade::CalmSpore,
+    // === end combat ===
 ];
 
 /// Which pixel icon an upgrade card shows.
@@ -628,6 +653,71 @@ impl Upgrade {
                 [255, 230, 120],
                 Mythic,
             ),
+            // === combat ===
+            Upgrade::SecondHeartbeat => i(
+                "SECOND HEARTBEAT",
+                "one more nerve, and it comes back now",
+                2,
+                4,
+                Icon::Heart,
+                [255, 100, 140],
+                Rare,
+            ),
+            Upgrade::SharpEdge => i(
+                "SHARP EDGE",
+                "strikes cut deeper into a reeling enemy",
+                3,
+                8,
+                Icon::Lid,
+                [255, 210, 120],
+                Common,
+            ),
+            Upgrade::LongReach => i(
+                "LONG REACH",
+                "your strike reaches a quarter further",
+                2,
+                7,
+                Icon::Wind,
+                [160, 220, 255],
+                Common,
+            ),
+            Upgrade::Counter => i(
+                "COUNTER",
+                "slip a blow with a dash or phase: the attacker reels",
+                1,
+                4,
+                Icon::Boot,
+                [255, 170, 90],
+                Rare,
+            ),
+            Upgrade::EchoStrike => i(
+                "ECHO STRIKE",
+                "every fourth strike sends a second wave",
+                1,
+                4,
+                Icon::Brain,
+                [200, 160, 255],
+                Rare,
+            ),
+            Upgrade::Thorns => i(
+                "THORNS",
+                "whatever hurts you is hurt back",
+                1,
+                4,
+                Icon::Gem,
+                [140, 255, 150],
+                Rare,
+            ),
+            Upgrade::CalmSpore => i(
+                "CALM SPORE",
+                "calm motes heal two and steady what is near",
+                1,
+                4,
+                Icon::Shard,
+                [150, 255, 210],
+                Rare,
+            ),
+            // === end combat ===
             Upgrade::Cursed(c) => {
                 let (name, desc) = c.text();
                 i(name, desc, 1, 1, Icon::Lid, [255, 70, 90], Cursed)
@@ -677,15 +767,26 @@ pub enum Synergy {
     Slipstream,
     /// DREAM ANCHOR + LONG BREATH: respawn safety doubled again.
     SafeHarbour,
+    // === combat ===
+    /// HUSH + SHARP EDGE: a sneak attack cuts one deeper.
+    Executioner,
+    /// WARD + THORNS: a broken ward hits back twice as hard.
+    Bulwark,
+    /// DASH + COUNTER: slipping a blow also cuts the attacker.
+    Riposte,
+    // === end combat ===
 }
 
-pub const ALL_SYNERGIES: [Synergy; 6] = [
+pub const ALL_SYNERGIES: [Synergy; 9] = [
     Synergy::GhostStep,
     Synergy::ThirdEye,
     Synergy::DeepFreeze,
     Synergy::Skywalk,
     Synergy::Slipstream,
     Synergy::SafeHarbour,
+    Synergy::Executioner,
+    Synergy::Bulwark,
+    Synergy::Riposte,
 ];
 
 /// How long GHOST STEP keeps you phased after a dash.
@@ -700,6 +801,9 @@ impl Synergy {
             Synergy::Skywalk => "SKYWALK",
             Synergy::Slipstream => "SLIPSTREAM",
             Synergy::SafeHarbour => "SAFE HARBOUR",
+            Synergy::Executioner => "EXECUTIONER",
+            Synergy::Bulwark => "BULWARK",
+            Synergy::Riposte => "RIPOSTE",
         }
     }
 
@@ -711,6 +815,9 @@ impl Synergy {
             Synergy::Skywalk => "blinking gives back your air jumps",
             Synergy::Slipstream => "dash recharges twice as fast",
             Synergy::SafeHarbour => "respawn safety doubled",
+            Synergy::Executioner => "sneak attacks cut one deeper",
+            Synergy::Bulwark => "a broken ward hits back twice as hard",
+            Synergy::Riposte => "slipping a blow cuts the attacker too",
         }
     }
 
@@ -724,6 +831,9 @@ impl Synergy {
             Synergy::Skywalk => [(Learn(Ability::Blink), 1), (DoubleJump, 1)],
             Synergy::Slipstream => [(Learn(Ability::Dash), 1), (SwiftFeet, 2)],
             Synergy::SafeHarbour => [(DreamAnchor, 1), (LongBreath, 1)],
+            Synergy::Executioner => [(Learn(Ability::Hush), 1), (SharpEdge, 1)],
+            Synergy::Bulwark => [(Learn(Ability::Ward), 1), (Thorns, 1)],
+            Synergy::Riposte => [(Learn(Ability::Dash), 1), (Counter, 1)],
         }
     }
 }
@@ -791,6 +901,8 @@ pub struct Stats {
     abilities: Vec<(Ability, f32, f32)>,
     synergies: Vec<Synergy>,
     curses: Vec<Curse>,
+    /// The combat picks (they change nothing else, so they count here).
+    combat: [u32; 7],
 }
 
 impl RunUpgrades {
@@ -943,6 +1055,16 @@ impl RunUpgrades {
                 })
                 .collect(),
             synergies: self.synergies(),
+            combat: [
+                Upgrade::SecondHeartbeat,
+                Upgrade::SharpEdge,
+                Upgrade::LongReach,
+                Upgrade::Counter,
+                Upgrade::EchoStrike,
+                Upgrade::Thorns,
+                Upgrade::CalmSpore,
+            ]
+            .map(|c| self.count(c)),
             curses: ALL_CURSES
                 .iter()
                 .copied()

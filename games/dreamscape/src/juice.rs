@@ -18,6 +18,8 @@ pub enum Hit {
     Shard,
     /// A smaller pickup (fragment, sigil).
     Pickup,
+    /// Your strike landed.
+    Strike,
 }
 
 /// Slowest the world ever runs during a dip (it never fully freezes).
@@ -85,13 +87,14 @@ impl Juice {
         if reduced {
             return;
         }
-        if what != Hit::Caught {
+        if what != Hit::Caught && what != Hit::Strike {
             self.ring_age = 0.0;
         }
         let (secs, floor, shake) = match what {
             Hit::Caught => (0.12, DIP_FLOOR, 0.10),
             Hit::Shard => (0.10, 0.45, 0.04),
             Hit::Pickup => (0.0, 1.0, 0.015),
+            Hit::Strike => (0.06, 0.3, 0.05),
         };
         if secs > 0.0 && secs >= self.dip_left {
             self.dip_left = secs;

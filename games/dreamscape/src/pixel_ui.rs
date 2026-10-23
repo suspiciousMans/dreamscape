@@ -1,5 +1,5 @@
 //! Shared pieces of the game's pixel look for screens: chipped panels,
-//! cell sprites, keycaps, chromatic-split text, scanlines, pixel glyphs.
+//! cell sprites, chromatic-split text, scanlines, pixel glyphs.
 //! Everything is built from whole "cells" (`cell(u)` pixels), so panels and
 //! icons share one grid and nothing is rounded or smooth.
 
@@ -153,36 +153,6 @@ pub fn hatch(p: &egui::Painter, r: Rect, c: f32, color: Color32) {
         }
         x += step;
     }
-}
-
-/// A small keycap with `text` inside.
-pub fn keycap(
-    p: &egui::Painter,
-    centre: Pos2,
-    text: &str,
-    size: f32,
-    c: f32,
-    rgb: [u8; 3],
-    alpha: f32,
-) {
-    let galley = p.layout_no_wrap(text.to_string(), FontId::monospace(size), Color32::WHITE);
-    let w = galley.size().x + c * 3.0;
-    let h = galley.size().y + c * 1.5;
-    let r = Rect::from_center_size(centre, Vec2::new(w.max(h), h));
-    p.rect_filled(
-        r.translate(Vec2::new(0.0, c * 0.7)),
-        0.0,
-        Color32::from_black_alpha(140),
-    );
-    p.rect_filled(r, 0.0, rgba([22, 14, 44], 0.95 * alpha));
-    p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, rgba(rgb, 0.8 * alpha)));
-    p.text(
-        r.center(),
-        Align2::CENTER_CENTER,
-        text,
-        FontId::monospace(size),
-        rgba(rgb, alpha),
-    );
 }
 
 /// A right-pointing selection marker, 3 cells wide and 5 tall, centred.
