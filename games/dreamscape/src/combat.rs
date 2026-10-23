@@ -138,10 +138,31 @@ impl Strike {
 /// The swing's flash: a fan of rays swept from one side to the other (and
 /// back on the next swing), each lighting as the sweep reaches it, then
 /// narrowing away. Pure, so the shape is tested.
-pub const SLASH_RAYS: usize = 13;
+pub const SLASH_RAYS: usize = 21;
 pub const SLASH_SWEEP: f32 = 0.14;
 pub const SLASH_FADE: f32 = 0.16;
 pub const SLASH_LIFE: f32 = SLASH_SWEEP + SLASH_FADE;
+
+/// Each ray is three pieces end to end, dim at the dreamer and white at the
+/// tip: (from, to) as fractions of its length, and its width against the ray's.
+pub const SLASH_SEGMENTS: [(f32, f32, f32); 3] = [(0.0, 0.42, 0.55), (0.42, 0.80, 0.9), (0.80, 1.0, 1.5)];
+/// Sparks thrown off the leading edge, and how long each flies.
+pub const SLASH_SPARKS: usize = 9;
+pub const SPARK_LIFE: f32 = 0.22;
+
+/// Spark `k` at `age`: (angle round from the facing, distance as a multiple of
+/// the reach, size 0..1). It leaves the tip as the sweep passes its angle,
+/// then flies on outward and shrinks. `None` before it leaves or after.
+pub fn slash_spark(k: usize, age: f32, half_arc: f32, flip: bool) -> Option<(f32, f32, f32)> {
+    let frac = if SLASH_SPARKS > 1 { k as f32 / (SLASH_SPARKS - 1) as f32 } else { 0.5 };
+    let since = age - SLASH_SWEEP * frac;
+    if !(0.0..SPARK_LIFE).contains(&since) {
+        return None;
+    }
+    let t = since / SPARK_LIFE;
+    let side = if flip { -1.0 } else { 1.0 };
+    Some((side * (-half_arc + 2.0 * half_arc * frac), 1.0 + 0.5 * t, 1.0 - t))
+}
 
 /// One ray of the fan at some moment: how far round from the facing (radians,
 /// positive to the right), how much of its full width and length it keeps.
@@ -452,6 +473,34 @@ mod tests {
             assert!(lit >= prev, "ray {i} lights after ray {}", i.saturating_sub(1));
             prev = lit;
         }
+    }
+
+    #[test]
+    fn a_ray_is_three_pieces_end_to_end_dim_to_bright_and_widening() {
+        let mut at = 0.0;
+        let mut last_w = 0.0;
+        for (from, to, w) in SLASH_SEGMENTS {
+            assert!((from - at).abs() < 1e-6, "no gap and no overlap");
+            assert!(to > from);
+            assert!(w > last_w, "the tip is the widest");
+            at = to;
+            last_w = w;
+        }
+        assert_eq!(at, 1.0, "ends at the full reach");
+    }
+
+    #[test]
+    fn sparks_leave_the_tip_as_the_sweep_passes_and_fly_out_shrinking() {
+        let half = 1.0;
+        assert!(slash_spark(0, -0.01, half, false).is_none());
+        let (a0, d0, s0) = slash_spark(0, 0.0, half, false).unwrap();
+        assert_eq!((a0, d0, s0), (-half, 1.0, 1.0), "first spark at the first edge");
+        let (a1, d1, s1) = slash_spark(0, SPARK_LIFE * 0.9, half, false).unwrap();
+        assert!(d1 > d0 && s1 < s0 && a1 == a0, "flew out, shrank, same bearing");
+        assert!(slash_spark(0, SPARK_LIFE + 0.001, half, false).is_none());
+        let last = slash_spark(SLASH_SPARKS - 1, SLASH_SWEEP, half, false).unwrap();
+        assert!((last.0 - half).abs() < 1e-5, "the last leaves at the far edge");
+        assert_eq!(slash_spark(0, 0.0, half, true).unwrap().0, half, "flipped swing");
     }
 
     #[test]

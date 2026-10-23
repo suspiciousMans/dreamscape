@@ -222,7 +222,9 @@ enum SpecialAI {
 
 /// A swing's flash in flight: a fan of rays swept across the strike's arc.
 struct Slash {
-    rays: Vec<Entity>,
+    /// Each ray's pieces (see `combat::SLASH_SEGMENTS`), and the flying sparks.
+    rays: Vec<[Entity; 3]>,
+    sparks: Vec<Entity>,
     age: f32,
     facing: Vec3,
     reach: f32,
@@ -1990,34 +1992,53 @@ impl DreamscapeGame {
             let (e, _, _) = self.unraveling.remove(k);
             let _ = self.world.despawn(e);
         }
-        // The swing's flash: a fan sweeps across the arc, then narrows away.
+        // The swing's flash: a fan sweeps across the arc from the dreamer's
+        // centre, then narrows away, throwing sparks off its leading edge.
         let me = self.player_position;
         let reduced = self.settings.reduced_motion;
         let mut done = Vec::new();
         for (k, s) in self.slashes.iter_mut().enumerate() {
             s.age += dt;
-            if s.age >= combat::SLASH_LIFE {
+            if s.age >= combat::SLASH_LIFE.max(combat::SLASH_SWEEP + combat::SPARK_LIFE) {
                 done.push(k);
                 continue;
             }
+            let heading = |angle: f32| {
+                let (sin, cos) = angle.sin_cos();
+                // Positive angles lean to the right of the facing.
+                Vec3::new(
+                    s.facing.x * cos + s.facing.z * sin,
+                    0.0,
+                    -s.facing.x * sin + s.facing.z * cos,
+                )
+            };
             let n = s.rays.len();
-            for (i, e) in s.rays.iter().enumerate() {
+            for (i, pieces) in s.rays.iter().enumerate() {
+                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced);
+                for (j, e) in pieces.iter().enumerate() {
+                    let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
+                        continue;
+                    };
+                    let Some(r) = ray else {
+                        t.scale = Vec3::ZERO;
+                        continue;
+                    };
+                    let (from, to, wide) = combat::SLASH_SEGMENTS[j];
+                    let dir = heading(r.angle);
+                    let len = s.reach * r.length;
+                    t.position = me + dir * (len * (from + to) / 2.0) + Vec3::Y * 0.25;
+                    t.rotation = Quat::from_rotation_arc(Vec3::Z, dir);
+                    t.scale = Vec3::new((0.1 + 0.4 * r.width) * wide, 0.012, len * (to - from));
+                }
+            }
+            for (k2, e) in s.sparks.iter().enumerate() {
                 let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                     continue;
                 };
-                match combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced) {
-                    Some(r) => {
-                        let (sin, cos) = r.angle.sin_cos();
-                        // Positive angles lean to the right of the facing.
-                        let dir = Vec3::new(
-                            s.facing.x * cos + s.facing.z * sin,
-                            0.0,
-                            -s.facing.x * sin + s.facing.z * cos,
-                        );
-                        let len = s.reach * r.length;
-                        t.position = me + dir * (len / 2.0) + Vec3::Y * 0.25;
-                        t.rotation = Quat::from_rotation_arc(Vec3::Z, dir);
-                        t.scale = Vec3::new(0.12 + 0.5 * r.width, 0.01, len);
+                match combat::slash_spark(k2, s.age, s.half_arc, s.flip).filter(|_| !reduced) {
+                    Some((angle, dist, size)) => {
+                        t.position = me + heading(angle) * (s.reach * dist) + Vec3::Y * 0.4;
+                        t.scale = Vec3::splat(0.34 * size);
                     }
                     None => t.scale = Vec3::ZERO,
                 }
@@ -2025,7 +2046,7 @@ impl DreamscapeGame {
         }
         for k in done.into_iter().rev() {
             let s = self.slashes.remove(k);
-            for e in s.rays {
+            for e in s.rays.into_iter().flatten().chain(s.sparks) {
                 let _ = self.world.despawn(e);
             }
         }
@@ -2262,6 +2283,7 @@ impl DreamscapeGame {
                 }
                 // === end combat ===
                 struck = true;
+                self.burst_pending = Some((t.pos + Vec3::Y * 0.5, [255, 150, 230], [255, 255, 255]));
                 let dmg = self.strike_damage(&t);
                 self.hurt_foe(&t, dmg, me, knock, combat::STAGGER_SECS);
             }
@@ -2576,7 +2598,7 @@ impl DreamscapeGame {
     /// `moths`, `mask`, `leech`). DREAMSCAPE_ENEMY=Moths|Mask|Leech forces
     /// that one into every dream (and past the depth gate).
     fn spawn_enemies_b(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
-        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() {
+        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() || self.sanctuary() {
             return Ok(());
         }
         let forced = crate::dev::var("DREAMSCAPE_ENEMY").ok();
@@ -3296,8 +3318,37 @@ impl DreamscapeGame {
         // === combat === the swing's flash
         if let Some(start) = self.slash_pending.take() {
             let cube = self.mesh(Shape::Cube)?;
-            let tex = self.texture(gl, [255, 225, 255, 255]);
+            let spark_mesh = self.mesh(Shape::Octahedron)?;
+            // Dim violet at the dreamer, pink in the middle, white at the tip.
+            let tex = [
+                self.texture(gl, [150, 110, 255, 255]),
+                self.texture(gl, [255, 170, 240, 255]),
+                self.texture(gl, [255, 255, 255, 255]),
+            ];
+            let spark_tex = self.texture(gl, [255, 245, 200, 255]);
             let rays = (0..combat::SLASH_RAYS)
+                .map(|_| {
+                    [0, 1, 2].map(|j| {
+                        let mut b = hecs::EntityBuilder::new();
+                        b.add(Transform {
+                            position: self.player_position,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        });
+                        b.add(MeshRenderer {
+                            mesh: cube.clone(),
+                            texture: Some(tex[j].clone()),
+                        });
+                        b.add(Lit);
+                        // The dim and pink pieces glow (see-through); the tip is solid.
+                        if j < 2 {
+                            b.add(Translucent);
+                        }
+                        self.world.spawn(b.build())
+                    })
+                })
+                .collect();
+            let sparks = (0..combat::SLASH_SPARKS)
                 .map(|_| {
                     self.world.spawn((
                         Transform {
@@ -3306,16 +3357,18 @@ impl DreamscapeGame {
                             scale: Vec3::ZERO,
                         },
                         MeshRenderer {
-                            mesh: cube.clone(),
-                            texture: Some(tex.clone()),
+                            mesh: spark_mesh.clone(),
+                            texture: Some(spark_tex.clone()),
                         },
+                        Spin(9.0),
                         Lit,
-                        Hero,
+                        Translucent,
                     ))
                 })
                 .collect();
             self.slashes.push(Slash {
                 rays,
+                sparks,
                 age: 0.0,
                 facing: start.facing,
                 reach: start.reach,
@@ -3909,6 +3962,7 @@ impl DreamscapeGame {
             self.director.theme,
             self.director.depth,
             !self.director.nightmare
+                && !self.sanctuary()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.theme != DreamTheme::Awakening,
@@ -4111,6 +4165,7 @@ impl DreamscapeGame {
         let allowed = !self.coop_active()
             && self.prologue.is_none()
             && !self.director.nightmare
+            && !self.sanctuary()
             && (!self.autopilot || dev.is_some());
         if !allowed {
             return Ok(());
@@ -7096,6 +7151,11 @@ impl DreamscapeGame {
 
     /// Begin melting toward `pending`. Ignored if a melt is already running
     /// (so touching the portal for several frames can't queue two descents).
+    /// A quiet place: the dream after a nightmare, where nothing can hurt you.
+    fn sanctuary(&self) -> bool {
+        self.prologue.is_none() && self.director.sanctuary()
+    }
+
     // === pressure ===
     /// Normal dreams only: no nightmares, the awakening, the prologue or co-op.
     fn pressure_applies(&self) -> bool {
@@ -7104,6 +7164,7 @@ impl DreamscapeGame {
             && !self.director.nightmare
             && self.director.theme != DreamTheme::Awakening
             && self.director.theme != DreamTheme::Lobby
+            && !self.sanctuary()
     }
 
     /// Per frame (Playing only): tick the clock, stir the pacers, speak,
@@ -7604,7 +7665,7 @@ impl DreamscapeGame {
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let theme = self.director.theme;
         let spec = theme.spec();
-        self.twists = if self.director.nightmare || self.prologue.is_some() {
+        self.twists = if self.director.nightmare || self.prologue.is_some() || self.sanctuary() {
             Twists::default()
         } else {
             dream::roll_twists(
@@ -7680,6 +7741,12 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        // === sanctuary === nothing here can hurt you
+        if self.sanctuary() {
+            dream.calm();
+            log::info!("Sanctuary: a quiet place at depth {}", self.director.depth);
+        }
+        // === end sanctuary ===
         if let Some(b) = self.director.blend {
             dream::blend_surfaces(&mut dream.surfaces, b);
             log::info!("Fused dream: {theme:?} with {b:?}");
@@ -7716,6 +7783,7 @@ impl DreamscapeGame {
         self.guard_angle = None;
         if let Some(shard) = dream.shard {
             let eligible = !self.director.nightmare
+                && !self.sanctuary()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.depth >= shard_rules::MIN_DEPTH
@@ -8432,6 +8500,12 @@ impl DreamscapeGame {
         }
         // === end shards ===
         self.spawn_enemies_b(gl, &dream)?; // === combat ===
+        // === sanctuary === a place to breathe: nerve refills
+        if self.sanctuary() {
+            self.nerve.heal(self.nerve.max());
+            self.dream_hint = "a quiet place · nothing here can hurt you".to_string();
+        }
+        // === end sanctuary ===
         // === hazards ===
         self.theme_rule = self.hazard_rule_state();
         if self.theme_rule.is_some() {
@@ -11660,6 +11734,25 @@ mod screen_smoke {
         assert!(g.moth_swarm.as_ref().unwrap().moths.iter().all(|m| matches!(m.mode, moths::Mode::Scattered(..))));
     }
     // === end combat ===
+
+    #[test]
+    fn a_sanctuary_has_no_hazards_no_clock_and_a_nerve_refill_waits_in_it() {
+        let mut g = game("sanct");
+        // A hazard dream at a depth that is not a sanctuary...
+        g.director.theme = DreamTheme::NightmareFactory;
+        g.director.depth = 8;
+        let normal = g.hazard_rule_state().is_some();
+        assert!(normal, "the factory has a rule at depth 8");
+        assert!(!g.sanctuary());
+        // ...and the dream right after a nightmare.
+        g.director.depth = 11;
+        assert!(g.sanctuary());
+        assert!(g.hazard_rule_state().is_none(), "no hazard in a sanctuary");
+        assert!(!g.pressure_applies(), "no clock either");
+        // The prologue is never one, nor a nightmare.
+        g.director.nightmare = true;
+        assert!(!g.sanctuary());
+    }
 
     #[test]
     fn calm_motes_heal_when_touched_and_fade_when_ignored() {

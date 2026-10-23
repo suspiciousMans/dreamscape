@@ -59,6 +59,18 @@ pub struct Atmosphere {
     pub fog_end: f32,
 }
 
+impl Dream {
+    /// A sanctuary: nothing in it can hurt you. Every enemy, gate and beat
+    /// tile is gone; the floor, the route, the shard and the portal stay.
+    pub fn calm(&mut self) {
+        self.patrols.clear();
+        self.lairs.clear();
+        self.specials.clear();
+        self.gates.clear();
+        self.beat_tiles.clear();
+    }
+}
+
 pub struct Dream {
     pub theme: DreamTheme,
     pub seed: u64,
@@ -1410,6 +1422,27 @@ mod tests {
         palette
             .iter()
             .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
+    }
+
+    #[test]
+    fn a_calmed_dream_has_nothing_that_can_hurt_and_keeps_its_way_through() {
+        for theme in crate::dream::ALL_THEMES {
+            for seed in 0..6u64 {
+                let mut d = generate(theme, seed, 11, None, true);
+                let (route, shard, portal, blocks) =
+                    (d.route.len(), d.shard, d.portal, d.blocks.len());
+                d.calm();
+                assert!(
+                    d.patrols.is_empty()
+                        && d.lairs.is_empty()
+                        && d.specials.is_empty()
+                        && d.gates.is_empty()
+                        && d.beat_tiles.is_empty(),
+                    "{theme:?} {seed}"
+                );
+                assert_eq!((d.route.len(), d.shard, d.portal, d.blocks.len()), (route, shard, portal, blocks));
+            }
+        }
     }
 
     #[test]
