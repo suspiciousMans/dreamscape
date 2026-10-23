@@ -13,6 +13,9 @@ pub const MAX: u32 = 5;
 pub const REFILL: u32 = 2;
 /// Seconds of invulnerability after a hit.
 pub const IFRAMES: f32 = 1.2;
+/// Gentle nerve: how much nerve a run starts with, and extra seconds of invulnerability.
+pub const GENTLE_START: u32 = 5;
+pub const GENTLE_IFRAMES: f32 = 0.5;
 /// Extra seconds per stack of LONG BREATH.
 pub const IFRAMES_PER_BREATH: f32 = 0.4;
 /// How long a shove from a hit lasts, and how fast it starts (units / s).

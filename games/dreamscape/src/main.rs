@@ -2333,7 +2333,8 @@ impl DreamscapeGame {
     /// when that was the last point (the old *caught* flow then runs).
     fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
         let away = self.away_from_nearest_threat();
-        let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32;
+        let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
+            + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
             nerve::Hit::Down => {
                 // DREAM ANCHOR: once a dream, a lethal blow leaves you standing.
@@ -2356,7 +2357,9 @@ impl DreamscapeGame {
                     self.nerve.max(),
                     self.director.depth
                 );
-                self.flash.trigger([1.0, 0.1, 0.15], 0.45);
+                // Reduce flashing: the red wash is a quarter as strong.
+                let wash = if self.settings.reduce_flashing { 0.12 } else { 0.45 };
+                self.flash.trigger([1.0, 0.1, 0.15], wash);
                 self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
                 self.sfx(Sound::Caught);
                 if self.run.count(Upgrade::Thorns) > 0 {
@@ -5994,7 +5997,11 @@ impl DreamscapeGame {
         self.run = RunUpgrades::from_loadout(&cards)
             .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
-        self.nerve = nerve::Nerve::default();
+        self.nerve = if self.settings.gentle_nerve {
+            nerve::Nerve::new(nerve::GENTLE_START)
+        } else {
+            nerve::Nerve::default()
+        };
         self.strike_count = 0;
         self.calm_timer = 0.0;
         if let Some(id) = self

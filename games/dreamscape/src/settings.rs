@@ -78,6 +78,8 @@ pub struct Settings {
     pub reduced_motion: bool,
     /// Caps full-screen flashes.
     pub reduce_flashing: bool,
+    /// Combat: five nerve to start and a longer breather after a hit.
+    pub gentle_nerve: bool,
     /// Shards and portals use fixed colour-blind-safe colours and patterns.
     pub colorblind_markers: bool,
     pub fullscreen: bool,
@@ -100,6 +102,7 @@ impl Default for Settings {
             vignette: 1.0,
             reduced_motion: false,
             reduce_flashing: false,
+            gentle_nerve: false,
             colorblind_markers: false,
             fullscreen: false,
             mouse_sens: 0.5,
@@ -190,6 +193,7 @@ pub enum Row {
     Vignette,
     ReducedMotion,
     ReduceFlashing,
+    GentleNerve,
     ColorblindMarkers,
     Fullscreen,
     MouseSens,
@@ -206,6 +210,7 @@ pub fn rows() -> Vec<Row> {
         Row::Vignette,
         Row::ReducedMotion,
         Row::ReduceFlashing,
+        Row::GentleNerve,
         Row::ColorblindMarkers,
         Row::Fullscreen,
         Row::MouseSens,
@@ -225,6 +230,7 @@ impl Row {
             Row::Vignette => "vignette".into(),
             Row::ReducedMotion => "reduced motion".into(),
             Row::ReduceFlashing => "reduce flashing".into(),
+            Row::GentleNerve => "gentle nerve".into(),
             Row::ColorblindMarkers => "colour-blind markers".into(),
             Row::Fullscreen => "fullscreen".into(),
             Row::MouseSens => "mouse sensitivity".into(),
@@ -245,6 +251,7 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::Vignette => step(&mut s.vignette),
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
         Row::ReduceFlashing => s.reduce_flashing = !s.reduce_flashing,
+        Row::GentleNerve => s.gentle_nerve = !s.gentle_nerve,
         Row::ColorblindMarkers => s.colorblind_markers = !s.colorblind_markers,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
         Row::MouseSens => step(&mut s.mouse_sens),
@@ -264,6 +271,7 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::Vignette => pct(s.vignette),
         Row::ReducedMotion => onoff(s.reduced_motion),
         Row::ReduceFlashing => onoff(s.reduce_flashing),
+        Row::GentleNerve => onoff(s.gentle_nerve),
         Row::ColorblindMarkers => onoff(s.colorblind_markers),
         Row::Fullscreen => onoff(s.fullscreen),
         Row::MouseSens => pct(s.mouse_sens),
@@ -332,7 +340,10 @@ mod tests {
         adjust(&mut s, Row::ColorblindMarkers, 1);
         assert!(s.colorblind_markers);
         assert_eq!(value(&s, Row::ColorblindMarkers), "on");
-        assert_eq!(rows().len(), 10 + ALL_ACTIONS.len() + 1);
+        assert_eq!(rows().len(), 11 + ALL_ACTIONS.len() + 1);
+        adjust(&mut s, Row::GentleNerve, 1);
+        assert!(s.gentle_nerve);
+        assert_eq!(value(&s, Row::GentleNerve), "on");
     }
 
     #[test]
