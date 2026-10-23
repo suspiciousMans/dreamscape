@@ -35,6 +35,7 @@ mod companion;
 mod coop;
 mod coop_game;
 mod crash;
+mod deck;
 mod dev;
 mod dissolve;
 mod dream;
