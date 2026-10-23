@@ -65,7 +65,11 @@ pub const ALL_ABILITIES: [Ability; 16] = [
 
 /// Shift and E.
 pub const ABILITY_SLOTS: usize = 2;
-pub const SLOT_KEYS: [&str; ABILITY_SLOTS] = ["shift", "e"];
+/// Cards in a hand: one more than the abilities a fixed loadout holds.
+/// The deck's hand (`deck.rs`) uses all of them; co-op and the autopilot
+/// keep the old [`ABILITY_SLOTS`].
+pub const HAND_SIZE: usize = ABILITY_SLOTS + 1;
+pub const SLOT_KEYS: [&str; HAND_SIZE] = ["shift", "e", "q"];
 
 pub const DASH_SPEED_MULT: f32 = 3.0;
 /// Blink distance, in cells.

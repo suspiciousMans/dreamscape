@@ -286,6 +286,9 @@ pub struct Lore {
     pub seen: Vec<String>,
     /// Booklet card numbers in the loadout.
     pub loadout: Vec<u32>,
+    /// Booklet card numbers in the deck built before a run (`deck.rs`).
+    /// Empty = no deck chosen: the loadout rule fills it.
+    pub deck: Vec<u32>,
     /// The collected dreamer riding along this run (M3).
     pub companion: Option<u32>,
     /// Fusion recipes discovered (sorted theme pairs, as indices into ALL_THEMES).

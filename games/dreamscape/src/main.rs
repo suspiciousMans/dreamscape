@@ -898,7 +898,7 @@ pub struct DreamscapeGame {
     /// Last direction the dreamer moved in (dash / blink aim).
     facing: Vec3,
     /// Ability keys pressed since the last update.
-    ability_requests: [bool; upgrades::ABILITY_SLOTS],
+    ability_requests: [bool; upgrades::HAND_SIZE],
 }
 
 /// Notes that a passive just did its work (only if the run holds it), so its
@@ -1217,7 +1217,7 @@ impl DreamscapeGame {
             air_jumps_used: 0,
             jump_was_down: false,
             facing: Vec3::Z,
-            ability_requests: [false; upgrades::ABILITY_SLOTS],
+            ability_requests: [false; upgrades::HAND_SIZE],
         }
     }
 
@@ -9818,6 +9818,7 @@ impl Game for DreamscapeGame {
             Some(Action::Jump) => self.input.jump = down,
             Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
             Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            Some(Action::Ability3) if down && !repeat => self.ability_requests[2] = true,
             Some(Action::Strike) if down && !repeat => self.strike_request = true,
             _ => {}
         }
