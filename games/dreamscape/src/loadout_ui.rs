@@ -120,6 +120,70 @@ fn tile_rect(left: f32, top: f32, tile: Vec2, gap: f32, i: usize, first_row: usi
     )
 }
 
+/// Where the visible tiles of a grid sit: (card index, rect). Drawing and the
+/// mouse share it.
+pub fn grid_tiles(screen: Rect, n: usize, selected: usize, grid_top: f32, width: f32) -> Vec<(usize, Rect)> {
+    let u = pixel_ui::scale(screen);
+    let left = screen.left() + screen.width() * 0.05;
+    let gap = 8.0 * u;
+    let tile = tile_size(width, u);
+    let first_row = (selected / COLS).saturating_sub(ROWS - 1);
+    (0..n)
+        .filter(|i| (first_row..first_row + ROWS).contains(&(i / COLS)))
+        .map(|i| (i, tile_rect(left, grid_top, tile, gap, i, first_row)))
+        .collect()
+}
+
+/// The tile under `at`, if any.
+pub fn grid_hit(screen: Rect, n: usize, selected: usize, grid_top: f32, width: f32, at: Pos2) -> Option<usize> {
+    grid_tiles(screen, n, selected, grid_top, width)
+        .into_iter()
+        .find(|(_, r)| r.contains(at))
+        .map(|(i, _)| i)
+}
+
+/// The loadout screen's geometry: where its slot boxes sit, and its grid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadoutLayout {
+    pub row_y: f32,
+    pub slot_h: f32,
+    pub slots: Vec<Rect>,
+    pub grid_top: f32,
+    pub grid_w: f32,
+}
+
+pub fn layout(screen: Rect) -> LoadoutLayout {
+    let u = pixel_ui::scale(screen);
+    let cx = screen.center().x;
+    let top = screen.top() + 22.0 * u;
+    let gap = 10.0 * u;
+    let slot_w = ((screen.width() * 0.9 - gap * (crate::lore::MAX_SLOTS as f32 - 1.0))
+        / crate::lore::MAX_SLOTS as f32)
+        .min(190.0 * u);
+    let slot_h = 64.0 * u;
+    let row_y = top + 62.0 * u;
+    let total = crate::lore::MAX_SLOTS as f32 * (slot_w + gap) - gap;
+    let slots = (0..crate::lore::MAX_SLOTS)
+        .map(|i| {
+            Rect::from_min_size(
+                Pos2::new(cx - total * 0.5 + i as f32 * (slot_w + gap), row_y),
+                Vec2::new(slot_w, slot_h),
+            )
+        })
+        .collect();
+    let grid_top = row_y + slot_h + 38.0 * u;
+    let left = screen.left() + screen.width() * 0.05;
+    let detail_w = CARD_SIZE.x * 1.0 + 24.0 * u;
+    let grid_w = (screen.right() - screen.width() * 0.05 - detail_w - 24.0 * u - left).max(300.0);
+    LoadoutLayout {
+        row_y,
+        slot_h,
+        slots,
+        grid_top,
+        grid_w,
+    }
+}
+
 /// The booklet's cards as small pixel tiles, `COLS` wide, scrolling with the
 /// cursor. Each shows its number, attribute and what its active ability is.
 /// Returns the bottom of the grid.
@@ -403,18 +467,10 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         .collect();
 
     // The slots: each shows the card in it and the ability it brings.
-    let gap = 10.0 * u;
-    let slot_w = ((screen.width() * 0.9 - gap * (crate::lore::MAX_SLOTS as f32 - 1.0))
-        / crate::lore::MAX_SLOTS as f32)
-        .min(190.0 * u);
-    let slot_h = 64.0 * u;
-    let row_y = top + 62.0 * u;
-    let total = crate::lore::MAX_SLOTS as f32 * (slot_w + gap) - gap;
+    let lay = layout(screen);
+    let (slot_h, row_y) = (lay.slot_h, lay.row_y);
     for i in 0..crate::lore::MAX_SLOTS {
-        let r = Rect::from_min_size(
-            Pos2::new(cx - total * 0.5 + i as f32 * (slot_w + gap), row_y),
-            Vec2::new(slot_w, slot_h),
-        );
+        let r = lay.slots[i];
         let open = i < m.slots;
         match chosen.get(i) {
             Some(card) => {
@@ -508,10 +564,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     }
 
     // The grid (scrolls with the cursor) on the left; the card and its powers on the right.
-    let grid_top = row_y + slot_h + 38.0 * u;
-    let left = screen.left() + screen.width() * 0.05;
-    let detail_w = CARD_SIZE.x * 1.0 + 24.0 * u;
-    let grid_w = (screen.right() - screen.width() * 0.05 - detail_w - 24.0 * u - left).max(300.0);
+    let (grid_top, grid_w) = (lay.grid_top, lay.grid_w);
     let marks = GridMarks {
         marked: &m.chosen,
         ..Default::default()

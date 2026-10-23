@@ -98,7 +98,13 @@ impl Booklet {
             }
         }
         self.runs.retain(|r| !r.cards.is_empty());
-        self.lore.loadout.retain(|&n| n != b);
+        // The fused card keeps whichever slot either card held, so merging
+        // never leaves you re-equipping.
+        let held = self.lore.loadout.iter().position(|&n| n == a || n == b);
+        self.lore.loadout.retain(|&n| n != a && n != b);
+        if let Some(i) = held {
+            self.lore.loadout.insert(i.min(self.lore.loadout.len()), a);
+        }
         let r = recipe(ca.theme, cb.theme);
         if !self.lore.recipes.contains(&r) {
             self.lore.recipes.push(r);
@@ -143,9 +149,10 @@ mod tests {
         let f = b.merge(1, 2).unwrap();
         assert_eq!(b.card_count(), 2);
         assert!(b.card(2).is_none());
-        assert!(
-            b.lore.loadout.is_empty(),
-            "a used-up card leaves the loadout"
+        assert_eq!(
+            b.lore.loadout,
+            vec![1],
+            "the used-up card's slot goes to the fused card"
         );
         assert_eq!(f.number, 1);
         assert_eq!((f.theme, f.fused), (Garden, Some(TheTunnel)));
@@ -157,6 +164,22 @@ mod tests {
         assert!(!b.runs[0].cards.is_empty());
         let text = ron::to_string(&b).unwrap();
         assert_eq!(ron::from_str::<Booklet>(&text).unwrap(), b);
+    }
+
+    #[test]
+    fn the_fused_card_keeps_a_slot_either_card_held_in_order_and_only_once() {
+        let mut b = booklet(&[Garden, TheTunnel, Lobby, Elfworks]);
+        b.lore.loadout = vec![3, 1, 2, 4];
+        b.merge(1, 2).unwrap();
+        assert_eq!(b.lore.loadout, vec![3, 1, 4], "one slot, where the first of them sat");
+        let mut c = booklet(&[Garden, TheTunnel, Lobby]);
+        c.lore.loadout = vec![3];
+        c.merge(1, 2).unwrap();
+        assert_eq!(c.lore.loadout, vec![3], "neither was equipped: nothing is added");
+        let mut d = booklet(&[Garden, TheTunnel]);
+        d.lore.loadout = vec![1];
+        d.merge(1, 2).unwrap();
+        assert_eq!(d.lore.loadout, vec![1]);
     }
 
     #[test]

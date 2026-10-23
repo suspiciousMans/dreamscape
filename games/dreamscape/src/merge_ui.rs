@@ -496,7 +496,12 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         }
     }
 
-    hint_bar(p, screen, v, "[a/d/w/s] browse   [enter] pick   [esc] back");
+    let hint = if m.first.is_some() {
+        "[click / enter] merge   [tab] use this as the first   [backspace] clear   [esc] back"
+    } else {
+        "[click / enter] pick the first card   [a/d/w/s] browse   [esc] back"
+    };
+    hint_bar(p, screen, v, hint);
     pixel_ui::scanlines(p, screen, c, 10);
 }
 
