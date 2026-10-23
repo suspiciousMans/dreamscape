@@ -113,6 +113,8 @@ pub struct Ctx {
     pub airborne: bool,
     /// The target is already reeling.
     pub staggered: bool,
+    /// Struck on armour (a Lullaby's front): damage is halved.
+    pub guarded: bool,
 }
 
 pub fn damage(base: f32, ctx: Ctx) -> f32 {
@@ -126,12 +128,20 @@ pub fn damage(base: f32, ctx: Ctx) -> f32 {
     if ctx.staggered {
         d *= STAGGERED_MULT;
     }
+    if ctx.guarded {
+        d *= crate::lullaby::FRONT_MULT;
+    }
     d
 }
 
 /// Kinds of enemy that can be struck.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    // === enemies-a ===
+    Tooth,
+    Weeper,
+    Lullaby,
+    // === end enemies-a ===
     /// A pacer; `child` is a splitter's offspring.
     Pacer { elite: Option<Elite>, child: bool },
     Stalker,
@@ -143,6 +153,9 @@ pub enum Kind {
 /// Hit points by kind (see the combat plan).
 pub fn base_hp(kind: Kind) -> f32 {
     match kind {
+        Kind::Tooth => crate::tooth::HP,
+        Kind::Weeper => crate::weeper::HP,
+        Kind::Lullaby => crate::lullaby::HP,
         Kind::Pacer { child: true, .. } => 1.0,
         Kind::Pacer { elite: Some(Elite::Big), .. } => 4.0,
         Kind::Pacer { .. } => 2.0,
@@ -297,8 +310,10 @@ mod tests {
         assert_eq!(damage(1.0, Ctx { unaware: true, ..plain }), 2.0);
         assert_eq!(damage(1.0, Ctx { airborne: true, ..plain }), 1.5);
         assert_eq!(damage(1.0, Ctx { staggered: true, ..plain }), 2.0);
-        let all = Ctx { unaware: true, airborne: true, staggered: true };
+        let all = Ctx { unaware: true, airborne: true, staggered: true, guarded: false };
         assert_eq!(damage(1.0, all), 6.0);
+        assert_eq!(damage(1.0, Ctx { guarded: true, ..plain }), 0.5, "armour halves it");
+        assert_eq!(damage(1.0, Ctx { guarded: true, ..all }), 3.0);
     }
 
     #[test]
@@ -311,6 +326,9 @@ mod tests {
         assert_eq!(base_hp(Kind::Stalker), 3.0);
         assert_eq!(base_hp(Kind::Sentry), 4.0);
         assert_eq!(base_hp(Kind::Jester), 1.0);
+        assert_eq!(base_hp(Kind::Tooth), 2.0);
+        assert_eq!(base_hp(Kind::Weeper), 2.0);
+        assert_eq!(base_hp(Kind::Lullaby), 6.0);
     }
 
     #[test]
