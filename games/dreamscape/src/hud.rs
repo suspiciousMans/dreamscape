@@ -463,7 +463,7 @@ pub fn draw(
     }
     if let (Mode::Playing, Some(line)) = (v.mode, &v.coop_line) {
         p.text(
-            Pos2::new(screen.center().x, screen.top() + EYE_TOP + EYE_BELOW + 14.0),
+            Pos2::new(screen.center().x, screen.top() + EYE_TOP + EYE_BELOW + 54.0),
             Align2::CENTER_TOP,
             line,
             FontId::monospace(16.0),
@@ -609,7 +609,7 @@ fn boss_bar(p: &egui::Painter, screen: Rect, v: &HudView) {
     let Some((name, taken, total, warning)) = &v.boss else {
         return;
     };
-    let top = screen.center_top() + Vec2::new(0.0, EYE_TOP + EYE_BELOW + 14.0);
+    let top = screen.center_top() + Vec2::new(0.0, EYE_TOP + EYE_BELOW + 54.0);
     p.text(
         top,
         Align2::CENTER_TOP,
@@ -1240,7 +1240,7 @@ fn title_card(p: &egui::Painter, screen: Rect, v: &HudView) {
     } else {
         ink(v)
     };
-    let y = screen.top() + screen.height() * 0.3;
+    let y = screen.top() + screen.height() * 0.36;
     let card_w = screen.width() - 40.0;
     glitch_text(
         p,
