@@ -45,7 +45,7 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
         },
         Mode::Paused => match button {
             P::A | P::B | P::Start => Some(Keycode::Escape),
-            P::Y => Some(Keycode::Q),
+            P::Y => Some(Keycode::M),
             P::X => Some(Keycode::B),
             P::LeftShoulder => Some(Keycode::L),
             P::RightShoulder => Some(Keycode::O),
@@ -64,7 +64,7 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::Y => Some(Keycode::R),
             P::Back => Some(Keycode::B),
             P::RightShoulder => Some(Keycode::L),
-            P::B => Some(Keycode::Escape),
+            P::B => Some(Keycode::W),
             _ => None,
         },
         // Left/right pick a pack, A opens it. No B: unpicked packs are lost,
@@ -271,7 +271,7 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
             ("SHIFT", "ability 1"),
             ("E", "ability 2"),
             ("F", "strike"),
-            ("ESC", "pause"),
+            ("ESC / P", "pause"),
         ]
     });
     v.push(("", "touch shards to wake · the portal goes deeper"));
@@ -304,7 +304,7 @@ mod tests {
         (Mode::Note, "[enter] keep it"),
         (Mode::Memories, "[w/s] choose  [esc] back"),
         (Mode::Paused, "[esc] keep dreaming"),
-        (Mode::Paused, "[q] wake up for real"),
+        (Mode::Paused, "[m] back to menu"),
         (Mode::Paused, "[b] dream booklet"),
         (Mode::Paused, "[l] lucid store   [o] settings   [x] codex"),
         (
@@ -316,11 +316,11 @@ mod tests {
         (Mode::Reveal, "remembering...    [space] skip"),
         (
             Mode::Reveal,
-            "[b] booklet   [l] lucid store   [r] dream again   [esc] wake",
+            "[b] booklet   [l] lucid store   [r] dream again   [w] wake",
         ),
         (
             Mode::Reveal,
-            "[s] press into booklet   [r] dream again   [esc] wake",
+            "[s] press into booklet   [r] dream again   [w] wake",
         ),
         (
             Mode::Booklet,
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(p(Mode::Choice, "[r] reroll"), "[X] reroll");
         assert_eq!(p(Mode::Choice, "[a/d] choose"), "[D-PAD] choose");
         assert_eq!(p(Mode::Reveal, "[s] press"), "[X] press");
-        assert_eq!(p(Mode::Paused, "[q] wake up"), "[Y] wake up");
+        assert_eq!(p(Mode::Paused, "[m] wake up"), "[Y] wake up");
         assert_eq!(p(Mode::Playing, "[shift]"), "[LB]");
         assert_eq!(prompt("[r] reroll", Mode::Choice, &s, false), "[r] reroll");
     }
