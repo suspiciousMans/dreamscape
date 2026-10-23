@@ -29,7 +29,8 @@ pub const BREAK_SECS: f32 = 0.5;
 /// Damage by what hit you: nightmare attacks hurt twice as much.
 pub fn damage_from(source: &str) -> u32 {
     match source {
-        "hunter" | "boss attack" => 2,
+        "hunter" | "boss attack" | "slam" => 2,
+        "tooth" | "tear" => 1,
         _ => 1,
     }
 }
@@ -250,6 +251,9 @@ mod tests {
         assert_eq!(damage_from("patrol"), 1);
         assert_eq!(damage_from("hunter"), 2);
         assert_eq!(damage_from("boss attack"), 2);
+        assert_eq!(damage_from("tooth"), 1);
+        assert_eq!(damage_from("tear"), 1);
+        assert_eq!(damage_from("slam"), 2);
         let mut n = Nerve::default();
         assert_eq!(n.hit(2, AWAY, 0.0), Hit::Hurt);
         assert_eq!(n.cur(), 1);

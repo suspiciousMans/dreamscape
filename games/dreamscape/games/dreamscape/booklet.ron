@@ -1,0 +1,61 @@
+(
+    runs: [],
+    stash: (
+        dust: 6,
+        owned: [],
+        charges: [],
+        eye: Dream,
+        card: Plain,
+        hud: Dream,
+        crystal: Pearl,
+        dust_earned: 6,
+    ),
+    codex: (
+        dreams: [],
+        enemies: [],
+        nightmares_beaten: 0,
+        ascension_unlocked: 0,
+        daily_best: None,
+    ),
+    lore: (
+        save_seed: 406006133873,
+        notes: [],
+        dreamers: [],
+        prologue_done: false,
+        seen: [],
+        loadout: [],
+        companion: None,
+        recipes: [],
+        ending_seen: false,
+    ),
+    achievements: (
+        ids: [],
+        purchases: 0,
+    ),
+    lottery: (
+        total_pulls: 0,
+        since_lucid: 0,
+        since_prophetic: 0,
+        sparks: 0,
+        pack_dry: 0,
+    ),
+    mastery: (
+        xp: [],
+        echoes: [],
+    ),
+    streak: (
+        last_day: Some(20745),
+        streak: 1,
+        best: 1,
+        rests: 0,
+    ),
+    clean: (
+        current: 0,
+        best: 0,
+    ),
+    weekly: (
+        week: 0,
+        best: 0,
+        claimed: false,
+    ),
+)

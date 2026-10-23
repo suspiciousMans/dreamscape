@@ -57,6 +57,10 @@ mod hand;
 mod hud;
 mod hunter;
 mod combat;
+mod lullaby;
+mod newfoes;
+mod tooth;
+mod weeper;
 mod loadout_ui;
 mod nerve;
 mod lore;
@@ -214,6 +218,10 @@ struct CombatTarget {
     kind: combat::Kind,
     /// It has not noticed you.
     unaware: bool,
+    /// Struck on armour (a Lullaby's front).
+    guarded: bool,
+    /// In a vulnerable recovery (a Tooth after its lunge).
+    recovering: bool,
 }
 
 struct SpecialEnemy {
@@ -221,6 +229,30 @@ struct SpecialEnemy {
     kind: EnemyKind,
     ai: SpecialAI,
 }
+
+// === enemies-a ===
+enum NewAI {
+    Tooth(tooth::Tooth),
+    Weeper(weeper::Weeper),
+    Lullaby(lullaby::Lullaby),
+}
+
+/// Tooth, Weeper or Lullaby, with the entities that dress it (tears, the
+/// armour plate, the slam marker and ring), all despawned with it.
+struct NewFoe {
+    entity: Entity,
+    kind: combat::Kind,
+    ai: NewAI,
+    base: Vec3,
+    floor_y: f32,
+    calm: Arc<GpuTexture>,
+    tell: Arc<GpuTexture>,
+    extras: Vec<Entity>,
+}
+
+/// Segments of a Lullaby's slam ring.
+const SLAM_SEGMENTS: usize = 32;
+// === end enemies-a ===
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Crumble {
@@ -487,6 +519,11 @@ pub struct DreamscapeGame {
     slashes: Vec<(Entity, f32)>,
     slash_pending: Option<(Vec3, Vec3)>,
     // === end combat ===
+    // === enemies-a ===
+    newfoes: Vec<NewFoe>,
+    /// Wall boxes tears die on.
+    foe_walls: Vec<weeper::Wall>,
+    // === end enemies-a ===
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
     /// An ability just fired: burst here, in these colours (spawned next update).
@@ -872,6 +909,8 @@ impl DreamscapeGame {
             counter_cd: 0.0,
             slashes: Vec::new(),
             slash_pending: None,
+            newfoes: Vec::new(), // enemies-a
+            foe_walls: Vec::new(), // enemies-a
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
@@ -1953,13 +1992,25 @@ impl DreamscapeGame {
     fn combat_targets(&self) -> Vec<CombatTarget> {
         let at = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
         let mut targets = Vec::new();
+        let me = self.player_position;
+        // === enemies-a === (armoured front, recovering) per new enemy
+        for f in &self.newfoes {
+            let Some(pos) = at(&self.world, f.entity) else { continue };
+            let (unaware, guarded, recovering) = match &f.ai {
+                NewAI::Tooth(a) => (a.unaware(pos, me), false, a.vulnerable()),
+                NewAI::Weeper(a) => (a.unaware(pos, me), false, false),
+                NewAI::Lullaby(a) => (a.unaware(pos, me), a.guarded_against(pos, me), false),
+            };
+            targets.push(CombatTarget { entity: f.entity, pos, kind: f.kind, unaware, guarded, recovering });
+        }
+        // === end enemies-a ===
         for p in &self.enemies {
             if let Some(pos) = at(&self.world, p.entity) {
                 let kind = combat::Kind::Pacer {
                     elite: p.elite,
                     child: p.split && p.elite == Some(Elite::Splitter),
                 };
-                targets.push(CombatTarget { entity: p.entity, pos, kind, unaware: !p.ai.chasing });
+                targets.push(CombatTarget { entity: p.entity, pos, kind, unaware: !p.ai.chasing, guarded: false, recovering: false });
             }
         }
         for sp in &self.specials {
@@ -1977,6 +2028,8 @@ impl DreamscapeGame {
                     pos,
                     kind,
                     unaware: !matches!(kind, combat::Kind::Sentry),
+                    guarded: false,
+                    recovering: false,
                 });
             }
         }
@@ -1996,7 +2049,9 @@ impl DreamscapeGame {
             // STILLNESS freezes: a frozen foe is a reeling one.
             staggered: self.stunned.contains_key(&t.entity)
                 || self.staggered.contains_key(&t.entity)
+                || t.recovering
                 || self.run.active(Ability::Stillness),
+            guarded: t.guarded,
             ghost: self.run.active(Ability::Phase),
             hush: self.run.active(Ability::Hush),
             high_ground: self.run.active(Ability::Step)
@@ -2034,6 +2089,22 @@ impl DreamscapeGame {
                         tr.position += away * knock;
                     }
                 }
+                // === enemies-a ===
+                if let Some(f) = self.newfoes.iter_mut().find(|f| f.entity == t.entity) {
+                    match &mut f.ai {
+                        // Its recovery is its own clock: no extra reel.
+                        NewAI::Tooth(a) => a.hurt(),
+                        NewAI::Weeper(a) => {
+                            a.hurt();
+                            self.staggered.insert(t.entity, stagger);
+                        }
+                        NewAI::Lullaby(a) => {
+                            a.stagger();
+                            self.staggered.insert(t.entity, stagger);
+                        }
+                    }
+                } else
+                // === end enemies-a ===
                 if matches!(t.kind, combat::Kind::Pacer { .. }) {
                     self.stunned.insert(t.entity, stagger);
                     if let Some(p) = self.enemies.iter_mut().find(|p| p.entity == t.entity) {
@@ -2301,6 +2372,14 @@ impl DreamscapeGame {
         self.stunned.remove(&entity);
         self.staggered.remove(&entity);
         self.enemies.retain(|p| p.entity != entity);
+        // === enemies-a === its tears, plate, marker and ring go with it
+        if let Some(k) = self.newfoes.iter().position(|f| f.entity == entity) {
+            let f = self.newfoes.remove(k);
+            for e in f.extras {
+                let _ = self.world.despawn(e);
+            }
+        }
+        // === end enemies-a ===
         if let Some(k) = self.specials.iter().position(|s| s.entity == entity) {
             let sp = self.specials.remove(k);
             if let SpecialAI::Sentry(_, beam) = sp.ai {
@@ -2378,9 +2457,11 @@ impl DreamscapeGame {
         let pacers = self.enemies.iter().filter_map(|p| at(p.entity));
         let specials = self.specials.iter().filter_map(|s| at(s.entity));
         let hunter = self.hunter.iter().filter_map(|(e, _, _)| at(*e));
+        let fresh = self.newfoes.iter().filter_map(|f| at(f.entity)); // enemies-a
         pacers
             .chain(specials)
             .chain(hunter)
+            .chain(fresh)
             .map(|p| Vec3::new(me.x - p.x, 0.0, me.z - p.z))
             .filter(|d| d.length() > 1e-3)
             .min_by(|a, b| a.length().total_cmp(&b.length()))
@@ -3603,6 +3684,228 @@ impl DreamscapeGame {
         Ok(())
     }
 
+    // === enemies-a ===
+    /// Puts the dream's Tooth, Weeper and Lullaby in their lairs.
+    fn spawn_newfoes(
+        &mut self,
+        gl: &engine::glow::Context,
+        dream: &Dream,
+        player_speed: f32,
+    ) -> anyhow::Result<()> {
+        // Dev switch: DREAMSCAPE_ENEMY=Tooth|Weeper|Lullaby in every dream.
+        let dev = crate::dev::var("DREAMSCAPE_ENEMY")
+            .ok()
+            .and_then(|n| newfoes::forced(&n));
+        let allowed = !self.coop_active()
+            && self.prologue.is_none()
+            && !self.director.nightmare
+            && (!self.autopilot || dev.is_some());
+        if !allowed {
+            return Ok(());
+        }
+        let plan = match dev {
+            Some(k) => newfoes::forced_plan(k),
+            None => newfoes::plan(dream.depth, dream.theme, dream.seed, false),
+        };
+        self.foe_walls = dream
+            .blocks
+            .iter()
+            .filter(|b| b.kind == BlockKind::Wall)
+            .map(|b| (b.pos - b.size * 0.5, b.pos + b.size * 0.5))
+            .collect();
+        // With the dev switch, crowd them near the spawn so a screenshot sees them.
+        let mut lairs = dream.lairs.clone();
+        if dev.is_some() {
+            lairs.sort_by(|a, b| {
+                (*a - dream.spawn).length().total_cmp(&(*b - dream.spawn).length())
+            });
+            lairs.truncate(4);
+            // DREAMSCAPE_ENEMY_NEAR=1 (screenshots): right in front of the spawn.
+            if crate::dev::var("DREAMSCAPE_ENEMY_NEAR").is_ok() {
+                let s = dream.spawn;
+                lairs = vec![s + Vec3::new(-2.0, 0.0, 8.0), s + Vec3::new(5.0, 0.0, 10.0)];
+            }
+        }
+        for (kind, lair) in newfoes::place(&plan, &lairs, dream.seed) {
+            let (shape, base, calm, tell) = match kind {
+                combat::Kind::Tooth => (
+                    Shape::Cone,
+                    Vec3::new(0.8, 1.3, 0.8),
+                    [235, 228, 200, 255],
+                    [255, 50, 40, 255],
+                ),
+                combat::Kind::Weeper => (
+                    Shape::Cylinder,
+                    Vec3::new(0.7, 1.9, 0.7),
+                    [110, 150, 235, 255],
+                    [225, 245, 255, 255],
+                ),
+                _ => (
+                    Shape::Cube,
+                    Vec3::new(1.9, 2.4, 1.9),
+                    [140, 90, 170, 255],
+                    [255, 200, 110, 255],
+                ),
+            };
+            let calm_tex = self.texture(gl, calm);
+            let tell_tex = self.texture(gl, tell);
+            let at = Vec3::new(lair.x, lair.y + (base.y * 0.5).max(0.5), lair.z);
+            let entity = self.world.spawn((
+                Transform { position: at, rotation: Quat::IDENTITY, scale: base },
+                MeshRenderer { mesh: self.mesh(shape)?, texture: Some(calm_tex.clone()) },
+                Lit,
+            ));
+            let mut extras = Vec::new();
+            let part = |g: &mut Self, shape: Shape, color: [u8; 4], translucent: bool| -> anyhow::Result<Entity> {
+                let tex = g.texture(gl, color);
+                let e = g.world.spawn((
+                    Transform { position: at, rotation: Quat::IDENTITY, scale: Vec3::ZERO },
+                    MeshRenderer { mesh: g.mesh(shape)?, texture: Some(tex) },
+                    Lit,
+                ));
+                if translucent {
+                    g.world.insert_one(e, Translucent)?;
+                }
+                Ok(e)
+            };
+            let ai = match kind {
+                combat::Kind::Tooth => NewAI::Tooth(tooth::Tooth::new(at, player_speed)),
+                combat::Kind::Weeper => {
+                    for _ in 0..weeper::MAX_TEARS {
+                        extras.push(part(self, Shape::Orb, [90, 230, 255, 255], false)?);
+                    }
+                    NewAI::Weeper(weeper::Weeper::new(at, player_speed))
+                }
+                _ => {
+                    // The armour plate on its front, the slam marker, the ring.
+                    extras.push(part(self, Shape::Cube, [235, 200, 110, 255], false)?);
+                    extras.push(part(self, Shape::Torus, [255, 110, 80, 255], true)?);
+                    for _ in 0..SLAM_SEGMENTS {
+                        extras.push(part(self, Shape::Cube, [255, 90, 150, 255], false)?);
+                    }
+                    NewAI::Lullaby(lullaby::Lullaby::new(at, player_speed))
+                }
+            };
+            log::info!("New enemy: {kind:?} at {at:?}");
+            self.newfoes.push(NewFoe {
+                entity,
+                kind,
+                ai,
+                base,
+                floor_y: lair.y,
+                calm: calm_tex,
+                tell: tell_tex,
+                extras,
+            });
+        }
+        Ok(())
+    }
+
+    /// Thinks for each new enemy and mirrors it (and its tears, plate,
+    /// marker and ring) onto its entities.
+    fn update_newfoes(&mut self, dt: f32, held: bool) {
+        if self.newfoes.is_empty() {
+            return;
+        }
+        let player = self.player_position;
+        let reduced = self.settings.reduced_motion;
+        let aim = self.decoy.map_or(player, |(at, _)| at);
+        let yaw_of = |f: Vec3| Quat::from_rotation_y(f.x.atan2(f.z));
+        for f in &mut self.newfoes {
+            let reeling = held || self.staggered.contains_key(&f.entity);
+            // The body first (one Transform borrowed at a time: hecs checks
+            // borrows per component column, not per entity).
+            let (telling, pos) = {
+                let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) else {
+                    continue;
+                };
+                let telling = match &mut f.ai {
+                    NewAI::Tooth(a) => {
+                        if !held {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.eye_lit()
+                    }
+                    NewAI::Weeper(a) => {
+                        if !reeling {
+                            a.update_aimed(&mut t.position, player, aim, &self.foe_walls, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        a.telling()
+                    }
+                    NewAI::Lullaby(a) => {
+                        if !reeling {
+                            a.update(&mut t.position, player, dt);
+                        }
+                        t.scale = f.base * a.scale_mult(reduced);
+                        t.rotation = yaw_of(a.facing());
+                        matches!(a.phase(), lullaby::Phase::Telegraph(_))
+                    }
+                };
+                (telling, t.position)
+            };
+            // Then what it carries: tears, plate, marker, ring.
+            match &f.ai {
+                NewAI::Tooth(_) => {}
+                NewAI::Weeper(a) => {
+                    for (k, e) in f.extras.iter().enumerate() {
+                        if let Ok(mut te) = self.world.get::<&mut Transform>(*e) {
+                            match a.tears.get(k) {
+                                Some(tear) => {
+                                    te.position = tear.pos;
+                                    te.scale = Vec3::splat(0.55);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            }
+                        }
+                    }
+                }
+                NewAI::Lullaby(a) => {
+                    let centre = Vec3::new(pos.x, f.floor_y, pos.z);
+                    for (k, e) in f.extras.iter().enumerate() {
+                        let Ok(mut te) = self.world.get::<&mut Transform>(*e) else {
+                            continue;
+                        };
+                        match k {
+                            0 => {
+                                te.position = pos + a.facing() * (f.base.x * 0.5 + 0.1);
+                                te.rotation = yaw_of(a.facing());
+                                te.scale = Vec3::new(1.5, 1.7, 0.25);
+                            }
+                            1 => match a.marker() {
+                                Some(r) => {
+                                    te.position = centre + Vec3::Y * 0.06;
+                                    te.rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+                                    te.scale = Vec3::new(2.0 * r, 2.0 * r, 0.05);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            },
+                            _ => match a.ring() {
+                                Some(radius) => {
+                                    let n = SLAM_SEGMENTS;
+                                    let ang = std::f32::consts::TAU * (k - 2) as f32 / n as f32;
+                                    let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+                                    let arc = std::f32::consts::TAU * radius / n as f32;
+                                    te.position = centre + out * radius + Vec3::Y * boss::RING_H * 0.5;
+                                    te.rotation = Quat::from_rotation_y(-ang + std::f32::consts::FRAC_PI_2);
+                                    te.scale = Vec3::new(arc * 1.05, boss::RING_H, boss::RING_T);
+                                }
+                                None => te.scale = Vec3::ZERO,
+                            },
+                        }
+                    }
+                }
+            }
+            if let Ok(mut r) = self.world.get::<&mut MeshRenderer>(f.entity) {
+                r.texture = Some(if telling { f.tell.clone() } else { f.calm.clone() });
+            }
+        }
+    }
+    // === end enemies-a ===
+
     /// Specials, crumbling floor and the jester, once per frame.
     fn update_specials(&mut self, dt: f32, held: bool) -> anyhow::Result<()> {
         let player = self.player_position;
@@ -3884,10 +4187,28 @@ impl DreamscapeGame {
             specials::gate_closed(self.dream_age, phase) && specials::gate_blocks(at, dir, player)
         });
         let boss_fx = self.hunter.iter().any(|(_, b, _)| b.hits(player));
+        // === enemies-a ===
+        let tooth = self.newfoes.iter().any(|f| {
+            matches!(&f.ai, NewAI::Tooth(t) if t.armed())
+                && at(f.entity).is_some_and(|pos| gameplay::touches(pos, player, gameplay::ENEMY_TOUCH_RADIUS))
+        });
+        let tear = self
+            .newfoes
+            .iter()
+            .any(|f| matches!(&f.ai, NewAI::Weeper(w) if w.touching(player)));
+        let slam = self.newfoes.iter().any(|f| {
+            matches!(&f.ai, NewAI::Lullaby(l) if at(f.entity).is_some_and(|pos| {
+                l.hits(Vec3::new(pos.x, 0.0, pos.z), player - Vec3::Y * f.floor_y)
+            }))
+        });
+        // === end enemies-a ===
         [
             (pacers, "patrol"),
             (hunter, "hunter"),
             (boss_fx, "boss attack"),
+            (slam, "slam"), // enemies-a
+            (tooth, "tooth"), // enemies-a
+            (tear, "tear"), // enemies-a
             (special, "special enemy"),
             (gate, "gate"),
             (beat, "beat tile"),
@@ -3983,6 +4304,28 @@ impl DreamscapeGame {
                 }
             }
         }
+        // === enemies-a === the new enemies reel too
+        for f in &mut self.newfoes {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(f.entity) {
+                let d = t.position - player;
+                let flat = Vec3::new(d.x, 0.0, d.z);
+                if flat.length() < radius {
+                    t.position += flat.normalize_or_zero() * push;
+                    match &mut f.ai {
+                        NewAI::Tooth(a) => a.hurt(),
+                        NewAI::Weeper(a) => {
+                            a.hurt();
+                            self.staggered.insert(f.entity, stun);
+                        }
+                        NewAI::Lullaby(a) => {
+                            a.stagger();
+                            self.staggered.insert(f.entity, stun);
+                        }
+                    }
+                }
+            }
+        }
+        // === end enemies-a ===
     }
 
     /// Loud abilities carry: every enemy within `radius` that isn't reeling
@@ -7033,6 +7376,8 @@ impl DreamscapeGame {
         }
         self.enemies.clear();
         self.specials.clear();
+        self.newfoes.clear(); // enemies-a
+        self.foe_walls.clear(); // enemies-a
         self.crumbles.clear();
         self.trail.clear();
         self.mimic_awake_at = specials::MIMIC_DELAY;
@@ -7637,6 +7982,7 @@ impl DreamscapeGame {
             });
         }
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
+        self.spawn_newfoes(gl, &dream, player_speed)?; // enemies-a
         // === shards ===
         if let (Some(a), Some(SpecialEnemy { ai: SpecialAI::Sentry(s, _), .. })) =
             (self.guard_angle, self.specials.last_mut())
@@ -9156,6 +9502,7 @@ impl Game for DreamscapeGame {
             }
         }
         self.update_specials(dt, held)?;
+        self.update_newfoes(dt, held); // enemies-a
         self.update_features();
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
