@@ -135,6 +135,42 @@ impl Strike {
     }
 }
 
+/// The swing's flash: a fan of rays swept from one side to the other (and
+/// back on the next swing), each lighting as the sweep reaches it, then
+/// narrowing away. Pure, so the shape is tested.
+pub const SLASH_RAYS: usize = 13;
+pub const SLASH_SWEEP: f32 = 0.14;
+pub const SLASH_FADE: f32 = 0.16;
+pub const SLASH_LIFE: f32 = SLASH_SWEEP + SLASH_FADE;
+
+/// One ray of the fan at some moment: how far round from the facing (radians,
+/// positive to the right), how much of its full width and length it keeps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ray {
+    pub angle: f32,
+    pub width: f32,
+    pub length: f32,
+}
+
+/// Ray `i` of `n` at `age` seconds into a swing whose arc is `half_arc` each
+/// way. `flip` sweeps right to left. Reduced motion lights the whole fan at
+/// once. `None` while it is dark (not reached yet, or faded).
+pub fn slash_ray(i: usize, n: usize, age: f32, half_arc: f32, flip: bool, reduced: bool) -> Option<Ray> {
+    let frac = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
+    let lit_at = if reduced { 0.0 } else { SLASH_SWEEP * frac };
+    let since = age - lit_at;
+    if !(0.0..SLASH_FADE).contains(&since) {
+        return None;
+    }
+    let side = if flip { -1.0 } else { 1.0 };
+    let width = (1.0 - since / SLASH_FADE).powf(1.5);
+    Some(Ray {
+        angle: side * (-half_arc + 2.0 * half_arc * frac),
+        width,
+        length: 0.85 + 0.15 * width,
+    })
+}
+
 /// Strike reach with LONG REACH stacks.
 pub fn reach_with(stacks: u32) -> f32 {
     REACH * (1.0 + LONG_REACH_PER * stacks.min(2) as f32)
@@ -393,6 +429,58 @@ mod tests {
         assert_eq!(damage(1.0, all), 6.0);
         assert_eq!(damage(1.0, Ctx { guarded: true, ..plain }), 0.5, "armour halves it");
         assert_eq!(damage(1.0, Ctx { guarded: true, ..all }), 3.0);
+    }
+
+    #[test]
+    fn the_slash_sweeps_across_the_arc_one_ray_after_another() {
+        let half = ARC_COS.acos();
+        let n = SLASH_RAYS;
+        // Nothing before the swing; the first ray is lit at once, the last at the end of the sweep.
+        assert!(slash_ray(n - 1, n, 0.0, half, false, false).is_none());
+        let first = slash_ray(0, n, 0.0, half, false, false).unwrap();
+        assert!((first.angle + half).abs() < 1e-4, "starts at the left edge");
+        assert_eq!(first.width, 1.0);
+        let last = slash_ray(n - 1, n, SLASH_SWEEP, half, false, false).unwrap();
+        assert!((last.angle - half).abs() < 1e-4, "ends at the right edge");
+        // Lit in order.
+        let mut prev = -1.0;
+        for i in 0..n {
+            let lit = (0..400)
+                .map(|k| k as f32 * 0.001)
+                .find(|&t| slash_ray(i, n, t, half, false, false).is_some())
+                .unwrap();
+            assert!(lit >= prev, "ray {i} lights after ray {}", i.saturating_sub(1));
+            prev = lit;
+        }
+    }
+
+    #[test]
+    fn the_trail_narrows_and_goes_dark_and_the_lead_is_the_widest() {
+        let half = ARC_COS.acos();
+        let early = slash_ray(0, SLASH_RAYS, 0.0, half, false, false).unwrap();
+        let later = slash_ray(0, SLASH_RAYS, 0.1, half, false, false).unwrap();
+        assert!(later.width < early.width && later.length < early.length);
+        assert!(slash_ray(0, SLASH_RAYS, SLASH_FADE + 0.001, half, false, false).is_none());
+        // Whole fan dark by the end of the life.
+        for i in 0..SLASH_RAYS {
+            assert!(slash_ray(i, SLASH_RAYS, SLASH_LIFE + 0.01, half, false, false).is_none());
+        }
+    }
+
+    #[test]
+    fn the_next_swing_goes_the_other_way_and_reduced_motion_lights_it_all_at_once() {
+        let half = 1.0;
+        let a = slash_ray(0, SLASH_RAYS, 0.0, half, false, false).unwrap();
+        let b = slash_ray(0, SLASH_RAYS, 0.0, half, true, false).unwrap();
+        assert_eq!(a.angle, -b.angle, "flipped");
+        let lit = (0..SLASH_RAYS)
+            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, true).is_some())
+            .count();
+        assert_eq!(lit, SLASH_RAYS);
+        let lit_normal = (0..SLASH_RAYS)
+            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, false).is_some())
+            .count();
+        assert!(lit_normal < SLASH_RAYS);
     }
 
     #[test]

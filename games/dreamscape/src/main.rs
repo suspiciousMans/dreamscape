@@ -220,6 +220,24 @@ enum SpecialAI {
     Leech(leech::Leech),
 }
 
+/// A swing's flash in flight: a fan of rays swept across the strike's arc.
+struct Slash {
+    rays: Vec<Entity>,
+    age: f32,
+    facing: Vec3,
+    reach: f32,
+    half_arc: f32,
+    flip: bool,
+}
+
+/// What a swing asks for, until the next frame spawns it.
+struct SlashStart {
+    facing: Vec3,
+    reach: f32,
+    half_arc: f32,
+    flip: bool,
+}
+
 /// Something a strike, a dash or a shock can hit.
 struct CombatTarget {
     entity: Entity,
@@ -525,8 +543,8 @@ pub struct DreamscapeGame {
     air_refunded: bool,
     counter_cd: f32,
     /// The swing's flash: (entity, age); and one waiting to be spawned.
-    slashes: Vec<(Entity, f32)>,
-    slash_pending: Option<(Vec3, Vec3)>,
+    slashes: Vec<Slash>,
+    slash_pending: Option<SlashStart>,
     // === end combat ===
     // === enemies-a ===
     newfoes: Vec<NewFoe>,
@@ -1895,7 +1913,17 @@ impl DreamscapeGame {
                     self.air_refunded = true;
                 }
                 self.sfx(Sound::Strike);
-                self.slash_pending = Some((self.player_position, self.flat_facing()));
+                let arc = if self.run.count(Upgrade::WideEyes) > 0 {
+                    combat::ARC_COS_WIDE
+                } else {
+                    combat::ARC_COS
+                };
+                self.slash_pending = Some(SlashStart {
+                    facing: self.flat_facing(),
+                    reach: combat::reach_with(self.run.count(Upgrade::LongReach)),
+                    half_arc: arc.acos(),
+                    flip: self.strike_count % 2 == 1, // every other swing comes back
+                });
             }
         }
         if self.strike.tick(dt) {
@@ -1962,22 +1990,46 @@ impl DreamscapeGame {
             let (e, _, _) = self.unraveling.remove(k);
             let _ = self.world.despawn(e);
         }
-        // The swing's flash fades fast.
+        // The swing's flash: a fan sweeps across the arc, then narrows away.
+        let me = self.player_position;
+        let reduced = self.settings.reduced_motion;
         let mut done = Vec::new();
-        for (k, (e, age)) in self.slashes.iter_mut().enumerate() {
-            *age += dt;
-            if *age >= 0.14 {
+        for (k, s) in self.slashes.iter_mut().enumerate() {
+            s.age += dt;
+            if s.age >= combat::SLASH_LIFE {
                 done.push(k);
-            } else if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
-                t.scale.z = 0.5 * (1.0 - *age / 0.14);
+                continue;
+            }
+            let n = s.rays.len();
+            for (i, e) in s.rays.iter().enumerate() {
+                let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
+                    continue;
+                };
+                match combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced) {
+                    Some(r) => {
+                        let (sin, cos) = r.angle.sin_cos();
+                        // Positive angles lean to the right of the facing.
+                        let dir = Vec3::new(
+                            s.facing.x * cos + s.facing.z * sin,
+                            0.0,
+                            -s.facing.x * sin + s.facing.z * cos,
+                        );
+                        let len = s.reach * r.length;
+                        t.position = me + dir * (len / 2.0) + Vec3::Y * 0.25;
+                        t.rotation = Quat::from_rotation_arc(Vec3::Z, dir);
+                        t.scale = Vec3::new(0.12 + 0.5 * r.width, 0.01, len);
+                    }
+                    None => t.scale = Vec3::ZERO,
+                }
             }
         }
         for k in done.into_iter().rev() {
-            let (e, _) = self.slashes.remove(k);
-            let _ = self.world.despawn(e);
+            let s = self.slashes.remove(k);
+            for e in s.rays {
+                let _ = self.world.despawn(e);
+            }
         }
         // Calm motes bob; touching one steadies you.
-        let me = self.player_position;
         let coop = self.coop_active();
         let mut taken = Vec::new();
         for (k, (e, age)) in self.motes.iter_mut().enumerate() {
@@ -3242,23 +3294,34 @@ impl DreamscapeGame {
     fn update_bursts(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
         let now = self.dream_age;
         // === combat === the swing's flash
-        if let Some((at, facing)) = self.slash_pending.take() {
+        if let Some(start) = self.slash_pending.take() {
             let cube = self.mesh(Shape::Cube)?;
-            let tex = self.texture(gl, [255, 215, 255, 255]);
-            let e = self.world.spawn((
-                Transform {
-                    position: at + facing * 1.5 + Vec3::Y * 0.25,
-                    rotation: Quat::from_rotation_arc(Vec3::Z, facing),
-                    scale: Vec3::new(2.4, 0.1, 0.5),
-                },
-                MeshRenderer {
-                    mesh: cube,
-                    texture: Some(tex),
-                },
-                Lit,
-                Hero,
-            ));
-            self.slashes.push((e, 0.0));
+            let tex = self.texture(gl, [255, 225, 255, 255]);
+            let rays = (0..combat::SLASH_RAYS)
+                .map(|_| {
+                    self.world.spawn((
+                        Transform {
+                            position: self.player_position,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ZERO,
+                        },
+                        MeshRenderer {
+                            mesh: cube.clone(),
+                            texture: Some(tex.clone()),
+                        },
+                        Lit,
+                        Hero,
+                    ))
+                })
+                .collect();
+            self.slashes.push(Slash {
+                rays,
+                age: 0.0,
+                facing: start.facing,
+                reach: start.reach,
+                half_arc: start.half_arc,
+                flip: start.flip,
+            });
         }
         for at in std::mem::take(&mut self.pending_motes) {
             let mesh = self.mesh(Shape::Octahedron)?;
