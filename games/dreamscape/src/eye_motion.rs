@@ -102,6 +102,13 @@ pub fn glance(clock: f32) -> f32 {
     smoother(p / GLANCE_EASE).min(smoother((GLANCE_LEN - p) / GLANCE_EASE))
 }
 
+/// The clock value at which a glance starts, at or after `clock`: setting the
+/// clock to it makes the eye glance at once (the shard is taken: look at the
+/// way out).
+pub fn next_glance_clock(clock: f32) -> f32 {
+    ((clock / GLANCE_PERIOD).ceil().max(1.0)) * GLANCE_PERIOD
+}
+
 /// What a shut, dreaming eye does this frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Rem {
@@ -181,6 +188,18 @@ pub fn hash01(k: u64, salt: u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_next_glance_starts_at_once_and_never_in_the_past() {
+        for clock in [0.0_f32, 3.0, 19.9, 20.0, 41.0, 100.0] {
+            let at = next_glance_clock(clock);
+            assert!(at >= clock && at >= GLANCE_PERIOD, "{clock} -> {at}");
+            assert!(at - clock < GLANCE_PERIOD + 1e-3);
+            assert!(glance(at + 0.6) > 0.5, "the glance is up by {at}");
+        }
+    }
+
     use super::*;
 
     #[test]

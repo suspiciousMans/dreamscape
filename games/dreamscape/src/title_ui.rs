@@ -76,6 +76,74 @@ pub fn draw_warning(p: &egui::Painter, screen: Rect, v: &HudView) {
     }
 }
 
+/// Where the title menu sits, so drawing and the mouse agree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuLayout {
+    /// The header's top and the 0.5..1 shrink on short windows.
+    pub top: f32,
+    pub k: f32,
+    pub menu_top: f32,
+    pub step: f32,
+    pub font: f32,
+    pub width: f32,
+    pub panel: Rect,
+    pub caption_size: f32,
+}
+
+/// `rows` are the labels as drawn (`[key]  label`); `has_goal` is whether the
+/// goal line is showing at the bottom.
+pub fn menu_layout(screen: Rect, rows: &[String], has_goal: bool) -> MenuLayout {
+    let cx = screen.center().x;
+    // A long menu (host/join/memories...) needs the room: lift the header and keep
+    // the menu clear of the goal/streak lines pinned to the bottom.
+    let top = screen.top() + screen.height() * if rows.len() > 8 { 0.1 } else { 0.2 };
+    // The header's fixed offsets shrink together on short windows.
+    let k = (screen.height() / 720.0).clamp(0.5, 1.0);
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
+    let menu_top = top + 236.0 * k;
+    // Keep the menu clear of the caption, the goal line, the stats strip and
+    // the perks, all of which are centred on the same axis as the menu.
+    let caption_size = 15.0 * u.max(0.8);
+    let caption_room = caption_size + c * 4.0;
+    let goal_room = if has_goal { 18.0 * u.max(0.8) + 14.0 * u } else { 0.0 };
+    let bottom_room = 62.0 * u + 12.0 * u + 22.0 * u + goal_room + caption_room + 6.0;
+    let n = rows.len().max(1) as f32;
+    let step = ((screen.bottom() - bottom_room.max(105.0) - menu_top - c * 6.0) / n).min(36.0);
+    let font = (step * 0.9).clamp(9.0, 26.0);
+    // Rows are centred; the panel is as wide as its longest row needs, evenly
+    // padded, and sits on the screen's centre line.
+    let longest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as f32;
+    let want = longest * font * 0.6 + c * 16.0;
+    let width = want.max(340.0 * u).min(screen.width() - 20.0);
+    let panel = Rect::from_min_max(
+        Pos2::new(cx - width * 0.5, menu_top - c * 3.0),
+        Pos2::new(cx + width * 0.5, menu_top + step * n - 2.0 + c * 3.0),
+    );
+    MenuLayout {
+        top,
+        k,
+        menu_top,
+        step,
+        font,
+        width,
+        panel,
+        caption_size,
+    }
+}
+
+/// The row under `at`, if any (the whole width of the panel counts).
+pub fn menu_hit(screen: Rect, rows: &[String], has_goal: bool, at: Pos2) -> Option<usize> {
+    let l = menu_layout(screen, rows, has_goal);
+    if at.x < l.panel.left() || at.x > l.panel.right() {
+        return None;
+    }
+    (0..rows.len()).find(|&i| {
+        let y = l.menu_top + i as f32 * l.step;
+        at.y >= y - 2.0 && at.y < y + l.step - 2.0
+    })
+}
+
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
     // Star field that breathes.
@@ -95,11 +163,25 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     let cx = screen.center().x;
-    // A long menu (host/join/memories...) needs the room: lift the header and keep
-    // the menu clear of the goal/streak lines pinned to the bottom.
-    let top = screen.top() + screen.height() * if v.menu.len() > 8 { 0.1 } else { 0.2 };
+    let u = pixel_ui::scale(screen);
+    let c = pixel_ui::cell(u);
+    let rows: Vec<String> = v
+        .menu
+        .iter()
+        .map(|(key, label, _)| v.k(&format!("[{key}]  {label}")))
+        .collect();
+    let lay = menu_layout(screen, &rows, !v.goal.is_empty());
+    let (top, k, menu_top, step, font, width, panel, caption_size) = (
+        lay.top,
+        lay.k,
+        lay.menu_top,
+        lay.step,
+        lay.font,
+        lay.width,
+        lay.panel,
+        lay.caption_size,
+    );
     // The header's fixed offsets shrink together on short windows.
-    let k = (screen.height() / 720.0).clamp(0.5, 1.0);
     glitch_text(
         p,
         Pos2::new(cx, top),
@@ -123,33 +205,6 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         rgba([200, 190, 230], 0.8),
     );
     crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0 * k), v.eye, v);
-
-    let u = pixel_ui::scale(screen);
-    let c = pixel_ui::cell(u);
-    let menu_top = top + 236.0 * k;
-    // Keep the menu clear of the caption, the goal line, the stats strip and
-    // the perks, all of which are centred on the same axis as the menu.
-    let caption_size = 15.0 * u.max(0.8);
-    let caption_room = caption_size + c * 4.0;
-    let goal_room = if v.goal.is_empty() { 0.0 } else { 18.0 * u.max(0.8) + 14.0 * u };
-    let bottom_room = 62.0 * u + 12.0 * u + 22.0 * u + goal_room + caption_room + 6.0;
-    let n = v.menu.len().max(1) as f32;
-    let step = ((screen.bottom() - bottom_room.max(105.0) - menu_top - c * 6.0) / n).min(36.0);
-    let font = (step * 0.9).clamp(9.0, 26.0);
-    // Rows are centred; the panel is as wide as its longest row needs, evenly
-    // padded, and sits on the screen's centre line.
-    let rows: Vec<String> = v
-        .menu
-        .iter()
-        .map(|(key, label, _)| v.k(&format!("[{key}]  {label}")))
-        .collect();
-    let longest = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as f32;
-    let want = longest * font * 0.6 + c * 16.0;
-    let width = want.max(340.0 * u).min(screen.width() - 20.0);
-    let panel = Rect::from_min_max(
-        Pos2::new(cx - width * 0.5, menu_top - c * 3.0),
-        Pos2::new(cx + width * 0.5, menu_top + step * n - 2.0 + c * 3.0),
-    );
     pixel_ui::panel(p, panel, [120, 100, 180], rgba([8, 4, 20], 0.82), c, 0.7);
     let selected = v.shop_col.min(v.menu.len().saturating_sub(1));
     for (i, ((_, _, _), row)) in v.menu.iter().zip(&rows).enumerate() {

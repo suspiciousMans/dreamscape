@@ -57,6 +57,7 @@ mod hand;
 mod hud;
 mod hunter;
 mod combat;
+mod edges;
 mod lullaby;
 mod newfoes;
 mod tooth;
@@ -544,6 +545,18 @@ pub struct DreamscapeGame {
     air_until: f32,
     air_refunded: bool,
     counter_cd: f32,
+    /// The combat edges the equipped cards teach.
+    edges: Vec<edges::Edge>,
+    /// FLOURISH's chain, SIPHON's tally, HEXMARK's marks, a LUNGE under way.
+    flourish: edges::Chain,
+    siphon: edges::Tally,
+    marks: HashMap<Entity, f32>,
+    lunge_left: f32,
+    lunge_dir: Vec3,
+    /// When each edge last did something (dream age), for the hand's pulse.
+    edge_fired: Vec<(edges::Edge, f32)>,
+    /// This blow is a FLOURISH (set while a strike resolves).
+    flourish_now: bool,
     /// The swing's flash: (entity, age); and one waiting to be spawned.
     slashes: Vec<Slash>,
     slash_pending: Option<SlashStart>,
@@ -881,6 +894,23 @@ fn fire_passive(fired: &mut Vec<(Upgrade, f32)>, run: &RunUpgrades, age: f32, u:
     fired.push((u, age));
 }
 
+/// What the mouse did on a menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pointer {
+    Hover,
+    Click,
+    /// Right button: step back (clear a pick, close).
+    Back,
+}
+
+/// Screens whose choices can be clicked.
+fn menu_pointer_mode(mode: hud::Mode) -> bool {
+    matches!(
+        mode,
+        hud::Mode::Title | hud::Mode::Choice | hud::Mode::Loadout | hud::Mode::Merge
+    )
+}
+
 impl DreamscapeGame {
     pub fn new(run_seed: u64) -> Self {
         Self {
@@ -944,6 +974,14 @@ impl DreamscapeGame {
             air_until: 0.0,
             air_refunded: false,
             counter_cd: 0.0,
+            edges: Vec::new(),
+            flourish: edges::Chain::default(),
+            siphon: edges::Tally::default(),
+            marks: HashMap::new(),
+            lunge_left: 0.0,
+            lunge_dir: Vec3::ZERO,
+            edge_fired: Vec::new(),
+            flourish_now: false,
             slashes: Vec::new(),
             slash_pending: None,
             newfoes: Vec::new(), // enemies-a
@@ -1835,7 +1873,16 @@ impl DreamscapeGame {
                     .iter()
                     .find(|n| n.0 == a.ability)
                     .map(|n| powers::power(n.1.theme).passive);
+                let edge = self
+                    .hand_cards
+                    .iter()
+                    .find(|n| n.0 == a.ability)
+                    .and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
                 hand::HandCard {
+                    edge: edge.map(|e| (e.name(), e.color())),
+                    edge_since: edge
+                        .and_then(|e| self.edge_fired.iter().find(|f| f.0 == e))
+                        .map_or(hand::NEVER, |f| self.dream_age - f.1),
                     passive: passive.map(|u| (u.info().name, u.info().color)),
                     passive_since: passive
                         .and_then(|u| self.passive_fired.iter().find(|f| f.0 == u))
@@ -1883,6 +1930,11 @@ impl DreamscapeGame {
             self.nerve.raise_max(want_max - self.nerve.max());
         }
         self.counter_cd = (self.counter_cd - dt).max(0.0);
+        self.lunge_left = (self.lunge_left - dt).max(0.0);
+        self.marks.retain(|_, left| {
+            *left -= dt;
+            *left > 0.0
+        });
         if !self.player_grounded {
             self.air_until = self.dream_age;
         } else {
@@ -1903,8 +1955,18 @@ impl DreamscapeGame {
         // === end combat passives ===
         let wants = std::mem::take(&mut self.strike_request);
         if active && wants {
-            let quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
+            let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
+            if self.has_edge(edges::Edge::Quickdraw) {
+                quick *= edges::QUICKDRAW_MULT;
+            }
             if self.strike.try_start(quick) {
+                // === edges === LUNGE: the swing carries you a step forward
+                if self.has_edge(edges::Edge::Lunge) {
+                    self.lunge_left = edges::LUNGE_SECS;
+                    self.lunge_dir = self.flat_facing();
+                    self.edge_fires(edges::Edge::Lunge);
+                }
+                // === end edges ===
                 // DOUBLE JUMP: a strike in the air gives one air jump back.
                 if !self.player_grounded
                     && !self.air_refunded
@@ -1954,6 +2016,9 @@ impl DreamscapeGame {
             self.leap_airborne = false;
         self.last_stand_used = false;
         self.counter_cd = 0.0;
+        self.marks.clear();
+        self.lunge_left = 0.0;
+        self.edge_fired.clear();
             if active {
                 let at = self.player_position;
                 if self.shock(at, combat::LEAP_SHOCK_REACH, 1.0, combat::STAGGER_SECS) > 0 {
@@ -2150,11 +2215,23 @@ impl DreamscapeGame {
                 || self.staggered.contains_key(&t.entity)
                 || t.recovering
                 || self.run.active(Ability::Stillness),
-            guarded: t.guarded,
+            guarded: t.guarded && !self.has_edge(edges::Edge::Rending),
             ghost: self.run.active(Ability::Phase),
             hush: self.run.active(Ability::Hush),
             high_ground: self.run.active(Ability::Step)
                 && me.y - t.pos.y > combat::HIGH_GROUND_RISE,
+        }
+    }
+
+    fn has_edge(&self, e: edges::Edge) -> bool {
+        self.edges.contains(&e)
+    }
+
+    /// An edge just did something: its card in the hand pulses.
+    fn edge_fires(&mut self, e: edges::Edge) {
+        if self.has_edge(e) {
+            self.edge_fired.retain(|f| f.0 != e);
+            self.edge_fired.push((e, self.dream_age));
         }
     }
 
@@ -2168,6 +2245,17 @@ impl DreamscapeGame {
         if ctx.unaware && self.run.has(upgrades::Synergy::Executioner) {
             dmg += 1.0;
         }
+        // === edges ===
+        if self.has_edge(edges::Edge::Reprisal) && self.nerve.invulnerable() {
+            dmg += edges::EDGE_BONUS;
+        }
+        if self.flourish_now {
+            dmg += edges::EDGE_BONUS;
+        }
+        if self.marks.contains_key(&t.entity) {
+            dmg += edges::EDGE_BONUS;
+        }
+        // === end edges ===
         dmg
     }
 
@@ -2175,6 +2263,11 @@ impl DreamscapeGame {
     /// `knock` shoves it that far from `from` (a frozen foe cannot be shoved).
     /// Returns true if it came undone.
     fn hurt_foe(&mut self, t: &CombatTarget, dmg: f32, from: Vec3, knock: f32, stagger: f32) -> bool {
+        // === edges === a mark is spent by the blow that uses it
+        if self.marks.remove(&t.entity).is_some() {
+            self.edge_fires(edges::Edge::Hexmark);
+        }
+        // === end edges ===
         let outcome = self
             .foes
             .entry(t.entity)
@@ -2182,6 +2275,11 @@ impl DreamscapeGame {
             .hit(dmg);
         match outcome {
             combat::Outcome::Hurt => {
+                // === edges === HEXMARK: the blow marks what it did not undo
+                if self.has_edge(edges::Edge::Hexmark) {
+                    self.marks.insert(t.entity, edges::HEXMARK_SECS);
+                }
+                // === end edges ===
                 let away = Vec3::new(t.pos.x - from.x, 0.0, t.pos.z - from.z).normalize_or_zero();
                 if knock > 0.0 && !self.run.active(Ability::Stillness) {
                     if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
@@ -2260,8 +2358,20 @@ impl DreamscapeGame {
         } else {
             combat::ARC_COS
         };
-        let knock = combat::KNOCKBACK
+        let mut knock = combat::KNOCKBACK
             * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+        // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
+        let mut stagger = combat::STAGGER_SECS;
+        if self.has_edge(edges::Edge::Haymaker) {
+            knock *= edges::HAYMAKER_KNOCK;
+            stagger *= edges::HAYMAKER_STAGGER;
+        }
+        self.flourish_now =
+            self.has_edge(edges::Edge::Flourish) && self.flourish.strike(self.dream_age);
+        if self.flourish_now {
+            self.edge_fires(edges::Edge::Flourish);
+        }
+        // === end edges ===
         // ECHO STRIKE: every fourth strike is followed by a longer wave.
         self.strike_count += 1;
         let echo = self.run.count(Upgrade::EchoStrike) > 0
@@ -2277,7 +2387,10 @@ impl DreamscapeGame {
                     continue;
                 }
                 // === combat === a mask's shield turns the blow aside
-                if t.kind == combat::Kind::Mask && self.mask_glances(t.entity, me) {
+                if t.kind == combat::Kind::Mask
+                    && !self.has_edge(edges::Edge::Rending)
+                    && self.mask_glances(t.entity, me)
+                {
                     self.mask_glance(t.pos);
                     continue;
                 }
@@ -2285,9 +2398,10 @@ impl DreamscapeGame {
                 struck = true;
                 self.burst_pending = Some((t.pos + Vec3::Y * 0.5, [255, 150, 230], [255, 255, 255]));
                 let dmg = self.strike_damage(&t);
-                self.hurt_foe(&t, dmg, me, knock, combat::STAGGER_SECS);
+                self.hurt_foe(&t, dmg, me, knock, stagger);
             }
         }
+        self.flourish_now = false;
         // === combat === the nightmare: wisps fall to a blow; the hunter only
         // can be hurt while it rests.
         if let Some((entity, b, _)) = self.hunter.as_mut() {
@@ -2479,6 +2593,14 @@ impl DreamscapeGame {
 
     /// An enemy comes undone: out of play at once, a short animation, loot.
     fn unravel(&mut self, entity: Entity, pos: Vec3) {
+        self.marks.remove(&entity);
+        // === edges === SIPHON: every third enemy undone steadies you
+        if self.has_edge(edges::Edge::Siphon) && self.siphon.undone() {
+            self.nerve.heal(1);
+            self.edge_fires(edges::Edge::Siphon);
+            self.sfx(Sound::Calm);
+        }
+        // === end edges ===
         self.foes.remove(&entity);
         self.stunned.remove(&entity);
         self.staggered.remove(&entity);
@@ -6245,6 +6367,115 @@ impl DreamscapeGame {
     }
 
     /// The pointer moved over (or clicked) the pick screen.
+    /// A key press, as if typed (the mouse uses the keys' own code paths).
+    fn press(&mut self, ctx: &mut Context, key: Keycode) {
+        let ev = Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(key),
+            scancode: None,
+            keymod: engine::sdl2::keyboard::Mod::NOMOD,
+            repeat: false,
+        };
+        self.handle_event(ctx, &ev);
+    }
+
+    /// The title menu's rows as drawn, and whether the goal line shows.
+    fn title_rows(&self) -> (Vec<String>, bool) {
+        let rows = self
+            .title_items()
+            .into_iter()
+            .map(|i| {
+                let (k, l, _) = self.title_label(i);
+                crate::pad::prompt(&format!("[{k}]  {l}"), self.mode, &self.settings, self.using_pad)
+            })
+            .collect();
+        let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
+        let goal = streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth));
+        (rows, !goal.is_empty())
+    }
+
+    // === pointer ===
+    /// The mouse over a menu: hovering selects, clicking does what Enter does
+    /// (the key to press is returned), right-clicking steps back. Positions
+    /// are mapped the way the screen draws.
+    fn menu_pointer(&mut self, x: i32, y: i32, what: Pointer) -> Option<Keycode> {
+        let (at, screen) = hud::to_layout(
+            hud::design_for(self.mode, self.store_tab),
+            self.screen_size,
+            x as f32,
+            y as f32,
+        );
+        let click = what == Pointer::Click;
+        match self.mode {
+            hud::Mode::Title => {
+                let (rows, goal) = self.title_rows();
+                if let Some(i) = title_ui::menu_hit(screen, &rows, goal, at) {
+                    self.title_sel = i;
+                    return click.then_some(Keycode::Return);
+                }
+            }
+            hud::Mode::Choice => {
+                let n = self.choice_view.cards.len();
+                let hit = upgrade_ui::card_rects(screen, n)
+                    .iter()
+                    .position(|r| r.contains(at));
+                if let Some(i) = hit {
+                    self.choice_view.selected = i;
+                    return click.then_some(Keycode::Return);
+                }
+            }
+            hud::Mode::Loadout => {
+                let lay = loadout_ui::layout(screen);
+                if click {
+                    // An equipped slot: click it to take the card out.
+                    if let Some(k) = lay.slots.iter().position(|r| r.contains(at)) {
+                        let chosen = self.booklet.lore.loadout.clone();
+                        if let Some(&number) = chosen.get(k) {
+                            self.booklet.lore.loadout.retain(|&n| n != number);
+                            self.sfx(Sound::Pick);
+                            self.persist_booklet();
+                        }
+                        return None;
+                    }
+                }
+                let n = self.booklet.card_count();
+                if let Some(i) = loadout_ui::grid_hit(screen, n, self.loadout_sel, lay.grid_top, lay.grid_w, at) {
+                    self.loadout_sel = i;
+                    return click.then_some(Keycode::Return);
+                }
+            }
+            hud::Mode::Merge => {
+                if what == Pointer::Back {
+                    if self.merge_first.is_some() {
+                        self.merge_first = None;
+                    } else {
+                        self.mode = self.merge_return;
+                    }
+                    return None;
+                }
+                let lay = merge_ui::layout(screen);
+                if click && lay.slots[0].contains(at) {
+                    // The first card's slot: click to take it back out.
+                    self.merge_first = None;
+                    return None;
+                }
+                if click && lay.slots[2].contains(at) {
+                    // The result: click to make it.
+                    return self.merge_first.is_some().then_some(Keycode::Return);
+                }
+                let n = self.booklet.card_count();
+                if let Some(i) = loadout_ui::grid_hit(screen, n, self.merge_sel, lay.grid_top, lay.grid_w, at) {
+                    self.merge_sel = i;
+                    return click.then_some(Keycode::Return);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+    // === end pointer ===
+
     fn pick_pointer(&mut self, x: i32, y: i32, click: bool) {
         let screen = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -6617,6 +6848,16 @@ impl DreamscapeGame {
                     },
                 }
             }
+            // Change your mind without hunting for the first card: Tab makes the
+            // card under the cursor the first one, Backspace puts it back.
+            Keycode::Tab => {
+                if let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number) {
+                    self.merge_first = Some(number);
+                    self.merge_status = None;
+                    self.sfx(Sound::Pick);
+                }
+            }
+            Keycode::Backspace if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape => self.mode = self.merge_return,
             _ => {}
@@ -6863,6 +7104,19 @@ impl DreamscapeGame {
             self.run.power(),
             self.loadout_scale
         );
+        self.edges = {
+            let mut e: Vec<edges::Edge> = Vec::new();
+            for c in &cards {
+                for x in loadout_ui::edges_of(c) {
+                    if !e.contains(&x) {
+                        e.push(x);
+                    }
+                }
+            }
+            e
+        };
+        self.flourish.reset();
+        self.siphon.reset();
         self.hand_cards = cards
             .iter()
             .map(|c| (powers::power(c.theme).active, c.clone()))
@@ -7486,14 +7740,22 @@ impl DreamscapeGame {
         ) {
             return None;
         }
-        self.shard_entities
+        let shard = self
+            .shard_entities
             .iter()
             .step_by(2)
             .filter_map(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position))
             .min_by(|a, b| {
                 a.distance_squared(self.player_position)
                     .total_cmp(&b.distance_squared(self.player_position))
-            })
+            });
+        // The shard (or the objective) is done: the eye turns to the way out.
+        // (A nightmare's portal stays sealed until every sigil is taken.)
+        shard.or_else(|| {
+            (self.objective.is_none() && self.sealed_portal.is_none())
+                .then(|| self.dream.as_ref().map(|d| d.portal))
+                .flatten()
+        })
     }
 
     /// The dream's objective is done: the shard is yours.
@@ -7512,6 +7774,8 @@ impl DreamscapeGame {
         }
         self.despawn_shard_slot();
         self.objective = None;
+        // The eye lifts its lid and looks at the way out, right now.
+        self.objective_clock = eye_motion::next_glance_clock(self.objective_clock);
         self.flash.trigger([0.3, 1.0, 1.0], 0.6);
         let pitch = self.juice.chain_pitch();
         self.juice.hit(juice::Hit::Shard, self.settings.reduced_motion);
@@ -9022,12 +9286,39 @@ impl Game for DreamscapeGame {
                 self.pick_pointer(*x, *y, true);
                 return;
             }
+            // === pointer === click a menu choice; right-click steps back
+            Event::MouseButtonDown {
+                mouse_btn: engine::sdl2::mouse::MouseButton::Left,
+                x,
+                y,
+                ..
+            } if menu_pointer_mode(self.mode) => {
+                if let Some(k) = self.menu_pointer(*x, *y, Pointer::Click) {
+                    self.press(ctx, k);
+                }
+                return;
+            }
+            Event::MouseButtonDown {
+                mouse_btn: engine::sdl2::mouse::MouseButton::Right,
+                x,
+                y,
+                ..
+            } if menu_pointer_mode(self.mode) => {
+                self.menu_pointer(*x, *y, Pointer::Back);
+                return;
+            }
+            // === end pointer ===
             // A real nudge of the mouse (not the synthetic event a window
             // gets when it opens under the cursor) switches back to keys.
             Event::MouseMotion { x, y, xrel, yrel, .. } => {
                 if self.mode == hud::Mode::PackPick {
                     self.pick_pointer(*x, *y, false);
                 }
+                // === pointer === hovering a choice selects it
+                if menu_pointer_mode(self.mode) && xrel.abs() + yrel.abs() > 0 {
+                    self.menu_pointer(*x, *y, Pointer::Hover);
+                }
+                // === end pointer ===
                 if !self.mouse_captured && xrel.abs() + yrel.abs() > 6 {
                     self.using_pad = false;
                 }
@@ -9833,8 +10124,9 @@ impl Game for DreamscapeGame {
             } else {
                 1.0
             };
-            body.velocity.x = v.x * walk + push.0 + knock.0;
-            body.velocity.z = v.z * walk + push.1 + knock.1;
+            let lunge = self.lunge_dir * edges::lunge_speed(self.lunge_left);
+            body.velocity.x = v.x * walk + push.0 + knock.0 + lunge.x;
+            body.velocity.z = v.z * walk + push.1 + knock.1 + lunge.z;
             // === end combat ===
             // === end hazards ===
             self.player_grounded = body.grounded;
@@ -11097,6 +11389,8 @@ mod screen_smoke {
             since_use,
             passive: Some(("SPRING", [120, 255, 200])),
             passive_since: hand::NEVER,
+            edge: Some(("LUNGE", [120, 220, 255])),
+            edge_since: hand::NEVER,
             cracked: false,
         }
     }
@@ -11752,6 +12046,310 @@ mod screen_smoke {
         // The prologue is never one, nor a nightmare.
         g.director.nightmare = true;
         assert!(!g.sanctuary());
+    }
+
+    #[test]
+    fn once_the_shard_is_taken_the_eye_points_at_the_way_out() {
+        let mut g = game("exit_eye");
+        let d = dream::generate_with(DreamTheme::Garden, 3, 2, None, true, dream::Pressure::default(), dream::Goals::default());
+        let portal = d.portal;
+        g.dream = Some(d);
+        g.objective = None;
+        // No shard slot is on screen: the way out is the target.
+        assert_eq!(g.objective_target(), Some(portal));
+        // Still hunting for something that has no beacon (a held-on objective): no pointing.
+        g.objective = Some(objective::Active::FindMemory);
+        assert_eq!(g.objective_target(), None);
+    }
+
+    fn three_cards(g: &mut DreamscapeGame) {
+        let recs: Vec<_> = [DreamTheme::Garden, DreamTheme::TheTunnel, DreamTheme::Lobby]
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| cards::tests::record(t, i as u64 + 1, 1, 0.3, false))
+            .collect();
+        g.booklet.add_run(1, &recs);
+        g.screen_size = (1280.0, 720.0);
+    }
+
+    fn tile_centre(g: &DreamscapeGame, sel: usize, grid_top: f32, grid_w: f32, i: usize) -> (i32, i32) {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let n = g.booklet.card_count();
+        let r = loadout_ui::grid_tiles(screen, n, sel, grid_top, grid_w)
+            .into_iter()
+            .find(|(k, _)| *k == i)
+            .expect("tile on screen")
+            .1;
+        (r.center().x as i32, r.center().y as i32)
+    }
+
+    #[test]
+    fn the_mouse_picks_and_merges_and_changes_its_mind_in_the_merge_menu() {
+        let mut g = game("merge_mouse");
+        three_cards(&mut g);
+        g.open_merge(hud::Mode::Title);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let lay = merge_ui::layout(screen);
+        let at = |g: &DreamscapeGame, i| tile_centre(g, g.merge_sel, lay.grid_top, lay.grid_w, i);
+        // Hover moves the cursor and does not act.
+        let (x, y) = at(&g, 1);
+        assert_eq!(g.menu_pointer(x, y, Pointer::Hover), None);
+        assert_eq!(g.merge_sel, 1);
+        assert_eq!(g.merge_first, None);
+        // A click is an Enter on that card: it becomes the first.
+        let (x, y) = at(&g, 0);
+        assert_eq!(g.menu_pointer(x, y, Pointer::Click), Some(Keycode::Return));
+        g.merge_key(Keycode::Return);
+        assert_eq!(g.merge_first, g.booklet.cards().next().map(|c| c.number));
+        // Changing your mind: click the first card's slot to take it back...
+        let s0 = lay.slots[0].center();
+        assert_eq!(g.menu_pointer(s0.x as i32, s0.y as i32, Pointer::Click), None);
+        assert_eq!(g.merge_first, None);
+        // ...or Tab makes the card under the cursor the first, Backspace clears it.
+        g.merge_sel = 2;
+        g.merge_key(Keycode::Tab);
+        assert_eq!(g.merge_first, g.booklet.cards().nth(2).map(|c| c.number));
+        g.merge_sel = 1;
+        g.merge_key(Keycode::Tab);
+        assert_eq!(g.merge_first, g.booklet.cards().nth(1).map(|c| c.number), "swapped, no unpicking first");
+        g.merge_key(Keycode::Backspace);
+        assert_eq!(g.merge_first, None);
+        // Right-click: clears a pick, and on an empty altar leaves.
+        g.merge_first = g.booklet.cards().next().map(|c| c.number);
+        g.menu_pointer(10, 10, Pointer::Back);
+        assert_eq!(g.merge_first, None);
+        assert_eq!(g.mode, hud::Mode::Merge);
+        g.menu_pointer(10, 10, Pointer::Back);
+        assert_eq!(g.mode, hud::Mode::Title);
+        // Clicking the result slot merges once a first card is in and the cursor is on a legal second.
+        g.open_merge(hud::Mode::Title);
+        g.merge_first = g.booklet.cards().next().map(|c| c.number);
+        g.merge_sel = 1;
+        let s2 = lay.slots[2].center();
+        assert_eq!(g.menu_pointer(s2.x as i32, s2.y as i32, Pointer::Click), Some(Keycode::Return));
+        g.merge_key(Keycode::Return);
+        assert_eq!(g.booklet.card_count(), 2, "merged");
+    }
+
+    #[test]
+    fn the_mouse_equips_and_unequips_in_the_loadout() {
+        let mut g = game("loadout_mouse");
+        three_cards(&mut g);
+        g.open_loadout();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        // The loadout is drawn at its design size; a 1280x720 window shows it 1:1 or larger.
+        let (pt, lscreen) = hud::to_layout(hud::design_for(hud::Mode::Loadout, 0), (1280.0, 720.0), 0.0, 0.0);
+        assert_eq!(pt, egui::Pos2::ZERO);
+        assert_eq!(lscreen, screen, "no scaling at 720p");
+        let lay = loadout_ui::layout(screen);
+        let (x, y) = tile_centre(&g, g.loadout_sel, lay.grid_top, lay.grid_w, 1);
+        assert_eq!(g.menu_pointer(x, y, Pointer::Click), Some(Keycode::Return));
+        assert_eq!(g.loadout_sel, 1);
+        g.loadout_key(Keycode::Return);
+        let first = g.booklet.cards().nth(1).map(|c| c.number).unwrap();
+        assert!(g.booklet.lore.loadout.contains(&first), "equipped");
+        // Click the slot it sits in: out it comes.
+        let s = lay.slots[g.booklet.lore.loadout.iter().position(|&n| n == first).unwrap()].center();
+        assert_eq!(g.menu_pointer(s.x as i32, s.y as i32, Pointer::Click), None);
+        assert!(!g.booklet.lore.loadout.contains(&first), "unequipped by clicking its slot");
+        // A small window scales the screen down, and the mouse scales with it.
+        let (pt, small) = hud::to_layout(hud::design_for(hud::Mode::Loadout, 0), (400.0, 225.0), 200.0, 100.0);
+        assert!((pt.x - 400.0).abs() < 1e-3 && (pt.y - 200.0).abs() < 1e-3, "{pt:?}");
+        assert!((small.width() - 800.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_mouse_picks_an_upgrade_and_a_title_row() {
+        let mut g = game("choice_mouse");
+        g.screen_size = (1280.0, 720.0);
+        g.mode = hud::Mode::Choice;
+        let card = || upgrade_ui::ChoiceCard {
+            name: "X".into(),
+            desc: String::new(),
+            icon: upgrades::Icon::Boot,
+            color: [1, 2, 3],
+            frame: [1, 2, 3],
+            tag: String::new(),
+        };
+        g.choice_view.cards = vec![card(), card(), card()];
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let rects = upgrade_ui::card_rects(screen, 3);
+        let c = rects[2].center();
+        assert_eq!(g.menu_pointer(c.x as i32, c.y as i32, Pointer::Hover), None);
+        assert_eq!(g.choice_view.selected, 2);
+        let c = rects[0].center();
+        assert_eq!(g.menu_pointer(c.x as i32, c.y as i32, Pointer::Click), Some(Keycode::Return));
+        assert_eq!(g.choice_view.selected, 0);
+        assert_eq!(g.menu_pointer(2, 2, Pointer::Click), None, "off the cards: nothing");
+        // The title menu: a row under the pointer is selected, and a click enters it.
+        g.mode = hud::Mode::Title;
+        let (rows, goal) = g.title_rows();
+        assert!(rows.len() >= 2);
+        let l = title_ui::menu_layout(screen, &rows, goal);
+        let y = l.menu_top + 1.0 * l.step + l.step * 0.4;
+        assert_eq!(g.menu_pointer(640, y as i32, Pointer::Click), Some(Keycode::Return));
+        assert_eq!(g.title_sel, 1);
+        assert_eq!(g.menu_pointer(5, y as i32, Pointer::Hover), None, "outside the panel");
+        assert_eq!(g.title_sel, 1);
+    }
+
+    /// A struck pacer forgets it was chasing; make it aware again so a sneak
+    /// attack's double does not muddy the numbers.
+    fn rechase(g: &mut DreamscapeGame) {
+        for p in &mut g.enemies {
+            p.ai.chasing = true;
+            if let Ok(mut t) = g.world.get::<&mut Transform>(p.entity) {
+                t.position.z = t.position.z.min(2.0); // back within reach
+            }
+        }
+        g.stunned.clear();
+    }
+
+    fn with_edge(name: &str, e: edges::Edge) -> DreamscapeGame {
+        let mut g = fighter(name, None);
+        g.edges = vec![e];
+        g
+    }
+
+    #[test]
+    fn rending_strikes_through_a_lullabys_armour_and_a_masks_shield() {
+        let mut g = with_edge("rending", edges::Edge::Rending);
+        let t = CombatTarget {
+            entity: g.world.spawn((Transform { position: Vec3::new(0.0, 1.0, 2.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0))),
+            pos: Vec3::new(0.0, 1.0, 2.0),
+            kind: combat::Kind::Pacer { elite: None, child: false },
+            unaware: false,
+            guarded: true,
+            recovering: false,
+        };
+        assert!(!g.strike_ctx(&t).guarded, "armour does nothing against it");
+        g.edges.clear();
+        assert!(g.strike_ctx(&t).guarded);
+    }
+
+    #[test]
+    fn reprisal_cuts_deeper_only_while_shaking_off_a_hit() {
+        let mut g = with_edge("reprisal", edges::Edge::Reprisal);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.foes.insert(e, combat::Foe { hp: 6.0, max: 6.0 });
+        g.resolve_strike();
+        assert_eq!(g.foes[&e].hp, 5.0, "plain: one");
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        rechase(&mut g);
+        g.resolve_strike();
+        assert_eq!(g.foes[&e].hp, 3.0, "invulnerable after a hit: two");
+    }
+
+    #[test]
+    fn flourish_cuts_deeper_on_the_third_quick_strike() {
+        let mut g = with_edge("flourish", edges::Edge::Flourish);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+        let mut hp = Vec::new();
+        for _ in 0..3 {
+            g.dream_age += 0.4;
+            rechase(&mut g);
+            g.resolve_strike();
+            hp.push(g.foes[&e].hp);
+            let z = g.world.get::<&Transform>(e).unwrap().position.z;
+            g.world.get::<&mut Transform>(e).unwrap().position.z = z.min(2.0);
+        }
+        assert_eq!(hp, vec![8.0, 7.0, 5.0], "1, 1, then 2 on the third");
+    }
+
+    #[test]
+    fn haymaker_shoves_twice_as_far() {
+        let far = |edge: Option<edges::Edge>| {
+            let mut g = fighter("hay", None);
+            g.edges = edge.into_iter().collect();
+            let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+            g.resolve_strike();
+            let z = g.world.get::<&Transform>(e).unwrap().position.z;
+            z - 2.0
+        };
+        let (plain, hay) = (far(None), far(Some(edges::Edge::Haymaker)));
+        assert!((hay / plain - edges::HAYMAKER_KNOCK).abs() < 0.01, "{plain} -> {hay}");
+    }
+
+    #[test]
+    fn siphon_steadies_on_every_third_unravel_and_hexmark_primes_the_next_blow() {
+        let mut g = with_edge("siphon", edges::Edge::Siphon);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        g.nerve.tick(2.0);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert_eq!(g.nerve.cur(), 1);
+        for k in 0..3 {
+            let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 40.0 + k as f32), false);
+            g.unravel(e, Vec3::ZERO);
+        }
+        assert_eq!(g.nerve.cur(), 2, "the third steadied");
+        // Hexmark: a blow marks, the next one cuts a point deeper and spends the mark.
+        let mut h = with_edge("hex", edges::Edge::Hexmark);
+        let e = put_pacer(&mut h, Vec3::new(0.0, 1.0, 2.0), true);
+        h.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+        h.resolve_strike();
+        assert_eq!(h.foes[&e].hp, 8.0);
+        assert!(h.marks.contains_key(&e), "marked");
+        rechase(&mut h);
+        let z = h.world.get::<&Transform>(e).unwrap().position.z;
+        h.player_position = Vec3::new(0.0, 1.0, z - 2.0);
+        h.resolve_strike();
+        assert_eq!(h.foes[&e].hp, 6.0, "the marked blow cut two");
+        h.update_combat(edges::HEXMARK_SECS + 1.0);
+        assert!(h.marks.values().all(|&l| l > 0.0), "marks fade");
+    }
+
+    #[test]
+    fn lunge_carries_the_dreamer_and_quickdraw_swings_sooner() {
+        let mut g = with_edge("lunge", edges::Edge::Lunge);
+        g.strike_request = true;
+        g.update_combat(0.0);
+        assert!(g.lunge_left > 0.0 && g.lunge_dir != Vec3::ZERO, "a step is under way");
+        g.update_combat(edges::LUNGE_SECS + 0.01);
+        assert_eq!(g.lunge_left, 0.0);
+        // Quickdraw: the cooldown is shorter, so a second swing comes sooner.
+        let slow = strike_gap(None);
+        let quick = strike_gap(Some(edges::Edge::Quickdraw));
+        assert!(quick < slow, "{quick} < {slow}");
+    }
+
+    /// Seconds between one swing and the next, with an edge.
+    fn strike_gap(edge: Option<edges::Edge>) -> f32 {
+        let mut g = fighter("cd", None);
+        g.edges = edge.into_iter().collect();
+        g.strike_request = true;
+        g.update_combat(0.0);
+        let mut t = 0.0;
+        loop {
+            g.slash_pending = None;
+            g.strike_request = true;
+            g.update_combat(0.01);
+            t += 0.01;
+            if g.slash_pending.is_some() || t > 3.0 {
+                return t;
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_that_teaches_an_edge_brings_it_into_the_run_and_the_hand_shows_it() {
+        let mut g = game("edge_hand");
+        // A Chord dream teaches FLOURISH.
+        let c = cards::card_from(&cards::tests::record(DreamTheme::SynesthesiaHall, 5, 3, 0.4, false));
+        assert_eq!(loadout_ui::edges_of(&c), vec![edges::Edge::Flourish]);
+        g.run.take(Upgrade::Learn(Ability::Slam));
+        g.hand_cards = vec![(Ability::Slam, c)];
+        g.edges = vec![edges::Edge::Flourish];
+        g.dream_age = 4.0;
+        g.edge_fires(edges::Edge::Flourish);
+        g.dream_age = 4.2;
+        let card = &g.hand_view()[0];
+        assert_eq!(card.edge.map(|e| e.0), Some("FLOURISH"));
+        assert!(hand::pulse(card.edge_since) > 0.0);
+        // A fused card carries both dreams' edges.
+        let mut f = cards::card_from(&cards::tests::record(DreamTheme::SynesthesiaHall, 6, 3, 0.4, false));
+        f.fused = Some(DreamTheme::NightmareFactory);
+        assert_eq!(loadout_ui::edges_of(&f), vec![edges::Edge::Flourish, edges::Edge::Rending]);
     }
 
     #[test]

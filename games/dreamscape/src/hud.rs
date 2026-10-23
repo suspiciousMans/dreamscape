@@ -434,12 +434,36 @@ pub fn ui_scale(mode: Mode, w: f32, h: f32) -> f32 {
 /// smaller it is drawn at this size and scaled down to fit, so no text runs
 /// off the edge. (Larger windows draw it as they always did.)
 fn design_size(v: &HudView) -> Option<(f32, f32)> {
-    match v.mode {
-        Mode::Store if v.store_tab == 0 => Some((1100.0, 600.0)),
+    design_for(v.mode, v.store_tab)
+}
+
+/// `design_size` from just the screen and tab (the mouse needs it too).
+pub fn design_for(mode: Mode, store_tab: usize) -> Option<(f32, f32)> {
+    match mode {
+        Mode::Store if store_tab == 0 => Some((1100.0, 600.0)),
         Mode::Store => Some((800.0, 450.0)),
         Mode::Loadout => Some((800.0, 450.0)),
         Mode::Booklet => Some((1100.0, 112.0 + crate::booklet_ui::CARD_SIZE.y + 170.0)),
         _ => None,
+    }
+}
+
+/// A mouse position (window pixels) as the screen lays itself out: the point
+/// and the layout's screen rect. Screens with a design size are drawn scaled
+/// down in small windows (see `fit_layer`), so the point scales up with them.
+pub fn to_layout(design: Option<(f32, f32)>, window: (f32, f32), x: f32, y: f32) -> (Pos2, Rect) {
+    match design {
+        Some(d) => {
+            let k = (window.0 / d.0).min(window.1 / d.1).clamp(0.1, 1.0);
+            (
+                Pos2::new(x / k, y / k),
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(window.0, window.1) / k),
+            )
+        }
+        None => (
+            Pos2::new(x, y),
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(window.0, window.1)),
+        ),
     }
 }
 

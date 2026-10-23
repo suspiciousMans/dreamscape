@@ -47,6 +47,9 @@ pub struct HandCard {
     pub passive: Option<(&'static str, [u8; 3])>,
     /// Seconds since that passive last did something; [`NEVER`] if it has not.
     pub passive_since: f32,
+    /// The combat edge this card's dream teaches, and when it last did something.
+    pub edge: Option<(&'static str, [u8; 3])>,
+    pub edge_since: f32,
     /// The run holds a curse: the card shows cracks.
     pub cracked: bool,
 }
@@ -265,6 +268,18 @@ pub fn draw(
             );
         }
         draw_card(ctx, p, r, angle, c, amount, time, u, art);
+        // The edge's name floats up too, higher than the passive's.
+        let eu = pulse(c.edge_since);
+        if let (Some((name, rgb)), true) = (c.edge, eu > 0.0) {
+            let rise = if reduced { 0.0 } else { 22.0 * u * (1.0 - eu) };
+            p.text(
+                Pos2::new(r.center().x, r.top() - 26.0 * u - rise),
+                egui::Align2::CENTER_BOTTOM,
+                name,
+                FontId::monospace((12.0 * u).max(8.0)),
+                rgba(rgb, eu.min(1.0)),
+            );
+        }
         // The passive's name floats up off the card and fades.
         let pu = pulse(c.passive_since);
         if let (Some((name, rgb)), true) = (c.passive, pu > 0.0) {
@@ -454,6 +469,21 @@ fn draw_card(
         turn.quad(p, sq, rgba(rgb, 0.75 + 0.25 * pu));
         if pu > 0.0 {
             turn.outline(p, sq.expand(10.0 * u * (1.0 - pu)), 1.5, rgba(rgb, pu));
+        }
+    }
+
+    // The edge: a red blade-shaped badge on the art's bottom-right, flaring when it acts.
+    if let Some((_, rgb)) = c.edge {
+        let eu = pulse(c.edge_since);
+        let s = (3.5 + 3.0 * eu) * u * k;
+        let at = Pos2::new(art.right() - 7.0 * u * k, art.bottom() - 7.0 * u * k).to_vec2();
+        let blade = Rect::from_center_size(at.to_pos2(), Vec2::new(s * 1.1, s * 2.4));
+        x.quad(p, blade.expand(1.5 * u), rgba([10, 4, 20], 0.9));
+        let turn = Xf::new(x.at(at), angle + std::f32::consts::FRAC_PI_4 * 0.5);
+        let sq = Rect::from_center_size(Pos2::ZERO, Vec2::new(s * 0.8, s * 2.0));
+        turn.quad(p, sq, rgba(rgb, 0.8 + 0.2 * eu));
+        if eu > 0.0 {
+            turn.outline(p, sq.expand(10.0 * u * (1.0 - eu)), 1.5, rgba(rgb, eu));
         }
     }
 
