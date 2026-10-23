@@ -160,6 +160,10 @@ pub struct HudView {
     pub hand: Vec<crate::hand::HandCard>,
     /// Synergies the hand's cards make together.
     pub hand_links: Vec<crate::hand::HandLink>,
+    /// Nerve: (now, most). (0, 0) hides the hearts (co-op).
+    pub nerve: (u32, u32),
+    /// 1 the instant of a hit, easing to 0: the eye flinches, a heart breaks.
+    pub nerve_flinch: f32,
     /// This dream's twists ("FLOODED · GILDED"), empty for none.
     pub twist: String,
     pub twist_blurb: String,
@@ -711,6 +715,12 @@ fn depth_counter(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
         y += 22.0;
     }
+    // === combat === nerve hearts
+    if v.nerve.1 > 0 {
+        hearts(p, at + Vec2::new(2.0, y), v);
+        y += 28.0;
+    }
+    // === end combat ===
     // The lists stop above the bottom margin and fold the rest
     // into "+N more", so a long run never runs off the screen.
     // (and above the eye's speech plate while it is talking).
@@ -773,6 +783,41 @@ fn pressure_bar(p: &egui::Painter, screen: Rect, lid: f32, warn: bool, time: f32
     }
 }
 // === end pressure ===
+
+/// Nerve as pixel hearts: full, the one that just broke (flashing white),
+/// and empty outlines. At one nerve the last heart beats.
+fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
+    use crate::pixels::icons;
+    let (now, max) = v.nerve;
+    let px = 2.0;
+    let step = 9.0 * px + 6.0;
+    for i in 0..max {
+        let centre = at + Vec2::new(i as f32 * step + 4.5 * px, 4.5 * px);
+        let full = i < now;
+        let just_broke = !full && i == now && v.nerve_flinch > 0.0;
+        let beat = if full && now == 1 {
+            1.0 + 0.18 * (v.time * 6.0).sin().max(0.0)
+        } else {
+            1.0
+        };
+        let (rgb, alpha) = if full {
+            ([255, 80, 120], 1.0)
+        } else if just_broke {
+            ([255, 255, 255], v.nerve_flinch)
+        } else {
+            ([110, 80, 130], 0.55)
+        };
+        crate::pixel_ui::icon(
+            p,
+            centre,
+            &icons::HEART,
+            px * beat,
+            rgb,
+            crate::pixel_ui::lighter(rgb),
+            alpha,
+        );
+    }
+}
 
 /// Top right: the dream's twist and HURRIED timer. The hand (held ability cards) sits down the right edge.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -935,7 +980,9 @@ fn lucidity_eye(p: &egui::Painter, screen: Rect, v: &HudView) {
     let gaze = look.gaze;
 
     // Breath + blink on top of whatever the lid is doing.
-    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time);
+    // A hit narrows the lid for an instant (nerve).
+    let flinch = 1.0 - 0.7 * v.nerve_flinch;
+    let open = (look.open * (1.0 + 0.05 * (v.time * 1.7).sin())).min(1.0) * pixels::blink(v.time) * flinch;
 
     let cells = pixels::eye_pixels(open, gaze, lucid);
     let iris = iris_color(v, lucid);

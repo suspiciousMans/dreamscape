@@ -57,6 +57,7 @@ mod hand;
 mod hud;
 mod hunter;
 mod loadout_ui;
+mod nerve;
 mod lore;
 mod memories_ui;
 mod merge_ui;
@@ -436,6 +437,12 @@ pub struct DreamscapeGame {
     new_records: Vec<(progress::NewRecord, u32)>,
     /// PHASE: the dreamer is drawn see-through.
     phased: bool,
+    // === combat ===
+    /// How many hits the dreamer can take (see `nerve.rs`).
+    nerve: nerve::Nerve,
+    /// The dreamer is drawn faint while invulnerable after a hit.
+    hurt_ghost: bool,
+    // === end combat ===
     /// Each loadout ability and the dream colours of the card that taught it.
     ability_tints: Vec<(Ability, [u8; 3], [u8; 3])>,
     /// An ability just fired: burst here, in these colours (spawned next update).
@@ -800,6 +807,8 @@ impl DreamscapeGame {
             chilled: Vec::new(),
             new_records: Vec::new(),
             phased: false,
+            nerve: nerve::Nerve::default(),
+            hurt_ghost: false,
             ability_tints: Vec::new(),
             burst_pending: None,
             bursts: Vec::new(),
@@ -1712,6 +1721,51 @@ impl DreamscapeGame {
             .collect()
     }
 
+    // === combat ===
+    /// Something touched the dreamer. Costs nerve; returns the source only
+    /// when that was the last point (the old *caught* flow then runs).
+    fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
+        let away = self.away_from_nearest_threat();
+        let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32;
+        match self.nerve.hit(nerve::damage_from(by), away, extra) {
+            nerve::Hit::Down => Some(by),
+            nerve::Hit::Ignored => None,
+            nerve::Hit::Hurt => {
+                log::info!(
+                    "Hurt by: {by} (nerve {}/{}, depth {})",
+                    self.nerve.cur(),
+                    self.nerve.max(),
+                    self.director.depth
+                );
+                self.flash.trigger([1.0, 0.1, 0.15], 0.45);
+                self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
+                self.sfx(Sound::Caught);
+                None
+            }
+        }
+    }
+
+    /// Unit direction (x, z) from the closest enemy to the dreamer; zero when
+    /// the hit came from the dream itself (a gate, a beat tile).
+    fn away_from_nearest_threat(&self) -> (f32, f32) {
+        let me = self.player_position;
+        let at = |e: Entity| self.world.get::<&Transform>(e).ok().map(|t| t.position);
+        let pacers = self.enemies.iter().filter_map(|p| at(p.entity));
+        let specials = self.specials.iter().filter_map(|s| at(s.entity));
+        let hunter = self.hunter.iter().filter_map(|(e, _, _)| at(*e));
+        pacers
+            .chain(specials)
+            .chain(hunter)
+            .map(|p| Vec3::new(me.x - p.x, 0.0, me.z - p.z))
+            .filter(|d| d.length() > 1e-3)
+            .min_by(|a, b| a.length().total_cmp(&b.length()))
+            .map_or((0.0, 0.0), |d| {
+                let n = d.normalize();
+                (n.x, n.z)
+            })
+    }
+    // === end combat ===
+
     /// A passive just did its work: its card in the hand pulses.
     fn passive_fires(&mut self, u: Upgrade) {
         fire_passive(&mut self.passive_fired, &self.run, self.dream_age, u);
@@ -2002,6 +2056,10 @@ impl DreamscapeGame {
                 .collect(),
             hand: self.hand_view(),
             hand_links: self.hand_links(),
+            // === combat ===
+            nerve: if self.coop_active() { (0, 0) } else { (self.nerve.cur(), self.nerve.max()) },
+            nerve_flinch: self.nerve.flinch(),
+            // === end combat ===
             twist: {
                 // === shards ===
                 let t = self.twists.label();
@@ -2303,10 +2361,21 @@ impl DreamscapeGame {
             }
             if phasing {
                 let _ = self.world.insert_one(player, Translucent);
-            } else {
+            } else if !self.hurt_ghost {
                 let _ = self.world.remove_one::<Translucent>(player);
             }
         }
+        // === combat === faint while invulnerable after a hit
+        let faint = self.nerve.faint(self.time, self.settings.reduced_motion);
+        if faint != self.hurt_ghost {
+            self.hurt_ghost = faint;
+            if faint {
+                let _ = self.world.insert_one(player, Translucent);
+            } else if !self.phased {
+                let _ = self.world.remove_one::<Translucent>(player);
+            }
+        }
+        // === end combat ===
         Ok(())
     }
 
@@ -5231,6 +5300,7 @@ impl DreamscapeGame {
         self.run = RunUpgrades::from_loadout(&cards)
             .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
+        self.nerve = nerve::Nerve::default();
         if let Some(id) = self
             .booklet
             .lore
@@ -5622,6 +5692,7 @@ impl DreamscapeGame {
                     self.director.descend();
                     self.coop_broadcast_plan();
                 }
+                self.nerve.heal(1); // combat: a portal steadies you
                 self.offer_upgrade = self.prologue.is_none();
                 self.load_dream(ctx)
             }
@@ -7848,6 +7919,7 @@ impl Game for DreamscapeGame {
         self.time += dt;
         self.flash.tick(dt);
         self.grace = (self.grace - dt).max(0.0);
+        self.nerve.tick(dt);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
             t.rotation = Quat::from_rotation_y(spin.0 * dt) * t.rotation;
         }
@@ -8167,8 +8239,11 @@ impl Game for DreamscapeGame {
             };
             // === hazards ===
             let push = self.theme_rule.map_or((0.0, 0.0), |r| r.effect().push);
-            body.velocity.x = v.x + push.0;
-            body.velocity.z = v.z + push.1;
+            // === combat === the shove from a hit
+            let knock = self.nerve.knock_velocity();
+            body.velocity.x = v.x + push.0 + knock.0;
+            body.velocity.z = v.z + push.1 + knock.1;
+            // === end combat ===
             // === end hazards ===
             self.player_grounded = body.grounded;
             if body.grounded {
@@ -8454,7 +8529,9 @@ impl Game for DreamscapeGame {
         }
 
         // 4. Fail states (autopilot is immune to enemies so E2E runs are deterministic)
-        let untouchable = self.run.active(Ability::Dash) || self.run.active(Ability::Phase);
+        let untouchable = self.run.active(Ability::Dash)
+            || self.run.active(Ability::Phase)
+            || self.nerve.invulnerable();
         let caught_by =
             if !self.autopilot && self.grace <= 0.0 && !untouchable && !self.coop_ghost() {
                 self.threat_touching()
@@ -8468,6 +8545,12 @@ impl Game for DreamscapeGame {
         } else {
             caught_by
         };
+        // === combat === a touch costs nerve; only the last point is a catch
+        let caught_by = match caught_by {
+            Some(by) if !self.coop_active() => self.take_nerve_hit(by),
+            other => other,
+        };
+        // === end combat ===
         let caught = caught_by.is_some();
         if let Some(by) = caught_by {
             log::info!(
@@ -9395,6 +9478,41 @@ mod screen_smoke {
 
     fn themed(theme: dream::DreamTheme, seed: u64) -> cards::Card {
         cards::card_from(&cards::tests::record(theme, seed, 3, 0.4, false))
+    }
+
+    #[test]
+    fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {
+        let mut g = game("nerve");
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        assert_eq!(g.nerve.cur(), 2);
+        assert!(g.nerve.invulnerable());
+        assert_eq!(g.take_nerve_hit("patrol"), None, "still invulnerable");
+        assert_eq!(g.nerve.cur(), 2);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), None);
+        g.nerve.tick(2.0);
+        assert_eq!(g.take_nerve_hit("patrol"), Some("patrol"), "nerve gone: caught");
+        assert_eq!(g.nerve.cur(), nerve::REFILL);
+    }
+
+    #[test]
+    fn the_hearts_draw_and_a_broken_one_flashes() {
+        let mut g = game("hearts");
+        g.mode = hud::Mode::Playing;
+        let n = |cur, flinch| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.nerve = (cur, 3);
+                v.nerve_flinch = flinch;
+            })
+            .len()
+        };
+        let hidden = frame_with(&g, 1280.0, 720.0, &|v| v.nerve = (0, 0)).len();
+        assert!(n(3, 0.0) > hidden, "hearts draw");
+        assert!(n(1, 0.0) > 0);
+        // co-op hides them
+        assert_eq!(hidden, frame_with(&g, 1280.0, 720.0, &|v| v.nerve = (0, 0)).len());
+        // nerve cap: every heart row still fits the screen
+        n(5, 0.5);
     }
 
     #[test]
