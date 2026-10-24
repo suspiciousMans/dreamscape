@@ -167,6 +167,12 @@ impl DreamDirector {
             && self.is_sanctuary_depth(self.depth)
     }
 
+    /// Nothing hostile is ever placed here: a sanctuary, or the Lobby you
+    /// start in. (The nightmare flag wins: a nightmare is never safe.)
+    pub fn enemy_free(&self) -> bool {
+        !self.nightmare && (self.sanctuary() || self.theme == DreamTheme::Lobby)
+    }
+
     /// Points the portal at a due card dream, unless the next dream is a
     /// nightmare or this one was a card dream. (A card dream may repeat the
     /// dream before it; sliding for that too could push it two late.)

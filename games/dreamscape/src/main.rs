@@ -3042,7 +3042,7 @@ impl DreamscapeGame {
     /// `moths`, `mask`, `leech`). DREAMSCAPE_ENEMY=Moths|Mask|Leech forces
     /// that one into every dream (and past the depth gate).
     fn spawn_enemies_b(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
-        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() || self.sanctuary() {
+        if self.coop_active() || self.coop.is_some() || self.prologue.is_some() || self.enemy_free() {
             return Ok(());
         }
         let forced = crate::dev::var("DREAMSCAPE_ENEMY").ok();
@@ -4440,7 +4440,7 @@ impl DreamscapeGame {
             self.director.theme,
             self.director.depth,
             !self.director.nightmare
-                && !self.sanctuary()
+                && !self.enemy_free()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.theme != DreamTheme::Awakening,
@@ -4643,7 +4643,7 @@ impl DreamscapeGame {
         let allowed = !self.coop_active()
             && self.prologue.is_none()
             && !self.director.nightmare
-            && !self.sanctuary()
+            && !self.enemy_free()
             && (!self.autopilot || dev.is_some());
         if !allowed {
             return Ok(());
@@ -8169,6 +8169,13 @@ impl DreamscapeGame {
         self.prologue.is_none() && self.director.sanctuary()
     }
 
+    /// A dream with no enemies, gates, hazards or twists placed in it: a
+    /// sanctuary, or the Lobby. Effects that belong to a real sanctuary
+    /// (nerve refill, its chord and hint) stay on [`Self::sanctuary`].
+    fn enemy_free(&self) -> bool {
+        self.prologue.is_none() && self.director.enemy_free()
+    }
+
     // === pressure ===
     /// Normal dreams only: no nightmares, the awakening, the prologue or co-op.
     fn pressure_applies(&self) -> bool {
@@ -8697,7 +8704,7 @@ impl DreamscapeGame {
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
         let theme = self.director.theme;
         let spec = theme.spec();
-        self.twists = if self.director.nightmare || self.prologue.is_some() || self.sanctuary() {
+        self.twists = if self.director.nightmare || self.prologue.is_some() || self.enemy_free() {
             Twists::default()
         } else {
             dream::roll_twists(
@@ -8774,9 +8781,9 @@ impl DreamscapeGame {
             )
         };
         // === sanctuary === nothing here can hurt you
-        if self.sanctuary() {
+        if self.enemy_free() {
             dream.calm();
-            log::info!("Sanctuary: a quiet place at depth {}", self.director.depth);
+            log::info!("Enemy-free dream: {:?} at depth {}", self.director.theme, self.director.depth);
         }
         // === end sanctuary ===
         if let Some(b) = self.director.blend {
@@ -8815,7 +8822,7 @@ impl DreamscapeGame {
         self.guard_angle = None;
         if let Some(shard) = dream.shard {
             let eligible = !self.director.nightmare
-                && !self.sanctuary()
+                && !self.enemy_free()
                 && self.prologue.is_none()
                 && self.coop.is_none()
                 && self.director.depth >= shard_rules::MIN_DEPTH
@@ -10508,6 +10515,8 @@ impl Game for DreamscapeGame {
             Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
             Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
             Some(Action::Ability3) if down && !repeat => self.ability_requests[2] = true,
+            Some(Action::Ability4) if down && !repeat => self.ability_requests[3] = true,
+            Some(Action::Ability5) if down && !repeat => self.ability_requests[4] = true,
             Some(Action::Strike) if down && !repeat => self.strike_request = true,
             _ => {}
         }
@@ -13082,6 +13091,29 @@ mod screen_smoke {
         // The prologue is never one, nor a nightmare.
         g.director.nightmare = true;
         assert!(!g.sanctuary());
+    }
+
+    #[test]
+    fn the_lobby_is_enemy_free_but_not_a_sanctuary_and_the_next_dream_is_not() {
+        let mut g = game("lobby_safe");
+        g.director.theme = DreamTheme::Lobby;
+        g.director.depth = 0;
+        assert!(g.enemy_free(), "no enemies in the Lobby");
+        assert!(!g.sanctuary(), "it has no sanctuary refill or chord");
+        assert!(g.hazard_rule_state().is_none());
+        assert!(!g.pressure_applies());
+        // Any other dream, and a nightmare, are not.
+        g.director.theme = DreamTheme::Garden;
+        g.director.depth = 4;
+        assert!(!g.enemy_free());
+        g.director.theme = DreamTheme::Lobby;
+        g.director.nightmare = true;
+        assert!(!g.enemy_free(), "a nightmare is never safe");
+        g.director.nightmare = false;
+        // The sanctuary after a nightmare still is.
+        g.director.theme = DreamTheme::Garden;
+        g.director.depth = 11;
+        assert!(g.enemy_free() && g.sanctuary());
     }
 
     #[test]

@@ -197,7 +197,8 @@ mod tests {
         assert!(note(2, 20).contains("3"));
         assert!(note(0, 20).contains("newest"));
         assert!(note(12, 20).contains("full"));
-        assert!(note(5, 20).contains("3"), "a hand of three at a time");
+        assert!(note(7, 20).contains(&crate::upgrades::HAND_SIZE.to_string()), "a full hand at a time");
+        assert!(note(4, 20).contains("4"), "a small deck holds what it has");
     }
 
     #[test]

@@ -91,11 +91,10 @@ pub const ALL_ABILITIES: [Ability; 24] = [
 
 /// Shift and E.
 pub const ABILITY_SLOTS: usize = 2;
-/// Cards in a hand: one more than the abilities a fixed loadout holds.
-/// The deck's hand (`deck.rs`) uses all of them; co-op and the autopilot
-/// keep the old [`ABILITY_SLOTS`].
-pub const HAND_SIZE: usize = ABILITY_SLOTS + 1;
-pub const SLOT_KEYS: [&str; HAND_SIZE] = ["shift", "e", "q"];
+/// Cards in a hand. The deck's hand (`deck.rs`) uses all of them; co-op and
+/// the autopilot keep the old [`ABILITY_SLOTS`].
+pub const HAND_SIZE: usize = 5;
+pub const SLOT_KEYS: [&str; HAND_SIZE] = ["shift", "e", "q", "r", "c"];
 
 pub const DASH_SPEED_MULT: f32 = 3.0;
 /// Blink distance, in cells.
@@ -2290,7 +2289,8 @@ mod tests {
     #[test]
     fn a_deck_hand_holds_a_third_ability_and_mirrors_it_in_taken() {
         let r = hand_of(&[Ability::Dash, Ability::Blink, Ability::Phase]);
-        assert_eq!(r.abilities.len(), HAND_SIZE);
+        assert_eq!(r.abilities.len(), 3);
+        assert!(r.abilities.len() <= HAND_SIZE);
         assert!(r.count(Upgrade::Learn(Ability::Phase)) == 1);
         assert!(r.has(Synergy::GhostStep), "dash + phase in the hand");
     }

@@ -8,7 +8,7 @@ use crate::settings::{Action, Settings};
 use engine::sdl2::controller::Button;
 use engine::sdl2::keyboard::Keycode;
 
-pub const ALL_BUTTONS: [Button; 12] = [
+pub const ALL_BUTTONS: [Button; 14] = [
     Button::A,
     Button::B,
     Button::X,
@@ -21,6 +21,8 @@ pub const ALL_BUTTONS: [Button; 12] = [
     Button::DPadDown,
     Button::DPadLeft,
     Button::DPadRight,
+    Button::LeftStick,
+    Button::RightStick,
 ];
 
 /// The key a controller button presses on this screen (`None` = nothing).
@@ -39,6 +41,8 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::LeftShoulder | P::RightShoulder => s.key_for(Action::Ability1),
             P::X => s.key_for(Action::Ability2),
             P::Y => s.key_for(Action::Ability3),
+            P::LeftStick => s.key_for(Action::Ability4),
+            P::RightStick => s.key_for(Action::Ability5),
             P::B => s.key_for(Action::Strike),
             P::Start => Some(Keycode::Escape),
             // Arrows turn the head in first-person dreams.
@@ -160,6 +164,8 @@ pub fn button_label(b: Button) -> &'static str {
         Button::DPadDown => "DOWN",
         Button::DPadLeft => "LEFT",
         Button::DPadRight => "RIGHT",
+        Button::LeftStick => "L3",
+        Button::RightStick => "R3",
         _ => "?",
     }
 }
@@ -271,6 +277,8 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
             ("LB/RB", "ability 1"),
             ("X", "ability 2"),
             ("Y", "ability 3"),
+            ("L3", "ability 4"),
+            ("R3", "ability 5"),
             ("B", "strike"),
             ("START", "pause"),
         ]
@@ -279,6 +287,8 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
             ("SHIFT", "ability 1"),
             ("E", "ability 2"),
             ("Q", "ability 3"),
+            ("R", "ability 4"),
+            ("C", "ability 5"),
             ("F", "strike"),
             ("ESC / P", "pause"),
         ]
@@ -348,6 +358,8 @@ mod tests {
         (Mode::Playing, "[shift]"),
         (Mode::Playing, "[e]"),
         (Mode::Playing, "[q]"),
+        (Mode::Playing, "[r]"),
+        (Mode::Playing, "[c]"),
     ];
 
     #[test]
