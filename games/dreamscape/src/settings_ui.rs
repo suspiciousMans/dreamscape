@@ -37,7 +37,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
         Vec2::new(width, row_h * s.rows.len() as f32 + c * 4.0),
     );
     pixel_ui::panel(p, panel, [120, 100, 180], rgba([8, 4, 20], 0.85), c, 0.7);
-    let font = (row_h * 0.72).clamp(12.0, 24.0);
+    let font = (row_h * 0.72).clamp((row_h * 0.85).min(12.0), 24.0);
     for (i, (label, value)) in s.rows.iter().enumerate() {
         let sel = i == s.selected;
         let y = y0 + i as f32 * row_h;

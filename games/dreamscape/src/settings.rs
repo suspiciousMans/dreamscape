@@ -24,10 +24,12 @@ pub enum Action {
     Ability1,
     Ability2,
     Ability3,
+    Ability4,
+    Ability5,
     Strike,
 }
 
-pub const ALL_ACTIONS: [Action; 9] = [
+pub const ALL_ACTIONS: [Action; 11] = [
     Action::Forward,
     Action::Back,
     Action::Left,
@@ -36,6 +38,8 @@ pub const ALL_ACTIONS: [Action; 9] = [
     Action::Ability1,
     Action::Ability2,
     Action::Ability3,
+    Action::Ability4,
+    Action::Ability5,
     Action::Strike,
 ];
 
@@ -50,6 +54,8 @@ impl Action {
             Action::Ability1 => "ability 1",
             Action::Ability2 => "ability 2",
             Action::Ability3 => "ability 3",
+            Action::Ability4 => "ability 4",
+            Action::Ability5 => "ability 5",
             Action::Strike => "strike",
         }
     }
@@ -64,6 +70,8 @@ impl Action {
             Action::Ability1 => "Left Shift",
             Action::Ability2 => "E",
             Action::Ability3 => "Q",
+            Action::Ability4 => "R",
+            Action::Ability5 => "C",
             Action::Strike => "F",
         }
     }

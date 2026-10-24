@@ -21,8 +21,8 @@ pub const RING_SECS: f32 = 0.5;
 pub const NEVER: f32 = f32::MAX;
 
 /// Card size at 720p, and how much of each card's width the next leaves showing.
-const CARD_W: f32 = 92.0;
-const CARD_H: f32 = 118.0;
+const CARD_W: f32 = 116.0;
+const CARD_H: f32 = 149.0;
 const VISIBLE: f32 = 0.82;
 /// Tilt between neighbouring cards, in radians (about 6 degrees).
 const TILT_STEP: f32 = 0.105;
@@ -228,7 +228,7 @@ fn smooth(t: f32) -> f32 {
 
 /// The draw stack: right of the hand, a little smaller than a card.
 pub fn stack_rect(screen: Rect, rests: &[Rect], u: f32) -> Rect {
-    let (w, h) = (CARD_W * 0.8 * u, CARD_H * 0.8 * u);
+    let (w, h) = (CARD_W * 0.9 * u, CARD_H * 0.9 * u);
     let (left, bottom) = rests.iter().fold((screen.center().x, screen.bottom() - 26.0 * u), |a, r| {
         (a.0.max(r.right()), a.1.max(r.bottom()))
     });
