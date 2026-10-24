@@ -48,6 +48,7 @@ mod enemy_ai;
 mod eye;
 mod eye_motion;
 mod juice;
+mod fortune;
 mod lottery;
 mod lottery_ui;
 mod retention;
@@ -98,6 +99,8 @@ mod sounds;
 mod specials;
 mod steam;
 mod store;
+mod tickets;
+mod tickets_ui;
 mod summary_ui;
 mod title_ui;
 mod transition;
@@ -369,6 +372,9 @@ enum TitleItem {
     JoinCoop,
     Quit,
 }
+
+/// The title's note when the day's free fortune is unclaimed. // === fortune ===
+const FORTUNE_LINE: &str = "a fortune is waiting in the Lucid Store";
 
 fn today() -> u64 {
     progress::day_number(
@@ -702,6 +708,18 @@ pub struct DreamscapeGame {
     lottery_status: Option<String>,
     /// Index into `lottery::pullable_themes()` for the spark pick.
     lottery_pick: usize,
+    // === fortune ===
+    /// What the last ticket scratch revealed, and how long ago.
+    ticket_revealed: Option<tickets_ui::Revealed>,
+    ticket_age: f32,
+    /// The first of the two presses to scratch a ticket has been made.
+    ticket_confirm: bool,
+    ticket_status: Option<String>,
+    /// Clean-dream tickets earned in the current run (capped).
+    tickets_this_run: u32,
+    /// Nerve was lost in the dream being played.
+    nerve_lost_this_dream: bool,
+    // === end fortune ===
     /// What the last pressed run did for its cards (shown on the pack screen).
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
@@ -1214,6 +1232,12 @@ impl DreamscapeGame {
             lottery_age: 0.0,
             lottery_status: None,
             lottery_pick: 0,
+            ticket_revealed: None,
+            ticket_age: 0.0,
+            ticket_confirm: false,
+            ticket_status: None,
+            tickets_this_run: 0,
+            nerve_lost_this_dream: false,
             last_report: None,
             shards_this_run: 0,
             second_wind_used: false,
@@ -2981,6 +3005,7 @@ impl DreamscapeGame {
             + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
             nerve::Hit::Down => {
+                self.nerve_lost_this_dream = true; // === fortune ===
                 // DREAM ANCHOR: once a dream, a lethal blow leaves you standing.
                 if self.run.count(Upgrade::DreamAnchor) > 0 && !self.last_stand_used {
                     self.last_stand_used = true;
@@ -2995,6 +3020,7 @@ impl DreamscapeGame {
             }
             nerve::Hit::Ignored => None,
             nerve::Hit::Hurt => {
+                self.nerve_lost_this_dream = true; // === fortune ===
                 log::info!(
                     "Hurt by: {by} (nerve {}/{}, depth {})",
                     self.nerve.cur(),
@@ -3608,7 +3634,7 @@ impl DreamscapeGame {
                 hud::Mode::Title | hud::Mode::Summary | hud::Mode::Reveal
             ) {
                 let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
-                streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth))
+                self.title_goal(&loadout)
             } else {
                 String::new()
             },
@@ -3626,6 +3652,11 @@ impl DreamscapeGame {
                 self.lottery_view()
             } else {
                 lottery_ui::LotteryView::default()
+            },
+            tickets: if self.mode == hud::Mode::Store && self.store_tab == 2 {
+                self.tickets_view()
+            } else {
+                tickets_ui::TicketsView::default()
             },
             mastery_levels: self
                 .booklet
@@ -6878,6 +6909,14 @@ impl DreamscapeGame {
             log::info!("Achievement: {} ({id})", achievements::name(id));
             steam::unlock(id);
         }
+        // === fortune === a ticket for each new achievement (solo play only)
+        if !self.coop_active() && !self.autopilot && self.prologue.is_none() {
+            tickets::give(
+                &mut self.booklet.stash,
+                tickets::TICKETS_PER_ACHIEVEMENT * fresh.len() as u32,
+            );
+        }
+        // === end fortune ===
         self.achievement_toast =
             Some((achievements::name(fresh[fresh.len() - 1]).to_string(), 0.0));
         self.sfx(Sound::Achievement);
@@ -7045,7 +7084,7 @@ impl DreamscapeGame {
             })
             .collect();
         let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
-        let goal = streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth));
+        let goal = self.title_goal(&loadout);
         (rows, !goal.is_empty())
     }
 
@@ -7234,6 +7273,7 @@ impl DreamscapeGame {
         let weekly_dust = self.booklet.weekly.claim(&weekly);
         if let Some(d) = weekly_dust {
             self.booklet.stash.earn(d);
+            tickets::give(&mut self.booklet.stash, tickets::TICKETS_PER_WEEKLY); // === fortune ===
         }
         self.after_pack_feelings(&haul, &report, weekly_dust);
         self.last_report = Some(report);
@@ -7310,8 +7350,161 @@ impl DreamscapeGame {
             outcome: self.lottery_outcome.clone(),
             age: self.lottery_age,
             status: self.lottery_status.clone(),
+            fortune: self.fortune_view(featured), // === fortune ===
         }
     }
+
+    // === fortune ===
+    /// A fortune is waiting today (solo play only; co-op and autopilot never see it).
+    fn fortune_waiting(&self) -> bool {
+        self.mode == hud::Mode::Title
+            && !self.coop_active()
+            && !self.autopilot
+            && self.booklet.fortune.available(today())
+    }
+
+    /// The title's bottom line: the goal, plus a plain note when a fortune
+    /// is waiting (no pulsing, no urgency).
+    fn title_goal(&self, loadout: &[u32]) -> String {
+        let goal = streaks::teaser(&retention::progress_inputs(&self.booklet, loadout, self.best_depth));
+        if !self.fortune_waiting() {
+            return goal;
+        }
+        if goal.is_empty() {
+            FORTUNE_LINE.to_string()
+        } else {
+            format!("{goal}  ·  {FORTUNE_LINE}")
+        }
+    }
+
+    /// The free pull's exact odds, shown only while one is waiting.
+    fn fortune_view(&self, featured: dream::DreamTheme) -> Option<lottery_ui::FortuneView> {
+        let day = today();
+        if !self.booklet.fortune.available(day) {
+            return None;
+        }
+        let o = fortune::fortune_odds(&self.booklet, day, Some(featured));
+        Some(lottery_ui::FortuneView {
+            odds: lottery::display_odds(&o),
+            nudge: self.booklet.fortune.nudge(day),
+            days: self.booklet.fortune.prior_days(day),
+        })
+    }
+
+    /// Claim today's free pull. The card is chosen from this save's own seed
+    /// stream and written before the reveal plays.
+    fn fortune_claim(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        let before = self.booklet.clone();
+        let save_seed = self.booklet.lore.save_seed;
+        match fortune::claim(&mut self.booklet, today(), save_seed) {
+            None => {
+                self.lottery_status = Some("today's fortune is already yours".into());
+                self.sfx(Sound::Denied);
+            }
+            Some(mut p) => {
+                p.pull.near_miss = None; // no near-miss teasing on a free gift
+                if self.persist_booklet() {
+                    log::info!("Fortune: {:?} -> {}", p.card.rarity, p.card.name);
+                    self.show_pull(p);
+                } else {
+                    self.booklet = before;
+                    self.lottery_status = Some("the deck couldn't write it down (see log)".into());
+                }
+            }
+        }
+    }
+
+    fn tickets_view(&self) -> tickets_ui::TicketsView {
+        let stash = &self.booklet.stash;
+        let left = !tickets::unowned_cosmetics(stash).is_empty();
+        let mut odds: Vec<(String, f32)> = tickets::odds(stash.ticket_dry, left)
+            .into_iter()
+            .map(|(k, share)| (k.label(), share))
+            .collect();
+        odds.sort_by(|a, b| b.1.total_cmp(&a.1));
+        tickets_ui::TicketsView {
+            tickets: stash.tickets,
+            odds,
+            pity_left: tickets::scratches_to_pity(stash.ticket_dry),
+            scratches: stash.ticket_scratches,
+            revealed: self.ticket_revealed.clone(),
+            age: self.ticket_age,
+            confirming: self.ticket_confirm,
+            status: self.ticket_status.clone(),
+        }
+    }
+
+    /// Scratch a ticket: the first press asks, the second confirms. The
+    /// prize is rolled and saved at the confirm; the animation only uncovers it.
+    fn ticket_press(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        if self.booklet.stash.tickets == 0 {
+            self.ticket_confirm = false;
+            self.ticket_status = Some("no tickets yet: clean dreams, achievements and weekly challenges earn them".into());
+            self.sfx(Sound::Denied);
+            return;
+        }
+        if !self.ticket_confirm {
+            self.ticket_confirm = true;
+            self.ticket_status = Some("scratch one ticket? press enter again to confirm".into());
+            return;
+        }
+        self.ticket_confirm = false;
+        let before = self.booklet.clone();
+        let seed = self.booklet.lore.save_seed;
+        let got = match tickets::scratch(&mut self.booklet, seed, today()) {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !self.persist_booklet() {
+            self.booklet = before;
+            self.ticket_status = Some("the ticket couldn't be written down (see log)".into());
+            return;
+        }
+        let (title, detail) = match &got.prize {
+            tickets::Prize::Dust(n) => (format!("{n} DREAM DUST"), "added to your stash".to_string()),
+            tickets::Prize::Pull => {
+                let c = got.pulled.as_ref().map(|p| &p.card);
+                (
+                    "A LOTTERY PULL".to_string(),
+                    c.map_or(String::new(), |c| format!("{} ({}), in your booklet", c.name, c.rarity.label())),
+                )
+            }
+            tickets::Prize::Cosmetic(i) => (
+                i.info().name.to_uppercase(),
+                format!("a new {} item, yours now", i.shelf().label().to_lowercase()),
+            ),
+            tickets::Prize::Hint => (
+                "A DREAM OF YOUR CHOOSING".to_string(),
+                "a spark pick is ready in the lottery tab".to_string(),
+            ),
+        };
+        log::info!("Ticket: {title} ({detail})");
+        self.sfx(if matches!(got.prize, tickets::Prize::Dust(n) if n < 80) { Sound::Pick } else { Sound::WakeDoor });
+        self.ticket_revealed = Some(tickets_ui::Revealed { title, detail });
+        self.ticket_age = 0.0;
+        self.ticket_status = None;
+    }
+
+    /// Tickets for a clean dream, once per finished dream, capped per run.
+    /// Solo runs only.
+    fn ticket_for_clean_dream(&mut self) {
+        if self.coop_active() || self.autopilot || self.prologue.is_some() {
+            return;
+        }
+        if !self.nerve_lost_this_dream
+            && self.caught_this_dream == 0
+            && tickets::for_clean_dream(&mut self.booklet.stash, &mut self.tickets_this_run) > 0
+        {
+            log::info!("Ticket: +1 for a clean dream ({} this run)", self.tickets_this_run);
+        }
+    }
+    // === end fortune ===
 
     /// A fresh seed for each pull (the lottery must not be replayable).
     fn lottery_seed(&self) -> u64 {
@@ -7401,6 +7594,8 @@ impl DreamscapeGame {
         self.store_status = None;
         self.store_tab = 0;
         self.lottery_status = None;
+        self.ticket_status = None; // === fortune ===
+        self.ticket_confirm = false;
         self.mode = hud::Mode::Store;
     }
 
@@ -7769,6 +7964,7 @@ impl DreamscapeGame {
         log::info!("Eye: {text}");
         self.eye_line = Some((text, -eye_motion::SPEECH_DELAY));
         self.booklet.clean.on_run_start();
+        self.tickets_this_run = 0; // === fortune ===
 
         // Abilities come from the loadout's cards (none in the prologue),
         // and each card's dream is planned into the run.
@@ -8751,6 +8947,7 @@ impl DreamscapeGame {
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
         if !self.run_log.is_empty() && !std::mem::take(&mut self.just_continued) {
+            self.ticket_for_clean_dream(); // === fortune ===
             if let streaks::CleanEvent::Clean {
                 label: Some(label), ..
             } = self.booklet.clean.on_dream_end(self.caught_this_dream > 0)
@@ -8761,6 +8958,7 @@ impl DreamscapeGame {
         }
         self.just_continued = false;
         self.caught_this_dream = 0;
+        self.nerve_lost_this_dream = false; // === fortune ===
         self.stare = 0.0;
         if self.run_active {
             self.achieve(Some(achievements::Event::Depth(self.director.depth)));
@@ -9968,6 +10166,16 @@ impl Game for DreamscapeGame {
             Ok("loadout") => self.open_loadout(),
             Ok("merge") => self.open_merge(hud::Mode::Title),
             Ok("store") => self.open_store(),
+            Ok("tickets") | Ok("tickets_scratch") => {
+                // === fortune === dev hook: the tickets tab, with a few tickets
+                self.open_store();
+                self.store_tab = 2;
+                tickets::give(&mut self.booklet.stash, 3);
+                if crate::dev::var("DREAMSCAPE_SCREEN").as_deref() == Ok("tickets_scratch") {
+                    self.ticket_press();
+                    self.ticket_press();
+                }
+            }
             Ok("lottery") | Ok("lottery_pull") => {
                 // Dev only: a fat purse so the screen has something to show.
                 self.booklet.stash.earn(300);
@@ -10362,10 +10570,27 @@ impl Game for DreamscapeGame {
                     return;
                 }
                 (hud::Mode::Store, Keycode::Tab) => {
-                    self.store_tab = 1 - self.store_tab;
+                    self.store_tab = (self.store_tab + 1) % 3; // === fortune === perks, lottery, tickets
                     self.lottery_status = None;
+                    self.ticket_status = None;
+                    self.ticket_confirm = false;
                     return;
                 }
+                // === fortune ===
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 2 => {
+                    self.ticket_press();
+                    return;
+                }
+                (hud::Mode::Store, _) if self.store_tab == 2 => {
+                    self.ticket_confirm = false;
+                    self.ticket_status = None;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::F) if self.store_tab == 1 => {
+                    self.fortune_claim();
+                    return;
+                }
+                // === end fortune ===
                 (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 1 => {
                     self.lottery_pull();
                     return;
@@ -10565,6 +10790,7 @@ impl Game for DreamscapeGame {
         }
         if self.mode == hud::Mode::Store {
             self.lottery_age += dt;
+            self.ticket_age += dt; // === fortune ===
         }
         if self.mode == hud::Mode::Playing {
             let dt = dt.min(gameplay::MAX_DT);
@@ -10690,6 +10916,10 @@ impl Game for DreamscapeGame {
                     "lottery" => {
                         self.open_store();
                         self.store_tab = 1;
+                    }
+                    "tickets" => {
+                        self.open_store();
+                        self.store_tab = 2; // === fortune ===
                     }
                     "summary" => {
                         self.title_age = 0.0;
@@ -12273,6 +12503,86 @@ mod screen_smoke {
         }
         assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
     }
+
+    // === fortune ===
+    #[test]
+    fn the_daily_fortune_is_free_once_a_day_and_the_title_says_so_plainly() {
+        let mut g = game("fortune_day");
+        g.mode = hud::Mode::Title;
+        assert!(g.title_goal(&[]).contains(FORTUNE_LINE));
+        assert!(g.title_rows().1, "the title reserves room for the line");
+        g.open_store();
+        g.store_tab = 1;
+        let view = g.hud_view().lottery;
+        let f = view.fortune.expect("odds shown while a fortune waits");
+        assert!((f.odds.iter().map(|o| o.1).sum::<f32>() - 1.0).abs() < 1e-4);
+        assert!(shapes(&g) > 50);
+        g.fortune_claim();
+        assert_eq!(g.booklet.card_count(), 1, "a free card");
+        assert_eq!(g.booklet.stash.dust, 0, "it costs nothing");
+        assert_eq!(g.booklet.lottery.total_pulls, 0, "and does not move pity");
+        assert!(g.lottery_outcome.as_ref().unwrap().near_miss.is_none());
+        g.fortune_claim();
+        assert_eq!(g.booklet.card_count(), 1, "once per day");
+        assert!(g.hud_view().lottery.fortune.is_none());
+        g.mode = hud::Mode::Title;
+        assert!(!g.title_goal(&[]).contains(FORTUNE_LINE));
+        // And it is saved: a reloaded booklet has no fortune waiting.
+        let again = cards::load(&g.booklet_path);
+        assert!(!again.fortune.available(today()));
+    }
+
+    #[test]
+    fn a_ticket_needs_two_presses_and_the_prize_is_saved_before_it_shows() {
+        let mut g = game("tickets_scratch");
+        g.open_store();
+        g.store_tab = 2;
+        assert!(shapes(&g) > 40);
+        g.ticket_press();
+        assert!(g.ticket_revealed.is_none(), "no tickets: nothing happens");
+        tickets::give(&mut g.booklet.stash, 2);
+        g.ticket_press();
+        assert_eq!(g.booklet.stash.tickets, 2, "first press only asks");
+        assert!(g.ticket_confirm);
+        assert!(shapes(&g) > 40, "confirm state draws");
+        g.ticket_press();
+        assert_eq!(g.booklet.stash.tickets, 1);
+        assert_eq!(g.booklet.stash.ticket_scratches, 1);
+        assert!(g.ticket_revealed.is_some());
+        let saved = cards::load(&g.booklet_path);
+        assert_eq!(saved.stash.tickets, 1, "written before the animation");
+        assert_eq!(saved.stash.ticket_scratches, 1);
+        for age in [0.0, 0.4, tickets_ui::SCRATCH, 3.0] {
+            g.ticket_age = age;
+            assert!(shapes(&g) > 40, "age {age}");
+        }
+        g.settings.reduced_motion = true;
+        assert!(shapes(&g) > 40);
+        let v = g.hud_view().tickets;
+        assert!((v.odds.iter().map(|o| o.1).sum::<f32>() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clean_dreams_earn_tickets_up_to_the_run_cap_and_a_hurt_dream_earns_none() {
+        let mut g = game("tickets_clean");
+        g.nerve_lost_this_dream = true;
+        g.ticket_for_clean_dream();
+        assert_eq!(g.booklet.stash.tickets, 0, "nerve was lost");
+        g.nerve_lost_this_dream = false;
+        for _ in 0..tickets::TICKETS_PER_RUN_CAP + 4 {
+            g.ticket_for_clean_dream();
+        }
+        assert_eq!(g.booklet.stash.tickets, tickets::TICKETS_PER_RUN_CAP);
+        g.tickets_this_run = 0; // a new run
+        g.ticket_for_clean_dream();
+        assert_eq!(g.booklet.stash.tickets, tickets::TICKETS_PER_RUN_CAP + 1);
+        let mut c = game("tickets_autopilot");
+        c.autopilot = true;
+        c.ticket_for_clean_dream();
+        assert_eq!(c.booklet.stash.tickets, 0, "inert on the autopilot");
+    }
+
+    // === end fortune ===
 
     fn card(ability: &'static str, since_use: f32) -> hand::HandCard {
         hand::HandCard {
@@ -14588,6 +14898,11 @@ mod screen_smoke {
         bad.extend(overflows(&g, "Store"));
         g.store_tab = 1;
         bad.extend(overflows(&g, "Lottery"));
+        g.store_tab = 2; // === fortune ===
+        bad.extend(overflows(&g, "Tickets"));
+        g.ticket_confirm = true;
+        bad.extend(overflows(&g, "Tickets-confirm"));
+        g.store_tab = 1;
         g.begin_pick(offers(3));
         bad.extend(overflows(&g, "PackPick"));
         g.pick.age = 3.0;

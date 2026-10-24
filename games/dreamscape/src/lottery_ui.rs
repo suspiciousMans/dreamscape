@@ -44,6 +44,19 @@ pub struct LotteryView {
     /// Seconds since the last pull was made.
     pub age: f32,
     pub status: Option<String>,
+    /// Today's free fortune, with its exact odds (None once claimed).
+    pub fortune: Option<FortuneView>,
+}
+
+/// The daily free pull as the lottery screen shows it.
+#[derive(Clone, Debug, Default)]
+pub struct FortuneView {
+    /// Exact odds of the free pull, nudge included.
+    pub odds: Vec<(Rarity, f32)>,
+    /// The streak's Lucid+ nudge (a probability).
+    pub nudge: f32,
+    /// Earlier consecutive fortune days behind it.
+    pub days: u32,
 }
 
 /// 0 while the deck shudders, then 1.0 -> 0.0 as the reveal settles.
@@ -117,6 +130,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         rgba([255, 210, 80], 1.0),
     );
 
+    fortune_line(p, screen, v);
     odds_panel(p, screen, v);
     stage(ctx, p, screen, v, art);
 
@@ -133,8 +147,11 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         );
     }
     let pull = v.k(&format!(
-        "[enter] pull ({} dust)   [a/d] pick a dream   [p] spark pick ({}/{})",
-        l.cost, l.sparks, l.spark_goal
+        "[enter] pull ({} dust)   [a/d] pick a dream   [p] spark pick ({}/{}){}",
+        l.cost,
+        l.sparks,
+        l.spark_goal,
+        if l.fortune.is_some() { "   [f] free fortune" } else { "" }
     ));
     let c = pixel_ui::cell(u);
     let size = pixel_ui::fit(&pull, 22.0 * u, screen.width() - 60.0, 10.0);
@@ -167,6 +184,32 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     );
     crate::loadout_ui::hint_bar(p, screen, v, "[tab] back to the store   [esc] leave");
     pixel_ui::scanlines(p, screen, c, 8);
+}
+
+/// The free daily fortune and its exact odds (only while one is waiting).
+fn fortune_line(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let Some(f) = &v.lottery.fortune else {
+        return;
+    };
+    let u = pixel_ui::scale(screen);
+    let mut text = String::from("FREE FORTUNE [f]:");
+    for &(r, share) in &f.odds {
+        text.push_str(&format!(" {} {:.1}%", r.label(), share * 100.0));
+    }
+    if f.nudge > 0.0 {
+        text.push_str(&format!(
+            "  (streak +{:.1}%, {} days)",
+            f.nudge * 100.0,
+            f.days
+        ));
+    }
+    p.text(
+        Pos2::new(screen.center().x, screen.top() + 90.0 * u),
+        Align2::CENTER_TOP,
+        &text,
+        FontId::monospace(pixel_ui::fit(&text, 16.0 * u, screen.width() - 40.0, 8.0)),
+        rgba([255, 210, 80], 0.9),
+    );
 }
 
 /// The honest numbers: exact odds, pity, sparks, tonight's featured dream.
