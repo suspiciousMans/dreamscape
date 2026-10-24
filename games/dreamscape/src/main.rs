@@ -12205,6 +12205,113 @@ mod screen_smoke {
         cards::card_from(&cards::tests::record(theme, seed, 3, 0.4, false))
     }
 
+    // === abilities2 ===
+    #[test]
+    fn quake_staggers_what_is_near_and_needs_the_ground() {
+        let mut g = fighter("quake", Some(Ability::Quake));
+        let near = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), false);
+        let far = put_pacer(&mut g, Vec3::new(abilities2::QUAKE_REACH + 4.0, 1.0, 0.0), false);
+        assert!(g.abilities2_ready(Ability::Quake));
+        g.abilities2_on_use(Ability::Quake, 1.0, 1.0);
+        assert_eq!(g.stunned.get(&near), Some(&abilities2::QUAKE_STAGGER));
+        assert!(!g.stunned.contains_key(&far));
+        g.player_grounded = false;
+        assert!(!g.abilities2_ready(Ability::Quake), "no ground, no quake");
+    }
+
+    #[test]
+    fn bind_roots_only_the_nearest_enemy_and_needs_one() {
+        let mut g = fighter("bind", Some(Ability::Bind));
+        assert!(!g.abilities2_ready(Ability::Bind), "nothing to bind");
+        let a = put_pacer(&mut g, Vec3::new(8.0, 1.0, 0.0), true);
+        let b = put_pacer(&mut g, Vec3::new(2.0, 1.0, 0.0), true);
+        assert!(g.abilities2_ready(Ability::Bind));
+        g.abilities2_on_use(Ability::Bind, 1.0, 1.0);
+        assert_eq!(g.stunned.get(&b), Some(&abilities2::BIND_SECS));
+        assert!(!g.stunned.contains_key(&a));
+    }
+
+    #[test]
+    fn a_bound_special_staggers_for_the_whole_bind() {
+        let mut g = fighter("bind2", Some(Ability::Bind));
+        let e = put_special(&mut g, EnemyKind::Stalker, Vec3::new(3.0, 1.0, 0.0), SpecialAI::Stalker(specials::Stalker::new(Vec3::new(3.0, 1.0, 0.0), 5.0)));
+        g.abilities2_on_use(Ability::Bind, 1.0, 1.0);
+        assert_eq!(g.staggered.get(&e), Some(&abilities2::BIND_SECS));
+    }
+
+    #[test]
+    fn a_mirror_throws_the_blow_back_once() {
+        let mut g = fighter("mirror", Some(Ability::Mirror));
+        let hitter = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        let bystander = put_pacer(&mut g, Vec3::new(4.0, 1.0, 3.0), false);
+        g.break_mirror();
+        assert!(!g.run.active(Ability::Mirror), "spent");
+        assert!(g.grace >= abilities2::MIRROR_GRACE);
+        assert_eq!(g.stunned.get(&bystander), Some(&abilities2::MIRROR_STUN));
+        assert_eq!(g.stunned.get(&hitter), Some(&abilities2::MIRROR_STUN));
+        assert_eq!(g.foes[&hitter].hp, 1.0, "the attacker took a hit");
+    }
+
+    #[test]
+    fn veil_makes_every_blow_a_sneak_attack() {
+        let mut g = fighter("veil", Some(Ability::Quake)); // no veil yet
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        let t = g.combat_targets().into_iter().find(|t| t.entity == e).unwrap();
+        assert!(!g.strike_ctx(&t).unaware, "it is chasing you");
+        g.run.take(Upgrade::Learn(Ability::Veil));
+        let slot = g.run.abilities.iter().position(|a| a.ability == Ability::Veil).unwrap();
+        g.run.abilities[slot].active = 3.0;
+        assert!(g.strike_ctx(&t).unaware);
+        assert!(g.strike_damage(&t) > 1.0 - 1e-6);
+    }
+
+    #[test]
+    fn surge_doubles_the_next_dash_and_fades_unused() {
+        let mut g = fighter("surge", Some(Ability::Surge));
+        g.abilities2_on_use(Ability::Surge, 1.0, 1.0);
+        g.abilities2_on_use(Ability::Dash, 1.0, 1.0);
+        assert_eq!(g.dash_boost, abilities2::SURGE_MULT);
+        assert_eq!(g.surge.take_jump(), abilities2::SURGE_MULT, "the jump is still owed");
+        g.update_abilities2(0.016);
+        assert_eq!(g.dash_boost, 1.0, "no dash in flight");
+        g.abilities2_on_use(Ability::Surge, 1.0, 1.0);
+        g.run.abilities[0].active = 0.0;
+        g.update_abilities2(0.016);
+        assert_eq!(g.surge.take_jump(), 1.0, "the surge faded");
+    }
+
+    #[test]
+    fn haste_quickens_you_inside_its_zone_until_it_fades() {
+        let mut g = fighter("haste", Some(Ability::Haste));
+        let base = g.player_speed();
+        g.abilities2_on_use(Ability::Haste, 1.0, 1.0);
+        assert!((g.player_speed() / base - abilities2::HASTE_PLAYER).abs() < 1e-4);
+        g.player_position = Vec3::new(abilities2::HASTE_RADIUS + 3.0, 1.0, 0.0);
+        assert!((g.player_speed() - base).abs() < 1e-4, "outside the zone");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.update_abilities2(Ability::Haste.duration() + 0.1);
+        assert!(g.haste.is_none());
+        assert!((g.player_speed() - base).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tether_drags_the_nearest_mote_to_you() {
+        let mut g = fighter("tether", Some(Ability::Tether));
+        assert!(!g.abilities2_ready(Ability::Tether), "nothing to pull");
+        let mote = g.world.spawn((
+            Transform { position: Vec3::new(10.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        g.motes.push((mote, 0.0));
+        assert!(g.abilities2_ready(Ability::Tether));
+        for _ in 0..10 {
+            g.update_abilities2(1.0 / 30.0);
+        }
+        let x = g.world.get::<&Transform>(mote).unwrap().position.x;
+        assert!(x < 6.0 && x > 3.0, "pulled a third of a second to {x}");
+    }
+    // === end abilities2 ===
+
     #[test]
     fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {
         let mut g = game("nerve");

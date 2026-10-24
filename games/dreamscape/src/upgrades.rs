@@ -354,7 +354,7 @@ impl Ability {
             Ability::Mirror => 8.0,
             Ability::Quake => 0.0,
             Ability::Veil => 5.0,
-            Ability::Surge => 8.0,
+            Ability::Surge => 6.0,
             Ability::Pulse => 4.0,
             Ability::Haste => 6.0,
             Ability::Bind => 0.0,
@@ -1977,8 +1977,9 @@ mod tests {
     #[test]
     fn a_shared_active_is_learned_once() {
         use crate::dream::DreamTheme::*;
-        // Both teach STILLNESS: the second fills no slot, the third does.
-        let r = RunUpgrades::from_loadout(&[card(Lobby), card(WatchingWallpaper), card(Garden)]);
+        // Both teach STILLNESS (two copies of one dream, now that no two
+        // dreams share an active): the second fills no slot, the third does.
+        let r = RunUpgrades::from_loadout(&[card(Lobby), card(Lobby), card(Garden)]);
         let actives: Vec<Ability> = r.abilities.iter().map(|a| a.ability).collect();
         assert_eq!(actives, vec![Ability::Stillness, Ability::ShardCall]);
     }
@@ -2003,6 +2004,18 @@ mod tests {
             !r.available(Upgrade::DoubleJump),
             "picks won't offer a maxed passive"
         );
+    }
+
+    #[test]
+    fn every_new_ability_can_be_learned_and_replaces_the_oldest() {
+        let mut r = RunUpgrades::default();
+        for a in crate::abilities2::NEW_ABILITIES {
+            assert!(r.available(Upgrade::Learn(a)), "{a:?}");
+            assert!(!a.name().is_empty() && !a.desc().is_empty() && a.name().len() <= 9);
+            r.take(Upgrade::Learn(a));
+            assert!(r.abilities.iter().any(|s| s.ability == a), "{a:?}");
+        }
+        assert_eq!(r.abilities.len(), ABILITY_SLOTS);
     }
 
     #[test]
