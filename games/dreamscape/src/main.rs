@@ -12228,6 +12228,45 @@ mod screen_smoke {
         assert_eq!(g.nerve.max(), 5, "never past five");
     }
 
+    // === upgrades2 ===
+    #[test]
+    fn iron_nerve_raises_the_ceiling_and_thin_skin_lowers_it_once() {
+        let mut g = fighter("ironnerve", None);
+        g.run.take(Upgrade::IronNerve);
+        g.update_combat(0.0);
+        assert_eq!((g.nerve.cur(), g.nerve.max()), (4, 4));
+        let mut t = fighter("thinskin", None);
+        t.run.take(Upgrade::Cursed(upgrades::Curse::ThinSkin));
+        t.update_combat(0.0);
+        assert_eq!((t.nerve.cur(), t.nerve.max()), (2, 2));
+        t.update_combat(0.0);
+        assert_eq!(t.nerve.max(), 2, "taken off once, not every frame");
+    }
+
+    #[test]
+    fn pack_rat_pays_on_a_skip_and_the_moths_favour_cuts_prices() {
+        let mut g = reward_game("packrat");
+        g.run.take(Upgrade::PackRat);
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert_eq!(g.bonus_dust, dust + upgrades::SKIP_DUST + upgrades::PACK_RAT_DUST);
+        let base = g.moth_terms().pct_off;
+        g.run.take(Upgrade::MothsFavour);
+        assert_eq!(g.moth_terms().pct_off, base + upgrades::MOTHS_FAVOUR_PCT);
+    }
+
+    #[test]
+    fn nimble_draw_and_the_free_reshuffle_reach_the_deck() {
+        let mut g = fighter("deckperks", None);
+        g.deck = Some(deck::Deck::new(&[1, 2, 3, 4, 5], 9));
+        g.run.take(Upgrade::NimbleDraw);
+        g.update_deck(0.0);
+        let want = g.run.deck_perks();
+        assert_eq!(g.deck.as_ref().unwrap().perks, want);
+        assert!(want.draw_mult < 1.0);
+    }
+    // === end upgrades2 ===
+
     #[test]
     fn sharp_edge_cuts_deeper_into_a_reeling_foe() {
         let mut g = fighter("edge", None);
