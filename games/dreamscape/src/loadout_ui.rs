@@ -33,6 +33,7 @@ pub struct LoadoutView {
 
 /// Adds the card, or takes it out if it's already in. A full loadout
 /// refuses new cards. Returns whether anything changed.
+#[allow(dead_code)] // the fixed-loadout screen: the deck builder (deck_ui) replaced it
 pub fn toggle(loadout: &mut Vec<u32>, number: u32, slots: usize) -> bool {
     if let Some(i) = loadout.iter().position(|&n| n == number) {
         loadout.remove(i);
@@ -91,6 +92,7 @@ pub fn edges_of(c: &Card) -> Vec<crate::edges::Edge> {
 
 /// Which ability slot a chosen card's active fills, or `None` if it brings
 /// no active (the slots are full, or an earlier card teaches the same one).
+#[allow(dead_code)] // the fixed-loadout screen: the deck builder (deck_ui) replaced it
 pub fn slot_of(chosen: &[&Card], number: u32) -> Option<usize> {
     let mut seen = Vec::new();
     for c in chosen {
@@ -486,6 +488,7 @@ pub fn hint_bar(p: &egui::Painter, screen: Rect, v: &HudView, text: &str) {
     );
 }
 
+#[allow(dead_code)] // the fixed-loadout screen: the deck builder (deck_ui) replaced it
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     let m = &v.loadout;
     let u = pixel_ui::scale(screen);

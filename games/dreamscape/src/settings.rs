@@ -23,10 +23,11 @@ pub enum Action {
     Jump,
     Ability1,
     Ability2,
+    Ability3,
     Strike,
 }
 
-pub const ALL_ACTIONS: [Action; 8] = [
+pub const ALL_ACTIONS: [Action; 9] = [
     Action::Forward,
     Action::Back,
     Action::Left,
@@ -34,6 +35,7 @@ pub const ALL_ACTIONS: [Action; 8] = [
     Action::Jump,
     Action::Ability1,
     Action::Ability2,
+    Action::Ability3,
     Action::Strike,
 ];
 
@@ -47,6 +49,7 @@ impl Action {
             Action::Jump => "jump",
             Action::Ability1 => "ability 1",
             Action::Ability2 => "ability 2",
+            Action::Ability3 => "ability 3",
             Action::Strike => "strike",
         }
     }
@@ -60,6 +63,7 @@ impl Action {
             Action::Jump => "Space",
             Action::Ability1 => "Left Shift",
             Action::Ability2 => "E",
+            Action::Ability3 => "Q",
             Action::Strike => "F",
         }
     }
@@ -326,7 +330,7 @@ mod tests {
         assert_eq!(s.key_for(Action::Forward), Some(Keycode::Space), "swapped");
         s.bind(Action::Ability2, Keycode::Q);
         assert_eq!(s.action_for(Keycode::Q), Some(Action::Ability2));
-        assert_eq!(s.action_for(Keycode::E), None);
+        assert_eq!(s.action_for(Keycode::E), Some(Action::Ability3), "swapped");
     }
 
     #[test]

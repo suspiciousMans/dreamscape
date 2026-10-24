@@ -35,6 +35,8 @@ mod companion;
 mod coop;
 mod coop_game;
 mod crash;
+mod deck;
+mod deck_ui;
 mod dev;
 mod dissolve;
 mod dream;
@@ -615,6 +617,20 @@ pub struct DreamscapeGame {
     passive_fired: Vec<(Upgrade, f32)>,
     /// Names of the cards that hold the abilities, for the hand.
     hand_cards: Vec<(Ability, cards::Card)>,
+    // === deck ===
+    /// The run's deck (`None` = the fixed loadout: co-op, autopilot, resumed runs).
+    deck: Option<deck::Deck>,
+    /// The cards dealt first: they give the run's passives, edges and dreams.
+    deck_opening: Vec<cards::Card>,
+    /// Animation clock for the deck (seconds, runs while playing).
+    deck_clock: f32,
+    /// Per hand slot: `deck_clock` when its card was drawn (future = not yet).
+    deck_drawn_at: [f32; upgrades::HAND_SIZE],
+    /// `deck_clock` when a card was last shuffled in.
+    deck_riffle_at: f32,
+    /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
+    deck_leaving: Vec<(hand::HandCard, usize, f32)>,
+    // === end deck ===
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -898,7 +914,7 @@ pub struct DreamscapeGame {
     /// Last direction the dreamer moved in (dash / blink aim).
     facing: Vec3,
     /// Ability keys pressed since the last update.
-    ability_requests: [bool; upgrades::ABILITY_SLOTS],
+    ability_requests: [bool; upgrades::HAND_SIZE],
 }
 
 /// Notes that a passive just did its work (only if the run holds it), so its
@@ -1024,6 +1040,12 @@ impl DreamscapeGame {
             ability_used: Vec::new(),
             passive_fired: Vec::new(),
             hand_cards: Vec::new(),
+            deck: None,
+            deck_opening: Vec::new(),
+            deck_clock: 0.0,
+            deck_drawn_at: [f32::MIN; upgrades::HAND_SIZE],
+            deck_riffle_at: hand::NEVER,
+            deck_leaving: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1217,7 +1239,7 @@ impl DreamscapeGame {
             air_jumps_used: 0,
             jump_was_down: false,
             facing: Vec3::Z,
-            ability_requests: [false; upgrades::ABILITY_SLOTS],
+            ability_requests: [false; upgrades::HAND_SIZE],
         }
     }
 
@@ -1891,11 +1913,145 @@ impl DreamscapeGame {
     }
 
     /// The equipped cards that hold abilities, with how long ago each was used.
+    // === deck ===
+    /// The card in hand slot `k` (the deck's, or for the fixed loadout the
+    /// card that teaches `ability`).
+    fn card_for_slot(&self, k: usize, ability: Ability) -> Option<&(Ability, cards::Card)> {
+        match &self.deck {
+            Some(d) => {
+                let number = d.hand().get(k).copied().flatten()?;
+                self.hand_cards.iter().find(|n| n.1.number == number)
+            }
+            None => self.hand_cards.iter().find(|n| n.0 == ability),
+        }
+    }
+
+    /// The deck's piles for the HUD.
+    fn hand_pile(&self) -> hand::HandPile {
+        match &self.deck {
+            Some(d) => hand::HandPile {
+                shown: true,
+                draw_count: d.draw_len(),
+                riffle_since: self.deck_clock - self.deck_riffle_at,
+                leaving: self
+                    .deck_leaving
+                    .iter()
+                    .map(|(card, slot, at)| hand::Leaving {
+                        card: card.clone(),
+                        slot: *slot,
+                        since: self.deck_clock - at,
+                    })
+                    .collect(),
+            },
+            None => hand::HandPile::default(),
+        }
+    }
+
+    /// Deck runs: advances the deck, and turns its draws into hand slots.
+    fn update_deck(&mut self, dt: f32) {
+        let Some(deck) = self.deck.as_mut() else {
+            return;
+        };
+        self.deck_clock += dt;
+        deck.tick(dt);
+        let events = deck.events();
+        for ev in events {
+            match ev {
+                deck::DeckEvent::Drawn { slot, card } => {
+                    let cd = self.deck.as_ref().map_or(0.0, |d| d.cooldown(card));
+                    if let Some(n) = self.hand_cards.iter().find(|n| n.1.number == card) {
+                        let ability = n.0;
+                        self.run.deck_draw(slot, ability, cd);
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                    }
+                }
+                deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
+                deck::DeckEvent::Played { .. } => {}
+            }
+        }
+        let clock = self.deck_clock;
+        self.deck_leaving.retain(|l| clock - l.2 < hand::LEAVE_TOTAL);
+    }
+
+    /// An ability just fired from `slot`: its card is discarded (the slot
+    /// waits to draw) and flicks out on the HUD.
+    fn deck_on_use(&mut self, slot: usize) {
+        if self.deck.is_none() || slot >= self.run.deck_slots {
+            return;
+        }
+        if let Some(snap) = self.hand_view().get(slot).cloned() {
+            self.deck_leaving.push((snap, slot, self.deck_clock));
+        }
+        let cooldown = self.run.abilities[slot].cooldown;
+        if let Some(d) = self.deck.as_mut() {
+            d.play(slot, cooldown);
+        }
+        self.run.abilities[slot].spent = true;
+    }
+
+    /// Which booklet cards this run's deck is built from, if it uses one.
+    /// `DREAMSCAPE_DECK=1,2,3` forces a deck (even on the autopilot).
+    fn deck_wanted(&self) -> Option<Vec<u32>> {
+        if self.prologue.is_some() || self.coop.is_some() {
+            return None;
+        }
+        if let Ok(list) = crate::dev::var("DREAMSCAPE_DECK") {
+            let forced: Vec<u32> = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            let forced = deck::clean(&forced, |n| self.booklet.card(n).is_some());
+            if !forced.is_empty() {
+                return Some(forced);
+            }
+        }
+        if self.autopilot {
+            return None;
+        }
+        let nums = self.booklet.deck_numbers();
+        (!nums.is_empty()).then_some(nums)
+    }
+
+    /// Starts the deck for a run and returns the opening hand. `None` for
+    /// the fixed loadout.
+    fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
+        self.deck = None;
+        self.deck_opening.clear();
+        self.deck_leaving.clear();
+        self.deck_riffle_at = hand::NEVER;
+        let nums = self.deck_wanted()?;
+        // Ascension rule 13 takes a slot from the hand, as it did from the loadout.
+        let cut = self.booklet.lore.slots().saturating_sub(self.asc_slots());
+        let hand_size = upgrades::HAND_SIZE.saturating_sub(cut).max(1);
+        let mut d = deck::Deck::new(&nums, self.director.dream_seed());
+        d.draw_to_fill(hand_size);
+        let mut opening = Vec::new();
+        for ev in d.events() {
+            if let deck::DeckEvent::Drawn { slot, card } = ev {
+                if let Some(c) = self.booklet.card(card) {
+                    opening.push(c.clone());
+                }
+                // The first hand fans out one card after another.
+                self.deck_drawn_at[slot] = self.deck_clock + 0.45 + 0.14 * slot as f32;
+            }
+        }
+        log::info!("Deck: {:?} (hand {hand_size})", nums);
+        self.hand_cards = nums
+            .iter()
+            .filter_map(|&n| self.booklet.card(n))
+            .map(|c| (powers::power(c.theme).active, c.clone()))
+            .collect();
+        self.deck = Some(d);
+        self.deck_opening = opening.clone();
+        Some(opening)
+    }
+    // === end deck ===
+
     fn hand_view(&self) -> Vec<hand::HandCard> {
         self.run
             .abilities
             .iter()
             .enumerate()
+            // === deck === spent ghosts finishing an effect are not cards in hand
+            .take(if self.run.deck_slots > 0 { self.run.deck_slots } else { usize::MAX })
+            // === end deck ===
             .map(|(k, a)| {
                 let (tint, tint2) = self
                     .ability_tints
@@ -1907,17 +2063,19 @@ impl DreamscapeGame {
                     .iter()
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
-                let passive = self
-                    .hand_cards
-                    .iter()
-                    .find(|n| n.0 == a.ability)
-                    .map(|n| powers::power(n.1.theme).passive);
-                let edge = self
-                    .hand_cards
-                    .iter()
-                    .find(|n| n.0 == a.ability)
-                    .and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
+                let slot_card = self.card_for_slot(k, a.ability);
+                let passive = slot_card.map(|n| powers::power(n.1.theme).passive);
+                let edge = slot_card.and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
+                // === deck ===
+                let since_draw = if self.deck.is_some() {
+                    self.deck_clock - self.deck_drawn_at[k.min(upgrades::HAND_SIZE - 1)]
+                } else {
+                    hand::NEVER
+                };
+                // === end deck ===
                 hand::HandCard {
+                    since_draw: if since_draw < 0.0 { 0.0 } else { since_draw },
+                    empty: a.spent || since_draw < 0.0,
                     edge: edge.map(|e| (e.name(), e.color())),
                     edge_since: edge
                         .and_then(|e| self.edge_fired.iter().find(|f| f.0 == e))
@@ -1932,11 +2090,7 @@ impl DreamscapeGame {
                         .iter()
                         .any(|u| matches!(u, Upgrade::Cursed(_))),
                     ability: a.ability.name(),
-                    card: self
-                        .hand_cards
-                        .iter()
-                        .find(|n| n.0 == a.ability)
-                        .map(|n| n.1.clone()),
+                    card: slot_card.map(|n| n.1.clone()),
                     key: upgrades::SLOT_KEYS[k],
                     charge: a.charge(self.run.cooldown_for(a.ability)),
                     active: a.is_active()
@@ -2002,7 +2156,12 @@ impl DreamscapeGame {
         } else {
             self.heart_timer = HEARTBEAT_EVERY * 0.6;
         }
-        let ready_now: Vec<bool> = self.run.abilities.iter().map(|a| a.cooldown <= 0.0).collect();
+        let ready_now: Vec<bool> = self
+            .run
+            .abilities
+            .iter()
+            .map(|a| a.cooldown <= 0.0 && !a.spent)
+            .collect();
         if self.was_ready.len() == ready_now.len()
             && ready_now.iter().zip(&self.was_ready).any(|(now, was)| *now && !*was)
             && self.mode == hud::Mode::Playing
@@ -3108,17 +3267,17 @@ impl DreamscapeGame {
     /// instead of a card have nothing to link.
     fn hand_links(&self) -> Vec<hand::HandLink> {
         let gives = |i: usize, u: Upgrade| {
-            let Some(a) = self.run.abilities.get(i).map(|s| s.ability) else {
+            let Some(a) = self.run.abilities.get(i).filter(|s| !s.spent).map(|s| s.ability) else {
                 return false;
             };
-            let card = self.hand_cards.iter().find(|n| n.0 == a).map(|n| &n.1);
+            let card = self.card_for_slot(i, a).map(|n| &n.1);
             u == Upgrade::Learn(a)
                 || card.is_some_and(|c| {
                     powers::power(c.theme).passive == u
                         || c.fused.is_some_and(|b| powers::power(b).passive == u)
                 })
         };
-        let n = self.run.abilities.len();
+        let n = if self.run.deck_slots > 0 { self.run.deck_slots } else { self.run.abilities.len() };
         self.run
             .synergies()
             .into_iter()
@@ -3173,8 +3332,8 @@ impl DreamscapeGame {
                 loadout_ui::LoadoutView {
                     cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
                     sort: self.settings.sort_loadout.label(),
-                    chosen: self.booklet.lore.loadout.clone(),
-                    slots: self.asc_slots(),
+                    chosen: self.booklet.lore.deck.clone(), // === deck ===
+                    slots: deck::DECK_MAX,
                     selected: self.loadout_sel,
                     companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
                         let l = &self.booklet.lore;
@@ -3391,6 +3550,7 @@ impl DreamscapeGame {
                 .collect(),
             hand: self.hand_view(),
             hand_links: self.hand_links(),
+            hand_pile: self.hand_pile(), // === deck ===
             foe_pips: Vec::new(),
             boss_hp: self.hunter.as_ref().map(|(_, b, _)| (b.hp / b.max_hp, b.vulnerable())),
             // === combat ===
@@ -5144,6 +5304,11 @@ impl DreamscapeGame {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
         };
+        // === deck === a used card is gone until its slot draws again
+        if state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots) {
+            return;
+        }
+        // === end deck ===
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
         let origin = self.player_position; // combat: where you were
@@ -5304,6 +5469,7 @@ impl DreamscapeGame {
             if cracks {
                 self.open_secret();
             }
+            self.deck_on_use(slot); // === deck ===
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -6211,6 +6377,7 @@ impl DreamscapeGame {
                 self.director = s.director();
                 self.director.nightmare_every = self.active_asc.nightmare_every();
                 self.run = s.upgrades();
+                self.deck = None; // === deck === a resumed run keeps its fixed kit
                 self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
                 self.active_form = s.form;
                 self.run.penalty_cards =
@@ -6611,11 +6778,11 @@ impl DreamscapeGame {
             hud::Mode::Loadout => {
                 let lay = loadout_ui::layout(screen);
                 if click {
-                    // An equipped slot: click it to take the card out.
-                    if let Some(k) = lay.slots.iter().position(|r| r.contains(at)) {
-                        let chosen = self.booklet.lore.loadout.clone();
+                    // A card in the deck: click its pip to take it out. // === deck ===
+                    if let Some(k) = deck_ui::pips(screen).iter().position(|r| r.contains(at)) {
+                        let chosen = self.booklet.lore.deck.clone();
                         if let Some(&number) = chosen.get(k) {
-                            self.booklet.lore.loadout.retain(|&n| n != number);
+                            self.booklet.lore.deck.retain(|&n| n != number);
                             self.sfx(Sound::Unequip);
                             self.persist_booklet();
                         }
@@ -6972,6 +7139,14 @@ impl DreamscapeGame {
             .take(b.lore.slots())
             .collect();
         self.booklet.lore.loadout = kept;
+        // === deck === the deck: cards still owned; empty starts as what would be used
+        let b = &self.booklet;
+        let mut d = deck::clean(&b.lore.deck, |n| b.card(n).is_some());
+        if d.is_empty() {
+            d = b.deck_numbers();
+        }
+        self.booklet.lore.deck = d;
+        // === end deck ===
         self.loadout_sel = self.loadout_sel.min(self.booklet.card_count() - 1);
         self.mode = hud::Mode::Loadout;
     }
@@ -7117,9 +7292,9 @@ impl DreamscapeGame {
                 else {
                     return;
                 };
-                let slots = self.asc_slots();
-                let was_in = self.booklet.lore.loadout.contains(&number);
-                if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
+                // === deck === choosing cards builds the deck
+                let was_in = self.booklet.lore.deck.contains(&number);
+                if deck::toggle(&mut self.booklet.lore.deck, number) {
                     self.sfx(if was_in { Sound::Unequip } else { Sound::Equip });
                     self.persist_booklet();
                 } else {
@@ -7132,6 +7307,13 @@ impl DreamscapeGame {
                 self.booklet.lore.companion = self.booklet.lore.next_companion();
                 self.persist_booklet();
             }
+            // === deck === too small a deck cannot start (none = automatic)
+            Keycode::Space
+                if !deck::valid(self.booklet.lore.deck.len(), self.booklet.card_count()) =>
+            {
+                self.sfx(Sound::Denied)
+            }
+            // === end deck ===
             Keycode::Space => self.start_from_title(),
             Keycode::Escape => self.mode = hud::Mode::Title,
             _ => {}
@@ -7195,6 +7377,8 @@ impl DreamscapeGame {
     fn refresh_card_effects(&mut self) {
         let cards = if self.prologue.is_some() {
             Vec::new()
+        } else if self.deck.is_some() {
+            self.deck_opening.clone() // === deck ===
         } else {
             // === ascension === (rule 13: one fewer slot)
             let mut c = self.booklet.loadout_cards();
@@ -7274,7 +7458,10 @@ impl DreamscapeGame {
         // Abilities come from the loadout's cards (none in the prologue),
         // and each card's dream is planned into the run.
         let cards = if self.prologue.is_some() {
+            self.deck = None;
             Vec::new()
+        } else if let Some(hand) = self.start_deck() {
+            hand // === deck === the opening hand
         } else {
             // === ascension === (rule 13: one fewer slot)
             let mut c = self.booklet.loadout_cards();
@@ -7312,8 +7499,12 @@ impl DreamscapeGame {
                 .map(attunement::reward)
                 .collect()
         };
-        self.run = RunUpgrades::from_loadout(&cards)
-            .with_attunements(&gifts)
+        self.run = if self.deck.is_some() {
+            RunUpgrades::from_hand(&cards) // === deck ===
+        } else {
+            RunUpgrades::from_loadout(&cards)
+        }
+        .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
         self.nerve = if self.settings.gentle_nerve {
             nerve::Nerve::new(nerve::GENTLE_START)
@@ -7357,12 +7548,19 @@ impl DreamscapeGame {
         };
         self.flourish.reset();
         self.siphon.reset();
-        self.hand_cards = cards
-            .iter()
-            .map(|c| (powers::power(c.theme).active, c.clone()))
-            .collect();
-        self.ability_tints = cards
-            .iter()
+        if self.deck.is_none() {
+            self.hand_cards = cards
+                .iter()
+                .map(|c| (powers::power(c.theme).active, c.clone()))
+                .collect();
+        }
+        let tint_cards: Vec<&cards::Card> = if self.deck.is_some() {
+            self.hand_cards.iter().map(|n| &n.1).collect()
+        } else {
+            cards.iter().collect()
+        };
+        self.ability_tints = tint_cards
+            .into_iter()
             .map(|c| {
                 let accents = c.fused.unwrap_or(c.theme).spec().accents;
                 (
@@ -9987,6 +10185,7 @@ impl Game for DreamscapeGame {
             Some(Action::Jump) => self.input.jump = down,
             Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
             Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            Some(Action::Ability3) if down && !repeat => self.ability_requests[2] = true,
             Some(Action::Strike) if down && !repeat => self.strike_request = true,
             _ => {}
         }
@@ -10291,6 +10490,7 @@ impl Game for DreamscapeGame {
         // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
+        self.update_deck(dt); // === deck ===
         // === pressure ===
         self.update_pressure(dt);
         // === end pressure ===
@@ -11734,6 +11934,8 @@ mod screen_smoke {
             edge: Some(("LUNGE", [120, 220, 255])),
             edge_since: hand::NEVER,
             cracked: false,
+            since_draw: hand::NEVER,
+            empty: false,
         }
     }
 
@@ -12489,16 +12691,83 @@ mod screen_smoke {
         assert_eq!(g.loadout_sel, 1);
         g.loadout_key(Keycode::Return);
         let first = g.booklet.cards().nth(1).map(|c| c.number).unwrap();
-        assert!(g.booklet.lore.loadout.contains(&first), "equipped");
-        // Click the slot it sits in: out it comes.
-        let s = lay.slots[g.booklet.lore.loadout.iter().position(|&n| n == first).unwrap()].center();
+        assert!(g.booklet.lore.deck.contains(&first), "added to the deck");
+        // Click the pip it sits in: out it comes.
+        let s = deck_ui::pips(screen)[g.booklet.lore.deck.iter().position(|&n| n == first).unwrap()].center();
         assert_eq!(g.menu_pointer(s.x as i32, s.y as i32, Pointer::Click), None);
-        assert!(!g.booklet.lore.loadout.contains(&first), "unequipped by clicking its slot");
+        assert!(!g.booklet.lore.deck.contains(&first), "removed by clicking its pip");
         // A small window scales the screen down, and the mouse scales with it.
         let (pt, small) = hud::to_layout(hud::design_for(hud::Mode::Loadout, 0), (400.0, 225.0), 200.0, 100.0);
         assert!((pt.x - 400.0).abs() < 1e-3 && (pt.y - 200.0).abs() < 1e-3, "{pt:?}");
         assert!((small.width() - 800.0).abs() < 1e-3);
     }
+
+    // === deck ===
+    #[test]
+    fn a_small_deck_cannot_start_but_an_empty_or_big_enough_one_can() {
+        let mut g = game("deck_start");
+        three_cards(&mut g);
+        g.open_loadout();
+        assert_eq!(g.booklet.lore.deck.len(), 1, "prefilled with what would be used");
+        g.mode = hud::Mode::Loadout;
+        g.loadout_key(Keycode::Space);
+        assert_eq!(g.mode, hud::Mode::Loadout, "1 of 3 cards: denied");
+        for n in g.booklet.cards().map(|c| c.number).collect::<Vec<_>>() {
+            if !g.booklet.lore.deck.contains(&n) {
+                g.booklet.lore.deck.push(n);
+            }
+        }
+        assert!(deck::valid(g.booklet.lore.deck.len(), g.booklet.card_count()));
+    }
+
+    #[test]
+    fn a_deck_run_deals_three_cards_and_a_used_one_is_redrawn_with_its_cooldown() {
+        let mut g = game("deck_run");
+        three_cards(&mut g);
+        g.booklet.lore.deck = g.booklet.cards().map(|c| c.number).collect();
+        g.begin_run();
+        assert!(g.deck.is_some());
+        assert_eq!(g.run.deck_slots, 3);
+        assert_eq!(g.run.abilities.len(), 3);
+        let view = g.hand_view();
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.iter().map(|c| c.key).collect::<Vec<_>>(), vec!["shift", "e", "q"]);
+        assert!(view.iter().all(|c| c.card.is_some()), "every slot knows its card");
+        // Use slot 1.
+        let before = view[1].card.as_ref().unwrap().number;
+        assert!(g.run.abilities[1].try_use(1.0, 1.0));
+        g.deck_on_use(1);
+        assert!(g.run.abilities[1].spent);
+        assert_eq!(g.deck_leaving.len(), 1);
+        assert!(g.hand_view()[1].empty, "the slot waits to draw");
+        assert_eq!(g.hand_pile().leaving.len(), 1);
+        g.update_deck(deck::DRAW_DELAY + 0.05);
+        assert!(!g.run.abilities[1].spent, "drew again");
+        let again = g.hand_view();
+        assert_eq!(again[1].card.as_ref().unwrap().number, before, "a deck as small as the hand deals it back");
+        assert!(again[1].since_draw < 0.2 && !again[1].empty);
+        assert!(g.run.abilities[1].cooldown > 0.0, "its cooldown came with it");
+        assert!(g.hand_pile().riffle_since < 0.5, "the stack shuffled");
+        // The flick finishes and is forgotten.
+        g.update_deck(hand::LEAVE_TOTAL);
+        assert!(g.deck_leaving.is_empty());
+        // Co-op keeps the fixed loadout.
+        g.coop = None;
+        g.prologue = None;
+    }
+
+    #[test]
+    fn a_fixed_loadout_run_has_no_deck() {
+        let mut g = game("deck_none");
+        three_cards(&mut g);
+        g.autopilot = true;
+        g.begin_run();
+        assert!(g.deck.is_none());
+        assert_eq!(g.run.deck_slots, 0);
+        assert!(g.hand_view().iter().all(|c| !c.empty && c.since_draw == hand::NEVER));
+        assert!(!g.hand_pile().shown);
+    }
+    // === end deck ===
 
     #[test]
     fn sorting_keeps_the_cursor_on_the_card_and_the_mouse_follows_the_order() {
@@ -13005,6 +13274,43 @@ mod screen_smoke {
             });
         }
     }
+
+    // === deck ===
+    #[test]
+    fn the_deck_stack_draws_a_riffle_and_cards_in_flight() {
+        let mut g = game("deck_draw");
+        g.mode = hud::Mode::Playing;
+        let n_shapes = |reduced: bool, pile: hand::HandPile, draw: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.settings_snapshot.reduced_motion = reduced;
+                let mut c = card("DASH", hand::NEVER);
+                c.since_draw = draw;
+                v.hand = vec![c, card("PHASE", hand::NEVER), card("BLINK", hand::NEVER)];
+                v.hand_pile = pile.clone();
+            })
+            .len()
+        };
+        let shown = |count: usize, riffle: f32, leaving: Vec<hand::Leaving>| hand::HandPile {
+            shown: true,
+            draw_count: count,
+            riffle_since: riffle,
+            leaving,
+        };
+        let none = n_shapes(false, hand::HandPile::default(), hand::NEVER);
+        let stack = n_shapes(false, shown(5, hand::NEVER, vec![]), hand::NEVER);
+        assert!(stack > none, "a stack with a badge draws");
+        assert!(n_shapes(false, shown(5, 0.2, vec![]), hand::NEVER) > stack, "a riffle adds sheets");
+        let flying = vec![hand::Leaving { card: card("DASH", hand::NEVER), slot: 1, since: 0.1 }];
+        assert!(n_shapes(false, shown(5, hand::NEVER, flying.clone()), hand::NEVER) > stack, "a flicked card draws");
+        assert_eq!(
+            n_shapes(true, shown(5, hand::NEVER, flying), hand::NEVER),
+            n_shapes(true, shown(5, hand::NEVER, vec![]), hand::NEVER),
+            "reduced motion: no flick"
+        );
+        assert!(n_shapes(false, shown(0, hand::NEVER, vec![]), hand::NEVER) > none, "an empty pile is an outline");
+        n_shapes(false, shown(5, hand::NEVER, vec![]), 0.1); // a card mid-draw paints
+    }
+    // === end deck ===
 
     #[test]
     fn the_pickup_ring_and_door_glow_draw_only_when_active() {
