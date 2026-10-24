@@ -124,14 +124,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
             card.color[1] / 2 + 60,
             card.color[2] / 2 + 60,
         ];
-        for (x, y, acc) in icons::cells(icon_rows(card.icon)) {
-            let at = centre + Vec2::new(x as f32 * px, y as f32 * px);
-            p.rect_filled(
-                Rect::from_center_size(at, Vec2::splat(px)),
-                0.0,
-                rgba(if acc { accent } else { card.color }, t),
-            );
-        }
+        // === perf === uipixels: run-merged cells, one mesh
+        let cells: Vec<(i32, i32, egui::Color32)> = icons::cells(icon_rows(card.icon))
+            .into_iter()
+            .map(|(x, y, acc)| (x, y, rgba(if acc { accent } else { card.color }, t)))
+            .collect();
+        crate::pixel_ui::cell_mesh(p, centre - Vec2::splat(px * 0.5), px, &cells);
+        // === end perf ===
         // Narrow cards (five or more) shrink their text to fit.
         let k = (r.width() / 300.0).clamp(0.55, 1.0);
         let name_y = r.top() + r.height() * 0.52;

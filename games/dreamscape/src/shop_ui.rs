@@ -178,6 +178,8 @@ pub(crate) fn paint_moth(
         "...############...",
         "..##############..",
     ];
+    // === perf === uipixels: the body as run-merged cells in one mesh
+    let mut body = Vec::new();
     for (y, row) in BODY.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             let col = match ch {
@@ -185,13 +187,11 @@ pub(crate) fn paint_moth(
                 '+' => wing,
                 _ => continue,
             };
-            p.rect_filled(
-                Rect::from_min_size(o + Vec2::new(x as f32 * px, y as f32 * px), Vec2::splat(px)),
-                0.0,
-                rgba(col, 0.95),
-            );
+            body.push((x as i32, y as i32, rgba(col, 0.95)));
         }
     }
+    crate::pixel_ui::cell_mesh(p, o, px, &body);
+    // === end perf ===
     // The eye: a 4x4 socket inside the head, with a pupil that follows.
     let eye_c = o + Vec2::new(9.0 * px, 5.5 * px);
     let open = if (time % 5.3) < 0.15 { 0.2 } else { 1.0 };
@@ -386,14 +386,18 @@ pub(crate) fn card_back_cell(b: CardBack, x: i32, y: i32, nx: i32, ny: i32) -> b
 pub(crate) fn card_back_pattern(p: &egui::Painter, r: Rect, b: CardBack, col: [u8; 3]) {
     let cell = 8.0;
     let (nx, ny) = ((r.width() / cell) as i32, (r.height() / cell) as i32);
+    // === perf === uipixels: one mesh of the lit cells
+    let mut q = crate::pixel_ui::Quads::new();
     for y in 0..ny {
         for x in 0..nx {
             if card_back_cell(b, x, y, nx, ny) {
                 let at = r.min + Vec2::new(x as f32 * cell, y as f32 * cell);
-                p.rect_filled(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), 0.0, rgba(col, 0.8));
+                q.rect(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), rgba(col, 0.8));
             }
         }
     }
+    q.paint(p);
+    // === end perf ===
 }
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {

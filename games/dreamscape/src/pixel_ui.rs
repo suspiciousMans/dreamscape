@@ -222,6 +222,19 @@ pub fn merge_cells<K: Copy + PartialEq>(cells: &[(i32, i32, K)]) -> Vec<(i32, i3
     out
 }
 
+/// Paints grid cells (`origin` is the top-left of cell (0, 0), `px` the cell
+/// size, each cell its own colour) as one mesh of run-merged quads.
+pub fn cell_mesh(p: &egui::Painter, origin: Pos2, px: f32, cells: &[(i32, i32, Color32)]) {
+    let mut q = Quads::new();
+    for (x, y, w, h, color) in merge_cells(cells) {
+        q.rect(
+            Rect::from_min_size(origin + Vec2::new(x as f32, y as f32) * px, Vec2::new(w as f32, h as f32) * px),
+            color,
+        );
+    }
+    q.paint(p);
+}
+
 /// Faint CRT scanlines across `r`: a dark line a cell high every two cells.
 /// One mesh of thin quads (they were a rect each).
 pub fn scanlines(p: &egui::Painter, r: Rect, c: f32, alpha: u8) {
@@ -685,6 +698,32 @@ pub(crate) mod tests {
             };
             assert_eq!(bars(&old), bars(&new), "panel {r:?}");
             assert!(new.len() <= 2);
+        }
+    }
+
+    #[test]
+    fn a_cell_mesh_matches_a_rect_per_cell() {
+        let a = Color32::from_rgb(200, 100, 50);
+        let b = Color32::from_rgba_unmultiplied(50, 120, 220, 200);
+        let mut cells = Vec::new();
+        for y in 0..9 {
+            for x in 0..14 {
+                match (x * 7 + y * 3) % 5 {
+                    0 | 1 => cells.push((x, y, a)),
+                    2 => cells.push((x, y, b)),
+                    _ => {}
+                }
+            }
+        }
+        for (origin, px) in [(Pos2::new(20.0, 30.0), 4.0), (Pos2::new(11.0, 9.0), 6.0), (Pos2::new(33.0, 40.0), 3.0)] {
+            let old = shapes_of(|p| {
+                for &(x, y, c) in &cells {
+                    p.rect_filled(Rect::from_min_size(origin + Vec2::new(x as f32, y as f32) * px, Vec2::splat(px)), 0.0, c);
+                }
+            });
+            let new = shapes_of(|p| cell_mesh(p, origin, px, &cells));
+            assert_eq!(new.len(), 1);
+            assert!(raster(&old, 300, 200) == raster(&new, 300, 200), "px {px}");
         }
     }
     // === end perf ===
