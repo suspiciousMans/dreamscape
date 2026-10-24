@@ -10043,7 +10043,7 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Choice {
             self.choice_view.age += dt;
             // E2E runs: take the first card (WAKE at the door) after a beat.
-            if self.autopilot && self.choice_view.age > 0.6 {
+            if self.autopilot && self.choice_view.age > 0.6 && crate::dev::var("DREAMSCAPE_SCREEN").is_err() {
                 self.choose(0);
             }
             return Ok(());
@@ -10084,6 +10084,14 @@ impl Game for DreamscapeGame {
                     "codex" => self.open_codex(),
                     "booklet" => self.open_booklet(),
                     "store" => self.open_store(),
+                    // === shop === "store:<shelf>:<col>" for shelf screenshots.
+                    st if st.starts_with("store:") => {
+                        let mut n = st[6..].split(':').map(|x| x.parse::<usize>().unwrap_or(0));
+                        self.open_store();
+                        self.shop_shelf = n.next().unwrap_or(0).min(store::Shelf::ALL.len() - 1);
+                        self.shop_col = shop_ui::clamp_col(self.shop_shelf, n.next().unwrap_or(0));
+                    }
+                    // === end shop ===
                     "lottery" => {
                         self.open_store();
                         self.store_tab = 1;
@@ -10238,6 +10246,24 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === shop ===
+        // Dev: DREAMSCAPE_SCREEN=moth opens the moth's room at 1 s of dream
+        // time with the autopilot (which then stops picking), for screenshots.
+        if self.autopilot && self.dream_age >= 1.0 && !self.dev_fired {
+            if let Ok(what) = crate::dev::var("DREAMSCAPE_SCREEN") {
+                self.dev_fired = true;
+                let mut it = what.split(':');
+                match it.next() {
+                    Some("moth") => {
+                        self.bonus_dust = 40;
+                        self.ensure_moth_stock();
+                        self.show_moth_shop(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // === end shop ===
         // === combat ===
         self.update_combat(dt);
         // === end combat ===

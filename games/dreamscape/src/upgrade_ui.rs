@@ -49,7 +49,8 @@ pub fn icon_rows(icon: Icon) -> &'static [&'static str; icons::SIZE] {
 pub fn card_rects(screen: Rect, n: usize) -> Vec<Rect> {
     let n = n.max(1);
     let w = (screen.width() * 0.86 / n as f32).min(300.0);
-    let h = (w * 1.3).min(screen.height() * 0.55);
+    // Crowded shelves (the moth's room) get taller, narrower cards.
+    let h = (w * if n >= 5 { 1.7 } else { 1.3 }).min(screen.height() * 0.55);
     let gap = w * 0.12;
     let total = n as f32 * w + (n - 1) as f32 * gap;
     let x0 = screen.center().x - total * 0.5;
@@ -131,28 +132,30 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
                 rgba(if acc { accent } else { card.color }, t),
             );
         }
+        // Narrow cards (five or more) shrink their text to fit.
+        let k = (r.width() / 300.0).clamp(0.55, 1.0);
         let name_y = r.top() + r.height() * 0.52;
         p.text(
             Pos2::new(r.center().x, name_y),
             Align2::CENTER_TOP,
             &card.name,
-            FontId::monospace(28.0),
+            FontId::monospace(28.0 * k),
             rgba(if sel { [255, 255, 255] } else { ink(v) }, t),
         );
         p.text(
-            Pos2::new(r.center().x, name_y + 32.0),
+            Pos2::new(r.center().x, name_y + 32.0 * k),
             Align2::CENTER_TOP,
             &card.tag,
-            FontId::monospace(16.0),
+            FontId::monospace((16.0 * k).max(11.0)),
             rgba(card.color, 0.9 * t),
         );
         let galley = p.layout(
             card.desc.clone(),
-            FontId::proportional(19.0),
+            FontId::proportional((19.0 * k).max(13.0)),
             rgba([215, 205, 240], t),
-            r.width() - 28.0,
+            r.width() - 28.0 * k,
         );
-        let at = Pos2::new(r.center().x - galley.size().x * 0.5, name_y + 58.0);
+        let at = Pos2::new(r.center().x - galley.size().x * 0.5, name_y + 58.0 * k);
         p.galley(at, galley, rgba([215, 205, 240], t));
     }
     p.text(
@@ -172,7 +175,7 @@ mod tests {
     fn cards_fit_the_screen_and_do_not_overlap() {
         for (w, h) in [(1280.0, 720.0), (800.0, 600.0), (1920.0, 1080.0)] {
             let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h));
-            for n in 1..=5 {
+            for n in 1..=7 {
                 let rs = card_rects(screen, n);
                 assert_eq!(rs.len(), n);
                 for r in &rs {
