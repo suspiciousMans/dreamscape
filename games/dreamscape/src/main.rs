@@ -17039,4 +17039,28 @@ mod screen_smoke {
         assert!(tagged > plain, "the tag is one more text");
     }
     // === end handscore ===
+
+    // === perf === `cargo test -p dreamscape --release hud_view_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hud_view_cost() {
+        let mut g = game("hud_cost");
+        let themes = dream::ALL_THEMES;
+        let recs: Vec<_> = (0..239u64)
+            .map(|i| cards::tests::record(themes[i as usize % themes.len()], i + 1, 1 + (i % 9) as u32, 0.3, false))
+            .collect();
+        g.booklet.add_run(1, &recs);
+        g.screen_size = (1280.0, 720.0);
+        let n = 2000;
+        for mode in [hud::Mode::Playing, hud::Mode::Loadout, hud::Mode::Merge, hud::Mode::Booklet, hud::Mode::Title] {
+            g.mode = mode;
+            std::hint::black_box(g.hud_view());
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(g.hud_view());
+            }
+            println!("hud_view {mode:?}: {:.1} us/call", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+        }
+    }
+    // === end perf ===
 }
