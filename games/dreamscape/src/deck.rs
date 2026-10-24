@@ -19,6 +19,47 @@ pub const SHUFFLE_DELAY: f32 = 0.30;
 /// Mixed into the dream seed for the deck's shuffles.
 pub const SEED_MIX: u64 = 0xDEC0_DEC0;
 
+// === toolcards ===
+/// Tool cards are run-only cards the moth sells in deck runs. They have no
+/// booklet number: each ability owns one id in a reserved range at the top
+/// of `u32`, so a tool card can never collide with a booklet card (the
+/// booklet counts up from 1) and is never saved in `lore.deck`.
+pub const TOOL_BASE: u32 = u32::MAX - 64;
+/// Mixed into the dream seed (and the tool's id) for its shuffle position.
+pub const TOOL_SEED_MIX: u64 = 0x700C_A4D5;
+
+/// The reserved id of `ability`'s tool card.
+pub fn tool_id(ability: crate::upgrades::Ability) -> u32 {
+    let i = crate::upgrades::ALL_ABILITIES
+        .iter()
+        .position(|&a| a == ability)
+        .unwrap_or(0);
+    TOOL_BASE + i as u32
+}
+
+/// The ability a tool card id stands for; `None` for any other number.
+pub fn tool_ability(id: u32) -> Option<crate::upgrades::Ability> {
+    if !is_tool(id) {
+        return None;
+    }
+    crate::upgrades::ALL_ABILITIES
+        .get((id - TOOL_BASE) as usize)
+        .copied()
+}
+
+/// Is `id` in the reserved tool range (a real booklet number never is)?
+pub fn is_tool(id: u32) -> bool {
+    id >= TOOL_BASE
+}
+// === end toolcards ===
+
+// === abilities3 ===
+/// How many played cards RECALL can look back through.
+pub const RECALL_MEMORY: usize = 8;
+/// The share of a recalled card's cooldown that is still left.
+pub const RECALL_COOLDOWN_LEFT: f32 = 0.5;
+// === end abilities3 ===
+
 // === upgrades2 ===
 /// How run upgrades bend the deck (`RunUpgrades::deck_perks`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +119,10 @@ pub struct Deck {
     pub perks: DeckPerks,
     free_used: u32,
     // === end upgrades2 ===
+    // === abilities3 ===
+    /// Cards played, oldest first (RECALL looks back through it).
+    played: Vec<u32>,
+    // === end abilities3 ===
 }
 
 impl Deck {
@@ -105,6 +150,7 @@ impl Deck {
             events: Vec::new(),
             perks: DeckPerks::default(),
             free_used: 0,
+            played: Vec::new(),
         }
     }
 
@@ -151,8 +197,92 @@ impl Deck {
         self.waiting.push((slot, DRAW_DELAY * self.perks.draw_mult));
         // === end upgrades2 ===
         self.events.push(DeckEvent::Played { slot, card });
+        self.played.push(card); // === abilities3 ===
+        if self.played.len() > RECALL_MEMORY {
+            self.played.remove(0);
+        }
         Some(Played { card, slot })
     }
+
+    // === abilities3 ===
+    /// MULLIGAN: every card in hand goes back into the draw pile, the pile
+    /// is shuffled (the deck's own stream), and every empty slot draws.
+    /// Returns the slots that were thrown back, with their cards.
+    pub fn mulligan(&mut self) -> Vec<(usize, u32)> {
+        let mut thrown = Vec::new();
+        for slot in 0..self.hand.len() {
+            if let Some(card) = self.hand[slot].take() {
+                self.draw.push(card);
+                self.events.push(DeckEvent::Played { slot, card });
+                thrown.push((slot, card));
+            }
+        }
+        for i in (1..self.draw.len()).rev() {
+            self.draw.swap(i, self.rng.gen_range(0..=i));
+        }
+        if let Some(&(_, card)) = thrown.first() {
+            self.events.push(DeckEvent::Shuffled { card });
+        }
+        for slot in 0..self.hand.len() {
+            if self.hand[slot].is_none() && self.draw_into(slot) {
+                self.waiting.retain(|w| w.0 != slot);
+            }
+        }
+        thrown
+    }
+
+    /// The card RECALL would bring back: the most recently played card
+    /// (other than `except`, RECALL's own) that is not already in hand.
+    pub fn recall_candidate(&self, except: Option<u32>) -> Option<u32> {
+        self.played
+            .iter()
+            .rev()
+            .copied()
+            .find(|&c| Some(c) != except && !self.hand.contains(&Some(c)))
+    }
+
+    /// RECALL: that card leaves the discard or the draw pile and lands in
+    /// the first empty slot, with `RECALL_COOLDOWN_LEFT` of its cooldown
+    /// left. `None` (nothing changes) when there is no card or no free slot.
+    pub fn recall(&mut self, except: Option<u32>) -> Option<(usize, u32)> {
+        let card = self.recall_candidate(except)?;
+        let slot = self.hand.iter().position(|h| h.is_none())?;
+        self.discard.retain(|d| d.0 != card);
+        self.draw.retain(|&c| c != card);
+        self.waiting.retain(|w| w.0 != slot);
+        self.hand[slot] = Some(card);
+        if let Some(c) = self.cooldowns.iter_mut().find(|c| c.0 == card) {
+            c.1 *= RECALL_COOLDOWN_LEFT;
+        }
+        self.events.push(DeckEvent::Drawn { slot, card });
+        Some((slot, card))
+    }
+    // === end abilities3 ===
+
+    // === toolcards ===
+    /// Shuffles a run-only card into the draw pile at a seeded random
+    /// position (`seed` is the dream seed; the stream is its own, so the
+    /// deck's other shuffles are untouched). Returns false, changing
+    /// nothing, if the deck already holds `id`.
+    pub fn insert_shuffled(&mut self, id: u32, seed: u64) -> bool {
+        if self.cooldowns.iter().any(|c| c.0 == id) {
+            return false;
+        }
+        let mut rng = StdRng::seed_from_u64(seed ^ TOOL_SEED_MIX ^ id as u64);
+        let at = rng.gen_range(0..=self.draw.len());
+        self.draw.insert(at, id);
+        self.cooldowns.push((id, 0.0));
+        self.events.push(DeckEvent::Shuffled { card: id });
+        true
+    }
+
+    /// The tool cards held anywhere in the deck, in id order.
+    pub fn tool_cards(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| is_tool(c)).collect();
+        v.sort_unstable();
+        v
+    }
+    // === end toolcards ===
 
     /// Advances every timer: cooldowns (all cards, wherever they are), the
     /// discard's shuffle-back, and the empty slots' draws.
@@ -289,6 +419,87 @@ mod tests {
         v
     }
 
+    // === abilities3 ===
+    #[test]
+    fn mulligan_redeals_the_whole_hand_and_loses_nothing() {
+        for seed in 0..20 {
+            let mut d = Deck::new(&[1, 2, 3, 4, 5, 6, 7, 8], seed);
+            d.draw_to_fill(5);
+            d.events();
+            let thrown = d.mulligan();
+            assert_eq!(thrown.len(), 5);
+            assert!(d.hand().iter().all(|h| h.is_some()), "a fresh full hand");
+            assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7, 8], "nothing lost or doubled");
+            let ev = d.events();
+            assert_eq!(ev.iter().filter(|e| matches!(e, DeckEvent::Played { .. })).count(), 5);
+            assert_eq!(ev.iter().filter(|e| matches!(e, DeckEvent::Drawn { .. })).count(), 5);
+            assert!(ev.iter().any(|e| matches!(e, DeckEvent::Shuffled { .. })));
+        }
+    }
+
+    #[test]
+    fn mulligan_after_playing_keeps_the_played_card_in_the_discard() {
+        let mut d = Deck::new(&[1, 2, 3, 4, 5, 6], 4);
+        d.draw_to_fill(3);
+        let used = d.hand()[0].unwrap();
+        d.play(0, 5.0);
+        d.mulligan();
+        assert_eq!(d.hand().iter().flatten().count(), 3);
+        assert!(!d.hand().contains(&Some(used)), "the played card is not redealt yet");
+        assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6]);
+        d.tick(DRAW_DELAY + 1.0);
+        assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn recall_brings_back_the_last_played_card_without_duplicating_any() {
+        for seed in 0..30 {
+            for wait in [0.0_f32, 0.1, 0.5, 2.0] {
+                let mut d = Deck::new(&[1, 2, 3, 4, 5, 6, 7], seed);
+                d.draw_to_fill(5);
+                let first = d.hand()[1].unwrap();
+                d.play(1, 8.0);
+                d.tick(wait);
+                if d.hand().contains(&Some(first)) {
+                    continue; // it was drawn straight back: nothing to recall
+                }
+                let recall_card = d.hand()[3].unwrap();
+                d.play(3, 14.0);
+                let got = d.recall(Some(recall_card));
+                let (slot, card) = got.expect("a played card to recall");
+                assert_eq!(card, first, "the last card before Recall itself");
+                assert_eq!(d.hand()[slot], Some(first));
+                assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7], "seed {seed} wait {wait}");
+                d.tick(5.0);
+                assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7]);
+                assert_eq!(d.all_cards().iter().filter(|&&c| c == first).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn recall_has_nothing_to_take_before_anything_was_played_or_when_it_is_back_in_hand() {
+        let mut d = Deck::new(&[1, 2, 3], 1);
+        d.draw_to_fill(3);
+        assert_eq!(d.recall_candidate(None), None);
+        assert_eq!(d.recall(None), None);
+        d.play(0, 1.0);
+        let c = d.recall(None);
+        assert!(c.is_some());
+        assert_eq!(d.recall_candidate(None), None, "already in hand");
+    }
+
+    #[test]
+    fn a_recalled_card_keeps_half_its_cooldown() {
+        let mut d = Deck::new(&[1, 2, 3, 4], 2);
+        d.draw_to_fill(3);
+        let c = d.hand()[0].unwrap();
+        d.play(0, 10.0);
+        d.recall(None);
+        assert!((d.cooldown(c) - 10.0 * RECALL_COOLDOWN_LEFT).abs() < 1e-4);
+    }
+    // === end abilities3 ===
+
     #[test]
     fn a_new_deck_fills_the_hand_from_the_top() {
         let mut d = Deck::new(&[1, 2, 3, 4, 5], 7);
@@ -423,6 +634,81 @@ mod tests {
         assert_eq!(needed(1), 1);
         assert_eq!(needed(50), DECK_MIN);
     }
+
+    // === toolcards ===
+    #[test]
+    fn tool_ids_map_both_ways_and_stay_out_of_the_booklet_range() {
+        use crate::upgrades::ALL_ABILITIES;
+        assert!(ALL_ABILITIES.len() <= 64, "one id per ability fits the range");
+        for &a in &ALL_ABILITIES {
+            let id = tool_id(a);
+            assert!(is_tool(id));
+            assert_eq!(tool_ability(id), Some(a));
+        }
+        let mut ids: Vec<u32> = ALL_ABILITIES.iter().map(|&a| tool_id(a)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), ALL_ABILITIES.len(), "one id each");
+        assert_eq!(tool_ability(1), None);
+        assert_eq!(tool_ability(TOOL_BASE - 1), None);
+        assert_eq!(tool_ability(u32::MAX), None, "past the table");
+        assert!(!is_tool(TOOL_BASE - 1));
+    }
+
+    #[test]
+    fn insert_shuffled_keeps_every_card_once_and_is_seeded() {
+        let a = tool_id(crate::upgrades::Ability::Tether);
+        let b = tool_id(crate::upgrades::Ability::Veil);
+        for seed in 0..40u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut d = Deck::new(&[1, 2, 3, 4, 5, 6], seed);
+            d.draw_to_fill(5);
+            let mut want = vec![1, 2, 3, 4, 5, 6];
+            assert!(d.insert_shuffled(a, seed));
+            assert!(!d.insert_shuffled(a, seed), "a second copy is refused");
+            assert!(d.insert_shuffled(b, seed));
+            want.extend([a, b]);
+            want.sort_unstable();
+            assert_eq!(d.total(), 8);
+            assert_eq!(d.tool_cards(), vec![a.min(b), a.max(b)]);
+            for _ in 0..300 {
+                if rng.gen_bool(0.5) {
+                    let slot = rng.gen_range(0..d.hand().len());
+                    d.play(slot, rng.gen_range(0.0..8.0));
+                }
+                d.tick(rng.gen_range(0.0..0.5));
+                assert_eq!(sorted(d.all_cards()), want, "seed {seed}");
+                d.events();
+            }
+        }
+        let (mut x, mut y) = (Deck::new(&[1, 2, 3, 4, 5, 6, 7, 8], 9), Deck::new(&[1, 2, 3, 4, 5, 6, 7, 8], 9));
+        x.insert_shuffled(a, 9);
+        y.insert_shuffled(a, 9);
+        assert_eq!(x.draw, y.draw);
+        let spots: std::collections::HashSet<usize> = (0..60u64)
+            .map(|s| {
+                let mut d = Deck::new(&[1, 2, 3, 4, 5, 6, 7, 8], 9);
+                d.insert_shuffled(a, s);
+                d.draw.iter().position(|&c| c == a).unwrap()
+            })
+            .collect();
+        assert!(spots.len() > 4, "the position varies with the seed: {spots:?}");
+    }
+
+    #[test]
+    fn a_tool_card_cycles_like_any_card_and_keeps_its_cooldown() {
+        let t = tool_id(crate::upgrades::Ability::Bind);
+        let mut d = Deck::new(&[1, 2, 3], 4);
+        d.insert_shuffled(t, 4);
+        d.draw_to_fill(4);
+        let slot = d.hand().iter().position(|&h| h == Some(t)).expect("drawn: the hand holds all four");
+        assert_eq!(d.play(slot, 6.0).unwrap().card, t);
+        assert!((d.cooldown(t) - 6.0).abs() < 1e-5);
+        d.tick(SHUFFLE_DELAY + 0.01);
+        assert_eq!(d.tool_cards(), vec![t], "it stays in the deck for the run");
+        assert_eq!(d.all_cards().iter().filter(|&&c| c == t).count(), 1);
+    }
+    // === end toolcards ===
 
     // === upgrades2 ===
     #[test]

@@ -147,7 +147,7 @@ pub fn spark_pick(b: &mut Booklet, theme: DreamTheme, seed: u64) -> Option<Pulle
     Some(press_pull(b, pull, seed))
 }
 
-fn press_pull(b: &mut Booklet, pull: Pull, seed: u64) -> Pulled {
+pub(crate) fn press_pull(b: &mut Booklet, pull: Pull, seed: u64) -> Pulled {
     let card = lottery::card_for_pull(&pull, seed);
     let card = b.add_pulled(seed, card);
     feed_echoes(b);

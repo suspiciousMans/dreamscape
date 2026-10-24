@@ -56,7 +56,19 @@ pub struct HandCard {
     pub since_draw: f32,
     /// Deck hands: nothing in this slot right now (waiting to draw).
     pub empty: bool,
+    // === toolcards ===
+    /// A run-only tool card bought from the moth: no booklet card behind
+    /// it, so no artwork, passive or edge. It wears [`TOOL_FRAME`] and a tag.
+    pub tool: bool,
+    // === end toolcards ===
 }
+
+// === toolcards ===
+/// The frame of a tool card (no rarity colours it).
+pub const TOOL_FRAME: [u8; 3] = [110, 225, 190];
+/// The tag on a tool card's art.
+pub const TOOL_TAG: &str = "TOOL";
+// === end toolcards ===
 
 /// Two cards (or one, if `a == b`) that make a synergy together.
 #[derive(Clone, Debug, PartialEq)]
@@ -658,10 +670,13 @@ fn draw_card(
     let ready = c.charge >= 1.0;
     let lit = ready || c.active || amount > 0.0;
     // The frame is the card's own (rarity); the tint is for the ring and flash.
-    let frame = c
-        .card
-        .as_ref()
-        .map_or(c.tint, |card| crate::booklet_ui::card_frame(card, time));
+    let frame = if c.tool {
+        TOOL_FRAME // === toolcards ===
+    } else {
+        c.card
+            .as_ref()
+            .map_or(c.tint, |card| crate::booklet_ui::card_frame(card, time))
+    };
     let edge = if lit { frame } else { frame.map(|v| v / 2 + 40) };
     let edge = if c.cracked {
         [0, 1, 2].map(|i| (edge[i] as u16 * 3 / 5 + [255u16, 40, 70][i] * 2 / 5) as u8)
@@ -741,6 +756,20 @@ fn draw_card(
     x.quad(p, key_box, rgba([22, 14, 44], 0.92));
     x.outline(p, key_box, 1.0, rgba(edge, 0.9));
     x.text(p, key_box.center().to_vec2(), c.key, key_size, rgba(edge, 1.0), angle);
+
+    // === toolcards === a plain tag where a card's passive diamond would sit
+    if c.tool {
+        let tag_size = font(8.0);
+        let w = TOOL_TAG.len() as f32 * tag_size * 0.62 + 6.0 * u * k;
+        let tag = Rect::from_min_size(
+            Pos2::new(art.left() + 2.0 * u, art.bottom() - tag_size - 6.0 * u * k),
+            Vec2::new(w, tag_size + 4.0 * u * k),
+        );
+        x.quad(p, tag, rgba([10, 4, 20], 0.92));
+        x.outline(p, tag, 1.0, rgba(TOOL_FRAME, 0.9));
+        x.text(p, tag.center().to_vec2(), TOOL_TAG, tag_size, rgba(TOOL_FRAME, 1.0), angle);
+    }
+    // === end toolcards ===
 
     // The passive: a small diamond on the art's bottom-left, flaring when it fires.
     if let Some((_, rgb)) = c.passive {

@@ -359,6 +359,9 @@ pub struct Booklet {
     /// This week's challenge progress.
     #[serde(default)]
     pub weekly: crate::streaks::WeeklyProgress,
+    /// The daily fortune (old saves: nothing claimed yet).
+    #[serde(default)]
+    pub fortune: crate::fortune::FortuneState,
 }
 
 impl Booklet {

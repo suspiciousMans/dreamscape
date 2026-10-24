@@ -24,6 +24,7 @@ use engine::ui::EguiState;
 use engine::ui::egui;
 
 mod abilities2;
+mod abilities3;
 mod access;
 mod attunement;
 mod achievements;
@@ -48,6 +49,7 @@ mod enemy_ai;
 mod eye;
 mod eye_motion;
 mod juice;
+mod fortune;
 mod lottery;
 mod lottery_ui;
 mod retention;
@@ -55,6 +57,7 @@ mod streaks;
 mod worth;
 mod fpv;
 mod fusion;
+mod gamble;
 mod gameplay;
 mod hand;
 mod hud;
@@ -98,6 +101,8 @@ mod sounds;
 mod specials;
 mod steam;
 mod store;
+mod tickets;
+mod tickets_ui;
 mod summary_ui;
 mod title_ui;
 mod transition;
@@ -249,6 +254,21 @@ struct SlashStart {
     flip: bool,
 }
 
+// === abilities3 ===
+/// The hand slot a settings action stands for.
+fn ability_slot(a: Option<settings::Action>) -> Option<usize> {
+    use settings::Action::*;
+    match a? {
+        Ability1 => Some(0),
+        Ability2 => Some(1),
+        Ability3 => Some(2),
+        Ability4 => Some(3),
+        Ability5 => Some(4),
+        _ => None,
+    }
+}
+// === end abilities3 ===
+
 /// Something a strike, a dash or a shock can hit.
 struct CombatTarget {
     entity: Entity,
@@ -370,6 +390,9 @@ enum TitleItem {
     Quit,
 }
 
+/// The title's note when the day's free fortune is unclaimed. // === fortune ===
+const FORTUNE_LINE: &str = "a fortune is waiting in the Lucid Store";
+
 fn today() -> u64 {
     progress::day_number(
         SystemTime::now()
@@ -416,6 +439,18 @@ enum ChoiceKind {
     Event(events::Event),
     /// The moth's room behind a cracked wall (cards in `moth_stock`).
     MothShop,
+    /// === risk === the moth's coin: stakes, confirm, result.
+    Gamble(GambleStage),
+    /// === risk === the wager portal's deal.
+    Wager,
+}
+
+/// === risk === Where the moth's coin screen is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GambleStage {
+    Stakes,
+    Confirm(u32),
+    Result,
 }
 
 /// The icon on an event's choice card.
@@ -641,6 +676,10 @@ pub struct DreamscapeGame {
     /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
     deck_leaving: Vec<(hand::HandCard, usize, f32)>,
     // === end deck ===
+    // === toolcards ===
+    /// Tool card ids bought this run (kept for the save; the deck holds the live ones).
+    tool_cards: Vec<u32>,
+    // === end toolcards ===
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -670,6 +709,25 @@ pub struct DreamscapeGame {
     /// PULSE: pillars standing over what hides behind walls.
     pulse_marks: Vec<Entity>,
     // === end abilities2 ===
+    // === abilities3 ===
+    /// ECHO: the ability it would repeat.
+    echo_last: Option<Ability>,
+    /// WAGER: rolls this dream, wagers since a jackpot, the line on the HUD.
+    wager_n: u32,
+    wager_dry: u32,
+    wager_line: Option<(String, f32)>,
+    /// Extra duration for an ability fired from a borrowed state (a jackpot).
+    borrow_stretch: f32,
+    /// OVERLOAD: the charge in progress, the ring that shows it, and the
+    /// charge being released right now.
+    overload: Option<abilities3::Charge>,
+    overload_ring: Option<Entity>,
+    overload_fire: Option<f32>,
+    /// Which ability keys are down right now.
+    ability_held: [bool; upgrades::HAND_SIZE],
+    bargain: abilities3::Bargain,
+    snares: abilities3::Snares<Option<Entity>>,
+    // === end abilities3 ===
     steps: Vec<Entity>,
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
@@ -702,6 +760,18 @@ pub struct DreamscapeGame {
     lottery_status: Option<String>,
     /// Index into `lottery::pullable_themes()` for the spark pick.
     lottery_pick: usize,
+    // === fortune ===
+    /// What the last ticket scratch revealed, and how long ago.
+    ticket_revealed: Option<tickets_ui::Revealed>,
+    ticket_age: f32,
+    /// The first of the two presses to scratch a ticket has been made.
+    ticket_confirm: bool,
+    ticket_status: Option<String>,
+    /// Clean-dream tickets earned in the current run (capped).
+    tickets_this_run: u32,
+    /// Nerve was lost in the dream being played.
+    nerve_lost_this_dream: bool,
+    // === end fortune ===
     /// What the last pressed run did for its cards (shown on the pack screen).
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
@@ -894,6 +964,19 @@ pub struct DreamscapeGame {
     // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
+    // === risk ===
+    gamble: gamble::RunState,
+    /// Gambles at the moth this visit.
+    gamble_visit: u32,
+    /// Run dust when this dream began (what a wager doubles is the gain).
+    wager_dust_start: u32,
+    /// Where this dream's wager portal stands, and whether it can be touched.
+    wager_portal: Option<(Vec3, bool)>,
+    /// Entering the portal now was agreed on the deal screen.
+    wager_enter: bool,
+    /// The pick being opened is the wagered dream's extra one.
+    wager_pick: bool,
+    // === end risk ===
     // === pacts ===
     /// Pacts taken this run, and the one the open pick offers.
     pacts: Vec<pacts::Pact>,
@@ -1066,6 +1149,7 @@ impl DreamscapeGame {
             deck_drawn_at: [f32::MIN; upgrades::HAND_SIZE],
             deck_riffle_at: hand::NEVER,
             deck_leaving: Vec::new(),
+            tool_cards: Vec::new(), // === toolcards ===
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1083,6 +1167,19 @@ impl DreamscapeGame {
             haste: None,
             pulse_marks: Vec::new(),
             // === end abilities2 ===
+            // === abilities3 ===
+            echo_last: None,
+            wager_n: 0,
+            wager_dry: 0,
+            wager_line: None,
+            borrow_stretch: 1.0,
+            overload: None,
+            overload_ring: None,
+            overload_fire: None,
+            ability_held: [false; upgrades::HAND_SIZE],
+            bargain: abilities3::Bargain::default(),
+            snares: abilities3::Snares::new(),
+            // === end abilities3 ===
             steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -1214,6 +1311,12 @@ impl DreamscapeGame {
             lottery_age: 0.0,
             lottery_status: None,
             lottery_pick: 0,
+            ticket_revealed: None,
+            ticket_age: 0.0,
+            ticket_confirm: false,
+            ticket_status: None,
+            tickets_this_run: 0,
+            nerve_lost_this_dream: false,
             last_report: None,
             shards_this_run: 0,
             second_wind_used: false,
@@ -1243,6 +1346,12 @@ impl DreamscapeGame {
             pressure_collapsed: false,
             // === end pressure ===
             bonus_dust: 0,
+            gamble: gamble::RunState::default(),
+            gamble_visit: 0,
+            wager_dust_start: 0,
+            wager_portal: None,
+            wager_enter: false,
+            wager_pick: false,
             pacts: Vec::new(),
             pact_offer: None,
             peak_difficulty: 1.0,
@@ -1280,7 +1389,9 @@ impl DreamscapeGame {
     fn pressure_base(&self) -> Pressure {
         let hard = self.director.hardness().is_some();
         Pressure {
-            enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
+            enemies: gameplay::pressured_enemy_count(self.difficulty())
+                * self.twists.enemy_count()
+                * gamble::enemy_mult(self.gamble.wager_active), // === risk ===
             growth_cap: if hard { 24 } else { 12 },
             // Dev switch: DREAMSCAPE_SPECIAL=Stalker puts that kind in every dream.
             force_special: crate::dev::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
@@ -1315,6 +1426,7 @@ impl DreamscapeGame {
     fn open_upgrade_choice(&mut self) {
         let seed = self.director.dream_seed()
             ^ 0xC401_CE00
+            ^ if std::mem::take(&mut self.wager_pick) { 0x57A6_0000 } else { 0 } // === risk ===
             ^ (self.run.rerolls_used as u64).wrapping_mul(0x9E37_79B9);
         let roll = upgrades::Roll {
             depth: self.director.depth,
@@ -1650,6 +1762,15 @@ impl DreamscapeGame {
     /// the moth opens her shop. Merging lives in the store's `[m]` now.
     /// Called once per pick, before `boss_reward` is cleared.
     fn moth_after_nightmare(&mut self) {
+        // === risk === the wagered dream's extra pick comes first (rare or better)
+        if self.gamble.pick_owed && self.risk_allowed() {
+            self.gamble.pick_owed = false;
+            self.boss_reward = true;
+            self.wager_pick = true;
+            self.open_upgrade_choice();
+            return;
+        }
+        // === end risk ===
         if self.autopilot
             || self.prologue.is_some()
             || self.coop.is_some()
@@ -1780,6 +1901,8 @@ impl DreamscapeGame {
                 self.sfx(Sound::Pick);
             }
             ChoiceKind::MothShop => self.buy_from_moth(index),
+            ChoiceKind::Gamble(stage) => self.choose_gamble(stage, index), // === risk ===
+            ChoiceKind::Wager => self.choose_wager(index), // === risk ===
             ChoiceKind::Event(event) => {
                 if !self.choose_event(&event, index) {
                     self.choice = Some(ChoiceKind::Event(event));
@@ -1993,6 +2116,11 @@ impl DreamscapeGame {
                         let ability = n.0;
                         self.run.deck_draw(slot, ability, cd);
                         self.deck_drawn_at[slot] = self.deck_clock;
+                    } else if let Some(ability) = deck::tool_ability(card) {
+                        // === toolcards === a bought tool card has no booklet card
+                        self.run.deck_draw(slot, ability, cd);
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                        // === end toolcards ===
                     }
                 }
                 deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
@@ -2043,6 +2171,7 @@ impl DreamscapeGame {
     /// the fixed loadout.
     fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
         self.deck = None;
+        self.tool_cards.clear(); // === toolcards === bought per run, never carried over
         self.deck_opening.clear();
         self.deck_leaving.clear();
         self.deck_riffle_at = hand::NEVER;
@@ -2082,6 +2211,7 @@ impl DreamscapeGame {
             // === deck === spent ghosts finishing an effect are not cards in hand
             .take(if self.run.deck_slots > 0 { self.run.deck_slots } else { usize::MAX })
             // === end deck ===
+            .filter(|(_, a)| self.run.deck_slots > 0 || !a.spent) // === abilities3 === a borrowed ability finishing its effect
             .map(|(k, a)| {
                 let (tint, tint2) = self
                     .ability_tints
@@ -2121,10 +2251,26 @@ impl DreamscapeGame {
                         .any(|u| matches!(u, Upgrade::Cursed(_))),
                     ability: a.ability.name(),
                     card: slot_card.map(|n| n.1.clone()),
+                    // === toolcards === the card in this slot is a bought tool
+                    tool: self
+                        .deck
+                        .as_ref()
+                        .and_then(|d| d.hand().get(k).copied().flatten())
+                        .is_some_and(deck::is_tool),
+                    // === end toolcards ===
                     key: upgrades::SLOT_KEYS[k],
-                    charge: a.charge(self.run.cooldown_for(a.ability)),
+                    // === abilities3 === a charging OVERLOAD fills its card
+                    charge: match (a.ability, self.overload) {
+                        (Ability::Overload, Some(c)) if c.slot == k => c.fraction(),
+                        _ => a.charge(self.run.cooldown_for(a.ability)),
+                    },
+                    // === end abilities3 ===
                     active: a.is_active()
-                        || (a.ability == Ability::Anchor && self.anchor.is_some()),
+                        || (a.ability == Ability::Anchor && self.anchor.is_some())
+                        // === abilities3 ===
+                        || (a.ability == Ability::Bargain && self.bargain.active())
+                        || (a.ability == Ability::Overload && self.overload.is_some()),
+                        // === end abilities3 ===
                     tint,
                     tint2,
                     since_use,
@@ -2543,7 +2689,7 @@ impl DreamscapeGame {
         // === edges2 === AMBUSH, OPENER, PUNISHER
         dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
         // === end edges2 ===
-        dmg
+        dmg * self.bargain.mult() // === abilities3 === BARGAIN cuts deeper
     }
 
     /// Damages one target: the shared end of a strike, a dash, a shock.
@@ -2712,6 +2858,7 @@ impl DreamscapeGame {
             }
         }
         self.flourish_now = false;
+        self.bargain.spend_strike(); // === abilities3 ===
         // === combat === the nightmare: wisps fall to a blow; the hunter only
         // can be hurt while it rests.
         if let Some((entity, b, _)) = self.hunter.as_mut() {
@@ -2981,6 +3128,7 @@ impl DreamscapeGame {
             + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
             nerve::Hit::Down => {
+                self.nerve_lost_this_dream = true; // === fortune ===
                 // DREAM ANCHOR: once a dream, a lethal blow leaves you standing.
                 if self.run.count(Upgrade::DreamAnchor) > 0 && !self.last_stand_used {
                     self.last_stand_used = true;
@@ -2995,6 +3143,7 @@ impl DreamscapeGame {
             }
             nerve::Hit::Ignored => None,
             nerve::Hit::Hurt => {
+                self.nerve_lost_this_dream = true; // === fortune ===
                 log::info!(
                     "Hurt by: {by} (nerve {}/{}, depth {})",
                     self.nerve.cur(),
@@ -3608,7 +3757,7 @@ impl DreamscapeGame {
                 hud::Mode::Title | hud::Mode::Summary | hud::Mode::Reveal
             ) {
                 let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
-                streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth))
+                self.title_goal(&loadout)
             } else {
                 String::new()
             },
@@ -3626,6 +3775,11 @@ impl DreamscapeGame {
                 self.lottery_view()
             } else {
                 lottery_ui::LotteryView::default()
+            },
+            tickets: if self.mode == hud::Mode::Store && self.store_tab == 2 {
+                self.tickets_view()
+            } else {
+                tickets_ui::TicketsView::default()
             },
             mastery_levels: self
                 .booklet
@@ -3697,7 +3851,12 @@ impl DreamscapeGame {
             } else {
                 summary_ui::SummaryView::default()
             },
-            hint: self.dream_hint.clone(),
+            // === abilities3 === the wager's roll shows for a moment
+            hint: match &self.wager_line {
+                Some((line, _)) => line.clone(),
+                None => self.dream_hint.clone(),
+            },
+            // === end abilities3 ===
             menu: if self.mode == hud::Mode::Title {
                 self.title_items()
                     .into_iter()
@@ -4438,7 +4597,7 @@ impl DreamscapeGame {
     fn hazard_rule_state(&self) -> Option<theme_rules::RuleState> {
         theme_rules::RuleState::new(
             self.director.theme,
-            self.director.depth,
+            gamble::hazard_depth(self.director.depth, self.gamble.wager_active), // === risk ===
             !self.director.nightmare
                 && !self.enemy_free()
                 && self.prologue.is_none()
@@ -5409,16 +5568,26 @@ impl DreamscapeGame {
     }
 
     fn use_ability(&mut self, slot: usize) {
+        self.fire_ability(slot, false);
+    }
+
+    /// `borrowed`: the state is a temporary one made by WAGER or ECHO (see
+    /// `fire_borrowed`), not a card in hand.
+    fn fire_ability(&mut self, slot: usize, borrowed: bool) {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
         };
         // === deck === a used card is gone until its slot draws again
-        if state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots) {
+        if !borrowed
+            && (state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots))
+        {
             return;
         }
         // === end deck ===
         let mult = self.run.cooldown_for(state.ability);
-        let stretch = self.run.duration_for(state.ability);
+        let stretch = self.run.duration_for(state.ability) * self.borrow_stretch; // === abilities3 ===
+        // === abilities3 === the card in this slot, before it is played
+        let slot_card = self.deck.as_ref().and_then(|d| d.hand().get(slot).copied().flatten());
         let origin = self.player_position; // combat: where you were
         if state.cooldown > 0.0 {
             self.sfx(Sound::Denied);
@@ -5430,6 +5599,20 @@ impl DreamscapeGame {
             return;
         }
         // === end abilities2 ===
+        // === abilities3 === refused with nothing to act on (the charge is kept)
+        if !self.abilities3_ready(state.ability, slot_card) {
+            self.sfx(Sound::Denied);
+            return;
+        }
+        // OVERLOAD: the key down starts the charge; the release fires it.
+        if state.ability == Ability::Overload && !borrowed && self.overload_fire.is_none() {
+            if self.overload.is_none() {
+                self.overload = Some(abilities3::Charge::new(slot));
+                self.sfx(Sound::OverloadCharge);
+            }
+            return;
+        }
+        // === end abilities3 ===
         // Chained soon after another ability: a combo.
         let combo = self
             .last_ability
@@ -5581,10 +5764,12 @@ impl DreamscapeGame {
             self.anchor_snapped = false;
             // === end combat ===
             self.abilities2_on_use(state.ability, mult, stretch); // === abilities2 ===
+            let wager = self.abilities3_before_play(slot, state.ability); // === abilities3 ===
             if cracks {
                 self.open_secret();
             }
             self.deck_on_use(slot); // === deck ===
+            self.abilities3_after_play(state.ability, slot_card, wager); // === abilities3 ===
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -5656,6 +5841,16 @@ impl DreamscapeGame {
                 Ability::Haste => [1.0, 0.6, 0.5],
                 Ability::Bind => [0.6, 0.9, 0.4],
                 // === end abilities2 ===
+                // === abilities3 ===
+                Ability::Wager => [1.0, 0.85, 0.4],
+                Ability::Echo => [0.7, 0.8, 1.0],
+                Ability::Swap => [0.9, 0.6, 1.0],
+                Ability::Mulligan => [0.95, 0.95, 0.8],
+                Ability::Recall => [0.6, 1.0, 0.9],
+                Ability::Overload => [1.0, 0.5, 0.3],
+                Ability::Bargain => [0.8, 0.2, 0.3],
+                Ability::Snare => [0.7, 0.9, 0.5],
+                // === end abilities3 ===
             };
             let tint = self
                 .ability_tints
@@ -5694,8 +5889,23 @@ impl DreamscapeGame {
                 Ability::Haste => Sound::HasteOn,
                 Ability::Bind => Sound::BindClamp,
                 // === end abilities2 ===
+                // === abilities3 ===
+                Ability::Wager => Sound::WagerRoll,
+                Ability::Echo => Sound::EchoRepeat,
+                Ability::Swap => Sound::SwapPop,
+                Ability::Mulligan => Sound::MulliganShuffle,
+                Ability::Recall => Sound::RecallDraw,
+                Ability::Overload => Sound::OverloadBlast,
+                Ability::Bargain => Sound::BargainPact,
+                Ability::Snare => Sound::SnarePlant,
+                // === end abilities3 ===
             });
             self.last_ability = Some((state.ability, self.dream_age));
+            // === abilities3 === ECHO repeats a real ability, never itself (or a wager's shell)
+            if !matches!(state.ability, Ability::Echo | Ability::Wager) {
+                self.echo_last = Some(state.ability);
+            }
+            // === end abilities3 ===
             self.ability_used.retain(|u| u.0 != state.ability);
             self.ability_used.push((state.ability, self.dream_age));
             if let Some(c) = combo {
@@ -5886,6 +6096,281 @@ impl DreamscapeGame {
         }
     }
     // === end abilities2 ===
+
+    // === abilities3 ===
+    /// Is there anything for `a` to act on? (If not the charge is kept.)
+    fn abilities3_ready(&self, a: Ability, slot_card: Option<u32>) -> bool {
+        match a {
+            Ability::Echo => abilities3::echo_target(self.echo_last).is_some(),
+            Ability::Swap => self.swap_target().is_some(),
+            Ability::Mulligan => self.deck.is_some(),
+            Ability::Recall => self
+                .deck
+                .as_ref()
+                .is_some_and(|d| d.recall_candidate(slot_card).is_some()),
+            Ability::Bargain => abilities3::bargain_allowed(self.nerve.cur()),
+            _ => true,
+        }
+    }
+
+    /// Roots one foe for `secs`: a pacer is stunned, the rest stagger.
+    fn root_foe(&mut self, t: &CombatTarget, secs: f32) {
+        if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, secs);
+        } else {
+            self.staggered.insert(t.entity, secs);
+        }
+    }
+
+    /// What SWAP would trade with: (the foe, or `None` for the decoy, and
+    /// where it stands).
+    fn swap_target(&self) -> Option<(Option<CombatTarget>, Vec3)> {
+        let mut who: Vec<Option<CombatTarget>> = Vec::new();
+        let mut pts: Vec<Vec3> = Vec::new();
+        for t in self.combat_targets() {
+            pts.push(t.pos);
+            who.push(Some(t));
+        }
+        if let Some((at, _)) = self.decoy {
+            pts.push(at);
+            who.push(None);
+        }
+        let i = abilities3::swap_pick(self.player_position, &pts)?;
+        let pos = pts[i];
+        Some((who.swap_remove(i), pos))
+    }
+
+    /// Runs before the card leaves the hand: WAGER rolls (so its cooldown
+    /// can be bent before the deck takes it) and SWAP/OVERLOAD/BARGAIN/SNARE act.
+    fn abilities3_before_play(
+        &mut self,
+        slot: usize,
+        a: Ability,
+    ) -> Option<abilities3::WagerRoll> {
+        let me = self.player_position;
+        match a {
+            Ability::Swap => {
+                if let Some((foe, pos)) = self.swap_target() {
+                    match foe {
+                        Some(t) => {
+                            if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
+                                tr.position = me;
+                            }
+                            self.root_foe(&t, abilities3::SWAP_STAGGER);
+                        }
+                        None => {
+                            if let Some((_, e)) = self.decoy {
+                                if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                                    tr.position = me;
+                                }
+                                self.decoy = Some((me, e));
+                            }
+                        }
+                    }
+                    self.burst_pending = Some((me, [230, 160, 255], [255, 255, 255]));
+                    self.teleport_player(pos);
+                }
+            }
+            Ability::Overload => {
+                let secs = self.overload_fire.take().unwrap_or(abilities3::OVERLOAD_AUTO);
+                let reach = abilities3::overload_radius(secs);
+                self.shock(me, reach, 0.0, abilities3::overload_stagger(secs));
+                self.alert_enemies(upgrades::SLAM_NOISE);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+            Ability::Bargain => {
+                if self.nerve.spend(1) {
+                    self.bargain.arm();
+                }
+            }
+            Ability::Snare => self.plant_snare(),
+            Ability::Wager => {
+                let roll = abilities3::wager_roll(self.director.dream_seed(), self.wager_n, self.wager_dry);
+                self.wager_n += 1;
+                self.wager_dry = if roll.kind == abilities3::WagerKind::Jackpot { 0 } else { self.wager_dry + 1 };
+                let timed = roll.ability.duration() > 0.0;
+                let full = self.run.abilities.get(slot).map_or(0.0, |s| s.cooldown);
+                if let Some(s) = self.run.abilities.get_mut(slot) {
+                    s.cooldown = abilities3::wager_cooldown(roll.kind, full, timed);
+                }
+                self.wager_line = Some((abilities3::wager_line(roll), abilities3::WAGER_LINE_SECS));
+                log::info!("Wager: {roll:?}");
+                if roll.kind == abilities3::WagerKind::Jackpot {
+                    self.sfx(Sound::WagerJackpot);
+                }
+                return Some(roll);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Runs after the card went to the discard: the effects that need the
+    /// hand's empty slot (MULLIGAN, RECALL) and the borrowed ones (WAGER, ECHO).
+    fn abilities3_after_play(
+        &mut self,
+        a: Ability,
+        slot_card: Option<u32>,
+        wager: Option<abilities3::WagerRoll>,
+    ) {
+        match a {
+            Ability::Mulligan => {
+                let snaps = self.hand_view();
+                let thrown = self.deck.as_mut().map(|d| d.mulligan()).unwrap_or_default();
+                for (slot, _) in thrown {
+                    if let Some(snap) = snaps.get(slot).cloned() {
+                        self.deck_leaving.push((snap, slot, self.deck_clock));
+                    }
+                }
+                // Every slot waits for its redraw; none can be used meanwhile.
+                for s in self.run.abilities.iter_mut().take(self.run.deck_slots) {
+                    s.spent = true;
+                }
+                self.deck_riffle_at = self.deck_clock;
+            }
+            Ability::Recall => {
+                if let Some(d) = self.deck.as_mut() {
+                    d.recall(slot_card);
+                }
+            }
+            Ability::Echo => {
+                if let Some(target) = abilities3::echo_target(self.echo_last) {
+                    self.fire_borrowed(target, 1.0);
+                }
+            }
+            Ability::Wager => {
+                if let Some(roll) = wager {
+                    match roll.kind {
+                        abilities3::WagerKind::Fizzle => {}
+                        kind => {
+                            let timed = roll.ability.duration() > 0.0;
+                            let fired =
+                                self.fire_borrowed(roll.ability, abilities3::wager_stretch(kind, timed));
+                            if !fired {
+                                self.wager_line = Some((
+                                    format!("WAGER: {} (nothing to use it on)", roll.ability.name()),
+                                    abilities3::WAGER_LINE_SECS,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Uses `a` without it being in hand and without starting its own
+    /// recharge: a temporary state is added, fired, and left to run out.
+    /// False if it had nothing to act on.
+    fn fire_borrowed(&mut self, a: Ability, stretch: f32) -> bool {
+        self.run.abilities.push(upgrades::AbilityState::new(a));
+        let idx = self.run.abilities.len() - 1;
+        let held = std::mem::replace(&mut self.borrow_stretch, stretch);
+        self.fire_ability(idx, true);
+        self.borrow_stretch = held;
+        let Some(st) = self.run.abilities.get_mut(idx) else {
+            return false;
+        };
+        let fired = st.cooldown > 0.0;
+        st.spent = true;
+        st.cooldown = 0.0;
+        if !fired || !st.is_active() {
+            self.run.abilities.remove(idx);
+        }
+        fired
+    }
+
+    /// SNARE: a trap at your feet; the third takes up the oldest.
+    fn plant_snare(&mut self) {
+        let me = self.player_position;
+        let entity = match (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+            (Some(tex), Ok(mesh)) => Some(self.world.spawn((
+                Transform {
+                    position: me - Vec3::Y * 0.95,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(abilities3::SNARE_RADIUS * 2.0, 0.03, abilities3::SNARE_RADIUS * 2.0),
+                },
+                MeshRenderer { mesh, texture: Some(tex) },
+                Translucent,
+                Lit,
+            ))),
+            _ => None,
+        };
+        if let Some(Some(old)) = self.snares.plant(me, entity) {
+            let _ = self.world.despawn(old);
+        }
+    }
+
+    /// Per frame: the OVERLOAD charge and its ring, BARGAIN's clock, the
+    /// traps, the wager line.
+    fn update_abilities3(&mut self, dt: f32) {
+        if let Some((_, left)) = self.wager_line.as_mut() {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.wager_line = None;
+            }
+        }
+        self.bargain.tick(dt);
+        // OVERLOAD
+        if let Some(mut c) = self.overload.take() {
+            let still = self.run.abilities.get(c.slot).is_some_and(|s| s.ability == Ability::Overload && !s.spent);
+            if !still {
+                if let Some(e) = self.overload_ring.take() {
+                    let _ = self.world.despawn(e);
+                }
+            } else {
+                c.tick(dt);
+                if self.ability_held[c.slot] && self.mode == hud::Mode::Playing {
+                    self.overload = Some(c);
+                    let r = abilities3::overload_radius(c.secs) * 2.0;
+                    if self.overload_ring.is_none() {
+                        if let (Some(tex), Ok(mesh)) = (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+                            self.overload_ring = Some(self.world.spawn((
+                                Transform {
+                                    position: self.player_position - Vec3::Y * 0.95,
+                                    rotation: Quat::IDENTITY,
+                                    scale: Vec3::new(r, 0.02, r),
+                                },
+                                MeshRenderer { mesh, texture: Some(tex) },
+                                Translucent,
+                                Lit,
+                            )));
+                        }
+                    }
+                    if let Some(e) = self.overload_ring {
+                        if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                            t.position = self.player_position - Vec3::Y * 0.95;
+                            t.scale = Vec3::new(r, 0.02, r);
+                        }
+                    }
+                } else {
+                    // Released: the blast.
+                    if let Some(e) = self.overload_ring.take() {
+                        let _ = self.world.despawn(e);
+                    }
+                    self.overload_fire = Some(c.secs);
+                    self.fire_ability(c.slot, false);
+                    self.overload_fire = None;
+                }
+            }
+        }
+        // SNARE
+        if self.snares.len() != 0 {
+            let pts: Vec<Vec3> = self.combat_targets().iter().map(|t| t.pos).collect();
+            for (handle, i) in self.snares.step(&pts) {
+                if let Some(e) = handle {
+                    let _ = self.world.despawn(e);
+                }
+                if let Some(t) = self.combat_targets().into_iter().find(|t| t.pos == pts[i]) {
+                    self.root_foe(&t, abilities3::SNARE_ROOT);
+                }
+                self.burst_pending = Some((pts[i], [180, 230, 130], [255, 255, 255]));
+                self.sfx(Sound::SnareTrip);
+            }
+        }
+    }
+    // === end abilities3 ===
 
     /// SHARD CALL: the shard (and its beacon) drift toward the dreamer.
     fn pull_shard(&mut self, dt: f32) {
@@ -6111,6 +6596,30 @@ impl DreamscapeGame {
                 }
             })
             .collect();
+        // === toolcards === deck runs: the tool cards, after the cards
+        let held = self.tool_cards_held();
+        for (j, &a) in shelf.tools.iter().enumerate() {
+            let bought = held.contains(&deck::tool_id(a));
+            let cost = moth_shop::tool_price(a, held.len(), terms);
+            let can = moth_shop::buy_tool(&shelf, shelf.cards.len() + j, self.bonus_dust, &held, terms).is_ok();
+            cards.push(upgrade_ui::ChoiceCard {
+                name: a.name().into(),
+                desc: a.desc().into(),
+                icon: upgrades::Icon::Gem,
+                color: if can { hand::TOOL_FRAME } else { [110, 110, 130] },
+                frame: if can { hand::TOOL_FRAME } else { [80, 80, 100] },
+                tag: if bought {
+                    moth_shop::TOOL_HELD.into()
+                } else if held.len() >= moth_shop::MAX_TOOL_CARDS {
+                    moth_shop::TOOL_NO_ROOM.into()
+                } else if can {
+                    format!("{cost} dust · {}", moth_shop::TOOL_TAG)
+                } else {
+                    format!("needs {cost} dust")
+                },
+            });
+        }
+        // === end toolcards ===
         let rr = moth_shop::reroll_price(shelf.rerolls);
         let can_rr = self.bonus_dust >= rr;
         cards.push(upgrade_ui::ChoiceCard {
@@ -6125,6 +6634,17 @@ impl DreamscapeGame {
                 format!("needs {rr} dust")
             },
         });
+        // === risk === the coin, after the reroll
+        let shut = gamble::RunState::shut_reason(self.bonus_dust, self.gamble_visit);
+        cards.push(upgrade_ui::ChoiceCard {
+            name: gamble::ROW_NAME.into(),
+            desc: gamble::ROW_DESC.into(),
+            icon: upgrades::Icon::Gem,
+            color: if shut.is_none() { [255, 150, 90] } else { [110, 110, 130] },
+            frame: if shut.is_none() { [255, 150, 90] } else { [80, 80, 100] },
+            tag: shut.map_or_else(|| "double or nothing".to_string(), str::to_string),
+        });
+        // === end risk ===
         let last = cards.len() - 1;
         self.choice_view = upgrade_ui::ChoiceView {
             title: moth_shop::TITLE.into(),
@@ -6132,7 +6652,7 @@ impl DreamscapeGame {
             cards,
             selected: selected.min(last),
             age: 0.0,
-            hint: "[a/d] choose   [enter] buy   [x] leave".into(),
+            hint: "[a/d] choose   [enter] buy   [g] gamble   [x] leave".into(),
         };
         self.choice = Some(ChoiceKind::MothShop);
         self.input = PlayerInputState::default();
@@ -6144,7 +6664,17 @@ impl DreamscapeGame {
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
         let terms = self.moth_terms();
-        if index == shelf.cards.len() {
+        if index == shelf.rows() + 1 {
+            self.open_gamble_stakes(); // === risk ===
+            return;
+        }
+        // === toolcards ===
+        if index >= shelf.cards.len() && index < shelf.rows() {
+            self.buy_tool_card(index);
+            return;
+        }
+        // === end toolcards ===
+        if index == shelf.rows() {
             match moth_shop::reroll(
                 &shelf,
                 self.director.dream_seed(),
@@ -6197,6 +6727,58 @@ impl DreamscapeGame {
         self.show_moth_shop(0);
     }
 
+    // === toolcards ===
+    /// The tool card ids held this run: the live deck's, else the saved list.
+    fn tool_cards_held(&self) -> Vec<u32> {
+        match &self.deck {
+            Some(d) => d.tool_cards(),
+            None => self.tool_cards.clone(),
+        }
+    }
+
+    /// A resumed run's saved tool cards go back into the deck if there is
+    /// one (a resumed run keeps its fixed kit today, so this does nothing
+    /// there and the list is only carried on in the save).
+    fn restore_tool_cards(&mut self) {
+        let seed = self.director.dream_seed();
+        if let Some(d) = self.deck.as_mut() {
+            for &id in &self.tool_cards {
+                if deck::tool_ability(id).is_some() {
+                    d.insert_shuffled(id, seed);
+                }
+            }
+        }
+    }
+
+    /// [enter] on a tool card row: dust for a card shuffled into the draw
+    /// pile for the rest of the run (never saved in the booklet).
+    fn buy_tool_card(&mut self, index: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        let terms = self.moth_terms();
+        let held = self.tool_cards_held();
+        let seed = self.director.dream_seed();
+        match moth_shop::buy_tool(&shelf, index, self.bonus_dust, &held, terms) {
+            Ok((a, cost)) if self.deck.is_some() => {
+                self.bonus_dust -= cost;
+                let id = deck::tool_id(a);
+                if let Some(d) = self.deck.as_mut() {
+                    d.insert_shuffled(id, seed);
+                }
+                self.tool_cards.push(id);
+                self.deck_riffle_at = self.deck_clock; // the card flies into the stack
+                self.save_run();
+                log::info!("Moth sold the {a:?} tool card for {cost} dust ({} left)", self.bonus_dust);
+            }
+            Ok(_) => {}
+            Err(why) => {
+                log::info!("Moth refused the tool card: {why:?}");
+                self.sfx(Sound::Denied);
+            }
+        }
+        self.show_moth_shop(index);
+    }
+    // === end toolcards ===
+
     /// [x]: back to the dream, exactly where you stood.
     fn leave_moth_shop(&mut self) {
         if !matches!(self.choice, Some(ChoiceKind::MothShop)) {
@@ -6207,6 +6789,231 @@ impl DreamscapeGame {
         self.sfx(Sound::Reroll);
     }
     // === end shop ===
+
+    // === risk ===
+    /// The gamble row's index in the shop (after the shelf and the reroll).
+    fn gamble_row(&self) -> usize {
+        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1)
+    }
+
+    fn risk_allowed(&self) -> bool {
+        !self.autopilot && self.prologue.is_none() && self.coop.is_none()
+    }
+
+    fn gamble_card(name: &str, desc: String, tag: String, hot: bool) -> upgrade_ui::ChoiceCard {
+        let c = if hot { [255, 150, 90] } else { [150, 150, 175] };
+        upgrade_ui::ChoiceCard {
+            name: name.into(),
+            desc,
+            icon: upgrades::Icon::Gem,
+            color: c,
+            frame: c,
+            tag,
+        }
+    }
+
+    fn show_gamble(&mut self, stage: GambleStage, subtitle: String, cards: Vec<upgrade_ui::ChoiceCard>, hint: &str) {
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: gamble::STAKE_TITLE.into(),
+            subtitle,
+            cards,
+            selected: 0,
+            age: 0.0,
+            hint: hint.into(),
+        };
+        self.choice = Some(ChoiceKind::Gamble(stage));
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// Step one: choose a stake. The odds are on this screen, as rolled.
+    fn open_gamble_stakes(&mut self) {
+        let stakes = gamble::RunState::stakes(self.bonus_dust);
+        if !self.risk_allowed() || stakes.is_empty() || self.gamble_visit >= gamble::MAX_PER_VISIT {
+            self.sfx(Sound::Denied);
+            let row = self.gamble_row();
+            self.show_moth_shop(row);
+            return;
+        }
+        let odds = self.gamble.odds();
+        let mut cards: Vec<_> = stakes
+            .iter()
+            .map(|&s| Self::gamble_card(&format!("{s} DUST"), odds.line(), format!("win: you get {} · lose: {s} gone", s * 2), true))
+            .collect();
+        cards.push(Self::gamble_card("BACK", "keep your dust. nothing happens.".into(), "no stake".into(), false));
+        self.show_gamble(
+            GambleStage::Stakes,
+            format!("you have {} dust · at most half of it · {} left this visit", self.bonus_dust, gamble::MAX_PER_VISIT - self.gamble_visit),
+            cards,
+            "[a/d] choose   [enter] pick a stake   [x] back",
+        );
+    }
+
+    /// Step two: confirm. Nothing is staked until [enter] here.
+    fn open_gamble_confirm(&mut self, stake: u32) {
+        let odds = self.gamble.odds();
+        let cards = vec![
+            Self::gamble_card(&format!("FLIP FOR {stake}"), odds.line(), format!("win +{stake} · lose -{stake}"), true),
+            Self::gamble_card("NOT NOW", "keep your dust. nothing happens.".into(), "no stake".into(), false),
+        ];
+        self.show_gamble(
+            GambleStage::Confirm(stake),
+            format!("{stake} run dust on the coin · you have {}", self.bonus_dust),
+            cards,
+            "[a/d] choose   [enter] decide   [x] back",
+        );
+        self.choice_view.selected = 1; // nothing is staked by default
+    }
+
+    fn choose_gamble(&mut self, stage: GambleStage, index: usize) {
+        match stage {
+            GambleStage::Stakes => {
+                let stakes = gamble::RunState::stakes(self.bonus_dust);
+                match stakes.get(index) {
+                    Some(&s) => self.open_gamble_confirm(s),
+                    None => self.gamble_back(),
+                }
+            }
+            GambleStage::Confirm(stake) if index == 0 => self.flip_coin(stake),
+            GambleStage::Confirm(_) => self.open_gamble_stakes(),
+            GambleStage::Result => {
+                let row = self.gamble_row();
+                self.show_moth_shop(row);
+            }
+        }
+    }
+
+    /// [x] on a coin screen: one step back.
+    fn gamble_back(&mut self) {
+        match self.choice {
+            Some(ChoiceKind::Gamble(GambleStage::Confirm(_))) => self.open_gamble_stakes(),
+            Some(ChoiceKind::Gamble(_)) => {
+                let row = self.gamble_row();
+                self.show_moth_shop(row);
+            }
+            _ => {}
+        }
+    }
+
+    /// The flip: decided now from its own seed stream, paid, and saved
+    /// before the result is shown, so quitting cannot re-roll it.
+    fn flip_coin(&mut self, stake: u32) {
+        let allowed = self.risk_allowed()
+            && gamble::RunState::stakes(self.bonus_dust).contains(&stake)
+            && self.gamble_visit < gamble::MAX_PER_VISIT;
+        if !allowed {
+            self.sfx(Sound::Denied);
+            self.open_gamble_stakes();
+            return;
+        }
+        let was_owed = self.gamble.owed();
+        let won = self.gamble.roll(self.director.dream_seed());
+        self.gamble.settle(won);
+        self.gamble_visit += 1;
+        self.bonus_dust = gamble::after_flip(self.bonus_dust, stake, won);
+        // A wagered dream doubles what it earned, not what the coin moved.
+        self.wager_dust_start = if won {
+            self.wager_dust_start + stake
+        } else {
+            self.wager_dust_start.saturating_sub(stake)
+        };
+        self.save_run();
+        self.sfx(if won { Sound::Pick } else { Sound::Denied });
+        log::info!("Moth coin: stake {stake}, won {won}, owed {was_owed}, dust {}", self.bonus_dust);
+        let (name, desc, tag) = if won {
+            ("THE COIN FELL YOUR WAY", format!("your {stake} dust came back doubled: +{stake}."), format!("+{stake} dust"))
+        } else {
+            ("THE COIN FELL HER WAY", format!("the moth keeps your {stake} dust."), format!("-{stake} dust"))
+        };
+        let cards = vec![Self::gamble_card(name, desc, tag, won)];
+        self.show_gamble(
+            GambleStage::Result,
+            format!("you have {} dust", self.bonus_dust),
+            cards,
+            "[enter] back to the shelf",
+        );
+    }
+
+    /// Per frame (Playing): standing in the second door asks for the deal.
+    fn update_wager(&mut self) {
+        let Some((at, armed)) = self.wager_portal else {
+            return;
+        };
+        let inside = gamble::at_wager(self.player_position, at);
+        if !inside && !armed {
+            self.wager_portal = Some((at, true));
+        } else if inside
+            && armed
+            && self.mode == hud::Mode::Playing
+            && self.choice.is_none()
+            && !self.transition.active()
+            && self.risk_allowed()
+        {
+            self.wager_portal = Some((at, false));
+            self.open_wager_deal();
+        }
+    }
+
+    /// The plain deal screen: what gets harder, what pays double.
+    fn open_wager_deal(&mut self) {
+        let card = |name: &str, desc: &str, tag: &str, c: [u8; 3]| upgrade_ui::ChoiceCard {
+            name: name.into(),
+            desc: desc.into(),
+            icon: upgrades::Icon::Eye,
+            color: c,
+            frame: c,
+            tag: tag.into(),
+        };
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: gamble::WAGER_TITLE.into(),
+            subtitle: gamble::WAGER_SUBTITLE.into(),
+            cards: vec![
+                card(gamble::WAGER_YES, gamble::WAGER_YES_DESC, "harder · x2 dust · extra pick", [255, 120, 200]),
+                card(gamble::WAGER_NO, gamble::WAGER_NO_DESC, "no change", [150, 150, 175]),
+            ],
+            selected: 1, // nothing is taken by default
+            age: 0.0,
+            hint: "[a/d] choose   [enter] decide   [x] not now".into(),
+        };
+        self.choice = Some(ChoiceKind::Wager);
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// [enter] on the deal: 0 takes the door (the dream melts as through the
+    /// ordinary portal, and the next one is wagered), 1 stays.
+    fn choose_wager(&mut self, index: usize) {
+        if index == 0 && self.risk_allowed() {
+            self.wager_enter = true;
+        }
+    }
+
+    /// Spawns this dream's second door, if it has one.
+    fn spawn_wager_portal(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        self.wager_portal = None;
+        let next = self.director.depth + 1;
+        let special = self.director.is_nightmare_depth(next) || self.director.is_sanctuary_depth(next);
+        let normal = self.pressure_applies() && !self.autopilot && self.run_active;
+        let Some(at) = gamble::wager_portal(self.director.dream_seed(), self.director.depth, normal, special, &dream.lairs) else {
+            return Ok(());
+        };
+        let tex = self.texture(gl, [255, 120, 200, 255]);
+        let mesh = self.mesh(Shape::Orb)?;
+        self.world.spawn((
+            Transform {
+                position: Vec3::new(at.x, 0.7, at.z),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.9, 1.4, 0.9),
+            },
+            MeshRenderer { mesh, texture: Some(tex) },
+            Spin(1.2),
+            Lit,
+        ));
+        self.wager_portal = Some((at, true));
+        log::info!("A wager portal stands at {at:?}");
+        Ok(())
+    }
+    // === end risk ===
 
     /// What a freshly taken upgrade does around the edges (shared by the
     /// moth's shelf; the after-dream pick has its own copy of this).
@@ -6704,6 +7511,9 @@ impl DreamscapeGame {
                 self.perks = s.perks.clone();
                 self.shards_this_run = s.shards_this_run;
                 self.bonus_dust = s.bonus_dust;
+                self.gamble = s.gamble.clone(); // === risk ===
+                self.tool_cards = s.tool_cards.clone(); // === toolcards ===
+                self.restore_tool_cards();
                 self.pacts = s.pacts.clone(); // === pacts ===
                 self.peak_difficulty = s.peak_difficulty;
                 self.run_log = s.run_log.clone();
@@ -6825,6 +7635,8 @@ impl DreamscapeGame {
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
+            gamble: self.gamble.clone(), // === risk ===
+            tool_cards: self.tool_cards_held(), // === toolcards ===
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -6878,6 +7690,14 @@ impl DreamscapeGame {
             log::info!("Achievement: {} ({id})", achievements::name(id));
             steam::unlock(id);
         }
+        // === fortune === a ticket for each new achievement (solo play only)
+        if !self.coop_active() && !self.autopilot && self.prologue.is_none() {
+            tickets::give(
+                &mut self.booklet.stash,
+                tickets::TICKETS_PER_ACHIEVEMENT * fresh.len() as u32,
+            );
+        }
+        // === end fortune ===
         self.achievement_toast =
             Some((achievements::name(fresh[fresh.len() - 1]).to_string(), 0.0));
         self.sfx(Sound::Achievement);
@@ -7045,7 +7865,7 @@ impl DreamscapeGame {
             })
             .collect();
         let loadout: Vec<u32> = self.booklet.loadout_cards().iter().map(|c| c.number).collect();
-        let goal = streaks::teaser(&retention::progress_inputs(&self.booklet, &loadout, self.best_depth));
+        let goal = self.title_goal(&loadout);
         (rows, !goal.is_empty())
     }
 
@@ -7234,6 +8054,7 @@ impl DreamscapeGame {
         let weekly_dust = self.booklet.weekly.claim(&weekly);
         if let Some(d) = weekly_dust {
             self.booklet.stash.earn(d);
+            tickets::give(&mut self.booklet.stash, tickets::TICKETS_PER_WEEKLY); // === fortune ===
         }
         self.after_pack_feelings(&haul, &report, weekly_dust);
         self.last_report = Some(report);
@@ -7310,8 +8131,161 @@ impl DreamscapeGame {
             outcome: self.lottery_outcome.clone(),
             age: self.lottery_age,
             status: self.lottery_status.clone(),
+            fortune: self.fortune_view(featured), // === fortune ===
         }
     }
+
+    // === fortune ===
+    /// A fortune is waiting today (solo play only; co-op and autopilot never see it).
+    fn fortune_waiting(&self) -> bool {
+        self.mode == hud::Mode::Title
+            && !self.coop_active()
+            && !self.autopilot
+            && self.booklet.fortune.available(today())
+    }
+
+    /// The title's bottom line: the goal, plus a plain note when a fortune
+    /// is waiting (no pulsing, no urgency).
+    fn title_goal(&self, loadout: &[u32]) -> String {
+        let goal = streaks::teaser(&retention::progress_inputs(&self.booklet, loadout, self.best_depth));
+        if !self.fortune_waiting() {
+            return goal;
+        }
+        if goal.is_empty() {
+            FORTUNE_LINE.to_string()
+        } else {
+            format!("{goal}  ·  {FORTUNE_LINE}")
+        }
+    }
+
+    /// The free pull's exact odds, shown only while one is waiting.
+    fn fortune_view(&self, featured: dream::DreamTheme) -> Option<lottery_ui::FortuneView> {
+        let day = today();
+        if !self.booklet.fortune.available(day) {
+            return None;
+        }
+        let o = fortune::fortune_odds(&self.booklet, day, Some(featured));
+        Some(lottery_ui::FortuneView {
+            odds: lottery::display_odds(&o),
+            nudge: self.booklet.fortune.nudge(day),
+            days: self.booklet.fortune.prior_days(day),
+        })
+    }
+
+    /// Claim today's free pull. The card is chosen from this save's own seed
+    /// stream and written before the reveal plays.
+    fn fortune_claim(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        let before = self.booklet.clone();
+        let save_seed = self.booklet.lore.save_seed;
+        match fortune::claim(&mut self.booklet, today(), save_seed) {
+            None => {
+                self.lottery_status = Some("today's fortune is already yours".into());
+                self.sfx(Sound::Denied);
+            }
+            Some(mut p) => {
+                p.pull.near_miss = None; // no near-miss teasing on a free gift
+                if self.persist_booklet() {
+                    log::info!("Fortune: {:?} -> {}", p.card.rarity, p.card.name);
+                    self.show_pull(p);
+                } else {
+                    self.booklet = before;
+                    self.lottery_status = Some("the deck couldn't write it down (see log)".into());
+                }
+            }
+        }
+    }
+
+    fn tickets_view(&self) -> tickets_ui::TicketsView {
+        let stash = &self.booklet.stash;
+        let left = !tickets::unowned_cosmetics(stash).is_empty();
+        let mut odds: Vec<(String, f32)> = tickets::odds(stash.ticket_dry, left)
+            .into_iter()
+            .map(|(k, share)| (k.label(), share))
+            .collect();
+        odds.sort_by(|a, b| b.1.total_cmp(&a.1));
+        tickets_ui::TicketsView {
+            tickets: stash.tickets,
+            odds,
+            pity_left: tickets::scratches_to_pity(stash.ticket_dry),
+            scratches: stash.ticket_scratches,
+            revealed: self.ticket_revealed.clone(),
+            age: self.ticket_age,
+            confirming: self.ticket_confirm,
+            status: self.ticket_status.clone(),
+        }
+    }
+
+    /// Scratch a ticket: the first press asks, the second confirms. The
+    /// prize is rolled and saved at the confirm; the animation only uncovers it.
+    fn ticket_press(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        if self.booklet.stash.tickets == 0 {
+            self.ticket_confirm = false;
+            self.ticket_status = Some("no tickets yet: clean dreams, achievements and weekly challenges earn them".into());
+            self.sfx(Sound::Denied);
+            return;
+        }
+        if !self.ticket_confirm {
+            self.ticket_confirm = true;
+            self.ticket_status = Some("scratch one ticket? press enter again to confirm".into());
+            return;
+        }
+        self.ticket_confirm = false;
+        let before = self.booklet.clone();
+        let seed = self.booklet.lore.save_seed;
+        let got = match tickets::scratch(&mut self.booklet, seed, today()) {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !self.persist_booklet() {
+            self.booklet = before;
+            self.ticket_status = Some("the ticket couldn't be written down (see log)".into());
+            return;
+        }
+        let (title, detail) = match &got.prize {
+            tickets::Prize::Dust(n) => (format!("{n} DREAM DUST"), "added to your stash".to_string()),
+            tickets::Prize::Pull => {
+                let c = got.pulled.as_ref().map(|p| &p.card);
+                (
+                    "A LOTTERY PULL".to_string(),
+                    c.map_or(String::new(), |c| format!("{} ({}), in your booklet", c.name, c.rarity.label())),
+                )
+            }
+            tickets::Prize::Cosmetic(i) => (
+                i.info().name.to_uppercase(),
+                format!("a new {} item, yours now", i.shelf().label().to_lowercase()),
+            ),
+            tickets::Prize::Hint => (
+                "A DREAM OF YOUR CHOOSING".to_string(),
+                "a spark pick is ready in the lottery tab".to_string(),
+            ),
+        };
+        log::info!("Ticket: {title} ({detail})");
+        self.sfx(if matches!(got.prize, tickets::Prize::Dust(n) if n < 80) { Sound::Pick } else { Sound::WakeDoor });
+        self.ticket_revealed = Some(tickets_ui::Revealed { title, detail });
+        self.ticket_age = 0.0;
+        self.ticket_status = None;
+    }
+
+    /// Tickets for a clean dream, once per finished dream, capped per run.
+    /// Solo runs only.
+    fn ticket_for_clean_dream(&mut self) {
+        if self.coop_active() || self.autopilot || self.prologue.is_some() {
+            return;
+        }
+        if !self.nerve_lost_this_dream
+            && self.caught_this_dream == 0
+            && tickets::for_clean_dream(&mut self.booklet.stash, &mut self.tickets_this_run) > 0
+        {
+            log::info!("Ticket: +1 for a clean dream ({} this run)", self.tickets_this_run);
+        }
+    }
+    // === end fortune ===
 
     /// A fresh seed for each pull (the lottery must not be replayable).
     fn lottery_seed(&self) -> u64 {
@@ -7401,6 +8375,8 @@ impl DreamscapeGame {
         self.store_status = None;
         self.store_tab = 0;
         self.lottery_status = None;
+        self.ticket_status = None; // === fortune ===
+        self.ticket_confirm = false;
         self.mode = hud::Mode::Store;
     }
 
@@ -7769,6 +8745,7 @@ impl DreamscapeGame {
         log::info!("Eye: {text}");
         self.eye_line = Some((text, -eye_motion::SPEECH_DELAY));
         self.booklet.clean.on_run_start();
+        self.tickets_this_run = 0; // === fortune ===
 
         // Abilities come from the loadout's cards (none in the prologue),
         // and each card's dream is planned into the run.
@@ -7939,9 +8916,11 @@ impl DreamscapeGame {
             log::info!("Ascension {}: {}", asc.0, progress::ascension_rule(asc.0));
         }
         self.stats = RunStats::default();
+        self.wager_dry = 0; // === abilities3 ===
         self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
+        self.gamble = gamble::RunState::default(); // === risk ===
         self.pressure_collapsed = false; // pressure
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
@@ -8259,6 +9238,7 @@ impl DreamscapeGame {
                     self.coop_broadcast_plan();
                 }
                 self.nerve.heal(1); // combat: a portal steadies you
+                self.gamble.begin_dream(); // === risk ===
                 self.offer_upgrade = self.prologue.is_none();
                 self.load_dream(ctx)
             }
@@ -8275,6 +9255,7 @@ impl DreamscapeGame {
             }
             transition::Pending::Wake => {
                 self.director.wake();
+                self.gamble.clear_wager(); // === risk ===
                 if std::mem::take(&mut self.to_bottom) {
                     // The bottom: waking, blended with the first dream you kept.
                     self.director.blend = Some(DreamTheme::Garden);
@@ -8747,10 +9728,12 @@ impl DreamscapeGame {
         );
         self.pressure_phase = pressure::Phase::Calm;
         self.pressure_dust_start = self.bonus_dust;
+        self.wager_dust_start = self.bonus_dust; // === risk ===
         // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
         if !self.run_log.is_empty() && !std::mem::take(&mut self.just_continued) {
+            self.ticket_for_clean_dream(); // === fortune ===
             if let streaks::CleanEvent::Clean {
                 label: Some(label), ..
             } = self.booklet.clean.on_dream_end(self.caught_this_dream > 0)
@@ -8761,6 +9744,7 @@ impl DreamscapeGame {
         }
         self.just_continued = false;
         self.caught_this_dream = 0;
+        self.nerve_lost_this_dream = false; // === fortune ===
         self.stare = 0.0;
         if self.run_active {
             self.achieve(Some(achievements::Event::Depth(self.director.depth)));
@@ -8954,6 +9938,16 @@ impl DreamscapeGame {
         self.surge.clear();
         self.dash_boost = 1.0;
         // === end abilities2 ===
+        // === abilities3 === (the old world's rings and traps are gone with it)
+        self.echo_last = None;
+        self.wager_n = 0;
+        self.wager_line = None;
+        self.overload = None;
+        self.overload_ring = None;
+        self.overload_fire = None;
+        self.bargain = abilities3::Bargain::default();
+        self.snares = abilities3::Snares::new();
+        // === end abilities3 ===
         self.last_ability = None;
         self.ability_used.clear();
         self.passive_fired.clear();
@@ -8962,6 +9956,7 @@ impl DreamscapeGame {
         self.caches.clear();
         self.secret = None;
         self.moth_stock = None;
+        self.gamble_visit = 0; // === risk ===
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -9285,6 +10280,7 @@ impl DreamscapeGame {
                 armed: true,
             });
         }
+        self.spawn_wager_portal(gl, &dream)?; // === risk ===
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
@@ -9968,6 +10964,16 @@ impl Game for DreamscapeGame {
             Ok("loadout") => self.open_loadout(),
             Ok("merge") => self.open_merge(hud::Mode::Title),
             Ok("store") => self.open_store(),
+            Ok("tickets") | Ok("tickets_scratch") => {
+                // === fortune === dev hook: the tickets tab, with a few tickets
+                self.open_store();
+                self.store_tab = 2;
+                tickets::give(&mut self.booklet.stash, 3);
+                if crate::dev::var("DREAMSCAPE_SCREEN").as_deref() == Ok("tickets_scratch") {
+                    self.ticket_press();
+                    self.ticket_press();
+                }
+            }
             Ok("lottery") | Ok("lottery_pull") => {
                 // Dev only: a fat purse so the screen has something to show.
                 self.booklet.stash.earn(300);
@@ -10115,6 +11121,13 @@ impl Game for DreamscapeGame {
         if matches!(event, Event::KeyDown { .. }) {
             self.using_pad = false;
         }
+        // === abilities3 === OVERLOAD charges while its key is held
+        if !repeat {
+            if let Some(i) = ability_slot(self.settings.action_for(key)) {
+                self.ability_held[i] = down;
+            }
+        }
+        // === end abilities3 ===
         // Ctrl+V in the code box pastes from the clipboard.
         if let Event::KeyDown {
             keycode: Some(Keycode::V),
@@ -10190,8 +11203,18 @@ impl Game for DreamscapeGame {
                             self.choose(i);
                         }
                     }
+                    Keycode::G if self.choice == Some(ChoiceKind::MothShop) => {
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
+                        self.choose(at + 1); // === risk ===
+                    }
+                    Keycode::X | Keycode::Escape if matches!(self.choice, Some(ChoiceKind::Gamble(_))) => {
+                        self.gamble_back(); // === risk ===
+                    }
+                    Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::Wager) => {
+                        self.choose(1); // === risk === not now
+                    }
                     Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
                         self.choose(at);
                     }
                     Keycode::R => self.reroll_choice(),
@@ -10362,10 +11385,27 @@ impl Game for DreamscapeGame {
                     return;
                 }
                 (hud::Mode::Store, Keycode::Tab) => {
-                    self.store_tab = 1 - self.store_tab;
+                    self.store_tab = (self.store_tab + 1) % 3; // === fortune === perks, lottery, tickets
                     self.lottery_status = None;
+                    self.ticket_status = None;
+                    self.ticket_confirm = false;
                     return;
                 }
+                // === fortune ===
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 2 => {
+                    self.ticket_press();
+                    return;
+                }
+                (hud::Mode::Store, _) if self.store_tab == 2 => {
+                    self.ticket_confirm = false;
+                    self.ticket_status = None;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::F) if self.store_tab == 1 => {
+                    self.fortune_claim();
+                    return;
+                }
+                // === end fortune ===
                 (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 1 => {
                     self.lottery_pull();
                     return;
@@ -10565,6 +11605,7 @@ impl Game for DreamscapeGame {
         }
         if self.mode == hud::Mode::Store {
             self.lottery_age += dt;
+            self.ticket_age += dt; // === fortune ===
         }
         if self.mode == hud::Mode::Playing {
             let dt = dt.min(gameplay::MAX_DT);
@@ -10690,6 +11731,10 @@ impl Game for DreamscapeGame {
                     "lottery" => {
                         self.open_store();
                         self.store_tab = 1;
+                    }
+                    "tickets" => {
+                        self.open_store();
+                        self.store_tab = 2; // === fortune ===
                     }
                     "summary" => {
                         self.title_age = 0.0;
@@ -10870,6 +11915,7 @@ impl Game for DreamscapeGame {
         self.update_combat(dt);
         // === end combat ===
         self.update_abilities2(dt); // === abilities2 ===
+        self.update_abilities3(dt); // === abilities3 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
@@ -10877,6 +11923,7 @@ impl Game for DreamscapeGame {
         self.update_skittish(dt);
         self.update_caches();
         self.update_secret();
+        self.update_wager(); // === risk ===
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
@@ -11568,9 +12615,11 @@ impl Game for DreamscapeGame {
             return Ok(());
         }
         let waiting = self.coop.as_ref().is_some_and(|c| c.in_portal);
-        if touched
-            .iter()
-            .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
+        let wagered = std::mem::take(&mut self.wager_enter); // === risk ===
+        if (wagered
+            || touched
+                .iter()
+                .any(|&e| self.world.get::<&PortalMarker>(e).is_ok()))
             && !waiting
             && !self.coop_ghost()
         {
@@ -11597,6 +12646,17 @@ impl Game for DreamscapeGame {
                 self.eye_line = None;
                 self.think(eye::Moment::NightmareBeaten, false);
             }
+            // === risk === a wagered dream pays double; taking the second door
+            // makes the next one wagered
+            if self.gamble.wager_active {
+                self.bonus_dust = gamble::doubled(self.wager_dust_start, self.bonus_dust);
+            }
+            self.gamble.finish_dream();
+            if wagered {
+                self.gamble.take_wager();
+                log::info!("The wager door is taken at depth {}", self.director.depth);
+            }
+            // === end risk ===
             if self.coop_active() {
                 self.coop_enter_portal();
                 return Ok(());
@@ -12274,6 +13334,86 @@ mod screen_smoke {
         assert_eq!(g.hud_view().lottery.outcome.unwrap(), outcome);
     }
 
+    // === fortune ===
+    #[test]
+    fn the_daily_fortune_is_free_once_a_day_and_the_title_says_so_plainly() {
+        let mut g = game("fortune_day");
+        g.mode = hud::Mode::Title;
+        assert!(g.title_goal(&[]).contains(FORTUNE_LINE));
+        assert!(g.title_rows().1, "the title reserves room for the line");
+        g.open_store();
+        g.store_tab = 1;
+        let view = g.hud_view().lottery;
+        let f = view.fortune.expect("odds shown while a fortune waits");
+        assert!((f.odds.iter().map(|o| o.1).sum::<f32>() - 1.0).abs() < 1e-4);
+        assert!(shapes(&g) > 50);
+        g.fortune_claim();
+        assert_eq!(g.booklet.card_count(), 1, "a free card");
+        assert_eq!(g.booklet.stash.dust, 0, "it costs nothing");
+        assert_eq!(g.booklet.lottery.total_pulls, 0, "and does not move pity");
+        assert!(g.lottery_outcome.as_ref().unwrap().near_miss.is_none());
+        g.fortune_claim();
+        assert_eq!(g.booklet.card_count(), 1, "once per day");
+        assert!(g.hud_view().lottery.fortune.is_none());
+        g.mode = hud::Mode::Title;
+        assert!(!g.title_goal(&[]).contains(FORTUNE_LINE));
+        // And it is saved: a reloaded booklet has no fortune waiting.
+        let again = cards::load(&g.booklet_path);
+        assert!(!again.fortune.available(today()));
+    }
+
+    #[test]
+    fn a_ticket_needs_two_presses_and_the_prize_is_saved_before_it_shows() {
+        let mut g = game("tickets_scratch");
+        g.open_store();
+        g.store_tab = 2;
+        assert!(shapes(&g) > 40);
+        g.ticket_press();
+        assert!(g.ticket_revealed.is_none(), "no tickets: nothing happens");
+        tickets::give(&mut g.booklet.stash, 2);
+        g.ticket_press();
+        assert_eq!(g.booklet.stash.tickets, 2, "first press only asks");
+        assert!(g.ticket_confirm);
+        assert!(shapes(&g) > 40, "confirm state draws");
+        g.ticket_press();
+        assert_eq!(g.booklet.stash.tickets, 1);
+        assert_eq!(g.booklet.stash.ticket_scratches, 1);
+        assert!(g.ticket_revealed.is_some());
+        let saved = cards::load(&g.booklet_path);
+        assert_eq!(saved.stash.tickets, 1, "written before the animation");
+        assert_eq!(saved.stash.ticket_scratches, 1);
+        for age in [0.0, 0.4, tickets_ui::SCRATCH, 3.0] {
+            g.ticket_age = age;
+            assert!(shapes(&g) > 40, "age {age}");
+        }
+        g.settings.reduced_motion = true;
+        assert!(shapes(&g) > 40);
+        let v = g.hud_view().tickets;
+        assert!((v.odds.iter().map(|o| o.1).sum::<f32>() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn clean_dreams_earn_tickets_up_to_the_run_cap_and_a_hurt_dream_earns_none() {
+        let mut g = game("tickets_clean");
+        g.nerve_lost_this_dream = true;
+        g.ticket_for_clean_dream();
+        assert_eq!(g.booklet.stash.tickets, 0, "nerve was lost");
+        g.nerve_lost_this_dream = false;
+        for _ in 0..tickets::TICKETS_PER_RUN_CAP + 4 {
+            g.ticket_for_clean_dream();
+        }
+        assert_eq!(g.booklet.stash.tickets, tickets::TICKETS_PER_RUN_CAP);
+        g.tickets_this_run = 0; // a new run
+        g.ticket_for_clean_dream();
+        assert_eq!(g.booklet.stash.tickets, tickets::TICKETS_PER_RUN_CAP + 1);
+        let mut c = game("tickets_autopilot");
+        c.autopilot = true;
+        c.ticket_for_clean_dream();
+        assert_eq!(c.booklet.stash.tickets, 0, "inert on the autopilot");
+    }
+
+    // === end fortune ===
+
     fn card(ability: &'static str, since_use: f32) -> hand::HandCard {
         hand::HandCard {
             ability,
@@ -12291,6 +13431,7 @@ mod screen_smoke {
             cracked: false,
             since_draw: hand::NEVER,
             empty: false,
+            tool: false,
         }
     }
 
@@ -12404,6 +13545,227 @@ mod screen_smoke {
         assert!(x < 6.0 && x > 3.0, "pulled a third of a second to {x}");
     }
     // === end abilities2 ===
+
+    // === abilities3 ===
+    fn with_ability(name: &str, a: Ability) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g.run.take(Upgrade::Learn(a));
+        g
+    }
+
+    #[test]
+    fn swap_trades_places_with_the_nearest_foe_and_staggers_it() {
+        let mut g = with_ability("swap", Ability::Swap);
+        g.use_ability(0);
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing to swap with: charge kept");
+        let near = put_pacer(&mut g, Vec3::new(6.0, 1.0, 0.0), true);
+        let _far = put_pacer(&mut g, Vec3::new(10.0, 1.0, 0.0), true);
+        g.use_ability(0);
+        assert_eq!(g.player_position, Vec3::new(6.0, 1.0, 0.0));
+        assert_eq!(g.world.get::<&Transform>(near).unwrap().position, Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(g.stunned.get(&near), Some(&abilities3::SWAP_STAGGER));
+        assert!(g.run.abilities[0].cooldown > 0.0);
+    }
+
+    #[test]
+    fn swap_can_trade_with_the_decoy() {
+        let mut g = with_ability("swap2", Ability::Swap);
+        let e = g.world.spawn((Transform { position: Vec3::new(4.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        g.decoy = Some((Vec3::new(4.0, 1.0, 0.0), e));
+        g.use_ability(0);
+        assert_eq!(g.player_position, Vec3::new(4.0, 1.0, 0.0));
+        assert_eq!(g.decoy.map(|d| d.0), Some(Vec3::new(0.0, 1.0, 0.0)));
+        assert_eq!(g.world.get::<&Transform>(e).unwrap().position, Vec3::new(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn bargain_costs_a_nerve_and_triples_three_strikes_then_ends() {
+        let mut g = with_ability("bargain", Ability::Bargain);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), false);
+        let t = g.combat_targets().into_iter().find(|t| t.entity == e).unwrap();
+        let plain = g.strike_damage(&t);
+        let nerve = g.nerve.cur();
+        g.use_ability(0);
+        assert_eq!(g.nerve.cur(), nerve - 1);
+        assert!((g.strike_damage(&t) - plain * abilities3::BARGAIN_MULT).abs() < 1e-4);
+        for _ in 0..abilities3::BARGAIN_STRIKES {
+            assert!(g.bargain.active());
+            g.bargain.spend_strike();
+        }
+        assert!((g.strike_damage(&t) - plain).abs() < 1e-4, "three strikes and it is over");
+    }
+
+    #[test]
+    fn bargain_refuses_at_one_nerve() {
+        let mut g = with_ability("bargain2", Ability::Bargain);
+        while g.nerve.cur() > 1 {
+            assert!(g.nerve.spend(1));
+        }
+        g.use_ability(0);
+        assert_eq!(g.nerve.cur(), 1);
+        assert!(!g.bargain.active());
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing was spent");
+    }
+
+    #[test]
+    fn a_snare_roots_the_first_foe_to_step_on_it_and_is_spent() {
+        let mut g = with_ability("snare", Ability::Snare);
+        g.use_ability(0);
+        assert_eq!(g.snares.len(), 1);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 0.0), true);
+        g.update_abilities3(0.016);
+        assert_eq!(g.snares.len(), 1, "nobody on it yet");
+        let near = put_pacer(&mut g, Vec3::new(0.5, 1.0, 0.0), true);
+        g.update_abilities3(0.016);
+        assert_eq!(g.snares.len(), 0, "spent");
+        assert_eq!(g.stunned.get(&near), Some(&abilities3::SNARE_ROOT));
+        assert!(!g.stunned.contains_key(&far));
+    }
+
+    #[test]
+    fn only_two_snares_stay_down() {
+        let mut g = with_ability("snare2", Ability::Snare);
+        for _ in 0..3 {
+            g.run.abilities[0].cooldown = 0.0;
+            g.player_position.x += 5.0;
+            g.use_ability(0);
+        }
+        assert_eq!(g.snares.len(), abilities3::SNARE_MAX);
+    }
+
+    #[test]
+    fn overload_charges_while_held_and_blasts_on_release_by_charge() {
+        let blast = |held_secs: f32| -> (f32, bool) {
+            let mut g = with_ability(&format!("overload{held_secs}"), Ability::Overload);
+            let mid = put_pacer(&mut g, Vec3::new(5.0, 1.0, 0.0), true);
+            let far = put_pacer(&mut g, Vec3::new(9.0, 1.0, 0.0), true);
+            g.mode = hud::Mode::Playing;
+            g.ability_held[0] = true;
+            g.use_ability(0);
+            assert!(g.overload.is_some() && g.run.abilities[0].cooldown <= 0.0, "charging, nothing spent yet");
+            let mut left = held_secs;
+            while left > 0.0 {
+                g.update_abilities3(0.1);
+                left -= 0.1;
+            }
+            assert!(g.stunned.is_empty(), "nothing before the release");
+            g.ability_held[0] = false;
+            g.update_abilities3(0.016);
+            assert!(g.overload.is_none() && g.run.abilities[0].cooldown > 0.0);
+            let stun = g.stunned.get(&mid).copied().unwrap_or(0.0);
+            (stun, g.stunned.contains_key(&far))
+        };
+        let (short, short_far) = blast(0.4);
+        let (full, full_far) = blast(3.0);
+        assert!(short == 0.0 && !short_far, "radius {} does not reach 5", abilities3::overload_radius(0.4));
+        assert!(full > 0.0 && full_far, "a full charge reaches both");
+        assert!((full - abilities3::OVERLOAD_STAGGER_MAX).abs() < 0.2);
+    }
+
+    #[test]
+    fn echo_needs_something_to_repeat_and_costs_nothing_extra() {
+        let mut g = with_ability("echo", Ability::Echo);
+        g.use_ability(0);
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing to echo: denied, charge kept");
+        g.run.take(Upgrade::Learn(Ability::Snare));
+        g.use_ability(1);
+        assert_eq!(g.snares.len(), 1);
+        assert_eq!(g.echo_last, Some(Ability::Snare));
+        let snare_cd = g.run.abilities[1].cooldown;
+        g.player_position.x += 5.0;
+        g.use_ability(0);
+        assert_eq!(g.snares.len(), 2, "the snare was set again");
+        assert_eq!(g.run.abilities[1].cooldown, snare_cd, "its recharge did not restart");
+        assert!(g.run.abilities[0].cooldown > 0.0, "echo itself recharges");
+        assert_eq!(g.echo_last, Some(Ability::Snare), "never echoes itself");
+        g.run.tick(1.0);
+        assert_eq!(g.run.abilities.len(), 2, "the borrowed state is gone");
+    }
+
+    #[test]
+    fn wager_rolls_once_shows_its_pick_and_bends_its_cooldown() {
+        let mut g = with_ability("wager", Ability::Wager);
+        let roll = abilities3::wager_roll(g.director.dream_seed(), 0, 0);
+        g.use_ability(0);
+        assert_eq!(g.wager_n, 1);
+        assert!(g.wager_line.as_ref().is_some_and(|l| l.0.contains(roll.ability.name())), "{:?}", g.wager_line);
+        let full = effective_cd(Ability::Wager);
+        let cd = g.run.abilities[0].cooldown;
+        let timed = roll.ability.duration() > 0.0;
+        assert!((cd - abilities3::wager_cooldown(roll.kind, full, timed)).abs() < 1e-3, "{roll:?} {cd}");
+        assert!(g.run.abilities.iter().all(|a| a.ability != roll.ability) || roll.ability == Ability::Wager);
+        g.run.tick(30.0);
+        assert_eq!(g.run.abilities.len(), 1, "the borrowed state ran out");
+        let line1 = g2_line(&g);
+        let mut g2 = with_ability("wager2", Ability::Wager);
+        g2.use_ability(0);
+        assert_eq!(g2_line(&g2), line1, "same dream, same roll");
+    }
+
+    fn g2_line(g: &DreamscapeGame) -> Option<String> {
+        g.wager_line.as_ref().map(|l| l.0.clone())
+    }
+
+    fn effective_cd(a: Ability) -> f32 {
+        upgrades::effective_cooldown(a, 1.0, 1.0)
+    }
+
+    fn deck_game(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        let mut d = deck::Deck::new(&[1, 2, 3, 4, 5, 6, 7], 3);
+        d.draw_to_fill(5);
+        d.events();
+        g.deck = Some(d);
+        g
+    }
+
+    #[test]
+    fn mulligan_and_recall_are_inert_without_a_deck() {
+        let g = game("nodeck");
+        assert!(!g.abilities3_ready(Ability::Mulligan, None));
+        assert!(!g.abilities3_ready(Ability::Recall, None));
+        assert!(!RunUpgrades::default().available(Upgrade::Learn(Ability::Mulligan)));
+        assert!(!RunUpgrades::default().available(Upgrade::Learn(Ability::Recall)));
+        assert!(RunUpgrades::default().available(Upgrade::Learn(Ability::Snare)));
+    }
+
+    #[test]
+    fn mulligan_redeals_the_hand_and_flicks_the_old_cards_out() {
+        let mut g = deck_game("mull");
+        assert!(g.abilities3_ready(Ability::Mulligan, None));
+        let before: Vec<_> = g.deck.as_ref().unwrap().hand().to_vec();
+        g.abilities3_after_play(Ability::Mulligan, before[0], None);
+        let d = g.deck.as_mut().unwrap();
+        assert!(d.hand().iter().all(|h| h.is_some()), "a fresh full hand");
+        assert_eq!(d.events().iter().filter(|e| matches!(e, deck::DeckEvent::Drawn { .. })).count(), 5);
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn recall_returns_the_last_played_card_to_the_hand() {
+        let mut g = deck_game("recall");
+        let d = g.deck.as_mut().unwrap();
+        let first = d.hand()[0].unwrap();
+        d.play(0, 6.0);
+        let own = d.hand()[2].unwrap();
+        d.play(2, 14.0);
+        assert!(g.abilities3_ready(Ability::Recall, Some(own)));
+        g.abilities3_after_play(Ability::Recall, Some(own), None);
+        let d = g.deck.as_mut().unwrap();
+        assert!(d.hand().contains(&Some(first)));
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4, 5, 6, 7], "no card lost or doubled");
+    }
+    // === end abilities3 ===
 
     #[test]
     fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {
@@ -14413,7 +15775,8 @@ mod screen_smoke {
         assert_eq!(g.choice_view.title, moth_shop::TITLE);
         // Shelf cards plus the reroll card.
         let shelf = g.moth_stock.clone().expect("stocked");
-        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 1);
+        // Shelf cards plus the reroll and the moth's coin.
+        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 2);
         g.leave_moth_shop();
         assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
         // Once: a further pick-less call does nothing.
@@ -14446,6 +15809,311 @@ mod screen_smoke {
         g.choose(0);
         assert_eq!((g.choice.clone(), g.mode), (None, hud::Mode::Playing));
     }
+
+    // === risk ===
+    fn coin_game(name: &str, dust: u32) -> DreamscapeGame {
+        let mut g = game(name);
+        g.director.depth = 6;
+        g.booklet.stash.dust = 500;
+        g.bonus_dust = dust;
+        g.enter_moth_shop_for_test();
+        g
+    }
+
+    /// Walk the three steps: row, stake, confirm.
+    fn flip(g: &mut DreamscapeGame, stake_index: usize) {
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Stakes)));
+        g.choose(stake_index);
+        assert!(matches!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Confirm(_)))));
+        g.choose(0);
+    }
+
+    #[test]
+    fn the_coin_costs_nothing_until_confirmed_and_odds_are_on_the_screen() {
+        let mut g = coin_game("risk_confirm", 40);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.bonus_dust, 40);
+        assert!(g.choice_view.cards[0].desc.contains("50% double · 50% lose the stake"));
+        assert_eq!(g.choice_view.cards.len(), 4, "5, 10, 20 and back");
+        g.choose(1);
+        assert_eq!(g.bonus_dust, 40, "choosing a stake stakes nothing");
+        assert_eq!(g.choice_view.selected, 1, "the safe card is the default");
+        assert!(g.choice_view.cards[0].desc.contains("50%"));
+        g.choose(1); // NOT NOW
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Stakes)));
+        assert_eq!((g.bonus_dust, g.gamble.flips), (40, 0));
+        // [x] walks back out to the shelf.
+        g.gamble_back();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.bonus_dust, 40);
+    }
+
+    #[test]
+    fn a_flip_moves_exactly_the_stake_on_run_dust_only() {
+        let mut g = coin_game("risk_flip", 40);
+        flip(&mut g, 1); // 10 dust
+        assert_eq!(g.gamble.flips, 1);
+        assert!(g.bonus_dust == 50 || g.bonus_dust == 30, "{}", g.bonus_dust);
+        assert_eq!(g.booklet.stash.dust, 500, "the bank is untouched");
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Result)));
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+    }
+
+    #[test]
+    fn stakes_never_exceed_half_the_dust_and_a_visit_allows_three() {
+        let mut g = coin_game("risk_caps", 9);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "9 dust: shut");
+        let mut g = coin_game("risk_visit", 400);
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP; // the first is a win, whatever
+        for _ in 0..gamble::MAX_PER_VISIT {
+            flip(&mut g, 0);
+            g.choose(0);
+        }
+        assert_eq!(g.gamble_visit, 3);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "a fourth is refused");
+        assert_eq!(g.gamble.flips, 3);
+        g.flip_coin(5);
+        assert_eq!(g.gamble.flips, 3, "even called directly");
+    }
+
+    #[test]
+    fn two_losses_then_the_moth_owes_you_one_and_says_so() {
+        let mut g = coin_game("risk_owed", 400);
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP;
+        let row = g.gamble_row();
+        g.choose(row);
+        assert!(g.choice_view.cards[0].desc.contains("the moth owes you one"));
+        g.choose(0);
+        let dust = g.bonus_dust;
+        g.choose(0);
+        assert_eq!(g.bonus_dust, dust + 5, "a guaranteed win");
+        assert_eq!(g.gamble.losses, 0);
+    }
+
+    #[test]
+    fn the_outcome_is_saved_before_it_shows_and_a_reload_cannot_reroll_it() {
+        let mut g = coin_game("risk_save", 100);
+        g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_save_run.ron");
+        let _ = std::fs::remove_file(&g.save_path);
+        g.run_active = true;
+        flip(&mut g, 2);
+        let saved = progress::load(&g.save_path).expect("saved at commit");
+        assert_eq!(saved.bonus_dust, g.bonus_dust, "the dust and the counter were saved together");
+        assert_eq!(saved.gamble, g.gamble);
+        assert_eq!(saved.gamble.flips, 1);
+        // Same dream, reloaded state: the next flip is the same draw.
+        let seed = g.director.dream_seed();
+        assert_eq!(saved.gamble.roll(seed), g.gamble.roll(seed));
+        let _ = std::fs::remove_file(&g.save_path);
+    }
+
+    #[test]
+    fn the_shop_is_unchanged_when_you_do_not_gamble() {
+        let mut g = coin_game("risk_unchanged", 100);
+        let shelf = g.moth_stock.clone().unwrap();
+        let cost = moth_shop::price_at(&shelf, 0, g.moth_terms()).unwrap();
+        g.choose(0);
+        assert_eq!(g.bonus_dust, 100 - cost);
+        assert_eq!(g.gamble, gamble::RunState::default());
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+    }
+
+    // === toolcards ===
+    fn tool_shop_game(name: &str, dust: u32) -> DreamscapeGame {
+        let mut g = deck_game(name);
+        g.run.deck_slots = 5;
+        g.director.depth = 6;
+        g.bonus_dust = dust;
+        g.save_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_run.ron"));
+        g.enter_moth_shop_for_test();
+        g
+    }
+
+    #[test]
+    fn the_shelf_sells_tool_cards_only_in_deck_runs() {
+        let g = tool_shop_game("tool_offer", 100);
+        let shelf = g.moth_stock.clone().unwrap();
+        assert_eq!(shelf.tools.len(), moth_shop::TOOLS_OFFERED);
+        assert_eq!(g.choice_view.cards.len(), shelf.rows() + 2, "cards, tools, reroll, coin");
+        let at = shelf.cards.len();
+        assert!(g.choice_view.cards[at].tag.contains("dust"), "{}", g.choice_view.cards[at].tag);
+        assert_eq!(g.choice_view.cards[at].name, shelf.tools[0].name());
+        let fixed = coin_game("tool_fixed", 100);
+        assert!(fixed.moth_stock.as_ref().unwrap().tools.is_empty());
+    }
+
+    #[test]
+    fn buying_tool_cards_costs_more_each_time_stops_at_two_and_keeps_counts() {
+        let mut g = tool_shop_game("tool_buy", 200);
+        let before = g.deck.as_ref().unwrap().all_cards().len();
+        let shelf = g.moth_stock.clone().unwrap();
+        let at = shelf.cards.len();
+        let (a, b) = (shelf.tools[0], shelf.tools[1]);
+        let first = moth_shop::tool_price(a, 0, g.moth_terms());
+        g.choose(at);
+        assert_eq!(g.bonus_dust, 200 - first);
+        let second = moth_shop::tool_price(b, 1, g.moth_terms());
+        assert_eq!(second, moth_shop::tool_base_price(b) + moth_shop::TOOL_PRICE_STEP);
+        g.choose(at + 1);
+        assert_eq!(g.bonus_dust, 200 - first - second);
+        let d = g.deck.as_ref().unwrap();
+        assert_eq!(d.tool_cards().len(), 2);
+        assert_eq!(d.all_cards().len(), before + 2, "counts: two cards added, none lost");
+        assert_eq!(g.tool_cards_held().len(), moth_shop::MAX_TOOL_CARDS);
+        // A third (a fresh reroll of the shelf) shows no room and takes nothing.
+        let mut shelf = g.moth_stock.clone().unwrap();
+        shelf.tools = vec![Ability::Overload];
+        g.moth_stock = Some(shelf);
+        let dust = g.bonus_dust;
+        g.show_moth_shop(0);
+        let row = g.moth_stock.as_ref().unwrap().cards.len();
+        assert_eq!(g.choice_view.cards[row].tag, moth_shop::TOOL_NO_ROOM);
+        g.choose(row);
+        assert_eq!(g.bonus_dust, dust);
+        assert_eq!(g.deck.as_ref().unwrap().tool_cards().len(), 2);
+        assert!(g.booklet.lore.deck.iter().all(|&n| !deck::is_tool(n)), "never in the booklet's deck");
+    }
+
+    #[test]
+    fn a_bought_tool_card_is_shown_as_a_tool_in_the_hand_and_never_saved_in_the_booklet() {
+        let mut g = deck_game("tool_hand");
+        g.run.deck_slots = 5;
+        let mut d = deck::Deck::new(&[], 3);
+        d.insert_shuffled(deck::tool_id(Ability::Snare), 3);
+        d.draw_to_fill(5);
+        g.deck = Some(d);
+        g.update_deck(0.0);
+        let view = g.hand_view();
+        let c = view.iter().find(|c| c.tool).expect("a tool card in hand");
+        assert_eq!((c.ability, c.card.is_none(), c.passive.is_none(), c.edge.is_none()), ("SNARE", true, true, true));
+        assert!(g.booklet.card(deck::tool_id(Ability::Snare)).is_none());
+        // The card draws like any other: its face can be painted.
+        let shapes = frame(&g, 1280.0, 720.0).len();
+        assert!(shapes > 0);
+        assert!(!view.iter().any(|c| !c.tool && c.ability == "SNARE"));
+    }
+
+    #[test]
+    fn using_a_tool_card_discards_it_and_it_comes_back_into_the_draw_pile() {
+        let mut g = deck_game("tool_use");
+        g.run.deck_slots = 5;
+        let id = deck::tool_id(Ability::Echo);
+        let mut d = deck::Deck::new(&[], 3);
+        d.insert_shuffled(id, 3);
+        d.draw_to_fill(5);
+        g.deck = Some(d);
+        g.update_deck(0.0);
+        g.run.abilities[0].cooldown = 0.0;
+        g.deck_on_use(0);
+        assert_eq!(g.deck.as_ref().unwrap().hand()[0], None);
+        g.update_deck(deck::SHUFFLE_DELAY + deck::DRAW_DELAY + 0.1);
+        assert_eq!(g.deck.as_ref().unwrap().tool_cards(), vec![id], "kept for the run");
+        assert_eq!(g.deck.as_ref().unwrap().all_cards(), vec![id]);
+    }
+
+    #[test]
+    fn tool_cards_survive_a_save_and_an_old_save_loads_without_them() {
+        let mut g = tool_shop_game("tool_save", 100);
+        g.run_active = true;
+        g.choose(g.moth_stock.as_ref().unwrap().cards.len());
+        let id = g.deck.as_ref().unwrap().tool_cards()[0];
+        let saved = progress::load(&g.save_path).expect("saved when bought");
+        assert_eq!(saved.tool_cards, vec![id]);
+        // Resumed: the list is carried on (a resumed run has no deck yet) ...
+        let mut r = game("tool_resume");
+        r.deck = None;
+        r.tool_cards = saved.tool_cards.clone();
+        r.restore_tool_cards();
+        assert_eq!(r.tool_cards_held(), vec![id]);
+        // ... and goes back into a deck when there is one.
+        r.deck = Some(deck::Deck::new(&[1, 2, 3], 4));
+        r.restore_tool_cards();
+        assert_eq!(r.deck.as_ref().unwrap().tool_cards(), vec![id]);
+        // An old save without the field loads, with no tool cards.
+        let mut bare = saved.clone();
+        bare.tool_cards.clear();
+        let text = ron::ser::to_string_pretty(&bare, ron::ser::PrettyConfig::default()).unwrap();
+        let old: String = text.lines().filter(|l| !l.contains("tool_cards")).collect::<Vec<_>>().join("\n");
+        let back: progress::SavedRun = ron::from_str(&old).expect("old save loads");
+        assert!(back.tool_cards.is_empty());
+    }
+    // === end toolcards ===
+
+    #[test]
+    fn no_coin_in_autopilot_or_co_op() {
+        let mut g = coin_game("risk_inert", 100);
+        g.autopilot = true;
+        g.open_gamble_stakes();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        g.flip_coin(5);
+        assert_eq!((g.gamble.flips, g.bonus_dust), (0, 100));
+    }
+
+    #[test]
+    fn the_wager_deal_takes_nothing_by_default_and_not_now_changes_nothing() {
+        let mut g = game("risk_deal");
+        g.open_wager_deal();
+        assert_eq!(g.choice_view.selected, 1);
+        assert_eq!(g.choice_view.title, gamble::WAGER_TITLE);
+        assert_eq!(g.choice_view.subtitle, "harder dream, double reward");
+        g.choose(1);
+        assert!(!g.wager_enter && !g.gamble.wager_next);
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+        g.open_wager_deal();
+        g.choose(0);
+        assert!(g.wager_enter, "the door is entered next frame");
+    }
+
+    #[test]
+    fn a_wagered_dream_is_harder_pays_double_and_owes_a_rare_pick() {
+        let mut g = game("risk_wagered");
+        g.director.depth = 5;
+        g.pressure_applies(); // normal dream
+        let base = g.pressure_base().enemies;
+        let plain = g.hazard_rule_state().map(|r| r.strength);
+        g.gamble.take_wager();
+        g.gamble.begin_dream();
+        assert!(g.gamble.wager_active);
+        assert!((g.pressure_base().enemies - base * 1.3).abs() < 1e-4);
+        if let (Some(a), Some(b)) = (plain, g.hazard_rule_state().map(|r| r.strength)) {
+            assert!(b > a, "stronger hazards");
+        }
+        // Earn 30 in it: leaving pays 30 more.
+        g.wager_dust_start = 10;
+        g.bonus_dust = 40;
+        g.bonus_dust = gamble::doubled(g.wager_dust_start, g.bonus_dust);
+        g.gamble.finish_dream();
+        assert_eq!(g.bonus_dust, 70);
+        assert!(g.gamble.pick_owed);
+        // The next ordinary pick closes into the extra rare+ one.
+        g.director.depth = 7;
+        g.open_upgrade_choice();
+        g.choose(0);
+        let Some(ChoiceKind::Upgrade(opts)) = g.choice.clone() else {
+            panic!("the extra pick");
+        };
+        assert!(opts.iter().all(|u| u.tier() >= upgrades::Tier::Rare), "rare or better: {opts:?}");
+        assert!(!g.gamble.pick_owed);
+        g.choose(0);
+        assert!(!matches!(g.choice, Some(ChoiceKind::Upgrade(_))), "only one extra");
+    }
+
+    #[test]
+    fn nothing_is_wagered_in_a_plain_dream() {
+        let g = game("risk_plain");
+        assert!(!g.gamble.wager_active && !g.gamble.pick_owed);
+        assert_eq!(gamble::enemy_mult(g.gamble.wager_active), 1.0);
+    }
+    // === end risk ===
 
     #[test]
     fn every_third_depth_opens_the_shop_after_the_pick() {
@@ -14525,6 +16193,26 @@ mod screen_smoke {
         let bad = overflows(&g, "MothShop");
         assert!(bad.is_empty(), "{bad:?}");
     }
+    // === toolcards ===
+    #[test]
+    fn the_fullest_deck_run_shelf_with_tool_cards_fits_the_screen() {
+        for bought in [0, 1, 2] {
+            let mut g = deck_game("shop_fit_tools");
+            g.run.deck_slots = 5;
+            g.director.depth = 9;
+            g.bonus_dust = 80;
+            g.perks = vec![store::Perk::DeepShelves];
+            g.enter_moth_shop_for_test();
+            let at = g.moth_stock.as_ref().unwrap().cards.len();
+            for k in 0..bought {
+                g.choose(at + k);
+            }
+            assert_eq!(g.tool_cards_held().len(), bought);
+            let bad = overflows(&g, "MothShop+tools");
+            assert!(bad.is_empty(), "{bought} bought: {bad:?}");
+        }
+    }
+    // === end toolcards ===
     // === end shop ===
 
     #[test]
@@ -14588,6 +16276,11 @@ mod screen_smoke {
         bad.extend(overflows(&g, "Store"));
         g.store_tab = 1;
         bad.extend(overflows(&g, "Lottery"));
+        g.store_tab = 2; // === fortune ===
+        bad.extend(overflows(&g, "Tickets"));
+        g.ticket_confirm = true;
+        bad.extend(overflows(&g, "Tickets-confirm"));
+        g.store_tab = 1;
         g.begin_pick(offers(3));
         bad.extend(overflows(&g, "PackPick"));
         g.pick.age = 3.0;
@@ -14602,6 +16295,28 @@ mod screen_smoke {
         }
         g.open_wake_choice();
         bad.extend(overflows(&g, "WakeChoice"));
+        // === risk === the moth's coin and the second door
+        g.bonus_dust = 80;
+        g.gamble_visit = 0;
+        g.director.depth = 6;
+        g.enter_moth_shop_for_test();
+        bad.extend(overflows(&g, "MothShop+coin"));
+        g.open_gamble_stakes();
+        bad.extend(overflows(&g, "Coin-stakes"));
+        g.open_gamble_confirm(20);
+        bad.extend(overflows(&g, "Coin-confirm"));
+        g.flip_coin(20);
+        bad.extend(overflows(&g, "Coin-result"));
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP;
+        g.open_gamble_stakes();
+        bad.extend(overflows(&g, "Coin-owed"));
+        g.open_wager_deal();
+        bad.extend(overflows(&g, "Wager-deal"));
+        g.choice = None;
+        g.gamble = gamble::RunState::default();
+        g.bonus_dust = 0;
+        g.gamble_visit = 0;
+        // === end risk ===
         for depth in [1, 6, 12] {
             g.director.depth = depth;
             g.open_upgrade_choice();

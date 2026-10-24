@@ -11,7 +11,7 @@
 //! here, never the banked stash, so a run that is quit or lost mid-shop
 //! loses nothing permanent.
 
-use crate::upgrades::{Roll, RunUpgrades, Tier, Upgrade};
+use crate::upgrades::{Ability, Roll, RunUpgrades, Tier, Upgrade};
 
 /// Dust for a common card.
 pub const PRICE_COMMON: u32 = 6;
@@ -78,11 +78,19 @@ pub struct Shelf {
     /// Index into `cards` of the discounted special, if any.
     pub special: Option<usize>,
     pub rerolls: u32,
+    // === toolcards === deck runs only: tool cards for dust, after the cards
+    pub tools: Vec<Ability>,
+    // === end toolcards ===
 }
 
 impl Shelf {
     pub fn is_empty(&self) -> bool {
-        self.cards.is_empty()
+        self.cards.is_empty() && self.tools.is_empty() // === toolcards ===
+    }
+
+    /// Rows for sale: the cards, then the tool cards. The reroll comes next.
+    pub fn rows(&self) -> usize {
+        self.cards.len() + self.tools.len()
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -153,8 +161,106 @@ fn build(seed: u64, run: &RunUpgrades, depth: u32, terms: Terms, rerolls: u32) -
         cards,
         special: special_at,
         rerolls,
+        tools: tool_offer(seed, run, rerolls), // === toolcards ===
     }
 }
+
+// === toolcards ===
+/// Tool cards on offer at once.
+pub const TOOLS_OFFERED: usize = 2;
+/// Most tool cards a deck holds at once.
+pub const MAX_TOOL_CARDS: usize = 2;
+/// Dust for a cheap utility, a mid and a strong tool card.
+pub const TOOL_PRICE_CHEAP: u32 = 8;
+pub const TOOL_PRICE_MID: u32 = 14;
+pub const TOOL_PRICE_STRONG: u32 = 22;
+/// Each tool card already bought this run makes the next this much dearer.
+pub const TOOL_PRICE_STEP: u32 = 4;
+/// Plain words for the shelf (flagged for the user's approval).
+pub const TOOL_TAG: &str = "tool card · this run only";
+pub const TOOL_NO_ROOM: &str = "no room";
+pub const TOOL_HELD: &str = "already in your deck";
+
+/// Abilities no booklet card can teach (not a dream's, not a resonant
+/// pair's): a deck run can only get these here. Derived, never listed.
+pub fn tool_pool() -> Vec<Ability> {
+    crate::upgrades::ALL_ABILITIES
+        .iter()
+        .copied()
+        .filter(|&a| {
+            !crate::dream::ALL_THEMES.iter().any(|&t| crate::powers::power(t).active == a)
+                && !crate::powers::PAIR_ABILITIES.iter().any(|p| p.2 == a)
+        })
+        .collect()
+}
+
+/// Base dust for a tool card of this ability, by strength.
+pub fn tool_base_price(a: Ability) -> u32 {
+    match a {
+        Ability::Swap | Ability::Mulligan | Ability::Recall => TOOL_PRICE_CHEAP,
+        Ability::Overload | Ability::Bargain => TOOL_PRICE_STRONG,
+        _ => TOOL_PRICE_MID,
+    }
+}
+
+/// Dust for `a`'s tool card when `held` tool cards are already in the deck.
+pub fn tool_price(a: Ability, held: usize, terms: Terms) -> u32 {
+    terms.apply(tool_base_price(a) + TOOL_PRICE_STEP * held as u32)
+}
+
+/// Up to [`TOOLS_OFFERED`] tool cards for a deck run (a fixed loadout gets
+/// none: it picks abilities instead). Same for the same dream and rerolls.
+pub fn tool_offer(seed: u64, run: &RunUpgrades, rerolls: u32) -> Vec<Ability> {
+    if run.deck_slots == 0 {
+        return Vec::new();
+    }
+    let mut pool = tool_pool();
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(
+        seed ^ 0x700C_5E11 ^ (rerolls as u64).wrapping_mul(0x9E37_79B9),
+    );
+    let mut out = Vec::new();
+    while out.len() < TOOLS_OFFERED && !pool.is_empty() {
+        out.push(pool.remove(rand::Rng::gen_range(&mut rng, 0..pool.len())));
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRefusal {
+    NoSuchCard,
+    TooPoor,
+    /// [`MAX_TOOL_CARDS`] already in the deck.
+    NoRoom,
+    /// This one is already in the deck.
+    Held,
+}
+
+/// Buying the tool card at row `index` (counted from the shelf's first
+/// row) with `dust`, while the deck holds `held` (tool card ids).
+pub fn buy_tool(
+    shelf: &Shelf,
+    index: usize,
+    dust: u32,
+    held: &[u32],
+    terms: Terms,
+) -> Result<(Ability, u32), ToolRefusal> {
+    let a = *index
+        .checked_sub(shelf.cards.len())
+        .and_then(|i| shelf.tools.get(i))
+        .ok_or(ToolRefusal::NoSuchCard)?;
+    if held.contains(&crate::deck::tool_id(a)) {
+        return Err(ToolRefusal::Held);
+    }
+    if held.len() >= MAX_TOOL_CARDS {
+        return Err(ToolRefusal::NoRoom);
+    }
+    let cost = tool_price(a, held.len(), terms);
+    if dust < cost {
+        return Err(ToolRefusal::TooPoor);
+    }
+    Ok((a, cost))
+}
+// === end toolcards ===
 
 // === abilities2 ===
 /// One of the new abilities, if this run can still learn it (a deck hand
@@ -163,6 +269,7 @@ fn build(seed: u64, run: &RunUpgrades, depth: u32, terms: Terms, rerolls: u32) -
 pub fn ability_offer(seed: u64, run: &RunUpgrades, rerolls: u32) -> Option<Upgrade> {
     let open: Vec<Upgrade> = crate::abilities2::NEW_ABILITIES
         .iter()
+        .chain(crate::abilities3::NEW_ABILITIES.iter()) // === abilities3 ===
         .map(|&a| Upgrade::Learn(a))
         .filter(|&u| run.available(u))
         .collect();
@@ -283,17 +390,91 @@ mod tests {
         for seed in 0..200 {
             let offer = ability_offer(seed, &run, 0).expect("a free dreamer can learn one");
             let Upgrade::Learn(a) = offer else { panic!("{offer:?}") };
-            assert!(crate::abilities2::NEW_ABILITIES.contains(&a));
+            assert!(crate::abilities2::NEW_ABILITIES.contains(&a) || crate::abilities3::NEW_ABILITIES.contains(&a));
+            assert!(!crate::abilities3::deck_only(a), "a fixed loadout has no deck to redeal");
             assert!(stock(seed, &run, 5, T).cards.contains(&offer), "seed {seed}");
             assert!(price_at(&stock(seed, &run, 5, T), stock(seed, &run, 5, T).cards.iter().position(|c| *c == offer).unwrap(), T).is_some());
             seen.insert(a);
         }
-        assert_eq!(seen.len(), 8, "every new ability gets sold");
+        assert_eq!(seen.len(), 14, "every new ability that works without a deck gets sold");
         let mut hand = RunUpgrades::default();
         hand.deck_slots = 3;
         assert_eq!(ability_offer(1, &hand, 0), None);
         assert!(stock(1, &hand, 5, T).cards.iter().all(|u| !u.is_ability()));
     }
+
+    // === toolcards ===
+    fn deck_run() -> RunUpgrades {
+        let mut r = RunUpgrades::default();
+        r.deck_slots = 3;
+        r
+    }
+
+    #[test]
+    fn tool_cards_are_the_abilities_no_card_can_teach() {
+        let pool = tool_pool();
+        assert!(pool.contains(&Ability::Bargain) && pool.contains(&Ability::Snare));
+        for a in &pool {
+            assert!(!crate::powers::PAIR_ABILITIES.iter().any(|p| p.2 == *a), "{a:?}");
+            assert!(!crate::dream::ALL_THEMES.iter().any(|&t| crate::powers::power(t).active == *a), "{a:?}");
+        }
+        assert!(!pool.contains(&Ability::Dash) && !pool.contains(&Ability::Mirror));
+        assert!(pool.len() >= TOOLS_OFFERED);
+    }
+
+    #[test]
+    fn only_deck_runs_are_offered_tool_cards() {
+        let fixed = RunUpgrades::default();
+        let deck = deck_run();
+        for seed in 0..60 {
+            assert!(stock(seed, &fixed, 6, T).tools.is_empty(), "fixed runs unchanged");
+            let shelf = stock(seed, &deck, 6, T);
+            assert_eq!(shelf.tools.len(), TOOLS_OFFERED);
+            assert_ne!(shelf.tools[0], shelf.tools[1]);
+            assert!(shelf.tools.iter().all(|t| tool_pool().contains(t)));
+            assert_eq!(shelf, stock(seed, &deck, 6, T), "deterministic");
+            assert_eq!(shelf.rows(), shelf.cards.len() + TOOLS_OFFERED);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..200 {
+            seen.extend(stock(seed, &deck, 6, T).tools);
+        }
+        assert_eq!(seen.len(), tool_pool().len(), "every tool card gets sold");
+    }
+
+    #[test]
+    fn tool_prices_rise_with_each_one_held_and_follow_strength() {
+        assert!(TOOL_PRICE_CHEAP < TOOL_PRICE_MID && TOOL_PRICE_MID < TOOL_PRICE_STRONG);
+        for a in tool_pool() {
+            let b = tool_base_price(a);
+            assert!([TOOL_PRICE_CHEAP, TOOL_PRICE_MID, TOOL_PRICE_STRONG].contains(&b));
+            assert_eq!(tool_price(a, 0, T), b);
+            assert_eq!(tool_price(a, 1, T), b + TOOL_PRICE_STEP);
+        }
+        let h = Terms { pct_off: 25, ..T };
+        assert!(tool_price(Ability::Snare, 0, h) < tool_price(Ability::Snare, 0, T));
+    }
+
+    #[test]
+    fn buying_a_tool_card_checks_purse_room_and_duplicates() {
+        let shelf = stock(3, &deck_run(), 6, T);
+        let n = shelf.cards.len();
+        let (first, second) = (shelf.tools[0], shelf.tools[1]);
+        let price = tool_price(first, 0, T);
+        assert_eq!(buy_tool(&shelf, n, price, &[], T), Ok((first, price)));
+        assert_eq!(buy_tool(&shelf, n, price - 1, &[], T), Err(ToolRefusal::TooPoor));
+        assert_eq!(buy_tool(&shelf, 0, 999, &[], T), Err(ToolRefusal::NoSuchCard), "a card row is not a tool");
+        assert_eq!(buy_tool(&shelf, n + 2, 999, &[], T), Err(ToolRefusal::NoSuchCard));
+        assert_eq!(buy_tool(&shelf, n, 999, &[crate::deck::tool_id(first)], T), Err(ToolRefusal::Held));
+        let one = [crate::deck::tool_id(first)];
+        let dear = tool_price(second, 1, T);
+        assert_eq!(buy_tool(&shelf, n + 1, 999, &one, T), Ok((second, dear)));
+        assert!(dear > tool_price(second, 0, T));
+        let full = [crate::deck::tool_id(Ability::Echo), crate::deck::tool_id(Ability::Swap)];
+        assert_eq!(MAX_TOOL_CARDS, 2);
+        assert_eq!(buy_tool(&shelf, n + 1, 999, &full, T), Err(ToolRefusal::NoRoom), "a third shows no room");
+    }
+    // === end toolcards ===
 
     #[test]
     fn deep_shelves_add_a_card() {

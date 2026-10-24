@@ -406,6 +406,15 @@ pub struct Stash {
     /// Lifetime dust earned (shown in the shop, and a little brag).
     #[serde(default)]
     pub dust_earned: u32,
+    /// Dream tickets in hand (see `tickets.rs`).
+    #[serde(default)]
+    pub tickets: u32,
+    /// Tickets ever scratched.
+    #[serde(default)]
+    pub ticket_scratches: u32,
+    /// Scratches in a row that gave only the smallest prize (ticket pity).
+    #[serde(default)]
+    pub ticket_dry: u32,
 }
 
 impl Stash {

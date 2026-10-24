@@ -64,6 +64,19 @@ pub enum Sound {
     HasteOn,
     BindClamp,
     // === end abilities2 ===
+    // === abilities3 ===
+    WagerRoll,
+    WagerJackpot,
+    EchoRepeat,
+    SwapPop,
+    MulliganShuffle,
+    RecallDraw,
+    OverloadCharge,
+    OverloadBlast,
+    BargainPact,
+    SnarePlant,
+    SnareTrip,
+    // === end abilities3 ===
     /// Two abilities chained into a combo.
     Combo,
     /// A high cache picked up.
@@ -136,7 +149,7 @@ pub enum Sound {
     Mote,
 }
 
-pub const ALL_SOUNDS: [Sound; 80] = [
+pub const ALL_SOUNDS: [Sound; 91] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -181,6 +194,19 @@ pub const ALL_SOUNDS: [Sound; 80] = [
     Sound::PulsePing,
     Sound::HasteOn,
     Sound::BindClamp,
+    // === abilities3 ===
+    Sound::WagerRoll,
+    Sound::WagerJackpot,
+    Sound::EchoRepeat,
+    Sound::SwapPop,
+    Sound::MulliganShuffle,
+    Sound::RecallDraw,
+    Sound::OverloadCharge,
+    Sound::OverloadBlast,
+    Sound::BargainPact,
+    Sound::SnarePlant,
+    Sound::SnareTrip,
+    // === end abilities3 ===
     Sound::Combo,
     Sound::CacheGet,
     Sound::Climb,
@@ -513,6 +539,55 @@ pub fn synth(sound: Sound) -> Vec<f32> {
             v(800.0, 300.0, 0.15).wave(1).gain(0.12).at(0.1),
         ],
         // === end abilities2 ===
+        // === abilities3 ===
+        WagerRoll => vec![
+            v(600.0, 900.0, 0.08).wave(2).gain(0.16),
+            v(800.0, 500.0, 0.08).wave(2).gain(0.16).at(0.08),
+            v(500.0, 1100.0, 0.12).wave(2).gain(0.16).at(0.16),
+        ],
+        WagerJackpot => vec![
+            v(784.0, 784.0, 0.1).wave(2).gain(0.2),
+            v(988.0, 988.0, 0.1).wave(2).gain(0.2).at(0.08),
+            v(1319.0, 1319.0, 0.1).wave(2).gain(0.2).at(0.16),
+            v(1568.0, 1568.0, 0.4).wave(2).gain(0.22).at(0.24),
+        ],
+        EchoRepeat => vec![
+            v(700.0, 700.0, 0.12).wave(2).gain(0.2).curve(1.4),
+            v(700.0, 700.0, 0.12).wave(2).gain(0.12).at(0.14).curve(1.4),
+            v(700.0, 700.0, 0.12).wave(2).gain(0.06).at(0.28).curve(1.4),
+        ],
+        SwapPop => vec![
+            v(300.0, 1200.0, 0.1).wave(1).gain(0.22),
+            v(1200.0, 300.0, 0.1).wave(1).gain(0.22).at(0.1),
+        ],
+        MulliganShuffle => vec![
+            v(2500.0, 800.0, 0.3).noise(1.0).gain(0.22).curve(0.9),
+            v(1800.0, 600.0, 0.25).noise(1.0).gain(0.16).at(0.12),
+        ],
+        RecallDraw => vec![
+            v(1800.0, 700.0, 0.15).noise(0.9).gain(0.2),
+            v(500.0, 900.0, 0.2).wave(2).gain(0.14).at(0.08),
+        ],
+        OverloadCharge => vec![
+            v(150.0, 900.0, 0.5).wave(1).gain(0.14).curve(1.6),
+        ],
+        OverloadBlast => vec![
+            v(900.0, 60.0, 0.5).wave(1).gain(0.34).curve(0.7),
+            v(1500.0, 200.0, 0.4).noise(0.9).gain(0.26).at(0.02),
+        ],
+        BargainPact => vec![
+            v(220.0, 110.0, 0.5).wave(1).gain(0.22).curve(1.0),
+            v(330.0, 165.0, 0.45).wave(2).gain(0.12).at(0.05),
+        ],
+        SnarePlant => vec![
+            v(400.0, 200.0, 0.1).wave(1).gain(0.2),
+            v(1000.0, 500.0, 0.08).noise(0.5).gain(0.14).at(0.05),
+        ],
+        SnareTrip => vec![
+            v(1400.0, 300.0, 0.15).noise(0.7).gain(0.26),
+            v(200.0, 100.0, 0.25).wave(1).gain(0.3).at(0.03),
+        ],
+        // === end abilities3 ===
         Combo => vec![
             v(523.0, 523.0, 0.1).wave(2).gain(0.22),
             v(659.0, 659.0, 0.1).wave(2).gain(0.22).at(0.07),

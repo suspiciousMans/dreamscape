@@ -276,7 +276,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             Pos2::new(cx, strip.top() - 10.0 * u),
             Align2::CENTER_BOTTOM,
             &v.goal,
-            FontId::monospace(18.0 * u.max(0.8)),
+            FontId::monospace(pixel_ui::fit(&v.goal, 18.0 * u.max(0.8), screen.width() - 40.0, 9.0)),
             rgba(hue(v.time * 0.15), 0.85),
         );
     }
