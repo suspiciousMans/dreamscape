@@ -16193,6 +16193,26 @@ mod screen_smoke {
         let bad = overflows(&g, "MothShop");
         assert!(bad.is_empty(), "{bad:?}");
     }
+    // === toolcards ===
+    #[test]
+    fn the_fullest_deck_run_shelf_with_tool_cards_fits_the_screen() {
+        for bought in [0, 1, 2] {
+            let mut g = deck_game("shop_fit_tools");
+            g.run.deck_slots = 5;
+            g.director.depth = 9;
+            g.bonus_dust = 80;
+            g.perks = vec![store::Perk::DeepShelves];
+            g.enter_moth_shop_for_test();
+            let at = g.moth_stock.as_ref().unwrap().cards.len();
+            for k in 0..bought {
+                g.choose(at + k);
+            }
+            assert_eq!(g.tool_cards_held().len(), bought);
+            let bad = overflows(&g, "MothShop+tools");
+            assert!(bad.is_empty(), "{bought} bought: {bad:?}");
+        }
+    }
+    // === end toolcards ===
     // === end shop ===
 
     #[test]
