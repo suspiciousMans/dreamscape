@@ -98,6 +98,7 @@ mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sorting;
+mod texprefetch; // === perf ===
 mod viewcache; // === perf ===
 mod sounds;
 mod specials;
@@ -515,6 +516,8 @@ pub struct DreamscapeGame {
     textures: HashMap<[u8; 4], Arc<GpuTexture>>,
     /// Per-dream procedural textures; destroyed when the dream changes.
     dream_textures: Vec<Arc<GpuTexture>>,
+    /// === perf === textures made ahead (on threads) for the dream being loaded.
+    tex_prefetch: texprefetch::Prefetched,
     time: f32,
     audio: Option<AudioContext>,
 
@@ -1071,6 +1074,7 @@ impl DreamscapeGame {
             meshes: HashMap::new(),
             textures: HashMap::new(),
             dream_textures: Vec::new(),
+            tex_prefetch: Default::default(), // === perf ===
             time: 0.0,
             audio: None,
             world: World::new(),
@@ -1977,7 +1981,7 @@ impl DreamscapeGame {
     ) -> anyhow::Result<Arc<GpuTexture>> {
         let tex = Arc::new(GpuTexture::from_rgba8(
             gl,
-            &spec.rgba(),
+            &self.tex_prefetch.pixels(spec), // === perf === usually made ahead
             TEX_SIZE,
             TEX_SIZE,
             // Bilinear: nearest-filtered 64px patterns shimmer into static at range.
@@ -9910,6 +9914,7 @@ impl DreamscapeGame {
     }
 
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        let _t_all = engine::perf::scope("load.total"); // === perf ===
         let theme = self.director.theme;
         let spec = theme.spec();
         self.twists = if self.director.nightmare || self.prologue.is_some() || self.enemy_free() {
@@ -9978,6 +9983,7 @@ impl DreamscapeGame {
         }
         self.air_jumps_used = 0;
         let goals = self.plan_goals();
+        let t_gen = engine::perf::scope("load.generate"); // === perf ===
         let mut dream = if self.director.nightmare {
             dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
         } else {
@@ -9991,6 +9997,7 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        drop(t_gen); // === perf ===
         // === sanctuary === nothing here can hurt you
         if self.enemy_free() {
             dream.calm();
@@ -10123,6 +10130,7 @@ impl DreamscapeGame {
             dream.surfaces.prop.pattern,
         );
 
+        let t_clear = engine::perf::scope("load.clear"); // === perf ===
         self.world.clear();
         {
             let gl = ctx.gl();
@@ -10131,6 +10139,7 @@ impl DreamscapeGame {
                 unsafe { tex.destroy(gl) };
             }
         }
+        drop(t_clear); // === perf ===
         self.enemies.clear();
         self.specials.clear();
         self.newfoes.clear(); // enemies-a
@@ -10211,17 +10220,55 @@ impl DreamscapeGame {
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
-        self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        {
+            let _t = engine::perf::scope("load.music_start"); // === perf ===
+            self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        }
 
         let gl = ctx.gl();
         let player_mesh = self.mesh(Shape::Octahedron)?;
         let enemy_mesh = self.mesh(Shape::Orb)?;
+        // === perf === every spec this dream needs up front, so the pixels are made
+        // side by side instead of one upload after another.
+        let cb = self.settings.colorblind_markers;
+        let shard_spec = if cb {
+            access::shard(dream.surfaces.shard.seed)
+        } else {
+            dream.surfaces.shard.clone()
+        };
+        let preview = if theme == DreamTheme::Awakening {
+            DreamTheme::Awakening
+        } else {
+            self.director.next
+        };
+        let (portal_spec, wake_spec) = if cb {
+            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
+        } else {
+            (
+                dream::portal_surface(preview, dream.seed ^ 0x5EED),
+                dream::portal_surface(DreamTheme::Awakening, dream.seed),
+            )
+        };
+        {
+            let _t = engine::perf::scope("load.textures_gen");
+            self.tex_prefetch.fill(&[
+                &dream.surfaces.floor,
+                &dream.surfaces.wall,
+                &dream.surfaces.prop,
+                &shard_spec,
+                &portal_spec,
+                &wake_spec,
+                &dream.surfaces.enemy,
+            ]);
+        }
+        // === end perf ===
+        let t_up = engine::perf::scope("load.textures_upload"); // === perf ===
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
         // A cracked wall wears the wall pattern with a bright hairline split.
         let crack_tex = if dream.secret.is_some() {
-            let mut px = dream.surfaces.wall.rgba();
+            let mut px = self.tex_prefetch.pixels(&dream.surfaces.wall);
             secrets::draw_crack(&mut px, TEX_SIZE, dream.seed);
             let tex = Arc::new(GpuTexture::from_rgba8(
                 gl,
@@ -10236,28 +10283,10 @@ impl DreamscapeGame {
             None
         };
         let mut cracked: Option<(Entity, Vec3, f32)> = None;
-        let cb = self.settings.colorblind_markers;
-        let shard_spec = if cb {
-            access::shard(dream.surfaces.shard.seed)
-        } else {
-            dream.surfaces.shard.clone()
-        };
         self.shard_tex = Some(self.upload_surface(gl, &shard_spec)?);
-        let preview = if theme == DreamTheme::Awakening {
-            DreamTheme::Awakening
-        } else {
-            self.director.next
-        };
-        let (portal_spec, wake_spec) = if cb {
-            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
-        } else {
-            (
-                dream::portal_surface(preview, dream.seed ^ 0x5EED),
-                dream::portal_surface(DreamTheme::Awakening, dream.seed),
-            )
-        };
         let portal_tex = self.upload_surface(gl, &portal_spec)?;
         self.wake_tex = Some(self.upload_surface(gl, &wake_spec)?);
+        drop(t_up); // === perf ===
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
@@ -10304,6 +10333,7 @@ impl DreamscapeGame {
             }
         }
         // === end hazards ===
+        let t_tiles = engine::perf::scope("load.spawn_tiles"); // === perf ===
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
@@ -10507,6 +10537,7 @@ impl DreamscapeGame {
                 armed: true,
             });
         }
+        drop(t_tiles); // === perf ===
         self.spawn_wager_portal(gl, &dream)?; // === risk ===
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
@@ -10758,6 +10789,7 @@ impl DreamscapeGame {
                 split: false,
             });
         }
+        let t_foes = engine::perf::scope("load.spawn_foes"); // === perf ===
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
         self.spawn_newfoes(gl, &dream, player_speed)?; // enemies-a
         // === shards ===
@@ -10768,6 +10800,7 @@ impl DreamscapeGame {
         }
         // === end shards ===
         self.spawn_enemies_b(gl, &dream)?; // === combat ===
+        drop(t_foes); // === perf ===
         // === sanctuary === a place to breathe: nerve refills
         if self.sanctuary() {
             self.nerve.heal(self.nerve.max());
@@ -10838,7 +10871,10 @@ impl DreamscapeGame {
             gone: 0,
         });
         // === end hazards ===
-        self.spawn_features(gl, &dream)?;
+        {
+            let _t = engine::perf::scope("load.spawn_features"); // === perf ===
+            self.spawn_features(gl, &dream)?;
+        }
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
             let tiles = dream
