@@ -11025,6 +11025,7 @@ impl DreamscapeGame {
             .props
             .get((dream.seed % spec.props.len() as u64) as usize)
             .copied();
+        self.tex_prefetch = Default::default(); // === perf === free the spare pixels
         self.dream = Some(dream);
         if !self.autopilot && self.director.depth > self.best_depth {
             self.best_depth = self.director.depth;

@@ -1473,6 +1473,12 @@ mod tests {
         let tot: f64 = rows.iter().map(|r| r.0).sum::<f64>() / rows.len() as f64;
         let tt: f64 = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
         println!("mean generate {tot:.2} ms, mean 5 textures {tt:.2} ms");
+        // Peak resident memory of this test process (Linux): 480 dreams were built and dropped.
+        if let Ok(st) = std::fs::read_to_string("/proc/self/status") {
+            for l in st.lines().filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS")) {
+                println!("{l}");
+            }
+        }
         for r in rows.iter().take(8) {
             println!("  {:<28} generate {:.2} ms  textures {:.2} ms", r.2, r.0, r.1);
         }

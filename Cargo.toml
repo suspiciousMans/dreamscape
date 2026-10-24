@@ -39,3 +39,14 @@ lto = "thin"
 codegen-units = 8
 strip = false
 debug = 1
+
+# === perf === dev/test speed (see plans/perf-briefs/NOTES-loadspikes.md)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Line tables keep panic backtraces readable; full DWARF only slows linking.
+[profile.dev.package.dreamscape]
+debug = "line-tables-only"
