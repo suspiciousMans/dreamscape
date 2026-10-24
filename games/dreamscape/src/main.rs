@@ -6560,10 +6560,6 @@ impl DreamscapeGame {
     /// the reroll.
     fn show_moth_shop(&mut self, selected: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
-        if shelf.is_empty() {
-            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
-            return;
-        }
         let terms = self.moth_terms();
         let mut cards: Vec<upgrade_ui::ChoiceCard> = shelf
             .cards
@@ -6620,6 +6616,17 @@ impl DreamscapeGame {
             });
         }
         // === end toolcards ===
+        // A sold-out shelf keeps the shop open: one EMPTY row stands first.
+        if shelf.is_empty() {
+            cards.push(upgrade_ui::ChoiceCard {
+                name: "EMPTY".into(),
+                desc: moth_shop::EMPTY.into(),
+                icon: upgrades::Icon::Eye,
+                color: [110, 110, 130],
+                frame: [80, 80, 100],
+                tag: "nothing for sale".into(),
+            });
+        }
         let rr = moth_shop::reroll_price(shelf.rerolls);
         let can_rr = self.bonus_dust >= rr;
         cards.push(upgrade_ui::ChoiceCard {
@@ -6663,6 +6670,17 @@ impl DreamscapeGame {
     /// card past the last one is the reroll.
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
+        // A sold-out shelf shows one EMPTY row first: it is not for sale.
+        let index = if shelf.is_empty() {
+            if index == 0 {
+                self.sfx(Sound::Denied);
+                self.show_moth_shop(0);
+                return;
+            }
+            index - 1
+        } else {
+            index
+        };
         let terms = self.moth_terms();
         if index == shelf.rows() + 1 {
             self.open_gamble_stakes(); // === risk ===
@@ -6717,7 +6735,7 @@ impl DreamscapeGame {
                 self.sfx(Sound::Denied);
             }
         }
-        // Sold out: the moth shrugs and you are back in the dream.
+        // Sold out: the shop stays open (EMPTY row, reroll, coin, leave).
         self.show_moth_shop(index);
     }
 
@@ -6793,7 +6811,7 @@ impl DreamscapeGame {
     // === risk ===
     /// The gamble row's index in the shop (after the shelf and the reroll).
     fn gamble_row(&self) -> usize {
-        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1)
+        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1 + usize::from(s.is_empty()))
     }
 
     fn risk_allowed(&self) -> bool {
@@ -11209,8 +11227,7 @@ impl Game for DreamscapeGame {
                         }
                     }
                     Keycode::G if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
-                        self.choose(at + 1); // === risk ===
+                        self.choose(self.gamble_row()); // === risk ===
                     }
                     Keycode::X | Keycode::Escape if matches!(self.choice, Some(ChoiceKind::Gamble(_))) => {
                         self.gamble_back(); // === risk ===
@@ -11219,8 +11236,7 @@ impl Game for DreamscapeGame {
                         self.choose(1); // === risk === not now
                     }
                     Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
-                        self.choose(at);
+                        self.choose(self.gamble_row() - 1);
                     }
                     Keycode::R => self.reroll_choice(),
                     Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
@@ -15787,6 +15803,45 @@ mod screen_smoke {
         // Once: a further pick-less call does nothing.
         g.moth_after_nightmare();
         assert_eq!(g.choice, None);
+    }
+
+    #[test]
+    fn a_sold_out_shelf_keeps_the_shop_open_with_reroll_coin_and_leave() {
+        let mut g = reward_game("shop_soldout");
+        g.choose(0);
+        g.bonus_dust = 5000;
+        for _ in 0..40 {
+            if g.moth_stock.as_ref().is_some_and(|s| s.cards.is_empty()) {
+                break;
+            }
+            g.choose(0);
+        }
+        g.moth_stock.as_mut().unwrap().tools.clear();
+        g.show_moth_shop(0);
+        assert!(g.moth_stock.as_ref().unwrap().is_empty());
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "still open");
+        let names: Vec<_> = g.choice_view.cards.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, ["EMPTY", "REROLL", gamble::ROW_NAME], "{names:?}");
+        assert!(g.choice_view.cards[0].desc.contains("NOTHING LEFT"));
+        // The EMPTY row is not for sale.
+        let dust = g.bonus_dust;
+        g.choose(0);
+        assert_eq!((g.bonus_dust, g.choice.clone()), (dust, Some(ChoiceKind::MothShop)));
+        // The reroll refills the shelf.
+        g.choose(1);
+        assert!(g.bonus_dust < dust, "the reroll was paid");
+        assert!(!g.moth_stock.as_ref().unwrap().is_empty(), "refilled");
+        // Sell it out again by hand: the coin row is reachable by [g].
+        g.moth_stock.as_mut().unwrap().cards.clear();
+        g.moth_stock.as_mut().unwrap().tools.clear();
+        g.show_moth_shop(0);
+        assert_eq!(g.gamble_row(), 2);
+        g.choose(g.gamble_row());
+        assert!(matches!(g.choice, Some(ChoiceKind::Gamble(_))), "{:?}", g.choice);
+        g.gamble_back();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
     }
 
     #[test]
