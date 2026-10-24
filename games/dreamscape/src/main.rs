@@ -55,6 +55,7 @@ mod streaks;
 mod worth;
 mod fpv;
 mod fusion;
+mod gamble;
 mod gameplay;
 mod hand;
 mod hud;
@@ -894,6 +895,17 @@ pub struct DreamscapeGame {
     // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
+    // === risk ===
+    gamble: gamble::RunState,
+    /// Gambles at the moth this visit.
+    gamble_visit: u32,
+    /// Run dust when this dream began (what a wager doubles is the gain).
+    wager_dust_start: u32,
+    /// Where this dream's wager portal stands, and whether it can be touched.
+    wager_portal: Option<(Vec3, bool)>,
+    /// Entering the portal now was agreed on the deal screen.
+    wager_enter: bool,
+    // === end risk ===
     // === pacts ===
     /// Pacts taken this run, and the one the open pick offers.
     pacts: Vec<pacts::Pact>,
@@ -1243,6 +1255,11 @@ impl DreamscapeGame {
             pressure_collapsed: false,
             // === end pressure ===
             bonus_dust: 0,
+            gamble: gamble::RunState::default(),
+            gamble_visit: 0,
+            wager_dust_start: 0,
+            wager_portal: None,
+            wager_enter: false,
             pacts: Vec::new(),
             pact_offer: None,
             peak_difficulty: 1.0,
@@ -6825,6 +6842,7 @@ impl DreamscapeGame {
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
+            gamble: self.gamble.clone(), // === risk ===
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");

@@ -384,6 +384,9 @@ pub struct SavedRun {
     /// Who the dreamer was (older saves: the crystal).
     #[serde(default)]
     pub form: crate::form::Form,
+    /// === risk === coin flips, owed wins and the wager portal's state.
+    #[serde(default)]
+    pub gamble: crate::gamble::RunState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +675,7 @@ mod tests {
             burden: None,
             loadout_scale: None,
             form: Default::default(),
+            gamble: Default::default(),
         }
     }
 
