@@ -7635,7 +7635,12 @@ impl DreamscapeGame {
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
-            gamble: self.gamble.clone(), // === risk ===
+            gamble: {
+                // === risk === the baseline and visit count ride along
+                let mut g = self.gamble.clone();
+                g.stamp(self.wager_dust_start, self.gamble_visit);
+                g
+            },
             tool_cards: self.tool_cards_held(), // === toolcards ===
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
@@ -9728,7 +9733,7 @@ impl DreamscapeGame {
         );
         self.pressure_phase = pressure::Phase::Calm;
         self.pressure_dust_start = self.bonus_dust;
-        self.wager_dust_start = self.bonus_dust; // === risk ===
+        self.wager_dust_start = self.gamble.take_wager_start(self.bonus_dust); // === risk ===
         // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
@@ -9956,7 +9961,7 @@ impl DreamscapeGame {
         self.caches.clear();
         self.secret = None;
         self.moth_stock = None;
-        self.gamble_visit = 0; // === risk ===
+        self.gamble_visit = self.gamble.take_visit_flips(); // === risk === a resumed visit keeps its count
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -15899,6 +15904,30 @@ mod screen_smoke {
     }
 
     #[test]
+    fn quitting_cannot_reset_the_visit_count_or_the_wager_baseline() {
+        let mut g = coin_game("risk_quit", 400);
+        g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_quit_run.ron");
+        let _ = std::fs::remove_file(&g.save_path);
+        g.run_active = true;
+        g.wager_dust_start = 123;
+        for _ in 0..gamble::MAX_PER_VISIT {
+            flip(&mut g, 0);
+            g.choose(0);
+        }
+        let start = g.wager_dust_start;
+        let saved = progress::load(&g.save_path).expect("saved");
+        // What the continue path and load_dream do with it.
+        g.gamble = saved.gamble.clone();
+        g.bonus_dust = saved.bonus_dust;
+        g.wager_dust_start = g.gamble.take_wager_start(g.bonus_dust);
+        g.gamble_visit = g.gamble.take_visit_flips();
+        assert_eq!(g.gamble_visit, gamble::MAX_PER_VISIT, "no extra flips after a reload");
+        assert_eq!(g.wager_dust_start, start, "not the current dust");
+        assert_ne!(g.wager_dust_start, g.bonus_dust);
+        let _ = std::fs::remove_file(&g.save_path);
+    }
+
+    #[test]
     fn the_outcome_is_saved_before_it_shows_and_a_reload_cannot_reroll_it() {
         let mut g = coin_game("risk_save", 100);
         g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_save_run.ron");
@@ -15907,7 +15936,9 @@ mod screen_smoke {
         flip(&mut g, 2);
         let saved = progress::load(&g.save_path).expect("saved at commit");
         assert_eq!(saved.bonus_dust, g.bonus_dust, "the dust and the counter were saved together");
-        assert_eq!(saved.gamble, g.gamble);
+        assert_eq!(saved.gamble.visit_flips, Some(1));
+        assert_eq!(saved.gamble.wager_start, Some(g.wager_dust_start));
+        assert_eq!(saved.gamble.flips, g.gamble.flips);
         assert_eq!(saved.gamble.flips, 1);
         // Same dream, reloaded state: the next flip is the same draw.
         let seed = g.director.dream_seed();
