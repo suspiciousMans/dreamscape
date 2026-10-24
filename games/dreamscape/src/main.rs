@@ -52,6 +52,7 @@ mod juice;
 mod fortune;
 mod lottery;
 mod lottery_ui;
+mod renderstate;
 mod retention;
 mod streaks;
 mod worth;
@@ -508,6 +509,10 @@ fn run_seed() -> u64 {
 pub struct DreamscapeGame {
     renderer: Option<Renderer>,
     shader_cache: Option<ShaderVariantCache>,
+    // === perf === world pass caches
+    world_locs: Option<renderstate::WorldLocs>,
+    pass_lists: renderstate::PassLists,
+    // === end perf ===
     profiles: Option<ProfileCycler>,
     render_params: Option<RenderParams>,
     meshes: HashMap<Shape, Arc<GpuMesh>>,
@@ -1062,6 +1067,8 @@ impl DreamscapeGame {
         Self {
             renderer: None,
             shader_cache: None,
+            world_locs: None,
+            pass_lists: Default::default(),
             profiles: None,
             render_params: None,
             meshes: HashMap::new(),
@@ -12996,22 +13003,30 @@ impl Game for DreamscapeGame {
             0
         };
         let program = shader_cache.get_or_compile(gl, flags)?;
+        // === perf === uniform locations are looked up once per program
+        if self.world_locs.as_ref().is_none_or(|w| w.program != program) {
+            self.world_locs = Some(renderstate::WorldLocs::new(gl, program));
+        }
+        let Some(locs) = self.world_locs.as_ref() else {
+            return Ok(());
+        };
+        // === end perf ===
         unsafe {
             gl.use_program(Some(program));
-            let loc = |name: &str| gl.get_uniform_location(program, name);
+            let loc = |name: &str| locs.frame(name);
             if let Some(l) = loc("uView") {
-                gl.uniform_matrix_4_f32_slice(Some(&l), false, &view.to_cols_array());
+                gl.uniform_matrix_4_f32_slice(Some(l), false, &view.to_cols_array());
             }
             if let Some(l) = loc("uProj") {
-                gl.uniform_matrix_4_f32_slice(Some(&l), false, &proj.to_cols_array());
+                gl.uniform_matrix_4_f32_slice(Some(l), false, &proj.to_cols_array());
             }
             if let Some(l) = loc("uLightDir") {
                 let d = Vec3::from(params.light_dir).normalize_or_zero();
-                gl.uniform_3_f32(Some(&l), d.x, d.y, d.z);
+                gl.uniform_3_f32(Some(l), d.x, d.y, d.z);
             }
             if let Some(l) = loc("uAmbientColor") {
                 gl.uniform_3_f32(
-                    Some(&l),
+                    Some(l),
                     params.ambient_color[0],
                     params.ambient_color[1],
                     params.ambient_color[2],
@@ -13022,22 +13037,22 @@ impl Game for DreamscapeGame {
                     engine::profile::LightingMode::Unlit => 0,
                     engine::profile::LightingMode::VertexLit => 1,
                 };
-                gl.uniform_1_i32(Some(&l), mode);
+                gl.uniform_1_i32(Some(l), mode);
             }
             if let Some(l) = loc("uVertexSnapAmount") {
-                gl.uniform_1_f32(Some(&l), params.vertex_snap_amount);
+                gl.uniform_1_f32(Some(l), params.vertex_snap_amount);
             }
             if let Some(l) = loc("uFogStart") {
-                gl.uniform_1_f32(Some(&l), params.fog_start + fog_push);
+                gl.uniform_1_f32(Some(l), params.fog_start + fog_push);
             }
             if let Some(l) = loc("uFogEnd") {
-                gl.uniform_1_f32(Some(&l), params.fog_end + fog_push);
+                gl.uniform_1_f32(Some(l), params.fog_end + fog_push);
             }
             if let Some(l) = loc("uFogColor") {
-                gl.uniform_3_f32(Some(&l), fog[0], fog[1], fog[2]);
+                gl.uniform_3_f32(Some(l), fog[0], fog[1], fog[2]);
             }
             if let Some(l) = loc("uPointLightCount") {
-                gl.uniform_1_i32(Some(&l), 0);
+                gl.uniform_1_i32(Some(l), 0);
             }
             if params.backface_culling {
                 gl.enable(engine::glow::CULL_FACE);
@@ -13046,49 +13061,57 @@ impl Game for DreamscapeGame {
                 gl.disable(engine::glow::CULL_FACE);
             }
             if let Some(l) = loc("uTex") {
-                gl.uniform_1_i32(Some(&l), 0);
+                gl.uniform_1_i32(Some(l), 0);
             }
             if let Some(l) = loc("uTime") {
-                gl.uniform_1_f32(Some(&l), time);
+                gl.uniform_1_f32(Some(l), time);
             }
             if let Some(l) = loc("uStrangeness") {
-                gl.uniform_1_f32(Some(&l), strangeness);
+                gl.uniform_1_f32(Some(l), strangeness);
             }
             if let Some(l) = loc("uBreathe") {
-                gl.uniform_1_f32(Some(&l), mood.breathe * motion);
+                gl.uniform_1_f32(Some(l), mood.breathe * motion);
             }
             if let Some(l) = loc("uPulse") {
-                gl.uniform_1_f32(Some(&l), pulse);
+                gl.uniform_1_f32(Some(l), pulse);
             }
             if let Some(l) = loc("uGlow") {
-                gl.uniform_1_f32(Some(&l), mood.glow);
+                gl.uniform_1_f32(Some(l), mood.glow);
             }
             if let Some(l) = loc("uPlayer") {
-                gl.uniform_3_f32(Some(&l), player.x, player.y, player.z);
+                gl.uniform_3_f32(Some(l), player.x, player.y, player.z);
             }
             if let Some(l) = loc("uSight") {
-                gl.uniform_1_f32(Some(&l), sight);
+                gl.uniform_1_f32(Some(l), sight);
             }
             if let Some(l) = loc("uSightFade") {
-                gl.uniform_1_f32(Some(&l), tunnel::SIGHT_FADE);
+                gl.uniform_1_f32(Some(l), tunnel::SIGHT_FADE);
             }
             if let Some(l) = loc("uDark") {
-                gl.uniform_3_f32(Some(&l), dark[0], dark[1], dark[2]);
+                gl.uniform_3_f32(Some(l), dark[0], dark[1], dark[2]);
             }
         }
 
-        let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
-        let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
-        let melt_loc = unsafe { gl.get_uniform_location(program, "uMelt") };
-        let lit_loc = unsafe { gl.get_uniform_location(program, "uLit") };
-        let hero_loc = unsafe { gl.get_uniform_location(program, "uHero") };
-        let ghost_loc = unsafe { gl.get_uniform_location(program, "uGhost") };
-        let outline_loc = unsafe { gl.get_uniform_location(program, "uOutline") };
+        let (model_loc, uv_loc, melt_loc, lit_loc, hero_loc, ghost_loc, outline_loc) = (
+            &locs.model,
+            &locs.uv,
+            &locs.melt,
+            &locs.lit,
+            &locs.hero,
+            &locs.ghost,
+            &locs.outline,
+        );
         unsafe {
             if let Some(l) = &ghost_loc {
                 gl.uniform_1_f32(Some(l), 0.0);
             }
         }
+        // === perf === one world query per frame; later passes walk short lists
+        let mut state = renderstate::DrawState::default();
+        let lists = &mut self.pass_lists;
+        lists.clear();
+        let mut visited = [0usize; 4];
+        // === end perf ===
         // 0: everything opaque. 1: a dark shell around the dreamer (inflated
         // back faces), so it reads on bright floors as well as dark ones.
         // 2 (translucent): water. 3: the dreamer's silhouette wherever
@@ -13129,46 +13152,39 @@ impl Game for DreamscapeGame {
                     }
                 }
             }
-            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
-                self.world
-                    .query::<(
-                        &Transform,
-                        &MeshRenderer,
-                        Option<&SurfaceUv>,
-                        Option<&NoMelt>,
-                        Option<&Lit>,
-                        Option<&Hero>,
-                        Option<&Translucent>,
-                        Option<&PlayerBody>,
-                        Option<&Halo>,
-                        Option<&Silhouette>,
-                    )>()
-                    .iter()
-            {
-                // Through your own eyes you don't see your own body.
-                if fp && (body.is_some() || halo.is_some()) {
-                    continue;
-                }
-                let wanted = match pass {
-                    0 => water.is_none(),
-                    2 => water.is_some(),
-                    _ => hero.is_some(),
-                };
-                if !wanted {
-                    continue;
-                }
+            // One draw of one entity; shared by all four passes.
+            let draw = |state: &mut renderstate::DrawState,
+                            transform: &Transform,
+                            mesh_renderer: &MeshRenderer,
+                            uv: Option<&SurfaceUv>,
+                            solid: bool,
+                            lit: bool,
+                            hero: bool,
+                            sil: bool| {
                 unsafe {
                     if let Some(l) = &lit_loc {
-                        gl.uniform_1_f32(Some(l), gameplay::lit_level(lit.is_some(), sil.is_some()));
+                        let v = gameplay::lit_level(lit, sil);
+                        if state.float(renderstate::lit_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &hero_loc {
-                        gl.uniform_1_f32(Some(l), if hero.is_some() { 1.0 } else { 0.0 });
+                        let v = if hero { 1.0 } else { 0.0 };
+                        if state.float(renderstate::hero_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &melt_loc {
-                        gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
+                        let v = if solid { 0.0 } else { melt };
+                        if state.float(renderstate::melt_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &uv_loc {
-                        gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
+                        let v = uv.map_or(0.0, |u| u.0);
+                        if state.float(renderstate::uv_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &model_loc {
                         gl.uniform_matrix_4_f32_slice(
@@ -13188,11 +13204,99 @@ impl Game for DreamscapeGame {
                     }
                 }
                 if let Some(texture) = &mesh_renderer.texture {
-                    texture.bind(gl, 0);
+                    if state.texture_needs_bind(texture.handle) {
+                        texture.bind(gl, 0);
+                    }
                 }
-                mesh_renderer.mesh.draw(gl);
+                if state.vao_needs_bind(mesh_renderer.mesh.vao) {
+                    unsafe { gl.bind_vertex_array(Some(mesh_renderer.mesh.vao)) };
+                }
+                mesh_renderer.mesh.draw_bound(gl);
+                state.stats.draws += 1;
+            };
+            if pass == 0 {
+                for (entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
+                    self.world
+                        .query::<(
+                            &Transform,
+                            &MeshRenderer,
+                            Option<&SurfaceUv>,
+                            Option<&NoMelt>,
+                            Option<&Lit>,
+                            Option<&Hero>,
+                            Option<&Translucent>,
+                            Option<&PlayerBody>,
+                            Option<&Halo>,
+                            Option<&Silhouette>,
+                        )>()
+                        .iter()
+                {
+                    // Through your own eyes you don't see your own body.
+                    if fp && (body.is_some() || halo.is_some()) {
+                        continue;
+                    }
+                    visited[0] += 1;
+                    if lists.route(entity, water.is_some(), hero.is_some()) {
+                        draw(
+                            &mut state,
+                            transform,
+                            mesh_renderer,
+                            uv,
+                            solid.is_some(),
+                            lit.is_some(),
+                            hero.is_some(),
+                            sil.is_some(),
+                        );
+                    }
+                }
+            } else {
+                let list = if pass == 2 { &lists.water } else { &lists.heroes };
+                for &entity in list {
+                    let Ok(mut q) = self.world.query_one::<(
+                        &Transform,
+                        &MeshRenderer,
+                        Option<&SurfaceUv>,
+                        Option<&NoMelt>,
+                        Option<&Lit>,
+                        Option<&Hero>,
+                        Option<&Silhouette>,
+                    )>(entity) else {
+                        continue;
+                    };
+                    let Some((transform, mesh_renderer, uv, solid, lit, hero, sil)) = q.get() else {
+                        continue;
+                    };
+                    visited[pass] += 1;
+                    draw(
+                        &mut state,
+                        transform,
+                        mesh_renderer,
+                        uv,
+                        solid.is_some(),
+                        lit.is_some(),
+                        hero.is_some(),
+                        sil.is_some(),
+                    );
+                }
             }
         }
+        // === perf === counters (ENGINE_PROF=1 only)
+        if engine::perf::enabled() {
+            let s = state.stats;
+            engine::perf::count("world draws", s.draws);
+            engine::perf::count("world uniform sets", s.uniform_calls);
+            engine::perf::count("world uniform skipped", s.uniform_skipped);
+            engine::perf::count("world tex binds", s.texture_binds);
+            engine::perf::count("world tex skipped", s.texture_skipped);
+            engine::perf::count("world vao binds", s.vao_binds);
+            engine::perf::count("world vao skipped", s.vao_skipped);
+            engine::perf::count("world visited p0 (all)", visited[0]);
+            engine::perf::count("world visited p1 (hero)", visited[1]);
+            engine::perf::count("world visited p2 (water)", visited[2]);
+            engine::perf::count("world visited p3 (sil)", visited[3]);
+            engine::perf::count("world queries", 1);
+        }
+        // === end perf ===
         if engine::perf::enabled() {
             unsafe { gl.finish() }; // profiling only: charge the GPU's time to this scope
         }

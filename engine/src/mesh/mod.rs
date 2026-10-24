@@ -123,6 +123,14 @@ impl GpuMesh {
         }
     }
 
+    /// Draws with this mesh's VAO already bound (see `bind`): lets a caller
+    /// skip the rebind between repeats of the same mesh.
+    pub fn draw_bound(&self, gl: &glow::Context) {
+        unsafe {
+            gl.draw_elements(glow::TRIANGLES, self.index_count, glow::UNSIGNED_INT, 0);
+        }
+    }
+
     pub fn draw(&self, gl: &glow::Context) {
         unsafe {
             gl.bind_vertex_array(Some(self.vao));
