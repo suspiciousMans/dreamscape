@@ -134,7 +134,57 @@ pub fn scanlines(p: &egui::Painter, r: Rect, c: f32, alpha: u8) {
 }
 
 /// Diagonal hatching in cells, for locked or unavailable things.
+///
+/// One textured quad: the stair-stepped diagonals repeat every 4 cells
+/// across and every cell up-and-right, so a 4x4 texel pattern (one texel a
+/// cell, NEAREST, repeating) tiles them exactly. Same pixels as
+/// `hatch_rects`, 2 triangles instead of one square per cell.
+// === perf === uipixels
 pub fn hatch(p: &egui::Painter, r: Rect, c: f32, color: Color32) {
+    if r.width() <= 0.0 || r.height() <= 0.0 || c <= 0.0 {
+        return;
+    }
+    let tex = hatch_texture(p.ctx());
+    // Cell grid origin: x0 = left - height at the rect's bottom edge.
+    let k = 4.0 * c;
+    let uv = Rect::from_min_max(
+        Pos2::new(r.height() / k, -r.height() / k),
+        Pos2::new((r.right() - (r.left() - r.height())) / k, 0.0),
+    );
+    p.image(tex, r, uv, color);
+}
+
+/// Texel (x, y) of the 4x4 hatch tile is lit on the anti-diagonal.
+pub(crate) fn hatch_texel(x: usize, y: usize) -> bool {
+    x == 3 - y
+}
+
+fn hatch_texture(ctx: &egui::Context) -> egui::TextureId {
+    let id = egui::Id::new("pixel_ui_hatch_tile");
+    if let Some(h) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return h.id();
+    }
+    let pixels: Vec<Color32> = (0..16)
+        .map(|i| if hatch_texel(i % 4, i / 4) { Color32::WHITE } else { Color32::TRANSPARENT })
+        .collect();
+    let image = egui::ColorImage { size: [4, 4], pixels };
+    let options = egui::TextureOptions {
+        magnification: egui::TextureFilter::Nearest,
+        minification: egui::TextureFilter::Nearest,
+        wrap_mode: egui::TextureWrapMode::Repeat,
+        mipmap_mode: None,
+    };
+    let h = ctx.load_texture("hatch-tile", image, options);
+    let tid = h.id();
+    ctx.data_mut(|d| d.insert_temp(id, h));
+    tid
+}
+// === end perf ===
+
+/// The original painter: one rect per hatch cell. Kept as the reference the
+/// textured `hatch` is tested against.
+#[cfg(test)]
+fn hatch_rects(p: &egui::Painter, r: Rect, c: f32, color: Color32) {
     let p = p.with_clip_rect(r);
     let step = c * 4.0;
     let mut x = r.left() - r.height();
@@ -349,6 +399,110 @@ mod tests {
         assert!(draw(|p| brackets(p, Rect::from_min_size(at, Vec2::splat(40.0)), 3.0, col)) == 8);
         assert!(draw(|p| hatch(p, Rect::from_min_size(at, Vec2::new(40.0, 20.0)), 3.0, col)) > 0);
     }
+
+    // === perf === a tiny CPU rasteriser: shapes -> premultiplied RGBA at pixel centres
+    pub(crate) fn raster(shapes: &[egui::epaint::ClippedShape], w: usize, h: usize) -> Vec<[u8; 4]> {
+        let mut buf = vec![[0u8; 4]; w * h];
+        fn over(dst: &mut [u8; 4], src: [u8; 4]) {
+            let ia = 255 - src[3] as u32;
+            for i in 0..4 {
+                dst[i] = (src[i] as u32 + (dst[i] as u32 * ia + 127) / 255).min(255) as u8;
+            }
+        }
+        fn go(buf: &mut [[u8; 4]], w: usize, h: usize, clip: Rect, s: &egui::Shape) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| go(buf, w, h, clip, s)),
+                egui::Shape::Rect(r) => {
+                    assert!(r.stroke.is_empty() && r.rounding == egui::Rounding::ZERO, "fill-only rects");
+                    let c = r.fill.to_array();
+                    let rr = r.rect.intersect(clip);
+                    for y in 0..h {
+                        for x in 0..w {
+                            if rr.contains(Pos2::new(x as f32 + 0.5, y as f32 + 0.5)) {
+                                over(&mut buf[y * w + x], c);
+                            }
+                        }
+                    }
+                }
+                egui::Shape::Mesh(m) => {
+                    // Quads of two triangles; sample the hatch tile for any managed texture.
+                    let mut done = vec![false; w * h]; // shared diagonals count once
+                    for tri in m.indices.chunks(3) {
+                        let v: Vec<_> = tri.iter().map(|&i| m.vertices[i as usize]).collect();
+                        let (mut lo, mut hi) = (v[0].pos, v[0].pos);
+                        for q in &v {
+                            lo = lo.min(q.pos);
+                            hi = hi.max(q.pos);
+                        }
+                        // Axis-aligned quads only: pixel centre inside the triangle's bounds
+                        // and on the right side of the diagonal.
+                        let area = |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+                        let sign = area(v[0].pos, v[1].pos, v[2].pos).signum();
+                        for y in 0..h {
+                            for x in 0..w {
+                                let q = Pos2::new(x as f32 + 0.5, y as f32 + 0.5);
+                                if !clip.contains(q) {
+                                    continue;
+                                }
+                                let w0 = area(v[1].pos, v[2].pos, q) * sign;
+                                let w1 = area(v[2].pos, v[0].pos, q) * sign;
+                                let w2 = area(v[0].pos, v[1].pos, q) * sign;
+                                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                                    continue;
+                                }
+                                let tot = w0 + w1 + w2;
+                                let uvp = (v[0].uv.to_vec2() * w0 + v[1].uv.to_vec2() * w1 + v[2].uv.to_vec2() * w2) / tot;
+                                let lit = if m.texture_id == egui::TextureId::default() {
+                                    true
+                                } else {
+                                    let tx = (uvp.x * 4.0).floor().rem_euclid(4.0) as usize;
+                                    let ty = (uvp.y * 4.0).floor().rem_euclid(4.0) as usize;
+                                    hatch_texel(tx, ty)
+                                };
+                                if lit && !done[y * w + x] {
+                                    done[y * w + x] = true;
+                                    over(&mut buf[y * w + x], v[0].color.to_array());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            go(&mut buf, w, h, cs.clip_rect, &cs.shape);
+        }
+        buf
+    }
+
+    fn shapes_of(f: impl Fn(&egui::Painter)) -> Vec<egui::epaint::ClippedShape> {
+        let (ctx, layer) = painter();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0))),
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| f(&ctx.layer_painter(layer))).shapes
+    }
+
+    #[test]
+    fn the_textured_hatch_covers_the_same_pixels_as_the_rects() {
+        let color = Color32::from_white_alpha(40);
+        for (r, c) in [
+            (Rect::from_min_size(Pos2::new(10.0, 12.0), Vec2::new(120.0, 90.0)), 3.0),
+            (Rect::from_min_size(Pos2::new(7.0, 5.0), Vec2::new(61.0, 37.0)), 3.0),
+            (Rect::from_min_size(Pos2::new(21.0, 9.0), Vec2::new(200.0, 150.0)), 5.0),
+            (Rect::from_min_size(Pos2::new(1.0, 1.0), Vec2::new(40.0, 20.0)), 2.0),
+        ] {
+            let old = shapes_of(|p| hatch_rects(p, r, c, color));
+            let new = shapes_of(|p| hatch(p, r, c, color));
+            assert!(new.len() < old.len(), "{} vs {}", new.len(), old.len());
+            let (a, b) = (raster(&old, 300, 200), raster(&new, 300, 200));
+            let bad: Vec<_> = (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| (i % 300, i / 300, a[i], b[i])).collect();
+            assert!(bad.is_empty(), "rect {r:?} cell {c}: {} differ, first {:?}", bad.len(), &bad[..bad.len().min(6)]);
+        }
+    }
+    // === end perf ===
 
     #[test]
     fn text_fits_or_hits_the_floor() {
