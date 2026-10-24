@@ -295,15 +295,14 @@ pub const FIRST_CARDS: usize = 5;
 /// fades instead (the waking dream always stays). And the very first pack
 /// always keeps one dream to build a loadout from, the Garden if it's there.
 pub fn shape_first_pack(pack: &mut [Recalled], owned: &[Card]) {
-    use crate::powers::power;
     let mut held: Vec<crate::upgrades::Ability> =
-        owned.iter().map(|c| power(c.theme).active).collect();
+        owned.iter().map(|c| crate::powers::power_of(c).active).collect();
     let mut count = owned.len();
     for r in pack.iter_mut().filter(|r| r.remembered) {
         if count >= FIRST_CARDS {
             break;
         }
-        let a = power(r.card.theme).active;
+        let a = crate::powers::power_of(&r.card).active;
         if held.contains(&a) && r.card.theme != DreamTheme::Awakening {
             r.remembered = false;
             continue;
@@ -403,11 +402,11 @@ impl Booklet {
         }
         let mut out: Vec<Card> = Vec::new();
         for c in self.cards().collect::<Vec<_>>().into_iter().rev() {
-            let a = crate::powers::power(c.theme).active;
+            let a = crate::powers::power_of(c).active;
             if out.len() < slots
                 && !out
                     .iter()
-                    .any(|o| crate::powers::power(o.theme).active == a)
+                    .any(|o| crate::powers::power_of(o).active == a)
             {
                 out.push(c.clone());
             }

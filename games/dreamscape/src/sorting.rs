@@ -2,7 +2,6 @@
 //! Pure logic: no GL, no clock.
 
 use crate::cards::Card;
-use crate::powers::power;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SortKey {
@@ -85,7 +84,7 @@ pub fn order(cards: &[Card], sort: Sort) -> Vec<usize> {
             SortKey::Rarity => ca.rarity.cmp(&cb.rarity),
             SortKey::Dream => ca.name.to_lowercase().cmp(&cb.name.to_lowercase()),
             SortKey::Number => std::cmp::Ordering::Equal,
-            SortKey::Ability => power(ca.theme).active.name().cmp(power(cb.theme).active.name()),
+            SortKey::Ability => crate::powers::power_of(ca).active.name().cmp(crate::powers::power_of(cb).active.name()),
         };
         let o = primary.then(ca.number.cmp(&cb.number));
         match sort.dir {
@@ -154,7 +153,7 @@ mod tests {
     #[test]
     fn ability_groups_by_active_name() {
         let c = sample();
-        let name = |i: usize| power(c[i].theme).active.name();
+        let name = |i: usize| crate::powers::power_of(&c[i]).active.name();
         for dir in [Dir::Asc, Dir::Desc] {
             let o = order(&c, Sort { key: SortKey::Ability, dir });
             let names: Vec<_> = o.iter().map(|&i| name(i)).collect();

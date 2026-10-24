@@ -57,7 +57,7 @@ pub fn step(selected: usize, n: usize, dx: i32, dy: i32) -> usize {
 
 /// What a card does, for the detail panel: (active line, passive line).
 pub fn describe(c: &Card, slot: Option<usize>) -> (String, String) {
-    let p = power(c.theme);
+    let p = crate::powers::power_of(c);
     let active = match slot {
         Some(i) if i < ABILITY_SLOTS => {
             format!("{}: {}", SLOT_KEYS[i].to_uppercase(), p.active.name())
@@ -79,7 +79,7 @@ pub fn describe(c: &Card, slot: Option<usize>) -> (String, String) {
 /// The combat edges a card teaches: its dream's, and a fused card's second.
 pub fn edges_of(c: &Card) -> Vec<crate::edges::Edge> {
     let mut out = Vec::new();
-    for e in [power(c.theme).edge, c.fused.and_then(|b| power(b).edge)]
+    for e in [crate::powers::power_of(c).edge, c.fused.and_then(|b| power(b).edge)]
         .into_iter()
         .flatten()
     {
@@ -96,7 +96,7 @@ pub fn edges_of(c: &Card) -> Vec<crate::edges::Edge> {
 pub fn slot_of(chosen: &[&Card], number: u32) -> Option<usize> {
     let mut seen = Vec::new();
     for c in chosen {
-        let a = power(c.theme).active;
+        let a = crate::powers::power_of(c).active;
         let fills = seen.len() < ABILITY_SLOTS && !seen.contains(&a);
         if c.number == number {
             return fills.then_some(seen.len());
@@ -230,7 +230,7 @@ pub fn draw_grid(
         }
         let r = tile_rect(left, grid_top, tile, gap, i, first_row);
         let col = card_frame(card, v.time);
-        let power = power(card.theme);
+        let power = crate::powers::power_of(card);
         let on = marks.marked.contains(&card.number);
         let dim = marks.dim_theme == Some(card.theme);
         let sel = i == selected;
@@ -353,12 +353,15 @@ pub fn power_lines(
     u: f32,
     time: f32,
 ) -> f32 {
-    let pw = power(c.theme);
+    let pw = crate::powers::power_of(c);
     let (active, passive) = describe(c, slot);
+    // A card with an edge has a fourth block: shrink every block a little so
+    // the flavour line still fits the panel.
+    let has_edge = !edges_of(c).is_empty();
+    let u = if has_edge { u * 0.78 } else { u };
     let ipx = (3.0 * u).round().max(2.0);
     let row_h = ipx * 9.0 + 8.0 * u;
-    // A card with an edge has a fourth block: tighten the gaps to fit panels.
-    let gap = if edges_of(c).is_empty() { 6.0 * u } else { 2.0 * u };
+    let gap = if has_edge { 3.0 * u } else { 6.0 * u };
     // The ability.
     pixel_ui::icon(
         p,
@@ -443,22 +446,19 @@ pub fn power_lines(
         );
         y3 += row_h + gap;
     }
-    // The flavour, a little glitchy. A card with an edge has no room for it.
-    if edges_of(c).is_empty() {
-        let wob = if (time * 0.7).fract() < 0.04 { 1.0 } else { 0.0 };
-        pixel_ui::split_text(
-            p,
-            Pos2::new(at.x + wob, y3),
-            Align2::LEFT_TOP,
-            pw.flavour,
-            pixel_ui::fit(pw.flavour, 13.0 * u, width, 7.0),
-            rgba([190, 180, 220], 0.9),
-            1.0,
-            0.5,
-        );
-        return y3 + 18.0 * u - at.y;
-    }
-    y3 - at.y
+    // The flavour, a little glitchy.
+    let wob = if (time * 0.7).fract() < 0.04 { 1.0 } else { 0.0 };
+    pixel_ui::split_text(
+        p,
+        Pos2::new(at.x + wob, y3),
+        Align2::LEFT_TOP,
+        pw.flavour,
+        pixel_ui::fit(pw.flavour, 13.0 * u, width, 7.0),
+        rgba([190, 180, 220], 0.9),
+        1.0,
+        0.5,
+    );
+    y3 + 18.0 * u - at.y
 }
 
 /// The bottom hint line, in a pixel strip.
@@ -523,7 +523,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             Some(card) => {
                 let col = card_frame(card, v.time);
                 pixel_ui::panel(p, r, col, rgba(col, 0.16), c, 1.0);
-                let pw = power(card.theme);
+                let pw = crate::powers::power_of(card);
                 pixel_ui::icon(
                     p,
                     r.left_center() + Vec2::new(c * 2.0 + c * 6.0, 0.0),

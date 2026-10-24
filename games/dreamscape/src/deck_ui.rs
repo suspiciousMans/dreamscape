@@ -8,7 +8,6 @@ use crate::hud::{glitch_text, ink, rgba, HudView};
 use crate::loadout_ui::{self, GridMarks};
 use crate::pixel_ui;
 use crate::pixels::icons;
-use crate::powers::power;
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Vec2};
 
 /// How the meter reads for a deck of `len` cards out of `owned`.
@@ -97,7 +96,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             Some(cd) => {
                 let col = card_frame(cd, v.time);
                 pixel_ui::panel(p, r, col, rgba(col, 0.16), c * 0.7, 1.0);
-                let pw = power(cd.theme);
+                let pw = crate::powers::power_of(cd);
                 pixel_ui::icon(p, r.center(), icons::ability(pw.active), (c * 0.5).max(1.5), pw.tint, pixel_ui::lighter(pw.tint), 1.0);
                 p.text(
                     r.left_top() + Vec2::new(c, c * 0.6),

@@ -1373,7 +1373,7 @@ impl RunUpgrades {
         use crate::powers::power;
         let mut run = Self::default();
         for c in cards {
-            let p = power(c.theme);
+            let p = crate::powers::power_of(c);
             if abilities
                 && run.abilities.len() < ABILITY_SLOTS
                 && !run.abilities.iter().any(|a| a.ability == p.active)
@@ -1793,7 +1793,7 @@ impl RunUpgrades {
         let mut run = Self::from_loadout_passives(cards);
         for c in cards.iter().take(HAND_SIZE) {
             run.abilities
-                .push(AbilityState::new(crate::powers::power(c.theme).active));
+                .push(AbilityState::new(crate::powers::power_of(c).active));
         }
         run.deck_slots = run.abilities.len();
         run.sync_learned();

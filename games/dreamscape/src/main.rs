@@ -2066,7 +2066,7 @@ impl DreamscapeGame {
         self.hand_cards = nums
             .iter()
             .filter_map(|&n| self.booklet.card(n))
-            .map(|c| (powers::power(c.theme).active, c.clone()))
+            .map(|c| (crate::powers::power_of(c).active, c.clone()))
             .collect();
         self.deck = Some(d);
         self.deck_opening = opening.clone();
@@ -2094,7 +2094,7 @@ impl DreamscapeGame {
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
                 let slot_card = self.card_for_slot(k, a.ability);
-                let passive = slot_card.map(|n| powers::power(n.1.theme).passive);
+                let passive = slot_card.map(|n| crate::powers::power_of(&n.1).passive);
                 let edge = slot_card.and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
                 // === deck ===
                 let since_draw = if self.deck.is_some() {
@@ -3381,7 +3381,7 @@ impl DreamscapeGame {
             let card = self.card_for_slot(i, a).map(|n| &n.1);
             u == Upgrade::Learn(a)
                 || card.is_some_and(|c| {
-                    powers::power(c.theme).passive == u
+                    crate::powers::power_of(c).passive == u
                         || c.fused.is_some_and(|b| powers::power(b).passive == u)
                 })
         };
@@ -7867,7 +7867,7 @@ impl DreamscapeGame {
         if self.deck.is_none() {
             self.hand_cards = cards
                 .iter()
-                .map(|c| (powers::power(c.theme).active, c.clone()))
+                .map(|c| (crate::powers::power_of(c).active, c.clone()))
                 .collect();
         }
         let tint_cards: Vec<&cards::Card> = if self.deck.is_some() {
@@ -7880,8 +7880,8 @@ impl DreamscapeGame {
             .map(|c| {
                 let accents = c.fused.unwrap_or(c.theme).spec().accents;
                 (
-                    powers::power(c.theme).active,
-                    powers::power(c.theme).tint,
+                    crate::powers::power_of(c).active,
+                    crate::powers::power_of(c).tint,
                     accents[accents.len().min(2) - 1],
                 )
             })
