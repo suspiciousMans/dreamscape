@@ -60,9 +60,27 @@ pub enum Ability {
     /// Roots the nearest enemy.
     Bind,
     // === end abilities2 ===
+    // === abilities3 ===
+    /// A random ability, used now.
+    Wager,
+    /// Repeat the last ability you used, free.
+    Echo,
+    /// Trade places with the nearest enemy or the decoy.
+    Swap,
+    /// Deck only: throw the hand back and draw a fresh one.
+    Mulligan,
+    /// Deck only: the last discarded card returns to your hand.
+    Recall,
+    /// Hold to charge, release for a blast.
+    Overload,
+    /// Pay a nerve: your next strikes cut three times as deep.
+    Bargain,
+    /// A trap at your feet roots the first enemy to step on it.
+    Snare,
+    // === end abilities3 ===
 }
 
-pub const ALL_ABILITIES: [Ability; 24] = [
+pub const ALL_ABILITIES: [Ability; 32] = [
     Ability::Dash,
     Ability::Blink,
     Ability::Stillness,
@@ -87,6 +105,16 @@ pub const ALL_ABILITIES: [Ability; 24] = [
     Ability::Pulse,
     Ability::Haste,
     Ability::Bind,
+    // === abilities3 ===
+    Ability::Wager,
+    Ability::Echo,
+    Ability::Swap,
+    Ability::Mulligan,
+    Ability::Recall,
+    Ability::Overload,
+    Ability::Bargain,
+    Ability::Snare,
+    // === end abilities3 ===
 ];
 
 /// Shift and E.
@@ -268,6 +296,16 @@ impl Ability {
             Ability::Pulse => "PULSE",
             Ability::Haste => "HASTE",
             Ability::Bind => "BIND",
+            // === abilities3 ===
+            Ability::Wager => "WAGER",
+            Ability::Echo => "ECHO",
+            Ability::Swap => "SWAP",
+            Ability::Mulligan => "MULLIGAN",
+            Ability::Recall => "RECALL",
+            Ability::Overload => "OVERLOAD",
+            Ability::Bargain => "BARGAIN",
+            Ability::Snare => "SNARE",
+            // === end abilities3 ===
         }
     }
 
@@ -297,6 +335,16 @@ impl Ability {
             Ability::Pulse => "see through walls: shades and cracks show",
             Ability::Haste => "a zone: you run fast, chasers drag",
             Ability::Bind => "roots the nearest enemy for 5s",
+            // === abilities3 ===
+            Ability::Wager => "a random ability: 10% jackpot (doubled), 10% fizzle",
+            Ability::Echo => "repeat your last ability, free",
+            Ability::Swap => "trade places with the nearest foe",
+            Ability::Mulligan => "throw back your hand, draw anew",
+            Ability::Recall => "your last played card returns",
+            Ability::Overload => "hold to charge, release to blast",
+            Ability::Bargain => "pay 1 nerve: next 3 strikes cut 3x",
+            Ability::Snare => "a trap roots the first foe to step on it",
+            // === end abilities3 ===
         }
     }
 
@@ -327,6 +375,16 @@ impl Ability {
             Ability::Pulse => 15.0,
             Ability::Haste => 18.0,
             Ability::Bind => 13.0,
+            // === abilities3 ===
+            Ability::Wager => 20.0,
+            Ability::Echo => 20.0,
+            Ability::Swap => 12.0,
+            Ability::Mulligan => 25.0,
+            Ability::Recall => 14.0,
+            Ability::Overload => 16.0,
+            Ability::Bargain => 18.0,
+            Ability::Snare => 12.0,
+            // === end abilities3 ===
         }
     }
 
@@ -357,6 +415,16 @@ impl Ability {
             Ability::Pulse => 4.0,
             Ability::Haste => 6.0,
             Ability::Bind => 0.0,
+            // === abilities3 === (all instant: they run on their own timers)
+            Ability::Wager
+            | Ability::Echo
+            | Ability::Swap
+            | Ability::Mulligan
+            | Ability::Recall
+            | Ability::Overload
+            | Ability::Bargain
+            | Ability::Snare => 0.0,
+            // === end abilities3 ===
         }
     }
 }
@@ -1504,6 +1572,11 @@ impl RunUpgrades {
         if self.deck_slots > 0 && u.is_ability() {
             return false;
         }
+        // === abilities3 === a hand to redeal or a discard to take from
+        if matches!(u, Upgrade::Learn(a) if crate::abilities3::deck_only(a)) && self.deck_slots == 0 {
+            return false;
+        }
+        // === end abilities3 ===
         let mut after = self.clone();
         after.take(u);
         after.stats() != self.stats()
@@ -1736,6 +1809,11 @@ impl RunUpgrades {
         for a in &mut self.abilities {
             a.tick(dt);
         }
+        // === abilities3 === a borrowed ability (WAGER, ECHO) is gone once its effect ends
+        if self.deck_slots == 0 {
+            self.abilities.retain(|a| !a.spent || a.is_active());
+        }
+        // === end abilities3 ===
         if self.deck_slots > 0 && self.abilities.len() > self.deck_slots {
             let slots = self.deck_slots;
             let before = self.abilities.len();

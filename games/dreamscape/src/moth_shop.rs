@@ -163,6 +163,7 @@ fn build(seed: u64, run: &RunUpgrades, depth: u32, terms: Terms, rerolls: u32) -
 pub fn ability_offer(seed: u64, run: &RunUpgrades, rerolls: u32) -> Option<Upgrade> {
     let open: Vec<Upgrade> = crate::abilities2::NEW_ABILITIES
         .iter()
+        .chain(crate::abilities3::NEW_ABILITIES.iter()) // === abilities3 ===
         .map(|&a| Upgrade::Learn(a))
         .filter(|&u| run.available(u))
         .collect();
@@ -283,12 +284,13 @@ mod tests {
         for seed in 0..200 {
             let offer = ability_offer(seed, &run, 0).expect("a free dreamer can learn one");
             let Upgrade::Learn(a) = offer else { panic!("{offer:?}") };
-            assert!(crate::abilities2::NEW_ABILITIES.contains(&a));
+            assert!(crate::abilities2::NEW_ABILITIES.contains(&a) || crate::abilities3::NEW_ABILITIES.contains(&a));
+            assert!(!crate::abilities3::deck_only(a), "a fixed loadout has no deck to redeal");
             assert!(stock(seed, &run, 5, T).cards.contains(&offer), "seed {seed}");
             assert!(price_at(&stock(seed, &run, 5, T), stock(seed, &run, 5, T).cards.iter().position(|c| *c == offer).unwrap(), T).is_some());
             seen.insert(a);
         }
-        assert_eq!(seen.len(), 8, "every new ability gets sold");
+        assert_eq!(seen.len(), 14, "every new ability that works without a deck gets sold");
         let mut hand = RunUpgrades::default();
         hand.deck_slots = 3;
         assert_eq!(ability_offer(1, &hand, 0), None);
