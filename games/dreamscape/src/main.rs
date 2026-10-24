@@ -2171,7 +2171,12 @@ impl DreamscapeGame {
                     ability: a.ability.name(),
                     card: slot_card.map(|n| n.1.clone()),
                     key: upgrades::SLOT_KEYS[k],
-                    charge: a.charge(self.run.cooldown_for(a.ability)),
+                    // === abilities3 === a charging OVERLOAD fills its card
+                    charge: match (a.ability, self.overload) {
+                        (Ability::Overload, Some(c)) if c.slot == k => c.fraction(),
+                        _ => a.charge(self.run.cooldown_for(a.ability)),
+                    },
+                    // === end abilities3 ===
                     active: a.is_active()
                         || (a.ability == Ability::Anchor && self.anchor.is_some())
                         // === abilities3 ===
@@ -12808,6 +12813,227 @@ mod screen_smoke {
         assert!(x < 6.0 && x > 3.0, "pulled a third of a second to {x}");
     }
     // === end abilities2 ===
+
+    // === abilities3 ===
+    fn with_ability(name: &str, a: Ability) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g.run.take(Upgrade::Learn(a));
+        g
+    }
+
+    #[test]
+    fn swap_trades_places_with_the_nearest_foe_and_staggers_it() {
+        let mut g = with_ability("swap", Ability::Swap);
+        g.use_ability(0);
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing to swap with: charge kept");
+        let near = put_pacer(&mut g, Vec3::new(6.0, 1.0, 0.0), true);
+        let _far = put_pacer(&mut g, Vec3::new(10.0, 1.0, 0.0), true);
+        g.use_ability(0);
+        assert_eq!(g.player_position, Vec3::new(6.0, 1.0, 0.0));
+        assert_eq!(g.world.get::<&Transform>(near).unwrap().position, Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(g.stunned.get(&near), Some(&abilities3::SWAP_STAGGER));
+        assert!(g.run.abilities[0].cooldown > 0.0);
+    }
+
+    #[test]
+    fn swap_can_trade_with_the_decoy() {
+        let mut g = with_ability("swap2", Ability::Swap);
+        let e = g.world.spawn((Transform { position: Vec3::new(4.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+        g.decoy = Some((Vec3::new(4.0, 1.0, 0.0), e));
+        g.use_ability(0);
+        assert_eq!(g.player_position, Vec3::new(4.0, 1.0, 0.0));
+        assert_eq!(g.decoy.map(|d| d.0), Some(Vec3::new(0.0, 1.0, 0.0)));
+        assert_eq!(g.world.get::<&Transform>(e).unwrap().position, Vec3::new(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn bargain_costs_a_nerve_and_triples_three_strikes_then_ends() {
+        let mut g = with_ability("bargain", Ability::Bargain);
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), false);
+        let t = g.combat_targets().into_iter().find(|t| t.entity == e).unwrap();
+        let plain = g.strike_damage(&t);
+        let nerve = g.nerve.cur();
+        g.use_ability(0);
+        assert_eq!(g.nerve.cur(), nerve - 1);
+        assert!((g.strike_damage(&t) - plain * abilities3::BARGAIN_MULT).abs() < 1e-4);
+        for _ in 0..abilities3::BARGAIN_STRIKES {
+            assert!(g.bargain.active());
+            g.bargain.spend_strike();
+        }
+        assert!((g.strike_damage(&t) - plain).abs() < 1e-4, "three strikes and it is over");
+    }
+
+    #[test]
+    fn bargain_refuses_at_one_nerve() {
+        let mut g = with_ability("bargain2", Ability::Bargain);
+        while g.nerve.cur() > 1 {
+            assert!(g.nerve.spend(1));
+        }
+        g.use_ability(0);
+        assert_eq!(g.nerve.cur(), 1);
+        assert!(!g.bargain.active());
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing was spent");
+    }
+
+    #[test]
+    fn a_snare_roots_the_first_foe_to_step_on_it_and_is_spent() {
+        let mut g = with_ability("snare", Ability::Snare);
+        g.use_ability(0);
+        assert_eq!(g.snares.len(), 1);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 0.0), true);
+        g.update_abilities3(0.016);
+        assert_eq!(g.snares.len(), 1, "nobody on it yet");
+        let near = put_pacer(&mut g, Vec3::new(0.5, 1.0, 0.0), true);
+        g.update_abilities3(0.016);
+        assert_eq!(g.snares.len(), 0, "spent");
+        assert_eq!(g.stunned.get(&near), Some(&abilities3::SNARE_ROOT));
+        assert!(!g.stunned.contains_key(&far));
+    }
+
+    #[test]
+    fn only_two_snares_stay_down() {
+        let mut g = with_ability("snare2", Ability::Snare);
+        for _ in 0..3 {
+            g.run.abilities[0].cooldown = 0.0;
+            g.player_position.x += 5.0;
+            g.use_ability(0);
+        }
+        assert_eq!(g.snares.len(), abilities3::SNARE_MAX);
+    }
+
+    #[test]
+    fn overload_charges_while_held_and_blasts_on_release_by_charge() {
+        let blast = |held_secs: f32| -> (f32, bool) {
+            let mut g = with_ability(&format!("overload{held_secs}"), Ability::Overload);
+            let mid = put_pacer(&mut g, Vec3::new(5.0, 1.0, 0.0), true);
+            let far = put_pacer(&mut g, Vec3::new(9.0, 1.0, 0.0), true);
+            g.mode = hud::Mode::Playing;
+            g.ability_held[0] = true;
+            g.use_ability(0);
+            assert!(g.overload.is_some() && g.run.abilities[0].cooldown <= 0.0, "charging, nothing spent yet");
+            let mut left = held_secs;
+            while left > 0.0 {
+                g.update_abilities3(0.1);
+                left -= 0.1;
+            }
+            assert!(g.stunned.is_empty(), "nothing before the release");
+            g.ability_held[0] = false;
+            g.update_abilities3(0.016);
+            assert!(g.overload.is_none() && g.run.abilities[0].cooldown > 0.0);
+            let stun = g.stunned.get(&mid).copied().unwrap_or(0.0);
+            (stun, g.stunned.contains_key(&far))
+        };
+        let (short, short_far) = blast(0.4);
+        let (full, full_far) = blast(3.0);
+        assert!(short == 0.0 && !short_far, "radius {} does not reach 5", abilities3::overload_radius(0.4));
+        assert!(full > 0.0 && full_far, "a full charge reaches both");
+        assert!((full - abilities3::OVERLOAD_STAGGER_MAX).abs() < 0.2);
+    }
+
+    #[test]
+    fn echo_needs_something_to_repeat_and_costs_nothing_extra() {
+        let mut g = with_ability("echo", Ability::Echo);
+        g.use_ability(0);
+        assert!(g.run.abilities[0].cooldown <= 0.0, "nothing to echo: denied, charge kept");
+        g.run.take(Upgrade::Learn(Ability::Snare));
+        g.use_ability(1);
+        assert_eq!(g.snares.len(), 1);
+        assert_eq!(g.echo_last, Some(Ability::Snare));
+        let snare_cd = g.run.abilities[1].cooldown;
+        g.player_position.x += 5.0;
+        g.use_ability(0);
+        assert_eq!(g.snares.len(), 2, "the snare was set again");
+        assert_eq!(g.run.abilities[1].cooldown, snare_cd, "its recharge did not restart");
+        assert!(g.run.abilities[0].cooldown > 0.0, "echo itself recharges");
+        assert_eq!(g.echo_last, Some(Ability::Snare), "never echoes itself");
+        g.run.tick(1.0);
+        assert_eq!(g.run.abilities.len(), 2, "the borrowed state is gone");
+    }
+
+    #[test]
+    fn wager_rolls_once_shows_its_pick_and_bends_its_cooldown() {
+        let mut g = with_ability("wager", Ability::Wager);
+        let roll = abilities3::wager_roll(g.director.dream_seed(), 0, 0);
+        g.use_ability(0);
+        assert_eq!(g.wager_n, 1);
+        assert!(g.wager_line.as_ref().is_some_and(|l| l.0.contains(roll.ability.name())), "{:?}", g.wager_line);
+        let full = effective_cd(Ability::Wager);
+        let cd = g.run.abilities[0].cooldown;
+        let timed = roll.ability.duration() > 0.0;
+        assert!((cd - abilities3::wager_cooldown(roll.kind, full, timed)).abs() < 1e-3, "{roll:?} {cd}");
+        assert!(g.run.abilities.iter().all(|a| a.ability != roll.ability) || roll.ability == Ability::Wager);
+        g.run.tick(30.0);
+        assert_eq!(g.run.abilities.len(), 1, "the borrowed state ran out");
+        let line1 = g2_line(&g);
+        let mut g2 = with_ability("wager2", Ability::Wager);
+        g2.use_ability(0);
+        assert_eq!(g2_line(&g2), line1, "same dream, same roll");
+    }
+
+    fn g2_line(g: &DreamscapeGame) -> Option<String> {
+        g.wager_line.as_ref().map(|l| l.0.clone())
+    }
+
+    fn effective_cd(a: Ability) -> f32 {
+        upgrades::effective_cooldown(a, 1.0, 1.0)
+    }
+
+    fn deck_game(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        let mut d = deck::Deck::new(&[1, 2, 3, 4, 5, 6, 7], 3);
+        d.draw_to_fill(5);
+        d.events();
+        g.deck = Some(d);
+        g
+    }
+
+    #[test]
+    fn mulligan_and_recall_are_inert_without_a_deck() {
+        let g = game("nodeck");
+        assert!(!g.abilities3_ready(Ability::Mulligan, None));
+        assert!(!g.abilities3_ready(Ability::Recall, None));
+        assert!(!RunUpgrades::default().available(Upgrade::Learn(Ability::Mulligan)));
+        assert!(!RunUpgrades::default().available(Upgrade::Learn(Ability::Recall)));
+        assert!(RunUpgrades::default().available(Upgrade::Learn(Ability::Snare)));
+    }
+
+    #[test]
+    fn mulligan_redeals_the_hand_and_flicks_the_old_cards_out() {
+        let mut g = deck_game("mull");
+        assert!(g.abilities3_ready(Ability::Mulligan, None));
+        let before: Vec<_> = g.deck.as_ref().unwrap().hand().to_vec();
+        g.abilities3_after_play(Ability::Mulligan, before[0], None);
+        let d = g.deck.as_mut().unwrap();
+        assert!(d.hand().iter().all(|h| h.is_some()), "a fresh full hand");
+        assert_eq!(d.events().iter().filter(|e| matches!(e, deck::DeckEvent::Drawn { .. })).count(), 5);
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn recall_returns_the_last_played_card_to_the_hand() {
+        let mut g = deck_game("recall");
+        let d = g.deck.as_mut().unwrap();
+        let first = d.hand()[0].unwrap();
+        d.play(0, 6.0);
+        let own = d.hand()[2].unwrap();
+        d.play(2, 14.0);
+        assert!(g.abilities3_ready(Ability::Recall, Some(own)));
+        g.abilities3_after_play(Ability::Recall, Some(own), None);
+        let d = g.deck.as_mut().unwrap();
+        assert!(d.hand().contains(&Some(first)));
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4, 5, 6, 7], "no card lost or doubled");
+    }
+    // === end abilities3 ===
 
     #[test]
     fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {

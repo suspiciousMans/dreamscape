@@ -28,6 +28,7 @@ pub fn deck_only(a: Ability) -> bool {
 }
 
 /// Obtainable only by picks and the moth (no resonant pair carries them).
+#[cfg(test)]
 pub const PICK_ONLY: [Ability; 2] = [Ability::Bargain, Ability::Snare];
 
 // --- WAGER: a random ability, used now ---
@@ -289,6 +290,7 @@ impl<T: Copy> Snares<T> {
         tripped
     }
 
+    #[cfg(test)]
     pub fn clear(&mut self) -> Vec<T> {
         self.traps.drain(..).map(|t| t.1).collect()
     }
