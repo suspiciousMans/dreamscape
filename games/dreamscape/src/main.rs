@@ -676,6 +676,10 @@ pub struct DreamscapeGame {
     /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
     deck_leaving: Vec<(hand::HandCard, usize, f32)>,
     // === end deck ===
+    // === toolcards ===
+    /// Tool card ids bought this run (kept for the save; the deck holds the live ones).
+    tool_cards: Vec<u32>,
+    // === end toolcards ===
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -1145,6 +1149,7 @@ impl DreamscapeGame {
             deck_drawn_at: [f32::MIN; upgrades::HAND_SIZE],
             deck_riffle_at: hand::NEVER,
             deck_leaving: Vec::new(),
+            tool_cards: Vec::new(), // === toolcards ===
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -2111,6 +2116,11 @@ impl DreamscapeGame {
                         let ability = n.0;
                         self.run.deck_draw(slot, ability, cd);
                         self.deck_drawn_at[slot] = self.deck_clock;
+                    } else if let Some(ability) = deck::tool_ability(card) {
+                        // === toolcards === a bought tool card has no booklet card
+                        self.run.deck_draw(slot, ability, cd);
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                        // === end toolcards ===
                     }
                 }
                 deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
@@ -2161,6 +2171,7 @@ impl DreamscapeGame {
     /// the fixed loadout.
     fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
         self.deck = None;
+        self.tool_cards.clear(); // === toolcards === bought per run, never carried over
         self.deck_opening.clear();
         self.deck_leaving.clear();
         self.deck_riffle_at = hand::NEVER;
@@ -2240,6 +2251,13 @@ impl DreamscapeGame {
                         .any(|u| matches!(u, Upgrade::Cursed(_))),
                     ability: a.ability.name(),
                     card: slot_card.map(|n| n.1.clone()),
+                    // === toolcards === the card in this slot is a bought tool
+                    tool: self
+                        .deck
+                        .as_ref()
+                        .and_then(|d| d.hand().get(k).copied().flatten())
+                        .is_some_and(deck::is_tool),
+                    // === end toolcards ===
                     key: upgrades::SLOT_KEYS[k],
                     // === abilities3 === a charging OVERLOAD fills its card
                     charge: match (a.ability, self.overload) {
@@ -6578,6 +6596,30 @@ impl DreamscapeGame {
                 }
             })
             .collect();
+        // === toolcards === deck runs: the tool cards, after the cards
+        let held = self.tool_cards_held();
+        for (j, &a) in shelf.tools.iter().enumerate() {
+            let bought = held.contains(&deck::tool_id(a));
+            let cost = moth_shop::tool_price(a, held.len(), terms);
+            let can = moth_shop::buy_tool(&shelf, shelf.cards.len() + j, self.bonus_dust, &held, terms).is_ok();
+            cards.push(upgrade_ui::ChoiceCard {
+                name: a.name().into(),
+                desc: a.desc().into(),
+                icon: upgrades::Icon::Gem,
+                color: if can { hand::TOOL_FRAME } else { [110, 110, 130] },
+                frame: if can { hand::TOOL_FRAME } else { [80, 80, 100] },
+                tag: if bought {
+                    moth_shop::TOOL_HELD.into()
+                } else if held.len() >= moth_shop::MAX_TOOL_CARDS {
+                    moth_shop::TOOL_NO_ROOM.into()
+                } else if can {
+                    format!("{cost} dust · {}", moth_shop::TOOL_TAG)
+                } else {
+                    format!("needs {cost} dust")
+                },
+            });
+        }
+        // === end toolcards ===
         let rr = moth_shop::reroll_price(shelf.rerolls);
         let can_rr = self.bonus_dust >= rr;
         cards.push(upgrade_ui::ChoiceCard {
@@ -6622,11 +6664,17 @@ impl DreamscapeGame {
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
         let terms = self.moth_terms();
-        if index == shelf.cards.len() + 1 {
+        if index == shelf.rows() + 1 {
             self.open_gamble_stakes(); // === risk ===
             return;
         }
-        if index == shelf.cards.len() {
+        // === toolcards ===
+        if index >= shelf.cards.len() && index < shelf.rows() {
+            self.buy_tool_card(index);
+            return;
+        }
+        // === end toolcards ===
+        if index == shelf.rows() {
             match moth_shop::reroll(
                 &shelf,
                 self.director.dream_seed(),
@@ -6679,6 +6727,58 @@ impl DreamscapeGame {
         self.show_moth_shop(0);
     }
 
+    // === toolcards ===
+    /// The tool card ids held this run: the live deck's, else the saved list.
+    fn tool_cards_held(&self) -> Vec<u32> {
+        match &self.deck {
+            Some(d) => d.tool_cards(),
+            None => self.tool_cards.clone(),
+        }
+    }
+
+    /// A resumed run's saved tool cards go back into the deck if there is
+    /// one (a resumed run keeps its fixed kit today, so this does nothing
+    /// there and the list is only carried on in the save).
+    fn restore_tool_cards(&mut self) {
+        let seed = self.director.dream_seed();
+        if let Some(d) = self.deck.as_mut() {
+            for &id in &self.tool_cards {
+                if deck::tool_ability(id).is_some() {
+                    d.insert_shuffled(id, seed);
+                }
+            }
+        }
+    }
+
+    /// [enter] on a tool card row: dust for a card shuffled into the draw
+    /// pile for the rest of the run (never saved in the booklet).
+    fn buy_tool_card(&mut self, index: usize) {
+        let shelf = self.moth_stock.clone().unwrap_or_default();
+        let terms = self.moth_terms();
+        let held = self.tool_cards_held();
+        let seed = self.director.dream_seed();
+        match moth_shop::buy_tool(&shelf, index, self.bonus_dust, &held, terms) {
+            Ok((a, cost)) if self.deck.is_some() => {
+                self.bonus_dust -= cost;
+                let id = deck::tool_id(a);
+                if let Some(d) = self.deck.as_mut() {
+                    d.insert_shuffled(id, seed);
+                }
+                self.tool_cards.push(id);
+                self.deck_riffle_at = self.deck_clock; // the card flies into the stack
+                self.save_run();
+                log::info!("Moth sold the {a:?} tool card for {cost} dust ({} left)", self.bonus_dust);
+            }
+            Ok(_) => {}
+            Err(why) => {
+                log::info!("Moth refused the tool card: {why:?}");
+                self.sfx(Sound::Denied);
+            }
+        }
+        self.show_moth_shop(index);
+    }
+    // === end toolcards ===
+
     /// [x]: back to the dream, exactly where you stood.
     fn leave_moth_shop(&mut self) {
         if !matches!(self.choice, Some(ChoiceKind::MothShop)) {
@@ -6693,7 +6793,7 @@ impl DreamscapeGame {
     // === risk ===
     /// The gamble row's index in the shop (after the shelf and the reroll).
     fn gamble_row(&self) -> usize {
-        self.moth_stock.as_ref().map_or(0, |s| s.cards.len() + 1)
+        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1)
     }
 
     fn risk_allowed(&self) -> bool {
@@ -7412,6 +7512,8 @@ impl DreamscapeGame {
                 self.shards_this_run = s.shards_this_run;
                 self.bonus_dust = s.bonus_dust;
                 self.gamble = s.gamble.clone(); // === risk ===
+                self.tool_cards = s.tool_cards.clone(); // === toolcards ===
+                self.restore_tool_cards();
                 self.pacts = s.pacts.clone(); // === pacts ===
                 self.peak_difficulty = s.peak_difficulty;
                 self.run_log = s.run_log.clone();
@@ -7534,6 +7636,7 @@ impl DreamscapeGame {
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
             gamble: self.gamble.clone(), // === risk ===
+            tool_cards: self.tool_cards_held(), // === toolcards ===
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -11101,7 +11204,7 @@ impl Game for DreamscapeGame {
                         }
                     }
                     Keycode::G if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
                         self.choose(at + 1); // === risk ===
                     }
                     Keycode::X | Keycode::Escape if matches!(self.choice, Some(ChoiceKind::Gamble(_))) => {
@@ -11111,7 +11214,7 @@ impl Game for DreamscapeGame {
                         self.choose(1); // === risk === not now
                     }
                     Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
                         self.choose(at);
                     }
                     Keycode::R => self.reroll_choice(),
@@ -13328,6 +13431,7 @@ mod screen_smoke {
             cracked: false,
             since_draw: hand::NEVER,
             empty: false,
+            tool: false,
         }
     }
 
@@ -15822,6 +15926,127 @@ mod screen_smoke {
         g.leave_moth_shop();
         assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
     }
+
+    // === toolcards ===
+    fn tool_shop_game(name: &str, dust: u32) -> DreamscapeGame {
+        let mut g = deck_game(name);
+        g.run.deck_slots = 5;
+        g.director.depth = 6;
+        g.bonus_dust = dust;
+        g.save_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_run.ron"));
+        g.enter_moth_shop_for_test();
+        g
+    }
+
+    #[test]
+    fn the_shelf_sells_tool_cards_only_in_deck_runs() {
+        let g = tool_shop_game("tool_offer", 100);
+        let shelf = g.moth_stock.clone().unwrap();
+        assert_eq!(shelf.tools.len(), moth_shop::TOOLS_OFFERED);
+        assert_eq!(g.choice_view.cards.len(), shelf.rows() + 2, "cards, tools, reroll, coin");
+        let at = shelf.cards.len();
+        assert!(g.choice_view.cards[at].tag.contains("dust"), "{}", g.choice_view.cards[at].tag);
+        assert_eq!(g.choice_view.cards[at].name, shelf.tools[0].name());
+        let fixed = coin_game("tool_fixed", 100);
+        assert!(fixed.moth_stock.as_ref().unwrap().tools.is_empty());
+    }
+
+    #[test]
+    fn buying_tool_cards_costs_more_each_time_stops_at_two_and_keeps_counts() {
+        let mut g = tool_shop_game("tool_buy", 200);
+        let before = g.deck.as_ref().unwrap().all_cards().len();
+        let shelf = g.moth_stock.clone().unwrap();
+        let at = shelf.cards.len();
+        let (a, b) = (shelf.tools[0], shelf.tools[1]);
+        let first = moth_shop::tool_price(a, 0, g.moth_terms());
+        g.choose(at);
+        assert_eq!(g.bonus_dust, 200 - first);
+        let second = moth_shop::tool_price(b, 1, g.moth_terms());
+        assert_eq!(second, moth_shop::tool_base_price(b) + moth_shop::TOOL_PRICE_STEP);
+        g.choose(at + 1);
+        assert_eq!(g.bonus_dust, 200 - first - second);
+        let d = g.deck.as_ref().unwrap();
+        assert_eq!(d.tool_cards().len(), 2);
+        assert_eq!(d.all_cards().len(), before + 2, "counts: two cards added, none lost");
+        assert_eq!(g.tool_cards_held().len(), moth_shop::MAX_TOOL_CARDS);
+        // A third (a fresh reroll of the shelf) shows no room and takes nothing.
+        let mut shelf = g.moth_stock.clone().unwrap();
+        shelf.tools = vec![Ability::Overload];
+        g.moth_stock = Some(shelf);
+        let dust = g.bonus_dust;
+        g.show_moth_shop(0);
+        let row = g.moth_stock.as_ref().unwrap().cards.len();
+        assert_eq!(g.choice_view.cards[row].tag, moth_shop::TOOL_NO_ROOM);
+        g.choose(row);
+        assert_eq!(g.bonus_dust, dust);
+        assert_eq!(g.deck.as_ref().unwrap().tool_cards().len(), 2);
+        assert!(g.booklet.lore.deck.iter().all(|&n| !deck::is_tool(n)), "never in the booklet's deck");
+    }
+
+    #[test]
+    fn a_bought_tool_card_is_shown_as_a_tool_in_the_hand_and_never_saved_in_the_booklet() {
+        let mut g = deck_game("tool_hand");
+        g.run.deck_slots = 5;
+        let mut d = deck::Deck::new(&[], 3);
+        d.insert_shuffled(deck::tool_id(Ability::Snare), 3);
+        d.draw_to_fill(5);
+        g.deck = Some(d);
+        g.update_deck(0.0);
+        let view = g.hand_view();
+        let c = view.iter().find(|c| c.tool).expect("a tool card in hand");
+        assert_eq!((c.ability, c.card.is_none(), c.passive.is_none(), c.edge.is_none()), ("SNARE", true, true, true));
+        assert!(g.booklet.card(deck::tool_id(Ability::Snare)).is_none());
+        // The card draws like any other: its face can be painted.
+        let shapes = frame(&g, 1280.0, 720.0).len();
+        assert!(shapes > 0);
+        assert!(!view.iter().any(|c| !c.tool && c.ability == "SNARE"));
+    }
+
+    #[test]
+    fn using_a_tool_card_discards_it_and_it_comes_back_into_the_draw_pile() {
+        let mut g = deck_game("tool_use");
+        g.run.deck_slots = 5;
+        let id = deck::tool_id(Ability::Echo);
+        let mut d = deck::Deck::new(&[], 3);
+        d.insert_shuffled(id, 3);
+        d.draw_to_fill(5);
+        g.deck = Some(d);
+        g.update_deck(0.0);
+        g.run.abilities[0].cooldown = 0.0;
+        g.deck_on_use(0);
+        assert_eq!(g.deck.as_ref().unwrap().hand()[0], None);
+        g.update_deck(deck::SHUFFLE_DELAY + deck::DRAW_DELAY + 0.1);
+        assert_eq!(g.deck.as_ref().unwrap().tool_cards(), vec![id], "kept for the run");
+        assert_eq!(g.deck.as_ref().unwrap().all_cards(), vec![id]);
+    }
+
+    #[test]
+    fn tool_cards_survive_a_save_and_an_old_save_loads_without_them() {
+        let mut g = tool_shop_game("tool_save", 100);
+        g.run_active = true;
+        g.choose(g.moth_stock.as_ref().unwrap().cards.len());
+        let id = g.deck.as_ref().unwrap().tool_cards()[0];
+        let saved = progress::load(&g.save_path).expect("saved when bought");
+        assert_eq!(saved.tool_cards, vec![id]);
+        // Resumed: the list is carried on (a resumed run has no deck yet) ...
+        let mut r = game("tool_resume");
+        r.deck = None;
+        r.tool_cards = saved.tool_cards.clone();
+        r.restore_tool_cards();
+        assert_eq!(r.tool_cards_held(), vec![id]);
+        // ... and goes back into a deck when there is one.
+        r.deck = Some(deck::Deck::new(&[1, 2, 3], 4));
+        r.restore_tool_cards();
+        assert_eq!(r.deck.as_ref().unwrap().tool_cards(), vec![id]);
+        // An old save without the field loads, with no tool cards.
+        let mut bare = saved.clone();
+        bare.tool_cards.clear();
+        let text = ron::ser::to_string_pretty(&bare, ron::ser::PrettyConfig::default()).unwrap();
+        let old: String = text.lines().filter(|l| !l.contains("tool_cards")).collect::<Vec<_>>().join("\n");
+        let back: progress::SavedRun = ron::from_str(&old).expect("old save loads");
+        assert!(back.tool_cards.is_empty());
+    }
+    // === end toolcards ===
 
     #[test]
     fn no_coin_in_autopilot_or_co_op() {

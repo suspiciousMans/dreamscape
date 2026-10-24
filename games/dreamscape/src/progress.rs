@@ -387,6 +387,9 @@ pub struct SavedRun {
     /// === risk === coin flips, owed wins and the wager portal's state.
     #[serde(default)]
     pub gamble: crate::gamble::RunState,
+    /// === toolcards === tool card ids bought this run (deck runs).
+    #[serde(default)]
+    pub tool_cards: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -676,6 +679,7 @@ mod tests {
             loadout_scale: None,
             form: Default::default(),
             gamble: Default::default(),
+            tool_cards: Vec::new(),
         }
     }
 
