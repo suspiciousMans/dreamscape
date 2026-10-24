@@ -13193,6 +13193,9 @@ impl Game for DreamscapeGame {
                 mesh_renderer.mesh.draw(gl);
             }
         }
+        if engine::perf::enabled() {
+            unsafe { gl.finish() }; // profiling only: charge the GPU's time to this scope
+        }
         drop(world_scope);
         unsafe {
             gl.depth_func(engine::glow::LESS);
@@ -13214,6 +13217,9 @@ impl Game for DreamscapeGame {
                 tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
             },
         );
+        if engine::perf::enabled() {
+            unsafe { gl.finish() };
+        }
         drop(present_scope);
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
@@ -13285,6 +13291,9 @@ impl Game for DreamscapeGame {
             drop(ui_run);
             let _t = engine::perf::scope("rnd.egui paint");
             ui.paint(drawable_size, output);
+            if engine::perf::enabled() {
+                unsafe { ctx.gl().finish() };
+            }
         }
         if std::mem::take(&mut self.export_requested) && self.mode == hud::Mode::Booklet {
             self.export_cards(ctx);

@@ -56,7 +56,14 @@ impl Platform {
             glow::Context::from_loader_function(|s| video.gl_get_proc_address(s) as *const _)
         });
 
-        if let Err(e) = video.gl_set_swap_interval(sdl2::video::SwapInterval::VSync) {
+        // Profiling aid: ENGINE_NOVSYNC=1 swaps immediately, so frame time shows
+        // the real work instead of the monitor's refresh.
+        let interval = if std::env::var_os("ENGINE_NOVSYNC").is_some() {
+            sdl2::video::SwapInterval::Immediate
+        } else {
+            sdl2::video::SwapInterval::VSync
+        };
+        if let Err(e) = video.gl_set_swap_interval(interval) {
             log::warn!("vsync not available, falling back to immediate swap: {e}");
             video
                 .gl_set_swap_interval(sdl2::video::SwapInterval::Immediate)

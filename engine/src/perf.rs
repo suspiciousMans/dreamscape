@@ -80,6 +80,28 @@ impl Drop for Scope {
     }
 }
 
+/// Adds `n` to a per-frame counter (shown as an average count per frame in
+/// the report, named with a trailing `#`): shapes drawn, vertices, calls...
+pub fn count(name: &'static str, n: usize) {
+    if !enabled() {
+        return;
+    }
+    TABLE.with(|t| {
+        let mut t = t.borrow_mut();
+        let i = match t.rows.iter().position(|r| r.0 == name) {
+            Some(i) => i,
+            None => {
+                t.rows.push((name, Stat::default()));
+                t.rows.len() - 1
+            }
+        };
+        let s = &mut t.rows[i].1;
+        s.total_ms += n as f64;
+        s.calls += 1;
+        s.frame_ms += n as f64;
+    });
+}
+
 /// Call once per frame (after the swap). Logs and resets every
 /// [`REPORT_EVERY`] frames.
 pub fn frame_end() {
