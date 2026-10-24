@@ -27,6 +27,8 @@ pub struct LoadoutView {
     /// The companion slot: `None` until a dreamer is collected, then the
     /// line to show ("[c] Ada: + CALM MIND x2 · ...", or "[c] nobody").
     pub companion: Option<String>,
+    /// The sort label shown in the hint bar (empty = none).
+    pub sort: String,
 }
 
 /// Adds the card, or takes it out if it's already in. A full loadout
@@ -654,7 +656,10 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p,
         screen,
         v,
-        "[a/d/w/s] browse   [enter] add/remove   [space] fall asleep   [esc] back",
+        &format!(
+            "[a/d/w/s] browse  [enter] add/remove  [t] sort: {}  [r] flip  [space] fall asleep  [esc] back",
+            v.loadout.sort
+        ),
     );
     pixel_ui::scanlines(p, screen, c, 10);
 }

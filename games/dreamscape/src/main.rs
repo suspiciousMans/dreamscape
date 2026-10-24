@@ -90,6 +90,7 @@ mod settings;
 mod secrets;
 mod settings_ui;
 mod shop_ui;
+mod sorting;
 mod sounds;
 mod specials;
 mod steam;
@@ -3154,7 +3155,8 @@ impl DreamscapeGame {
             },
             loadout: if self.mode == hud::Mode::Loadout {
                 loadout_ui::LoadoutView {
-                    cards: self.booklet.cards().cloned().collect(),
+                    cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
+                    sort: self.settings.sort_loadout.label(),
                     chosen: self.booklet.lore.loadout.clone(),
                     slots: self.asc_slots(),
                     selected: self.loadout_sel,
@@ -3178,7 +3180,8 @@ impl DreamscapeGame {
             },
             merge: if self.mode == hud::Mode::Merge {
                 merge_ui::MergeView {
-                    cards: self.booklet.cards().cloned().collect(),
+                    cards: self.sorted_cards(self.settings.sort_merge).into_iter().cloned().collect(),
+                    sort: self.settings.sort_merge.label(),
                     selected: self.merge_sel,
                     first: self.merge_first,
                     status: self.merge_status.clone(),
@@ -3279,7 +3282,7 @@ impl DreamscapeGame {
             },
             journal_status: self.journal_status.clone(),
             booklet_cards: if self.mode == hud::Mode::Booklet {
-                let all: Vec<&cards::Card> = self.booklet.cards().collect();
+                let all = self.sorted_cards(self.settings.sort_booklet);
                 all[cards::page_range(all.len(), self.booklet_page)]
                     .iter()
                     .map(|c| (*c).clone())
@@ -3287,6 +3290,7 @@ impl DreamscapeGame {
             } else {
                 Vec::new()
             },
+            booklet_sort: self.settings.sort_booklet.label(),
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
@@ -6890,6 +6894,55 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Loadout;
     }
 
+    // === sort ===
+    /// The booklet's cards in the given order.
+    fn sorted_cards(&self, sort: sorting::Sort) -> Vec<&cards::Card> {
+        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        // `order` wants a slice of cards; sorting is by value so clone the (small) list.
+        let tmp: Vec<cards::Card> = all.iter().map(|c| (*c).clone()).collect();
+        sorting::order(&tmp, sort).into_iter().map(|i| all[i]).collect()
+    }
+
+    /// `[t]` (cycle = true) or `[r]` on the booklet, merge or loadout screen: the cursor
+    /// stays on the same card.
+    fn sort_press(&mut self, cycle: bool) {
+        let mode = self.mode;
+        let sort_of = |s: &settings::Settings| match mode {
+            hud::Mode::Booklet => s.sort_booklet,
+            hud::Mode::Merge => s.sort_merge,
+            _ => s.sort_loadout,
+        };
+        let old = sort_of(&self.settings);
+        let cursor = match mode {
+            hud::Mode::Booklet => self.booklet_page * cards::CARDS_PER_PAGE,
+            hud::Mode::Merge => self.merge_sel,
+            _ => self.loadout_sel,
+        };
+        let number = self.sorted_cards(old).get(cursor).map(|c| c.number);
+        let mut new = old;
+        if cycle {
+            new.cycle_key();
+        } else {
+            new.flip();
+        }
+        match mode {
+            hud::Mode::Booklet => self.settings.sort_booklet = new,
+            hud::Mode::Merge => self.settings.sort_merge = new,
+            _ => self.settings.sort_loadout = new,
+        }
+        let at = number
+            .and_then(|n| self.sorted_cards(new).iter().position(|c| c.number == n))
+            .unwrap_or(0);
+        match mode {
+            hud::Mode::Booklet => self.booklet_page = at / cards::CARDS_PER_PAGE,
+            hud::Mode::Merge => self.merge_sel = at,
+            _ => self.loadout_sel = at,
+        }
+        self.sfx(Sound::Pick);
+        self.save_settings();
+    }
+    // === end sort ===
+
     /// The moth's merge screen; `back` is where escape returns to.
     fn open_merge(&mut self, back: hud::Mode) {
         self.merge_return = back;
@@ -6916,7 +6969,7 @@ impl DreamscapeGame {
         }
         match key {
             Keycode::Return | Keycode::Space => {
-                let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number)
+                let Some(number) = self.sorted_cards(self.settings.sort_merge).get(self.merge_sel).map(|c| c.number)
                 else {
                     return;
                 };
@@ -6933,8 +6986,8 @@ impl DreamscapeGame {
                             self.merge_status = Some(format!("{}: {}", c.rarity.label(), c.name));
                             self.merge_first = None;
                             self.merge_sel = self
-                                .booklet
-                                .cards()
+                                .sorted_cards(self.settings.sort_merge)
+                                .iter()
                                 .position(|x| x.number == a)
                                 .unwrap_or(0);
                             self.flash.trigger([1.0, 0.8, 1.0], 0.5);
@@ -6948,12 +7001,14 @@ impl DreamscapeGame {
             // Change your mind without hunting for the first card: Tab makes the
             // card under the cursor the first one, Backspace puts it back.
             Keycode::Tab => {
-                if let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number) {
+                if let Some(number) = self.sorted_cards(self.settings.sort_merge).get(self.merge_sel).map(|c| c.number) {
                     self.merge_first = Some(number);
                     self.merge_status = None;
                     self.sfx(Sound::Pick);
                 }
             }
+            Keycode::T => self.sort_press(true),
+            Keycode::R => self.sort_press(false),
             Keycode::Backspace if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape => self.mode = self.merge_return,
@@ -6976,7 +7031,7 @@ impl DreamscapeGame {
         }
         match key {
             Keycode::Return => {
-                let Some(number) = self.booklet.cards().nth(self.loadout_sel).map(|c| c.number)
+                let Some(number) = self.sorted_cards(self.settings.sort_loadout).get(self.loadout_sel).map(|c| c.number)
                 else {
                     return;
                 };
@@ -6989,6 +7044,8 @@ impl DreamscapeGame {
                     self.sfx(Sound::Denied); // the slots are full
                 }
             }
+            Keycode::T => self.sort_press(true),
+            Keycode::R => self.sort_press(false),
             Keycode::C if !self.booklet.lore.dreamers.is_empty() => {
                 self.booklet.lore.companion = self.booklet.lore.next_companion();
                 self.persist_booklet();
@@ -9651,6 +9708,14 @@ impl Game for DreamscapeGame {
                     self.mode = self.booklet_return;
                     return;
                 }
+                (hud::Mode::Booklet, Keycode::T) => {
+                    self.sort_press(true);
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::R) => {
+                    self.sort_press(false);
+                    return;
+                }
                 (hud::Mode::Booklet, Keycode::P) => {
                     self.export_requested = true;
                     return;
@@ -9992,10 +10057,16 @@ impl Game for DreamscapeGame {
                     // The first card picked, the cursor on one that can merge with it.
                     "merge2" => {
                         self.open_merge(hud::Mode::Title);
-                        let cards: Vec<&cards::Card> = self.booklet.cards().collect();
-                        if let Some(a) = cards.first() {
-                            self.merge_first = Some(a.number);
-                            if let Some(i) = cards.iter().position(|b| fusion::can_merge(a, b)) {
+                        let picked = {
+                            let cards = self.sorted_cards(self.settings.sort_merge);
+                            cards.first().map(|a| {
+                                let i = cards.iter().position(|b| fusion::can_merge(a, b));
+                                (a.number, i)
+                            })
+                        };
+                        if let Some((number, i)) = picked {
+                            self.merge_first = Some(number);
+                            if let Some(i) = i {
                                 self.merge_sel = i;
                             }
                         }
@@ -11294,7 +11365,7 @@ impl DreamscapeGame {
             log::error!("could not create {dir:?}: {e}");
             return;
         }
-        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        let all = self.sorted_cards(self.settings.sort_booklet);
         let page = &all[cards::page_range(all.len(), self.booklet_page)];
         let screen = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -11396,6 +11467,9 @@ mod screen_smoke {
         let mut g = DreamscapeGame::new(7);
         g.booklet = cards::Booklet::default();
         g.booklet_path = path;
+        // Never read or write the shared settings file (sort choices persist there).
+        g.settings = settings::Settings::default();
+        g.settings_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_settings.ron"));
         g
     }
 
@@ -12291,6 +12365,62 @@ mod screen_smoke {
         let (pt, small) = hud::to_layout(hud::design_for(hud::Mode::Loadout, 0), (400.0, 225.0), 200.0, 100.0);
         assert!((pt.x - 400.0).abs() < 1e-3 && (pt.y - 200.0).abs() < 1e-3, "{pt:?}");
         assert!((small.width() - 800.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sorting_keeps_the_cursor_on_the_card_and_the_mouse_follows_the_order() {
+        let mut g = game("sort_keys");
+        three_cards(&mut g);
+        let nums: Vec<u32> = g.booklet.cards().map(|c| c.number).collect();
+        let newest = *nums.iter().max().unwrap();
+        let oldest = *nums.iter().min().unwrap();
+        // Merge: flip to newest-first; the cursor (on the oldest) follows its card.
+        g.open_merge(hud::Mode::Title);
+        g.merge_sel = 0;
+        g.merge_key(Keycode::R);
+        assert_eq!(g.settings.sort_merge.dir, sorting::Dir::Desc);
+        assert_eq!(g.merge_sel, nums.len() - 1);
+        assert_eq!(g.sorted_cards(g.settings.sort_merge)[g.merge_sel].number, oldest);
+        // A mouse click on the first tile picks the newest card.
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let lay = merge_ui::layout(screen);
+        let (x, y) = tile_centre(&g, g.merge_sel, lay.grid_top, lay.grid_w, 0);
+        assert_eq!(g.menu_pointer(x, y, Pointer::Click), Some(Keycode::Return));
+        g.merge_key(Keycode::Return);
+        assert_eq!(g.merge_first, Some(newest));
+        g.merge_key(Keycode::T);
+        assert_eq!(g.settings.sort_merge.key, sorting::SortKey::Rarity);
+        assert_eq!(g.merge_first, Some(newest), "the picked card survives a re-sort");
+        assert_eq!(g.settings.sort_booklet, sorting::Sort::default(), "per screen");
+        // Loadout: Return equips the card under the (sorted) cursor.
+        g.open_loadout();
+        g.loadout_key(Keycode::R);
+        g.loadout_sel = 0;
+        g.loadout_key(Keycode::Return);
+        assert_eq!(g.booklet.lore.loadout, vec![newest]);
+        // Booklet: paging follows the sorted order.
+        g.mode = hud::Mode::Booklet;
+        g.booklet_page = 0;
+        g.settings.sort_booklet = sorting::Sort { key: sorting::SortKey::Number, dir: sorting::Dir::Desc };
+        assert_eq!(g.hud_view().booklet_cards.first().map(|c| c.number), Some(newest));
+    }
+
+    #[test]
+    fn sorted_screens_draw_and_old_settings_still_load() {
+        let mut g = game("sort_frames");
+        three_cards(&mut g);
+        g.settings.sort_booklet = sorting::Sort { key: sorting::SortKey::Rarity, dir: sorting::Dir::Desc };
+        g.settings.sort_merge = sorting::Sort { key: sorting::SortKey::Ability, dir: sorting::Dir::Asc };
+        g.settings.sort_loadout = sorting::Sort { key: sorting::SortKey::Dream, dir: sorting::Dir::Desc };
+        for mode in [hud::Mode::Booklet, hud::Mode::Merge, hud::Mode::Loadout] {
+            g.mode = mode;
+            assert!(shapes(&g) > 10, "{mode:?} drew nothing");
+        }
+        let old: settings::Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert_eq!(old.sort_merge, sorting::Sort::default());
+        let text = ron::ser::to_string(&g.settings).unwrap();
+        let back: settings::Settings = ron::from_str(&text).unwrap();
+        assert_eq!(back.sort_loadout, g.settings.sort_loadout);
     }
 
     #[test]

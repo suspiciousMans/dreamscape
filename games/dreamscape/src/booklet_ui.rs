@@ -219,7 +219,10 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p,
         screen,
         v,
-        "[a/d] turn page      [p] save these cards as images      [esc] back",
+        &format!(
+            "[a/d] turn page   [t] sort: {}   [r] flip   [p] save as images   [esc] back",
+            v.booklet_sort
+        ),
     );
 }
 
