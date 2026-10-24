@@ -142,13 +142,13 @@ fn effective_featured(featured: Option<DreamTheme>) -> Option<DreamTheme> {
 /// Rarity tables for the next pull: `(natural, final)`.
 /// `natural` has soft pity only; `final` also applies hard pity. A roll
 /// whose rarity differs between the two was changed by hard pity.
-fn rarity_tables(state: &LotteryState) -> ([f32; 5], [f32; 5]) {
+fn rarity_tables(state: &LotteryState, nudge: f32) -> ([f32; 5], [f32; 5]) {
     let lucid_pull = state.since_lucid.saturating_add(1);
     let prophetic_pull = state.since_prophetic.saturating_add(1);
 
     let ramp = lucid_pull.saturating_sub(SOFT_PITY_LUCID) as f32 * SOFT_PITY_STEP;
     let base_lucid_plus = BASE_ODDS[LUCID_INDEX] + BASE_ODDS[PROPHETIC_INDEX];
-    let lucid_plus = (base_lucid_plus + ramp).min(1.0);
+    let lucid_plus = (base_lucid_plus + ramp + nudge.max(0.0)).min(1.0);
 
     // Lucid+ mass is split Prophetic (fixed share) / Lucid (the rest); the
     // remaining mass keeps the base proportions of Faint/Hazy/Vivid.
@@ -190,7 +190,13 @@ fn pick_index(table: &[f32; 5], u: f32) -> usize {
 
 /// The exact current probabilities, pity included, for honest display.
 pub fn odds(state: &LotteryState, featured: Option<DreamTheme>) -> Odds {
-    let (_, fin) = rarity_tables(state);
+    odds_nudged(state, featured, 0.0)
+}
+
+/// `odds` with `nudge` (a probability, e.g. 0.01) added to the Lucid+ chance.
+/// Used by the daily fortune's streak bonus; 0 is the normal pull.
+pub fn odds_nudged(state: &LotteryState, featured: Option<DreamTheme>, nudge: f32) -> Odds {
+    let (_, fin) = rarity_tables(state, nudge);
     let n = pullable_themes().len() as f32;
     let (featured_share, other_share) = match effective_featured(featured) {
         Some(_) => {
@@ -236,8 +242,18 @@ fn roll_theme(rng: &mut StdRng, featured: Option<DreamTheme>) -> DreamTheme {
 /// One pull. Deterministic for `(state, seed, featured)`. The draw order
 /// from the seeded RNG is fixed: rarity roll, theme, foil.
 pub fn pull(state: &mut LotteryState, seed: u64, featured: Option<DreamTheme>) -> Pull {
+    pull_nudged(state, seed, featured, 0.0)
+}
+
+/// `pull` with a Lucid+ `nudge` (see `odds_nudged`); same draw order.
+pub fn pull_nudged(
+    state: &mut LotteryState,
+    seed: u64,
+    featured: Option<DreamTheme>,
+    nudge: f32,
+) -> Pull {
     let mut rng = StdRng::seed_from_u64(seed);
-    let (natural, fin) = rarity_tables(state);
+    let (natural, fin) = rarity_tables(state, nudge);
 
     let u: f32 = rng.gen();
     let index = pick_index(&fin, u);
