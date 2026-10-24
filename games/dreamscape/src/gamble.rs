@@ -43,7 +43,6 @@ pub const WAGER_YES: &str = "TAKE THE DEAL";
 pub const WAGER_YES_DESC: &str = "the next dream is harder: more enemies and a stronger hazard. dust earned in it is doubled and you get one extra rare card pick.";
 pub const WAGER_NO: &str = "NOT NOW";
 pub const WAGER_NO_DESC: &str = "stay in this dream. the usual door is still there.";
-pub const WAGER_TOAST: &str = "A SECOND DOOR HAS OPENED. YOU DO NOT HAVE TO TAKE IT.";
 
 /// The gambling state saved with a run.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +102,7 @@ impl RunState {
     }
 
     /// May the shop offer a gamble now? `done` = gambles this visit.
+    #[cfg(test)]
     pub fn open(dust: u32, done: u32) -> bool {
         done < MAX_PER_VISIT && !Self::stakes(dust).is_empty()
     }
