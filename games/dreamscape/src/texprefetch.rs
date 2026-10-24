@@ -62,4 +62,24 @@ mod tests {
         let other = crate::dream::portal_surface(ALL_THEMES[1], 9);
         assert_eq!(pre.pixels(&other), other.rgba(), "a miss falls back to making it now");
     }
+
+    #[test]
+    #[ignore]
+    fn texture_timing() {
+        let d = crate::dream::generate_with(
+            DreamTheme::Garden, 3, 4, None, true, Default::default(), Default::default(),
+        );
+        let s = &d.surfaces;
+        let specs = [&s.floor, &s.wall, &s.prop, &s.shard, &s.enemy, &s.floor, &s.wall];
+        let (mut ser, mut par) = (f64::MAX, f64::MAX);
+        for _ in 0..10 {
+            let t = std::time::Instant::now();
+            for sp in &specs { std::hint::black_box(sp.rgba()); }
+            ser = ser.min(t.elapsed().as_secs_f64() * 1e3);
+            let t = std::time::Instant::now();
+            std::hint::black_box(generate_all(&specs));
+            par = par.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("7 textures: serial {ser:.2} ms, threads {par:.2} ms");
+    }
 }
