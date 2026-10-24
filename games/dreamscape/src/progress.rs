@@ -390,6 +390,10 @@ pub struct SavedRun {
     /// === toolcards === tool card ids bought this run (deck runs).
     #[serde(default)]
     pub tool_cards: Vec<u32>,
+    /// === decksave === the whole deck mid-run (older saves: none, and the
+    /// run resumes on the fixed kit as before).
+    #[serde(default)]
+    pub deck: Option<crate::deck::DeckSave>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -680,6 +684,7 @@ mod tests {
             form: Default::default(),
             gamble: Default::default(),
             tool_cards: Vec::new(),
+            deck: None,
         }
     }
 

@@ -29,6 +29,10 @@ pub struct LoadoutView {
     pub companion: Option<String>,
     /// The sort label shown in the hint bar (empty = none).
     pub sort: String,
+    /// === decklife === deck-wide passive status for the note line, and the
+    /// booklet numbers whose passives the cap benched (empty = none/auto deck).
+    pub passives: String,
+    pub benched: Vec<u32>,
 }
 
 /// Adds the card, or takes it out if it's already in. A full loadout

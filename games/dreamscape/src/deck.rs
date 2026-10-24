@@ -7,6 +7,7 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 
 /// Fewest and most cards a deck is built from.
 pub const DECK_MIN: usize = 3;
@@ -83,6 +84,22 @@ impl Default for DeckPerks {
 }
 // === end upgrades2 ===
 
+// === decksave ===
+/// A deck mid-run, as written into the saved run (`SavedRun::deck`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeckSave {
+    pub seed: u64,
+    pub epoch: u32,
+    pub draw: Vec<u32>,
+    pub hand: Vec<Option<u32>>,
+    pub discard: Vec<(u32, f32)>,
+    pub waiting: Vec<(usize, f32)>,
+    pub cooldowns: Vec<(u32, f32)>,
+    pub played: Vec<u32>,
+    pub free_used: u32,
+}
+// === end decksave ===
+
 /// What happened, for the animation layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeckEvent {
@@ -114,6 +131,10 @@ pub struct Deck {
     /// Seconds until each card can be used again. Travels with the card.
     cooldowns: Vec<(u32, f32)>,
     rng: StdRng,
+    /// The dream seed the deck was built from, and how many times its random
+    /// stream has been re-seeded by a resume (a stream cannot be saved).
+    seed: u64,
+    epoch: u32,
     events: Vec<DeckEvent>,
     // === upgrades2 ===
     pub perks: DeckPerks,
@@ -147,12 +168,60 @@ impl Deck {
             discard: Vec::new(),
             waiting: Vec::new(),
             rng,
+            seed,
+            epoch: 0,
             events: Vec::new(),
             perks: DeckPerks::default(),
             free_used: 0,
             played: Vec::new(),
         }
     }
+
+    // === decksave ===
+    /// Everything a resumed run needs to carry on with this exact deck.
+    pub fn snapshot(&self) -> DeckSave {
+        DeckSave {
+            seed: self.seed,
+            epoch: self.epoch,
+            draw: self.draw.clone(),
+            hand: self.hand.clone(),
+            discard: self.discard.clone(),
+            waiting: self.waiting.clone(),
+            cooldowns: self.cooldowns.clone(),
+            played: self.played.clone(),
+            free_used: self.free_used,
+        }
+    }
+
+    /// The deck as saved: same draw order, hand, discard and cooldowns. Its
+    /// random stream is re-seeded from the saved counter (a stream cannot be
+    /// saved), so later shuffles are deterministic but differ from an
+    /// unbroken run's.
+    pub fn restore(save: &DeckSave) -> Self {
+        let epoch = save.epoch + 1;
+        Self {
+            draw: save.draw.clone(),
+            hand: save.hand.clone(),
+            discard: save.discard.clone(),
+            waiting: save.waiting.clone(),
+            cooldowns: save.cooldowns.clone(),
+            rng: StdRng::seed_from_u64(save.seed ^ SEED_MIX ^ ((epoch as u64) << 40)),
+            seed: save.seed,
+            epoch,
+            events: Vec::new(),
+            perks: DeckPerks::default(),
+            free_used: save.free_used,
+            played: save.played.clone(),
+        }
+    }
+
+    /// Every booklet card (no tool cards) in the deck, in id order.
+    pub fn booklet_cards(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| !is_tool(c)).collect();
+        v.sort_unstable();
+        v
+    }
+    // === end decksave ===
 
     /// Sizes the hand to `hand_size` slots and draws into every empty one
     /// that the draw pile can fill. A deck smaller than the hand leaves the
@@ -610,6 +679,67 @@ mod tests {
             }
         }
     }
+
+    // === decksave ===
+    #[test]
+    fn a_saved_deck_restores_the_same_hand_and_draw_order() {
+        for seed in 0..30u64 {
+            let mut d = Deck::new(&[3, 4, 5, 6, 7, 8, 9], seed);
+            d.draw_to_fill(5);
+            d.play(1, 7.0);
+            d.insert_shuffled(tool_id(crate::upgrades::Ability::Dash), seed);
+            d.tick(0.1);
+            let save = d.snapshot();
+            let text = ron::ser::to_string_pretty(&save, ron::ser::PrettyConfig::default()).unwrap();
+            let back: DeckSave = ron::from_str(&text).unwrap();
+            assert_eq!(back, save, "survives ron");
+            let r = Deck::restore(&back);
+            assert_eq!(r.hand(), d.hand());
+            assert_eq!(r.draw, d.draw);
+            assert_eq!(r.discard, d.discard);
+            assert_eq!(r.tool_cards(), d.tool_cards());
+            assert_eq!(r.cooldown(4), d.cooldown(4));
+            assert_eq!(r.played, d.played);
+        }
+    }
+
+    #[test]
+    fn nothing_is_lost_or_duplicated_across_save_restore_cycles() {
+        for seed in 0..40u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let n = rng.gen_range(1..=DECK_MAX as u32);
+            let cards: Vec<u32> = (10..10 + n).collect();
+            let mut d = Deck::new(&cards, seed);
+            d.draw_to_fill(rng.gen_range(1..=5));
+            for step in 0..300 {
+                if rng.gen_bool(0.5) {
+                    let slot = rng.gen_range(0..d.hand().len());
+                    d.play(slot, rng.gen_range(0.0..8.0));
+                }
+                if step % 17 == 0 {
+                    d = Deck::restore(&d.snapshot());
+                }
+                d.tick(rng.gen_range(0.0..0.5));
+                assert_eq!(sorted(d.all_cards()), cards, "seed {seed} step {step}");
+                d.events();
+            }
+            assert_eq!(d.booklet_cards(), cards);
+        }
+    }
+
+    #[test]
+    fn a_restored_deck_shuffles_on_its_own_deterministic_stream() {
+        let mut a = Deck::new(&[1, 2, 3, 4, 5, 6], 9);
+        a.draw_to_fill(3);
+        a.play(0, 1.0);
+        let save = a.snapshot();
+        let (mut x, mut y) = (Deck::restore(&save), Deck::restore(&save));
+        x.tick(2.0);
+        y.tick(2.0);
+        assert_eq!(x.draw, y.draw);
+        assert_eq!(x.hand(), y.hand());
+    }
+    // === end decksave ===
 
     #[test]
     fn saved_decks_are_cleaned() {
