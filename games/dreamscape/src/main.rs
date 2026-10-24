@@ -15414,6 +15414,7 @@ mod screen_smoke {
             riffle_since: hand::NEVER,
             leaving: vec![],
             back,
+            ..hand::HandPile::default()
         };
         let paint = |back: Option<store::CardBack>, since_draw: f32, reduced: bool| {
             let mut s = String::new();
