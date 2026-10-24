@@ -23,6 +23,7 @@ use engine::ui::EguiState;
 
 use engine::ui::egui;
 
+mod abilities2;
 mod access;
 mod attunement;
 mod achievements;
@@ -429,6 +430,13 @@ fn event_icon(plan: events::Plan) -> upgrades::Icon {
         VoiceCard => Icon::Shard,
         FreeReroll => Icon::Brain,
         MoonBlink | MoonSteady => Icon::Eye,
+        // === events2 ===
+        DustGamble | Handout | ChordGamble | SwapUpgrade => Icon::Gem,
+        BorrowedPick | TwoRerolls => Icon::Brain,
+        CurseForShard | ShardOnly | ShardThin => Icon::Shard,
+        ShedCurse => Icon::Lid,
+        TwistOnly | TwistDust | GildOnly | GildThin => Icon::Eye,
+        // === end events2 ===
     }
 }
 
@@ -554,6 +562,8 @@ pub struct DreamscapeGame {
     air_until: f32,
     air_refunded: bool,
     counter_cd: f32,
+    /// THIN SKIN's lost nerve has been taken off this run's max. // === upgrades2 ===
+    thin_skin_applied: bool,
     /// The combat edges the equipped cards teach.
     edges: Vec<edges::Edge>,
     /// FLOURISH's chain, SIPHON's tally, HEXMARK's marks, a LUNGE under way.
@@ -651,6 +661,15 @@ pub struct DreamscapeGame {
     slam: u8,
     /// STEP: where the next steps go (spawned with the GL context in hand), and the live ones.
     step_pending: Option<Vec<Vec3>>,
+    // === abilities2 ===
+    surge: abilities2::Surge,
+    /// Speed multiplier of the dash in flight (a SURGE doubles it).
+    dash_boost: f32,
+    /// HASTE: the zone and the disc that draws it.
+    haste: Option<(abilities2::HasteField, Option<Entity>)>,
+    /// PULSE: pillars standing over what hides behind walls.
+    pulse_marks: Vec<Entity>,
+    // === end abilities2 ===
     steps: Vec<Entity>,
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
@@ -1007,6 +1026,7 @@ impl DreamscapeGame {
             air_until: 0.0,
             air_refunded: false,
             counter_cd: 0.0,
+            thin_skin_applied: false,
             edges: Vec::new(),
             flourish: edges::Chain::default(),
             siphon: edges::Tally::default(),
@@ -1057,6 +1077,12 @@ impl DreamscapeGame {
             stunned: HashMap::new(),
             slam: 0,
             step_pending: None,
+            // === abilities2 ===
+            surge: abilities2::Surge::default(),
+            dash_boost: 1.0,
+            haste: None,
+            pulse_marks: Vec::new(),
+            // === end abilities2 ===
             steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -1386,7 +1412,7 @@ impl DreamscapeGame {
                 format!(
                     "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
                     self.run.rerolls_left(),
-                    if pfx.skip_pays_nothing { 0 } else { upgrades::SKIP_DUST }
+                    if pfx.skip_pays_nothing { 0 } else { self.run.skip_dust() }
                 )
             },
         };
@@ -1639,7 +1665,9 @@ impl DreamscapeGame {
     }
 
     fn moth_terms(&self) -> moth_shop::Terms {
-        moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks))
+        let mut t = moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks));
+        t.pct_off += self.run.moth_pct_off(); // === upgrades2 ===
+        t
     }
 
     fn perk_fx(&self) -> store::PerkFx {
@@ -1659,11 +1687,11 @@ impl DreamscapeGame {
         self.moth_after_nightmare();
         self.boss_reward = false;
         if !pacts::effects(&self.pacts).skip_pays_nothing {
-            self.bonus_dust += upgrades::SKIP_DUST + self.perk_fx().skip_bonus; // === pacts ===
+            self.bonus_dust += self.run.skip_dust() + self.perk_fx().skip_bonus; // === pacts ===
         }
         self.stats.skipped += 1;
         self.coop_ready();
-        log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
+        log::info!("Skipped the pick (+{} dust)", self.run.skip_dust());
     }
 
     fn open_wake_choice(&mut self) {
@@ -1949,9 +1977,11 @@ impl DreamscapeGame {
 
     /// Deck runs: advances the deck, and turns its draws into hand slots.
     fn update_deck(&mut self, dt: f32) {
+        let perks = self.run.deck_perks(); // === upgrades2 ===
         let Some(deck) = self.deck.as_mut() else {
             return;
         };
+        deck.perks = perks; // === upgrades2 ===
         self.deck_clock += dt;
         deck.tick(dt);
         let events = deck.events();
@@ -2036,7 +2066,7 @@ impl DreamscapeGame {
         self.hand_cards = nums
             .iter()
             .filter_map(|&n| self.booklet.card(n))
-            .map(|c| (powers::power(c.theme).active, c.clone()))
+            .map(|c| (crate::powers::power_of(c).active, c.clone()))
             .collect();
         self.deck = Some(d);
         self.deck_opening = opening.clone();
@@ -2064,7 +2094,7 @@ impl DreamscapeGame {
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
                 let slot_card = self.card_for_slot(k, a.ability);
-                let passive = slot_card.map(|n| powers::power(n.1.theme).passive);
+                let passive = slot_card.map(|n| crate::powers::power_of(&n.1).passive);
                 let edge = slot_card.and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
                 // === deck ===
                 let since_draw = if self.deck.is_some() {
@@ -2118,7 +2148,13 @@ impl DreamscapeGame {
         }
         let active = !self.coop_active() && (!self.autopilot || dev_from.is_some());
         // === combat passives ===
-        let want_max = (nerve::START + self.run.count(Upgrade::SecondHeartbeat)).min(nerve::MAX);
+        // === upgrades2 === THIN SKIN's price, then IRON NERVE and friends
+        if self.run.has_curse(upgrades::Curse::ThinSkin) && !self.thin_skin_applied {
+            self.thin_skin_applied = true;
+            self.nerve.lower_max(1);
+        }
+        let want_max = self.run.nerve_max();
+        // === end upgrades2 ===
         if want_max > self.nerve.max() {
             self.nerve.raise_max(want_max - self.nerve.max());
         }
@@ -2173,7 +2209,8 @@ impl DreamscapeGame {
         // === end sounds ===
         let wants = std::mem::take(&mut self.strike_request);
         if active && wants {
-            let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
+            let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32)
+                * self.run.strike_cooldown(); // === upgrades2 ===
             if self.has_edge(edges::Edge::Quickdraw) {
                 quick *= edges::QUICKDRAW_MULT;
             }
@@ -2196,14 +2233,14 @@ impl DreamscapeGame {
                 }
                 // Every other swing comes back, a little lower.
                 self.sfx_pitched(Sound::Strike, if self.strike_count % 2 == 1 { 0.9 } else { 1.0 });
-                let arc = if self.run.count(Upgrade::WideEyes) > 0 {
-                    combat::ARC_COS_WIDE
-                } else {
-                    combat::ARC_COS
-                };
+                let arc = self.strike_arc_cos();
+                // === edges2 === CLEAVE and LONGARM show on the swing
+                self.edge_fires(edges::Edge::Cleave);
+                self.edge_fires(edges::Edge::Longarm);
+                // === end edges2 ===
                 self.slash_pending = Some(SlashStart {
                     facing: self.flat_facing(),
-                    reach: combat::reach_with(self.run.count(Upgrade::LongReach)),
+                    reach: self.strike_reach(),
                     half_arc: arc.acos(),
                     flip: self.strike_count % 2 == 1, // every other swing comes back
                 });
@@ -2424,7 +2461,9 @@ impl DreamscapeGame {
         let me = self.player_position;
         combat::Ctx {
             // BLINK sets up a sneak attack; HUSH deepens it.
-            unaware: t.unaware || self.dream_age < self.backstab_until,
+            unaware: t.unaware
+                || self.dream_age < self.backstab_until
+                || self.run.active(Ability::Veil), // === abilities2 ===
             airborne: !self.player_grounded
                 || self.run.active(Ability::Float)
                 || (self.run.count(Upgrade::Spring) > 0
@@ -2441,6 +2480,31 @@ impl DreamscapeGame {
                 && me.y - t.pos.y > combat::HIGH_GROUND_RISE,
         }
     }
+
+    // === edges2 ===
+    /// The strike's reach: LONG REACH cards, then LONGARM.
+    fn strike_reach(&self) -> f32 {
+        edges::reach(
+            combat::reach_with(self.run.count(Upgrade::LongReach)),
+            self.has_edge(edges::Edge::Longarm),
+        )
+    }
+
+    /// The strike's half-arc cosine: WIDE EYES, then CLEAVE.
+    fn strike_arc_cos(&self) -> f32 {
+        let base = if self.run.count(Upgrade::WideEyes) > 0 {
+            combat::ARC_COS_WIDE
+        } else {
+            combat::ARC_COS
+        };
+        edges::arc_cos(base, self.has_edge(edges::Edge::Cleave))
+    }
+
+    /// Is this foe still untouched?
+    fn foe_is_fresh(&self, t: &CombatTarget) -> bool {
+        self.foes.get(&t.entity).map_or(true, |f| f.hp >= f.max)
+    }
+    // === end edges2 ===
 
     fn has_edge(&self, e: edges::Edge) -> bool {
         self.edges.contains(&e)
@@ -2476,6 +2540,9 @@ impl DreamscapeGame {
             dmg += edges::EDGE_BONUS;
         }
         // === end edges ===
+        // === edges2 === AMBUSH, OPENER, PUNISHER
+        dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
+        // === end edges2 ===
         dmg
     }
 
@@ -2500,6 +2567,11 @@ impl DreamscapeGame {
                     self.marks.insert(t.entity, edges::HEXMARK_SECS);
                 }
                 // === end edges ===
+                // === edges2 === RIPPLE: the foes beside the target reel
+                if self.has_edge(edges::Edge::Ripple) {
+                    self.ripple(t);
+                }
+                // === end edges2 ===
                 let away = Vec3::new(t.pos.x - from.x, 0.0, t.pos.z - from.z).normalize_or_zero();
                 if knock > 0.0 && !self.run.active(Ability::Stillness) {
                     if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
@@ -2544,6 +2616,28 @@ impl DreamscapeGame {
         }
     }
 
+    // === edges2 ===
+    /// RIPPLE: every other foe near `t` reels briefly. Returns how many.
+    fn ripple(&mut self, t: &CombatTarget) -> usize {
+        let near: Vec<CombatTarget> = self
+            .combat_targets()
+            .into_iter()
+            .filter(|o| o.entity != t.entity && o.pos.distance(t.pos) <= edges::RIPPLE_REACH)
+            .collect();
+        for o in &near {
+            if matches!(o.kind, combat::Kind::Pacer { .. }) {
+                self.stunned.insert(o.entity, edges::RIPPLE_STAGGER);
+            } else {
+                self.staggered.insert(o.entity, edges::RIPPLE_STAGGER);
+            }
+        }
+        if !near.is_empty() {
+            self.edge_fires(edges::Edge::Ripple);
+        }
+        near.len()
+    }
+    // === end edges2 ===
+
     /// An area effect: every foe within `reach` of `centre` takes `dmg`
     /// (0 = stagger only) and reels. Returns how many were touched.
     fn shock(&mut self, centre: Vec3, reach: f32, dmg: f32, stagger: f32) -> usize {
@@ -2572,12 +2666,8 @@ impl DreamscapeGame {
         let me = self.player_position;
         let facing = self.flat_facing();
         let mut struck = false;
-        let reach = combat::reach_with(self.run.count(Upgrade::LongReach));
-        let arc = if self.run.count(Upgrade::WideEyes) > 0 {
-            combat::ARC_COS_WIDE
-        } else {
-            combat::ARC_COS
-        };
+        let reach = self.strike_reach();
+        let arc = self.strike_arc_cos();
         let mut knock = combat::KNOCKBACK
             * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
         // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
@@ -2863,8 +2953,18 @@ impl DreamscapeGame {
             combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
         );
         self.bonus_dust += loot.dust;
+        // === edges2 === WINDFALL: extra dust; LANTERN: always a mote
+        if self.has_edge(edges::Edge::Windfall) {
+            self.bonus_dust += edges::WINDFALL_DUST;
+            self.edge_fires(edges::Edge::Windfall);
+        }
+        let lantern = self.has_edge(edges::Edge::Lantern);
+        if lantern {
+            self.edge_fires(edges::Edge::Lantern);
+        }
+        // === end edges2 ===
         self.sfx_pitched(Sound::Coin, 1.0 + 0.04 * loot.dust.min(5) as f32);
-        if loot.mote {
+        if loot.mote || lantern {
             self.pending_motes.push(pos);
         }
         log::info!("Unravelled (+{} dust{})", loot.dust, if loot.mote { ", a calm mote" } else { "" });
@@ -2877,6 +2977,7 @@ impl DreamscapeGame {
     fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
         let away = self.away_from_nearest_threat();
         let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
+            + self.run.afterglow() // === upgrades2 ===
             + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
             nerve::Hit::Down => {
@@ -3171,6 +3272,13 @@ impl DreamscapeGame {
                 self.knock_leech(e, false);
                 continue;
             }
+            // === abilities2 ===
+            if self.run.active(Ability::Mirror) {
+                self.break_mirror();
+                self.knock_leech(e, false);
+                continue;
+            }
+            // === end abilities2 ===
             if let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == e).map(|s| &mut s.ai) {
                 lc.latch_on();
             }
@@ -3273,7 +3381,7 @@ impl DreamscapeGame {
             let card = self.card_for_slot(i, a).map(|n| &n.1);
             u == Upgrade::Learn(a)
                 || card.is_some_and(|c| {
-                    powers::power(c.theme).passive == u
+                    crate::powers::power_of(c).passive == u
                         || c.fused.is_some_and(|b| powers::power(b).passive == u)
                 })
         };
@@ -5316,6 +5424,12 @@ impl DreamscapeGame {
             self.sfx(Sound::Denied);
             return;
         }
+        // === abilities2 === nothing to act on: the charge is kept
+        if !self.abilities2_ready(state.ability) {
+            self.sfx(Sound::Denied);
+            return;
+        }
+        // === end abilities2 ===
         // Chained soon after another ability: a combo.
         let combo = self
             .last_ability
@@ -5466,6 +5580,7 @@ impl DreamscapeGame {
             self.combat_on_use(state.ability, origin);
             self.anchor_snapped = false;
             // === end combat ===
+            self.abilities2_on_use(state.ability, mult, stretch); // === abilities2 ===
             if cracks {
                 self.open_secret();
             }
@@ -5531,6 +5646,16 @@ impl DreamscapeGame {
                 Ability::Step => [0.6, 0.8, 1.0],
                 Ability::Hush => [0.7, 0.6, 1.0],
                 Ability::Gust => [0.8, 1.0, 0.9],
+                // === abilities2 ===
+                Ability::Tether => [0.4, 1.0, 0.7],
+                Ability::Mirror => [0.85, 0.9, 1.0],
+                Ability::Quake => [0.8, 0.6, 0.4],
+                Ability::Veil => [0.5, 0.45, 0.8],
+                Ability::Surge => [1.0, 0.85, 0.3],
+                Ability::Pulse => [0.6, 1.0, 1.0],
+                Ability::Haste => [1.0, 0.6, 0.5],
+                Ability::Bind => [0.6, 0.9, 0.4],
+                // === end abilities2 ===
             };
             let tint = self
                 .ability_tints
@@ -5559,6 +5684,16 @@ impl DreamscapeGame {
                 Ability::Step => Sound::StepRise,
                 Ability::Hush => Sound::HushOn,
                 Ability::Gust => Sound::Gust,
+                // === abilities2 ===
+                Ability::Tether => Sound::TetherPull,
+                Ability::Mirror => Sound::MirrorUp,
+                Ability::Quake => Sound::QuakeRumble,
+                Ability::Veil => Sound::VeilOn,
+                Ability::Surge => Sound::SurgeUp,
+                Ability::Pulse => Sound::PulsePing,
+                Ability::Haste => Sound::HasteOn,
+                Ability::Bind => Sound::BindClamp,
+                // === end abilities2 ===
             });
             self.last_ability = Some((state.ability, self.dream_age));
             self.ability_used.retain(|u| u.0 != state.ability);
@@ -5572,6 +5707,185 @@ impl DreamscapeGame {
             }
         }
     }
+
+    // === abilities2 ===
+    /// Can `a` be used right now? (No target, or nothing underfoot: the
+    /// charge is kept.)
+    fn abilities2_ready(&self, a: Ability) -> bool {
+        match a {
+            Ability::Quake => abilities2::quake_allowed(self.player_grounded),
+            Ability::Bind => self.bind_target().is_some(),
+            Ability::Tether => self.tether_target().is_some(),
+            _ => true,
+        }
+    }
+
+    /// The nearest thing BIND can root.
+    fn bind_target(&self) -> Option<CombatTarget> {
+        let targets = self.combat_targets();
+        let pts: Vec<Vec3> = targets.iter().map(|t| t.pos).collect();
+        let i = abilities2::bind_pick(self.player_position, &pts)?;
+        targets.into_iter().nth(i)
+    }
+
+    /// Roots one foe: a pacer is stunned, the rest stagger (a strike
+    /// cuts a staggered foe deeper).
+    fn bind_foe(&mut self, t: &CombatTarget) {
+        if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, abilities2::BIND_SECS);
+        } else {
+            self.staggered.insert(t.entity, abilities2::BIND_SECS);
+        }
+    }
+
+    /// The nearest shard or calm mote TETHER would pull: (where it is, the
+    /// mote's entity or `None` for the shard).
+    fn tether_target(&self) -> Option<(Vec3, Option<Entity>)> {
+        let mut pts = Vec::new();
+        let mut who = Vec::new();
+        for (e, _) in &self.motes {
+            if let Ok(t) = self.world.get::<&Transform>(*e) {
+                pts.push(t.position);
+                who.push(Some(*e));
+            }
+        }
+        if let Some(&s) = self.shard_entities.first() {
+            if let Ok(t) = self.world.get::<&Transform>(s) {
+                pts.push(t.position);
+                who.push(None);
+            }
+        }
+        let i = abilities2::tether_pick(self.player_position, &pts)?;
+        Some((pts[i], who[i]))
+    }
+
+    /// The effects that happen the moment an ability fires.
+    fn abilities2_on_use(&mut self, a: Ability, _cd_mult: f32, stretch: f32) {
+        let me = self.player_position;
+        match a {
+            Ability::Surge => self.surge.arm(),
+            Ability::Dash => self.dash_boost = self.surge.take_dash(),
+            Ability::Quake => {
+                self.shock(me, abilities2::QUAKE_REACH, 0.0, abilities2::QUAKE_STAGGER);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+            Ability::Bind => {
+                if let Some(t) = self.bind_target() {
+                    self.bind_foe(&t);
+                }
+            }
+            Ability::Haste => {
+                let secs = Ability::Haste.duration() * stretch;
+                let disc = match (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+                    (Some(tex), Ok(mesh)) => Some(self.world.spawn((
+                        Transform {
+                            position: me - Vec3::Y * 0.95,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::new(abilities2::HASTE_RADIUS * 2.0, 0.02, abilities2::HASTE_RADIUS * 2.0),
+                        },
+                        MeshRenderer { mesh, texture: Some(tex) },
+                        Translucent,
+                        Lit,
+                    ))),
+                    _ => None,
+                };
+                if let Some((_, Some(old))) = self.haste.take() {
+                    let _ = self.world.despawn(old);
+                }
+                self.haste = Some((abilities2::HasteField::new(me, secs), disc));
+            }
+            Ability::Pulse => self.pulse_reveal(),
+            _ => {}
+        }
+    }
+
+    /// PULSE: a tall pillar over the cracked wall and over every Shade.
+    fn pulse_reveal(&mut self) {
+        let (Some(tex), Ok(mesh)) = (self.player_tex.clone(), self.mesh(Shape::Cube)) else {
+            return;
+        };
+        let mut spots: Vec<Vec3> = Vec::new();
+        if let Some(s) = self.secret.as_ref().filter(|s| s.wall.is_some()) {
+            spots.push(s.at);
+        }
+        for p in self.enemies.iter().filter(|p| p.elite == Some(Elite::Shade)) {
+            if let Ok(t) = self.world.get::<&Transform>(p.entity) {
+                spots.push(t.position);
+            }
+        }
+        for at in spots {
+            let e = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * abilities2::PULSE_PILLAR_HEIGHT * 0.5,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(0.2, abilities2::PULSE_PILLAR_HEIGHT, 0.2),
+                },
+                MeshRenderer { mesh: mesh.clone(), texture: Some(tex.clone()) },
+                Translucent,
+                Lit,
+            ));
+            self.pulse_marks.push(e);
+        }
+    }
+
+    /// MIRROR: the blow is thrown back; the attacker is hurt, all near reel.
+    fn break_mirror(&mut self) {
+        for a in &mut self.run.abilities {
+            if a.ability == Ability::Mirror {
+                a.active = 0.0;
+            }
+        }
+        self.grace = self.grace.max(abilities2::MIRROR_GRACE);
+        let me = self.player_position;
+        self.ward_reflect();
+        self.shock(me, abilities2::MIRROR_REACH, 0.0, abilities2::MIRROR_STUN);
+        self.flash.trigger([0.85, 0.9, 1.0], 0.5);
+        self.burst_pending = Some((me, [200, 220, 255], [255, 255, 255]));
+        self.sfx(Sound::MirrorBreak);
+        log::info!("The mirror threw the blow back");
+    }
+
+    /// Per frame: TETHER pulls, the HASTE zone fades, SURGE and PULSE end.
+    fn update_abilities2(&mut self, dt: f32) {
+        if !self.run.active(Ability::Surge) {
+            self.surge.clear();
+        }
+        if !self.run.active(Ability::Dash) {
+            self.dash_boost = 1.0;
+        }
+        if self.run.active(Ability::Tether) {
+            if let Some((pos, who)) = self.tether_target() {
+                let next = abilities2::tether_step(pos, self.player_position, dt);
+                match who {
+                    Some(e) => {
+                        if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                            t.position = next;
+                        }
+                    }
+                    None => {
+                        for &e in &self.shard_entities {
+                            if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                                t.position += next - pos;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((mut f, disc)) = self.haste.take() {
+            if f.tick(dt) {
+                self.haste = Some((f, disc));
+            } else if let Some(e) = disc {
+                let _ = self.world.despawn(e);
+            }
+        }
+        if !self.run.active(Ability::Pulse) {
+            for e in self.pulse_marks.drain(..) {
+                let _ = self.world.despawn(e);
+            }
+        }
+    }
+    // === end abilities2 ===
 
     /// SHARD CALL: the shard (and its beacon) drift toward the dreamer.
     fn pull_shard(&mut self, dt: f32) {
@@ -6530,6 +6844,7 @@ impl DreamscapeGame {
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
             * self.active_form.speed_mult()
+            * self.haste.map_or(1.0, |h| h.0.player_mult(self.player_position)) // === abilities2 ===
             // === shards ===
             * shard_rules::heavy_mults(self.heavy_elapsed()).0
             // === end shards ===
@@ -7512,6 +7827,7 @@ impl DreamscapeGame {
             nerve::Nerve::default()
         };
         self.strike_count = 0;
+        self.thin_skin_applied = false; // === upgrades2 ===
         self.calm_timer = 0.0;
         if let Some(id) = self
             .booklet
@@ -7551,7 +7867,7 @@ impl DreamscapeGame {
         if self.deck.is_none() {
             self.hand_cards = cards
                 .iter()
-                .map(|c| (powers::power(c.theme).active, c.clone()))
+                .map(|c| (crate::powers::power_of(c).active, c.clone()))
                 .collect();
         }
         let tint_cards: Vec<&cards::Card> = if self.deck.is_some() {
@@ -7564,8 +7880,8 @@ impl DreamscapeGame {
             .map(|c| {
                 let accents = c.fused.unwrap_or(c.theme).spec().accents;
                 (
-                    powers::power(c.theme).active,
-                    powers::power(c.theme).tint,
+                    crate::powers::power_of(c).active,
+                    crate::powers::power_of(c).tint,
                     accents[accents.len().min(2) - 1],
                 )
             })
@@ -8625,6 +8941,12 @@ impl DreamscapeGame {
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.anchor = None;
+        // === abilities2 === (the world was cleared: the entities are gone)
+        self.haste = None;
+        self.pulse_marks.clear();
+        self.surge.clear();
+        self.dash_boost = 1.0;
+        // === end abilities2 ===
         self.last_ability = None;
         self.ability_used.clear();
         self.passive_fired.clear();
@@ -10538,6 +10860,7 @@ impl Game for DreamscapeGame {
         // === combat ===
         self.update_combat(dt);
         // === end combat ===
+        self.update_abilities2(dt); // === abilities2 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
@@ -10634,7 +10957,7 @@ impl Game for DreamscapeGame {
         let dashing = self.run.active(Ability::Dash);
         if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
             let v = if dashing {
-                self.facing * gameplay::MOVE_SPEED * upgrades::DASH_SPEED_MULT
+                self.facing * gameplay::MOVE_SPEED * upgrades::DASH_SPEED_MULT * self.dash_boost
             } else {
                 desired
             };
@@ -10671,7 +10994,7 @@ impl Game for DreamscapeGame {
                 self.air_jumps_used = 0;
             }
             if wants_jump && body.grounded {
-                body.velocity.y = jump_speed;
+                body.velocity.y = jump_speed * self.surge.take_jump(); // === abilities2 ===
                 self.jump_event = true; // === combat === a leech counts it
                 if jump_pressed {
                     self.sfx(Sound::Jump);
@@ -10679,7 +11002,7 @@ impl Game for DreamscapeGame {
                 }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
-                body.velocity.y = jump_speed;
+                body.velocity.y = jump_speed * self.surge.take_jump(); // === abilities2 ===
                 self.jump_event = true; // === combat === a leech counts it
                 self.sfx(Sound::AirJump);
                 fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::DoubleJump);
@@ -10716,6 +11039,11 @@ impl Game for DreamscapeGame {
         } else {
             1.0
         };
+        // === abilities2 ===
+        let veiled = self.run.active(Ability::Veil);
+        let pulsing = self.run.active(Ability::Pulse);
+        let haste = self.haste.map(|h| h.0);
+        // === end abilities2 ===
         // === shards ===
         let want_alert = shard_rules::heavy_mults(self.heavy_elapsed()).1;
         if (want_alert - self.heavy_applied).abs() > 1e-4 {
@@ -10749,7 +11077,17 @@ impl Game for DreamscapeGame {
                 } else {
                     nearest(&hunted, t.position)
                 };
-                p.ai.update(&mut t.position, target, dt * hush);
+                // === abilities2 === VEIL: they lose you; HASTE: they drag in the zone
+                if veiled && p.ai.chasing {
+                    p.ai.reset();
+                }
+                let drag = haste.map_or(1.0, |h| h.foe_mult(t.position));
+                p.ai.update(
+                    &mut t.position,
+                    abilities2::seen_from(target, veiled),
+                    dt * hush * drag,
+                );
+                // === end abilities2 ===
                 // Swell when they notice you: the tell that you've been seen.
                 let size = if p.ai.chasing { 1.25 } else { 0.9 }
                     * match p.elite {
@@ -10758,7 +11096,12 @@ impl Game for DreamscapeGame {
                         _ => 1.0,
                     };
                 let hidden = p.elite == Some(Elite::Shade)
-                    && (t.position - self.player_position).length() > specials::SHADE_SHOWS_WITHIN;
+                    && (t.position - self.player_position).length()
+                        > if pulsing {
+                            abilities2::PULSE_SHADE_SHOWS // === abilities2 ===
+                        } else {
+                            specials::SHADE_SHOWS_WITHIN
+                        };
                 t.scale = Vec3::splat(if hidden { 0.0 } else { size });
                 if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
@@ -10985,6 +11328,9 @@ impl Game for DreamscapeGame {
         let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
             self.break_ward();
             self.ward_reflect(); // combat
+            None
+        } else if caught_by.is_some() && self.run.active(Ability::Mirror) {
+            self.break_mirror(); // === abilities2 ===
             None
         } else {
             caught_by
@@ -11943,6 +12289,113 @@ mod screen_smoke {
         cards::card_from(&cards::tests::record(theme, seed, 3, 0.4, false))
     }
 
+    // === abilities2 ===
+    #[test]
+    fn quake_staggers_what_is_near_and_needs_the_ground() {
+        let mut g = fighter("quake", Some(Ability::Quake));
+        let near = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), false);
+        let far = put_pacer(&mut g, Vec3::new(abilities2::QUAKE_REACH + 4.0, 1.0, 0.0), false);
+        assert!(g.abilities2_ready(Ability::Quake));
+        g.abilities2_on_use(Ability::Quake, 1.0, 1.0);
+        assert_eq!(g.stunned.get(&near), Some(&abilities2::QUAKE_STAGGER));
+        assert!(!g.stunned.contains_key(&far));
+        g.player_grounded = false;
+        assert!(!g.abilities2_ready(Ability::Quake), "no ground, no quake");
+    }
+
+    #[test]
+    fn bind_roots_only_the_nearest_enemy_and_needs_one() {
+        let mut g = fighter("bind", Some(Ability::Bind));
+        assert!(!g.abilities2_ready(Ability::Bind), "nothing to bind");
+        let a = put_pacer(&mut g, Vec3::new(8.0, 1.0, 0.0), true);
+        let b = put_pacer(&mut g, Vec3::new(2.0, 1.0, 0.0), true);
+        assert!(g.abilities2_ready(Ability::Bind));
+        g.abilities2_on_use(Ability::Bind, 1.0, 1.0);
+        assert_eq!(g.stunned.get(&b), Some(&abilities2::BIND_SECS));
+        assert!(!g.stunned.contains_key(&a));
+    }
+
+    #[test]
+    fn a_bound_special_staggers_for_the_whole_bind() {
+        let mut g = fighter("bind2", Some(Ability::Bind));
+        let e = put_special(&mut g, EnemyKind::Stalker, Vec3::new(3.0, 1.0, 0.0), SpecialAI::Stalker(specials::Stalker::new(Vec3::new(3.0, 1.0, 0.0), 5.0)));
+        g.abilities2_on_use(Ability::Bind, 1.0, 1.0);
+        assert_eq!(g.staggered.get(&e), Some(&abilities2::BIND_SECS));
+    }
+
+    #[test]
+    fn a_mirror_throws_the_blow_back_once() {
+        let mut g = fighter("mirror", Some(Ability::Mirror));
+        let hitter = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        let bystander = put_pacer(&mut g, Vec3::new(4.0, 1.0, 3.0), false);
+        g.break_mirror();
+        assert!(!g.run.active(Ability::Mirror), "spent");
+        assert!(g.grace >= abilities2::MIRROR_GRACE);
+        assert_eq!(g.stunned.get(&bystander), Some(&abilities2::MIRROR_STUN));
+        assert_eq!(g.stunned.get(&hitter), Some(&abilities2::MIRROR_STUN));
+        assert_eq!(g.foes[&hitter].hp, 1.0, "the attacker took a hit");
+    }
+
+    #[test]
+    fn veil_makes_every_blow_a_sneak_attack() {
+        let mut g = fighter("veil", Some(Ability::Quake)); // no veil yet
+        let e = put_pacer(&mut g, Vec3::new(1.0, 1.0, 0.0), true);
+        let t = g.combat_targets().into_iter().find(|t| t.entity == e).unwrap();
+        assert!(!g.strike_ctx(&t).unaware, "it is chasing you");
+        g.run.take(Upgrade::Learn(Ability::Veil));
+        let slot = g.run.abilities.iter().position(|a| a.ability == Ability::Veil).unwrap();
+        g.run.abilities[slot].active = 3.0;
+        assert!(g.strike_ctx(&t).unaware);
+        assert!(g.strike_damage(&t) > 1.0 - 1e-6);
+    }
+
+    #[test]
+    fn surge_doubles_the_next_dash_and_fades_unused() {
+        let mut g = fighter("surge", Some(Ability::Surge));
+        g.abilities2_on_use(Ability::Surge, 1.0, 1.0);
+        g.abilities2_on_use(Ability::Dash, 1.0, 1.0);
+        assert_eq!(g.dash_boost, abilities2::SURGE_MULT);
+        assert_eq!(g.surge.take_jump(), abilities2::SURGE_MULT, "the jump is still owed");
+        g.update_abilities2(0.016);
+        assert_eq!(g.dash_boost, 1.0, "no dash in flight");
+        g.abilities2_on_use(Ability::Surge, 1.0, 1.0);
+        g.run.abilities[0].active = 0.0;
+        g.update_abilities2(0.016);
+        assert_eq!(g.surge.take_jump(), 1.0, "the surge faded");
+    }
+
+    #[test]
+    fn haste_quickens_you_inside_its_zone_until_it_fades() {
+        let mut g = fighter("haste", Some(Ability::Haste));
+        let base = g.player_speed();
+        g.abilities2_on_use(Ability::Haste, 1.0, 1.0);
+        assert!((g.player_speed() / base - abilities2::HASTE_PLAYER).abs() < 1e-4);
+        g.player_position = Vec3::new(abilities2::HASTE_RADIUS + 3.0, 1.0, 0.0);
+        assert!((g.player_speed() - base).abs() < 1e-4, "outside the zone");
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.update_abilities2(Ability::Haste.duration() + 0.1);
+        assert!(g.haste.is_none());
+        assert!((g.player_speed() - base).abs() < 1e-4);
+    }
+
+    #[test]
+    fn tether_drags_the_nearest_mote_to_you() {
+        let mut g = fighter("tether", Some(Ability::Tether));
+        assert!(!g.abilities2_ready(Ability::Tether), "nothing to pull");
+        let mote = g.world.spawn((
+            Transform { position: Vec3::new(10.0, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+            Spin(1.0),
+        ));
+        g.motes.push((mote, 0.0));
+        assert!(g.abilities2_ready(Ability::Tether));
+        for _ in 0..10 {
+            g.update_abilities2(1.0 / 30.0);
+        }
+        let x = g.world.get::<&Transform>(mote).unwrap().position.x;
+        assert!(x < 6.0 && x > 3.0, "pulled a third of a second to {x}");
+    }
+    // === end abilities2 ===
+
     #[test]
     fn touches_cost_nerve_one_at_a_time_and_only_the_last_is_a_catch() {
         let mut g = game("nerve");
@@ -12211,6 +12664,45 @@ mod screen_smoke {
         g.update_combat(0.0);
         assert_eq!(g.nerve.max(), 5, "never past five");
     }
+
+    // === upgrades2 ===
+    #[test]
+    fn iron_nerve_raises_the_ceiling_and_thin_skin_lowers_it_once() {
+        let mut g = fighter("ironnerve", None);
+        g.run.take(Upgrade::IronNerve);
+        g.update_combat(0.0);
+        assert_eq!((g.nerve.cur(), g.nerve.max()), (4, 4));
+        let mut t = fighter("thinskin", None);
+        t.run.take(Upgrade::Cursed(upgrades::Curse::ThinSkin));
+        t.update_combat(0.0);
+        assert_eq!((t.nerve.cur(), t.nerve.max()), (2, 2));
+        t.update_combat(0.0);
+        assert_eq!(t.nerve.max(), 2, "taken off once, not every frame");
+    }
+
+    #[test]
+    fn pack_rat_pays_on_a_skip_and_the_moths_favour_cuts_prices() {
+        let mut g = reward_game("packrat");
+        g.run.take(Upgrade::PackRat);
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert_eq!(g.bonus_dust, dust + upgrades::SKIP_DUST + upgrades::PACK_RAT_DUST);
+        let base = g.moth_terms().pct_off;
+        g.run.take(Upgrade::MothsFavour);
+        assert_eq!(g.moth_terms().pct_off, base + upgrades::MOTHS_FAVOUR_PCT);
+    }
+
+    #[test]
+    fn nimble_draw_and_the_free_reshuffle_reach_the_deck() {
+        let mut g = fighter("deckperks", None);
+        g.deck = Some(deck::Deck::new(&[1, 2, 3, 4, 5], 9));
+        g.run.take(Upgrade::NimbleDraw);
+        g.update_deck(0.0);
+        let want = g.run.deck_perks();
+        assert_eq!(g.deck.as_ref().unwrap().perks, want);
+        assert!(want.draw_mult < 1.0);
+    }
+    // === end upgrades2 ===
 
     #[test]
     fn sharp_edge_cuts_deeper_into_a_reeling_foe() {
@@ -12980,6 +13472,91 @@ mod screen_smoke {
         let quick = strike_gap(Some(edges::Edge::Quickdraw));
         assert!(quick < slow, "{quick} < {slow}");
     }
+
+    // === edges2 ===
+    fn hp_after_one_blow(edge: Option<edges::Edge>, setup: impl Fn(&mut DreamscapeGame, Entity)) -> f32 {
+        let mut g = fighter("e2", None);
+        g.edges = edge.into_iter().collect();
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+        setup(&mut g, e);
+        g.resolve_strike();
+        g.foes[&e].hp
+    }
+
+    #[test]
+    fn opener_ambush_and_punisher_each_cut_a_point_deeper_when_they_apply() {
+        let nothing = |_: &mut DreamscapeGame, _: Entity| {};
+        let plain = hp_after_one_blow(None, nothing);
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opener), nothing), plain - 1.0);
+        // Not fresh: no opener bonus.
+        let hurt = |g: &mut DreamscapeGame, e: Entity| {
+            g.foes.insert(e, combat::Foe { hp: 8.0, max: 9.0 });
+        };
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opener), hurt), 8.0 - (9.0 - plain));
+        // Ambush: an unaware foe (not chasing) takes a point more than without it.
+        let calm = |g: &mut DreamscapeGame, _: Entity| {
+            for p in &mut g.enemies {
+                p.ai.chasing = false;
+            }
+        };
+        assert_eq!(
+            hp_after_one_blow(Some(edges::Edge::Ambush), calm),
+            hp_after_one_blow(None, calm) - 1.0
+        );
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Ambush), nothing), plain, "it was aware");
+        // Punisher: a stunned foe.
+        let stun = |g: &mut DreamscapeGame, e: Entity| {
+            g.stunned.insert(e, 5.0);
+        };
+        assert_eq!(
+            hp_after_one_blow(Some(edges::Edge::Opportunist), stun),
+            hp_after_one_blow(None, stun) - 1.0
+        );
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opportunist), nothing), plain);
+    }
+
+    #[test]
+    fn cleave_hits_to_the_side_and_longarm_hits_further() {
+        let hit = |edge: Option<edges::Edge>, at: Vec3| {
+            let mut g = fighter("e2reach", None);
+            g.edges = edge.into_iter().collect();
+            let e = put_pacer(&mut g, at, true);
+            g.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+            g.resolve_strike();
+            g.foes[&e].hp < 9.0
+        };
+        let side = Vec3::new(2.0, 1.0, 0.8);
+        assert!(!hit(None, side));
+        assert!(hit(Some(edges::Edge::Cleave), side));
+        let far = Vec3::new(0.0, 1.0, 2.8);
+        assert!(!hit(None, far));
+        assert!(hit(Some(edges::Edge::Longarm), far));
+        assert!(!hit(Some(edges::Edge::Longarm), Vec3::new(0.0, 1.0, 3.2)), "still a limit");
+    }
+
+    #[test]
+    fn ripple_rattles_the_neighbours_and_windfall_and_lantern_pay_on_unravel() {
+        let mut g = with_edge("ripple", edges::Edge::Ripple);
+        let a = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        let b = put_pacer(&mut g, Vec3::new(1.5, 1.0, 2.0), true);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 20.0), true);
+        g.resolve_strike();
+        assert!(g.stunned.contains_key(&b) || g.staggered.contains_key(&b), "the neighbour reels");
+        assert!(!g.stunned.contains_key(&far));
+        let _ = a;
+        // Windfall: extra dust. Lantern: a mote.
+        let mut w = with_edge("windfall", edges::Edge::Windfall);
+        let base = w.bonus_dust;
+        let e = put_pacer(&mut w, Vec3::new(0.0, 1.0, 40.0), false);
+        w.unravel(e, Vec3::ZERO);
+        assert!(w.bonus_dust - base >= edges::WINDFALL_DUST);
+        let mut l = with_edge("lantern", edges::Edge::Lantern);
+        let e = put_pacer(&mut l, Vec3::new(0.0, 1.0, 40.0), false);
+        l.unravel(e, Vec3::ZERO);
+        assert_eq!(l.pending_motes.len(), 1, "a calm mote");
+    }
+    // === end edges2 ===
 
     /// Seconds between one swing and the next, with an edge.
     fn strike_gap(edge: Option<edges::Edge>) -> f32 {

@@ -295,15 +295,14 @@ pub const FIRST_CARDS: usize = 5;
 /// fades instead (the waking dream always stays). And the very first pack
 /// always keeps one dream to build a loadout from, the Garden if it's there.
 pub fn shape_first_pack(pack: &mut [Recalled], owned: &[Card]) {
-    use crate::powers::power;
     let mut held: Vec<crate::upgrades::Ability> =
-        owned.iter().map(|c| power(c.theme).active).collect();
+        owned.iter().map(|c| crate::powers::power_of(c).active).collect();
     let mut count = owned.len();
     for r in pack.iter_mut().filter(|r| r.remembered) {
         if count >= FIRST_CARDS {
             break;
         }
-        let a = power(r.card.theme).active;
+        let a = crate::powers::power_of(&r.card).active;
         if held.contains(&a) && r.card.theme != DreamTheme::Awakening {
             r.remembered = false;
             continue;
@@ -403,11 +402,11 @@ impl Booklet {
         }
         let mut out: Vec<Card> = Vec::new();
         for c in self.cards().collect::<Vec<_>>().into_iter().rev() {
-            let a = crate::powers::power(c.theme).active;
+            let a = crate::powers::power_of(c).active;
             if out.len() < slots
                 && !out
                     .iter()
-                    .any(|o| crate::powers::power(o.theme).active == a)
+                    .any(|o| crate::powers::power_of(o).active == a)
             {
                 out.push(c.clone());
             }
@@ -639,10 +638,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_first_five_cards_teach_different_abilities() {
-        // Lobby and WatchingWallpaper both teach STILLNESS.
+        // Two Lobby cards both teach STILLNESS (no two dreams share an active now).
         let mut pack = vec![
             recalled(Lobby, 1, true),
-            recalled(WatchingWallpaper, 2, true),
+            recalled(Lobby, 2, true),
             recalled(Garden, 3, true),
             recalled(Awakening, 4, true),
         ];
@@ -659,7 +658,7 @@ pub(crate) mod tests {
             .enumerate()
             .map(|(i, &t)| card_from(&record(t, i as u64, 1, 0.1, false)))
             .collect();
-        let mut pack = vec![recalled(WatchingWallpaper, 9, true)];
+        let mut pack = vec![recalled(Lobby, 9, true)];
         shape_first_pack(&mut pack, &owned);
         assert!(pack[0].remembered);
     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Steamworks API names, in the order of the design doc.
 #[cfg(test)]
-pub const ALL: [&str; 29] = [
+pub const ALL: [&str; 44] = [
     "wake_once",
     "first_shard",
     "first_nightmare",
@@ -40,6 +40,23 @@ pub const ALL: [&str; 29] = [
     "decoy_boss",
     "rewind_loop",
     "long_stare",
+    // === achievements2 ===
+    "first_fusion",
+    "resonant_card",
+    "lucid_card",
+    "cards_25",
+    "cards_50",
+    "ten_dreams",
+    "five_enemies",
+    "bare_depth_5",
+    "long_depth_15",
+    "nightmares_5",
+    "purchases_10",
+    "dust_500",
+    "early_wake",
+    "deep_clean",
+    "depth_50",
+    // === end achievements2 ===
 ];
 
 pub const TRIP_DREAMS: [DreamTheme; 6] = [
@@ -53,6 +70,23 @@ pub const TRIP_DREAMS: [DreamTheme; 6] = [
 
 pub const FULL_BOOKLET: usize = 100;
 pub const STARE_SECONDS: f32 = 10.0;
+
+// === achievements2 === thresholds
+pub const CARDS_25: usize = 25;
+pub const CARDS_50: usize = 50;
+pub const TEN_DREAMS: usize = 10;
+pub const FIVE_ENEMIES: usize = 5;
+pub const BARE_DEPTH: u32 = 5;
+pub const LONG_DEPTH: u32 = 15;
+pub const NIGHTMARES_5: u32 = 5;
+pub const PURCHASES_10: u32 = 10;
+pub const DUST_HOARD: u32 = 500;
+/// A short run ended in at most this many seconds of dreaming.
+pub const EARLY_WAKE_SECS: u32 = 90;
+/// A clean wake at least this deep.
+pub const DEEP_CLEAN_DEPTH: u32 = 12;
+pub const DEPTH_50: u32 = 50;
+// === end achievements2 ===
 
 /// The display name (the doc's "Name" column).
 pub fn name(id: &str) -> &'static str {
@@ -86,6 +120,23 @@ pub fn name(id: &str) -> &'static str {
         "decoy_boss" => "Nice Try",
         "rewind_loop" => "Déjà Vu",
         "long_stare" => "It Stares Back",
+        // === achievements2 ===
+        "first_fusion" => "Two Become One",
+        "resonant_card" => "Resonance",
+        "lucid_card" => "Clear as Day",
+        "cards_25" => "Pocketful",
+        "cards_50" => "Shoebox",
+        "ten_dreams" => "Wanderer",
+        "five_enemies" => "Acquaintances",
+        "bare_depth_5" => "Empty Pockets",
+        "long_depth_15" => "Marathon",
+        "nightmares_5" => "Regular at the Door",
+        "purchases_10" => "Regular Customer",
+        "dust_500" => "Dust Bunny",
+        "early_wake" => "Light Sleeper",
+        "deep_clean" => "Untroubled",
+        "depth_50" => "Bottomless",
+        // === end achievements2 ===
         _ => "",
     }
 }
@@ -187,6 +238,21 @@ fn state(b: &Booklet) -> Vec<&'static str> {
     when(b.card_count() >= FULL_BOOKLET, "full_booklet");
     when(c.ascension_unlocked > 5, "ascension_5");
     when(b.achievements.purchases > 0, "first_purchase");
+    // === achievements2 ===
+    when(b.cards().any(|c| matches!(c.rarity, Rarity::Fused | Rarity::Resonant)), "first_fusion");
+    when(b.cards().any(|c| c.rarity == Rarity::Resonant), "resonant_card");
+    when(b.cards().any(|c| matches!(c.rarity, Rarity::Lucid | Rarity::Prophetic)), "lucid_card");
+    when(b.card_count() >= CARDS_25, "cards_25");
+    when(b.card_count() >= CARDS_50, "cards_50");
+    when(c.dreams.len() >= TEN_DREAMS, "ten_dreams");
+    when(c.enemies.len() >= FIVE_ENEMIES, "five_enemies");
+    when(c.bare_wake_depth >= BARE_DEPTH, "bare_depth_5");
+    when(c.deepest_long >= LONG_DEPTH, "long_depth_15");
+    when(c.nightmares_beaten >= NIGHTMARES_5, "nightmares_5");
+    when(b.achievements.purchases >= PURCHASES_10, "purchases_10");
+    when(b.stash.dust >= DUST_HOARD, "dust_500");
+    when(c.fastest_wake.is_some_and(|s| s <= EARLY_WAKE_SECS), "early_wake");
+    // === end achievements2 ===
     out
 }
 
@@ -210,6 +276,11 @@ fn event(e: Event) -> Vec<&'static str> {
             }
             if caught == 0 && fell == 0 {
                 out.push("clean_run");
+                // === achievements2 ===
+                if depth >= DEEP_CLEAN_DEPTH {
+                    out.push("deep_clean");
+                }
+                // === end achievements2 ===
             }
             if depth >= 10 && abilities_used == 0 {
                 out.push("no_abilities");
@@ -220,7 +291,7 @@ fn event(e: Event) -> Vec<&'static str> {
         }
         Event::ShardTaken => out.push("first_shard"),
         Event::Depth(d) => {
-            for (at, id) in [(10, "depth_10"), (20, "depth_20"), (35, "depth_35")] {
+            for (at, id) in [(10, "depth_10"), (20, "depth_20"), (35, "depth_35"), (DEPTH_50, "depth_50")] {
                 if d >= at {
                     out.push(id);
                 }
@@ -278,11 +349,15 @@ mod tests {
     }
 
     #[test]
-    fn twenty_nine_distinct_named_achievements() {
+    fn forty_four_distinct_named_achievements() {
         let mut ids = ALL.to_vec();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 29);
+        assert_eq!(ids.len(), 44);
+        for id in ALL {
+            assert!(id.len() <= 28 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{id}: Steam API name");
+            assert!(name(id).len() <= 28, "{id}: name fits the toast");
+        }
         for id in ALL {
             assert!(!name(id).is_empty(), "{id}");
         }
@@ -304,11 +379,20 @@ mod tests {
         }
         b.codex.nightmares_beaten = 1;
         b.codex.ascension_unlocked = 10;
-        b.achievements.purchases = 1;
+        b.achievements.purchases = PURCHASES_10;
+        // === achievements2 ===
+        b.runs[0].cards[1].rarity = Rarity::Resonant;
+        b.runs[0].cards[2].rarity = Rarity::Lucid;
+        b.codex.bare_wake_depth = BARE_DEPTH;
+        b.codex.deepest_long = LONG_DEPTH;
+        b.codex.nightmares_beaten = NIGHTMARES_5;
+        b.codex.fastest_wake = Some(EARLY_WAKE_SECS);
+        b.stash.dust = DUST_HOARD;
+        // === end achievements2 ===
         let mut all: Vec<&str> = check(&b, None);
         for e in [
             Event::Woke {
-                depth: 12,
+                depth: 50,
                 caught: 0,
                 fell: 0,
                 abilities_used: 0,
@@ -316,7 +400,7 @@ mod tests {
                 long_at: Some(10),
             },
             Event::ShardTaken,
-            Event::Depth(40),
+            Event::Depth(DEPTH_50),
             Event::WentDeeper,
             Event::NightmareBeaten {
                 tier: 2,
@@ -349,6 +433,95 @@ mod tests {
             assert!(all.contains(&id), "{id} never unlocks");
         }
     }
+
+    // === achievements2 ===
+    #[test]
+    fn the_new_state_achievements_need_exactly_their_threshold() {
+        let mut b = Booklet::default();
+        let recs: Vec<_> = (0..CARDS_50 as u64)
+            .map(|i| record(ALL_THEMES[i as usize % 20], i, 1, 0.1, false))
+            .collect();
+        b.add_run(1, &recs[..CARDS_25 - 1]);
+        let has = |b: &Booklet, id: &str| check(b, None).contains(&id);
+        assert!(!has(&b, "cards_25"));
+        b.add_run(2, &recs[CARDS_25 - 1..CARDS_25]);
+        assert!(has(&b, "cards_25") && !has(&b, "cards_50"));
+        b.add_run(3, &recs[CARDS_25..]);
+        assert!(has(&b, "cards_50"));
+        // Fusion and resonance are different; a lucid card counts, a faint one does not.
+        for r in &mut b.runs {
+            for c in &mut r.cards {
+                c.rarity = Rarity::Faint;
+            }
+        }
+        assert!(!has(&b, "first_fusion") && !has(&b, "lucid_card"));
+        b.runs[0].cards[0].rarity = Rarity::Fused;
+        assert!(has(&b, "first_fusion") && !has(&b, "resonant_card"));
+        b.runs[0].cards[0].rarity = Rarity::Resonant;
+        assert!(has(&b, "first_fusion") && has(&b, "resonant_card"));
+        b.runs[0].cards[1].rarity = Rarity::Lucid;
+        assert!(has(&b, "lucid_card"));
+        // Codex counters, one short then enough.
+        for (id, short, enough) in [
+            ("bare_depth_5", BARE_DEPTH - 1, BARE_DEPTH),
+            ("long_depth_15", LONG_DEPTH - 1, LONG_DEPTH),
+            ("nightmares_5", NIGHTMARES_5 - 1, NIGHTMARES_5),
+        ] {
+            let mut x = Booklet::default();
+            let set = |x: &mut Booklet, n: u32| match id {
+                "bare_depth_5" => x.codex.bare_wake_depth = n,
+                "long_depth_15" => x.codex.deepest_long = n,
+                _ => x.codex.nightmares_beaten = n,
+            };
+            set(&mut x, short);
+            assert!(!has(&x, id), "{id}");
+            set(&mut x, enough);
+            assert!(has(&x, id), "{id}");
+        }
+        let mut x = Booklet::default();
+        x.achievements.purchases = PURCHASES_10 - 1;
+        x.stash.dust = DUST_HOARD - 1;
+        x.codex.fastest_wake = Some(EARLY_WAKE_SECS + 1);
+        for id in ["purchases_10", "dust_500", "early_wake"] {
+            assert!(!has(&x, id), "{id}");
+        }
+        x.achievements.purchases += 1;
+        x.stash.dust += 1;
+        x.codex.fastest_wake = Some(EARLY_WAKE_SECS);
+        for id in ["purchases_10", "dust_500", "early_wake"] {
+            assert!(has(&x, id), "{id}");
+        }
+    }
+
+    #[test]
+    fn dreams_and_enemies_met_are_counted() {
+        let mut b = Booklet::default();
+        for &t in ALL_THEMES.iter().take(TEN_DREAMS - 1) {
+            b.codex.visit(t, 1);
+        }
+        assert!(!check(&b, None).contains(&"ten_dreams"));
+        b.codex.visit(ALL_THEMES[TEN_DREAMS - 1], 1);
+        assert!(check(&b, None).contains(&"ten_dreams"));
+        for &k in ALL_ENEMY_KINDS.iter().take(FIVE_ENEMIES - 1) {
+            b.codex.meet(k);
+        }
+        assert!(!check(&b, None).contains(&"five_enemies"));
+        b.codex.meet(ALL_ENEMY_KINDS[FIVE_ENEMIES - 1]);
+        assert!(check(&b, None).contains(&"five_enemies"));
+    }
+
+    #[test]
+    fn a_deep_clean_wake_and_depth_fifty_unlock_only_when_earned() {
+        let b = Booklet::default();
+        let woke = |depth, caught, fell| Event::Woke { depth, caught, fell, abilities_used: 1, daily: false, long_at: None };
+        assert!(got(&b, woke(DEEP_CLEAN_DEPTH, 0, 0)).contains(&"deep_clean"));
+        assert!(!got(&b, woke(DEEP_CLEAN_DEPTH - 1, 0, 0)).contains(&"deep_clean"));
+        assert!(!got(&b, woke(30, 1, 0)).contains(&"deep_clean"));
+        assert!(!got(&b, woke(30, 0, 1)).contains(&"deep_clean"));
+        assert!(got(&b, Event::Depth(DEPTH_50)).contains(&"depth_50"));
+        assert!(!got(&b, Event::Depth(DEPTH_50 - 1)).contains(&"depth_50"));
+    }
+    // === end achievements2 ===
 
     #[test]
     fn nothing_unlocks_for_nothing() {

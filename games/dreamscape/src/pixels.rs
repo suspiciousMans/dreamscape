@@ -307,6 +307,40 @@ pub mod icons {
         ".........", "..####+..", ".#....#..", "......#..", "#######+.",
         ".........", "..+####..", ".+....+#.", "......#+.",
     ];
+    // === abilities2 ===
+    pub const TETHER: [&str; SIZE] = [
+        ".#######.", "#.......#", "#.......#", ".#.....#.", "..#...#..",
+        "...#+#...", "....+....", "...+++...", "....+....",
+    ];
+    pub const MIRROR: [&str; SIZE] = [
+        "..#####..", ".#+...+#.", "#+.....+#", "#.+...+.#", "#..+.+..#",
+        "#...+...#", ".#.....#.", "..#####..", "....#....",
+    ];
+    pub const QUAKE: [&str; SIZE] = [
+        "....#....", "...#.#...", "....#.#..", "...#.#...", "....#....",
+        ".........", "#########", ".+++++++.", "..+++++..",
+    ];
+    pub const VEIL: [&str; SIZE] = [
+        "..#####..", ".#.....#.", "#.......#", "#.#.#.#.#", "#.+.+.+.#",
+        "#.+.+.+.#", "#.+.+.+.#", "#.+.+.+.#", "#########",
+    ];
+    pub const SURGE: [&str; SIZE] = [
+        "....+....", "...+++...", "..+.+.+..", ".+..+..+.", "....+....",
+        "....#....", "...###...", "..#####..", ".#######.",
+    ];
+    pub const PULSE: [&str; SIZE] = [
+        ".........", "..#####..", ".#.....#.", "#..###..#", "#.#+++#.#",
+        "#..###..#", ".#.....#.", "..#####..", ".........",
+    ];
+    pub const HASTE: [&str; SIZE] = [
+        ".........", "#.#......", ".#.#.....", "#.#.#.+++", ".#.#.+++.",
+        "#.#.#.+++", ".#.#.....", "#.#......", ".........",
+    ];
+    pub const BIND: [&str; SIZE] = [
+        "..#####..", ".#+++++#.", ".#+###+#.", ".#+###+#.", "..#####..",
+        "#########", "#+#+#+#+#", ".#.#.#.#.", ".........",
+    ];
+    // === end abilities2 ===
     #[allow(dead_code)] // only the old loadout screen drew it
     pub const LOCK: [&str; SIZE] = [
         "..#####..", ".#.....#.", ".#.....#.", "#########", "#+++#+++#",
@@ -333,6 +367,14 @@ pub mod icons {
             Step => &STEP,
             Hush => &HUSH,
             Gust => &GUST,
+            Tether => &TETHER,
+            Mirror => &MIRROR,
+            Quake => &QUAKE,
+            Veil => &VEIL,
+            Surge => &SURGE,
+            Pulse => &PULSE,
+            Haste => &HASTE,
+            Bind => &BIND,
         }
     }
 
@@ -352,10 +394,11 @@ pub mod icons {
     }
 
     #[cfg(test)]
-    pub const ALL: [&[&str; SIZE]; 28] = [
+    pub const ALL: [&[&str; SIZE]; 36] = [
         &SHARD, &HEART, &BRAIN, &LID, &WIND, &MAGNET, &BOOT, &EYE, &GEM, &CARD, &INK, &DASH,
         &REWIND, &BLINK, &STILLNESS, &PHASE, &SHARD_CALL, &DECOY, &FLOAT, &FLARE, &LOCK, &LEAP,
-        &SLAM, &ANCHOR, &WARD, &STEP, &HUSH, &GUST,
+        &SLAM, &ANCHOR, &WARD, &STEP, &HUSH, &GUST, &TETHER, &MIRROR, &QUAKE, &VEIL, &SURGE, &PULSE,
+        &HASTE, &BIND,
     ];
 }
 

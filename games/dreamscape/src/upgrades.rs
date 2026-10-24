@@ -42,9 +42,27 @@ pub enum Ability {
     Hush,
     /// A blast that throws nearby enemies back.
     Gust,
+    // === abilities2 ===
+    /// Yank the nearest shard or calm mote to you.
+    Tether,
+    /// The next hit is thrown back; everything near reels.
+    Mirror,
+    /// The floor ripples and staggers everything on it.
+    Quake,
+    /// Chasers lose you; a blow on one is a sneak attack.
+    Veil,
+    /// The next jump and the next dash are doubled.
+    Surge,
+    /// See through walls: hidden things stand out.
+    Pulse,
+    /// A zone where you are quick and chasers drag.
+    Haste,
+    /// Roots the nearest enemy.
+    Bind,
+    // === end abilities2 ===
 }
 
-pub const ALL_ABILITIES: [Ability; 16] = [
+pub const ALL_ABILITIES: [Ability; 24] = [
     Ability::Dash,
     Ability::Blink,
     Ability::Stillness,
@@ -61,6 +79,14 @@ pub const ALL_ABILITIES: [Ability; 16] = [
     Ability::Step,
     Ability::Hush,
     Ability::Gust,
+    Ability::Tether,
+    Ability::Mirror,
+    Ability::Quake,
+    Ability::Veil,
+    Ability::Surge,
+    Ability::Pulse,
+    Ability::Haste,
+    Ability::Bind,
 ];
 
 /// Shift and E.
@@ -235,6 +261,14 @@ impl Ability {
             Ability::Step => "STEP",
             Ability::Hush => "HUSH",
             Ability::Gust => "GUST",
+            Ability::Tether => "TETHER",
+            Ability::Mirror => "MIRROR",
+            Ability::Quake => "QUAKE",
+            Ability::Veil => "VEIL",
+            Ability::Surge => "SURGE",
+            Ability::Pulse => "PULSE",
+            Ability::Haste => "HASTE",
+            Ability::Bind => "BIND",
         }
     }
 
@@ -256,6 +290,14 @@ impl Ability {
             Ability::Step => "two steps of air rise ahead of you",
             Ability::Hush => "chasers crawl at a third speed for 6s",
             Ability::Gust => "throw nearby enemies back and dizzy them",
+            Ability::Tether => "yank the nearest shard or mote to you",
+            Ability::Mirror => "the next hit is thrown back, foes reel",
+            Ability::Quake => "shake the floor: everything near staggers",
+            Ability::Veil => "chasers lose you; a blow is a sneak attack",
+            Ability::Surge => "your next jump and dash go twice as far",
+            Ability::Pulse => "see through walls: shades and cracks show",
+            Ability::Haste => "a zone: you run fast, chasers drag",
+            Ability::Bind => "roots the nearest enemy for 5s",
         }
     }
 
@@ -278,6 +320,14 @@ impl Ability {
             Ability::Step => 18.0,
             Ability::Hush => 14.0,
             Ability::Gust => 11.0,
+            Ability::Tether => 12.0,
+            Ability::Mirror => 22.0,
+            Ability::Quake => 10.0,
+            Ability::Veil => 16.0,
+            Ability::Surge => 14.0,
+            Ability::Pulse => 15.0,
+            Ability::Haste => 18.0,
+            Ability::Bind => 13.0,
         }
     }
 
@@ -300,6 +350,14 @@ impl Ability {
             Ability::Step => 8.0,
             Ability::Hush => 6.0,
             Ability::Gust => 0.0,
+            Ability::Tether => 2.5,
+            Ability::Mirror => 8.0,
+            Ability::Quake => 0.0,
+            Ability::Veil => 5.0,
+            Ability::Surge => 6.0,
+            Ability::Pulse => 4.0,
+            Ability::Haste => 6.0,
+            Ability::Bind => 0.0,
         }
     }
 }
@@ -396,6 +454,42 @@ pub enum Upgrade {
     /// Calm motes heal more and steady what is near.
     CalmSpore,
     // === end combat ===
+    // === upgrades2 ===
+    /// Move 6% faster.
+    Tailwind,
+    /// Fall a little slower, jump a little floatier.
+    LightBones,
+    /// See 8% further.
+    NightOwl,
+    /// Shards turn up more often.
+    Dowsing,
+    /// Skipping a pick pays more dust.
+    PackRat,
+    /// Strikes recover faster.
+    QuickHands,
+    /// The deck draws a new card sooner.
+    NimbleDraw,
+    /// Ability cards come off cooldown sooner.
+    Restful,
+    /// Enemies notice you from nearer.
+    HushedSteps,
+    /// One more free reroll.
+    SpareCoin,
+    /// The moth sells for less.
+    MothsFavour,
+    /// Used cards shuffle back into the deck sooner.
+    HomingCards,
+    /// The first card you use is shuffled back at once, ready.
+    FreeReshuffle,
+    /// Abilities last longer.
+    SlowBurn,
+    /// A longer breath of safety after a hit.
+    Afterglow,
+    /// Mythic: one more nerve.
+    IronNerve,
+    /// Mythic: much more dust.
+    Tithe,
+    // === end upgrades2 ===
     Learn(Ability),
     /// Strong, with a price.
     Cursed(Curse),
@@ -414,20 +508,42 @@ pub enum Curse {
     Featherfall,
     /// Shards much commoner; one fewer card at every pick.
     Greed,
+    // === upgrades2 ===
+    /// Abilities last 50% longer; they recharge 25% slower.
+    Hourglass,
+    /// +20% speed; the deck draws 40% slower.
+    Sleepwalker,
+    /// +12% lucky memory; one fewer nerve.
+    ThinSkin,
+    /// Shards commoner; enemies notice you from 25% further.
+    Magpie,
+    /// Strikes 30% quicker; 30% less safety after a respawn.
+    BorrowedTime,
+    /// Used cards return 50% sooner; new cards draw 30% slower.
+    RiggedDeck,
+    // === end upgrades2 ===
 }
 
-pub const ALL_CURSES: [Curse; 5] = [
+pub const ALL_CURSES: [Curse; 11] = [
     Curse::GlassCannon,
     Curse::BloodMoon,
     Curse::Insomnia,
     Curse::Featherfall,
     Curse::Greed,
+    // === upgrades2 ===
+    Curse::Hourglass,
+    Curse::Sleepwalker,
+    Curse::ThinSkin,
+    Curse::Magpie,
+    Curse::BorrowedTime,
+    Curse::RiggedDeck,
+    // === end upgrades2 ===
 ];
 
 /// Chance one card of a pick is swapped for a cursed one.
 pub const CURSE_CHANCE: f64 = 0.2;
 
-pub const PASSIVES: [Upgrade; 21] = [
+pub const PASSIVES: [Upgrade; 38] = [
     Upgrade::SwiftFeet,
     Upgrade::Spring,
     Upgrade::WideEyes,
@@ -451,6 +567,25 @@ pub const PASSIVES: [Upgrade; 21] = [
     Upgrade::Thorns,
     Upgrade::CalmSpore,
     // === end combat ===
+    // === upgrades2 ===
+    Upgrade::Tailwind,
+    Upgrade::LightBones,
+    Upgrade::NightOwl,
+    Upgrade::Dowsing,
+    Upgrade::PackRat,
+    Upgrade::QuickHands,
+    Upgrade::NimbleDraw,
+    Upgrade::Restful,
+    Upgrade::HushedSteps,
+    Upgrade::SpareCoin,
+    Upgrade::MothsFavour,
+    Upgrade::HomingCards,
+    Upgrade::FreeReshuffle,
+    Upgrade::SlowBurn,
+    Upgrade::Afterglow,
+    Upgrade::IronNerve,
+    Upgrade::Tithe,
+    // === end upgrades2 ===
 ];
 
 /// Which pixel icon an upgrade card shows.
@@ -726,6 +861,161 @@ impl Upgrade {
                 Rare,
             ),
             // === end combat ===
+            // === upgrades2 ===
+            Upgrade::Tailwind => i(
+                "TAILWIND",
+                "move 6% faster",
+                3,
+                8,
+                Icon::Boot,
+                [170, 255, 220],
+                Common,
+            ),
+            Upgrade::LightBones => i(
+                "LIGHT BONES",
+                "fall slower: gravity 7% lighter",
+                2,
+                7,
+                Icon::Wind,
+                [200, 230, 255],
+                Common,
+            ),
+            Upgrade::NightOwl => i(
+                "NIGHT OWL",
+                "see 8% further",
+                3,
+                8,
+                Icon::Eye,
+                [255, 230, 150],
+                Common,
+            ),
+            Upgrade::Dowsing => i(
+                "DOWSING",
+                "shards turn up 5% more often",
+                3,
+                7,
+                Icon::Shard,
+                [160, 255, 255],
+                Common,
+            ),
+            Upgrade::PackRat => i(
+                "PACK RAT",
+                "skipping a pick pays 4 more dust",
+                3,
+                6,
+                Icon::Magnet,
+                [220, 190, 140],
+                Common,
+            ),
+            Upgrade::QuickHands => i(
+                "QUICK HANDS",
+                "strikes recover 15% faster",
+                2,
+                7,
+                Icon::Lid,
+                [255, 190, 140],
+                Common,
+            ),
+            Upgrade::NimbleDraw => i(
+                "NIMBLE DRAW",
+                "the deck draws 25% sooner",
+                3,
+                7,
+                Icon::Brain,
+                [190, 170, 255],
+                Common,
+            ),
+            Upgrade::Restful => i(
+                "RESTFUL",
+                "abilities recharge 10% faster",
+                3,
+                7,
+                Icon::Heart,
+                [170, 210, 255],
+                Common,
+            ),
+            Upgrade::HushedSteps => i(
+                "HUSHED STEPS",
+                "enemies notice you 12% later",
+                3,
+                5,
+                Icon::Boot,
+                [150, 150, 200],
+                Rare,
+            ),
+            Upgrade::SpareCoin => i(
+                "SPARE COIN",
+                "one more free reroll",
+                2,
+                4,
+                Icon::Gem,
+                [255, 220, 120],
+                Rare,
+            ),
+            Upgrade::MothsFavour => i(
+                "MOTH'S FAVOUR",
+                "the moth's shelf is 10% cheaper",
+                3,
+                5,
+                Icon::Magnet,
+                [230, 200, 255],
+                Rare,
+            ),
+            Upgrade::HomingCards => i(
+                "HOMING CARDS",
+                "used cards shuffle back 40% sooner",
+                2,
+                5,
+                Icon::Brain,
+                [150, 220, 255],
+                Rare,
+            ),
+            Upgrade::FreeReshuffle => i(
+                "FREE RESHUFFLE",
+                "your first card used comes straight back, ready",
+                1,
+                4,
+                Icon::Lid,
+                [255, 150, 220],
+                Rare,
+            ),
+            Upgrade::SlowBurn => i(
+                "SLOW BURN",
+                "abilities last 15% longer",
+                2,
+                5,
+                Icon::Wind,
+                [255, 170, 100],
+                Rare,
+            ),
+            Upgrade::Afterglow => i(
+                "AFTERGLOW",
+                "a longer breath of safety after a hit",
+                2,
+                5,
+                Icon::Heart,
+                [255, 190, 200],
+                Rare,
+            ),
+            Upgrade::IronNerve => i(
+                "IRON NERVE",
+                "one more nerve",
+                1,
+                3,
+                Icon::Heart,
+                [255, 120, 120],
+                Mythic,
+            ),
+            Upgrade::Tithe => i(
+                "TITHE",
+                "+60% dust from every waking",
+                1,
+                4,
+                Icon::Gem,
+                [255, 215, 90],
+                Mythic,
+            ),
+            // === end upgrades2 ===
             Upgrade::Cursed(c) => {
                 let (name, desc) = c.text();
                 i(name, desc, 1, 1, Icon::Lid, [255, 70, 90], Cursed)
@@ -756,6 +1046,26 @@ impl Curse {
                 "jump 30% higher · half the safety after a respawn",
             ),
             Curse::Greed => ("GREED", "shards turn up far more · one fewer card per pick"),
+            // === upgrades2 ===
+            Curse::Hourglass => (
+                "HOURGLASS",
+                "abilities last 50% longer · they recharge 25% slower",
+            ),
+            Curse::Sleepwalker => ("SLEEPWALKER", "+20% speed · the deck draws 40% slower"),
+            Curse::ThinSkin => ("THIN SKIN", "luckier memories · one fewer nerve"),
+            Curse::Magpie => (
+                "MAGPIE",
+                "shards turn up more · enemies notice you from further",
+            ),
+            Curse::BorrowedTime => (
+                "BORROWED TIME",
+                "strikes 30% quicker · less safety after a respawn",
+            ),
+            Curse::RiggedDeck => (
+                "RIGGED DECK",
+                "used cards return 50% sooner · new cards draw 30% slower",
+            ),
+            // === end upgrades2 ===
         }
     }
 }
@@ -783,9 +1093,31 @@ pub enum Synergy {
     /// DASH + COUNTER: slipping a blow also cuts the attacker.
     Riposte,
     // === end combat ===
+    // === upgrades2 ===
+    /// TAILWIND x2 + NIGHT OWL: 10% faster again.
+    NightRunner,
+    /// DOWSING x2 + SHARD SENSE: shards even likelier.
+    DivinersRod,
+    /// PACK RAT + DUST HOARDER: skipping pays double.
+    LeanTimes,
+    /// NIMBLE DRAW x2 + HOMING CARDS: the deck flows twice as fast.
+    Cascade,
+    /// FREE RESHUFFLE + QUICKEN: two free reshuffles.
+    EndlessHand,
+    /// MOTH'S FAVOUR + DUST HOARDER: a further 10% off.
+    Regular,
+    /// QUICK HANDS + SHARP EDGE: strikes recover another 15% faster.
+    Flurry,
+    /// HUSHED STEPS + HUSH: the hush lasts half again as long.
+    Whisper,
+    /// IRON NERVE + AFTERGLOW: a long breath after a hit.
+    Brace,
+    /// LIGHT BONES + SPRING: jump 15% higher.
+    Featherlight,
+    // === end upgrades2 ===
 }
 
-pub const ALL_SYNERGIES: [Synergy; 9] = [
+pub const ALL_SYNERGIES: [Synergy; 19] = [
     Synergy::GhostStep,
     Synergy::ThirdEye,
     Synergy::DeepFreeze,
@@ -795,6 +1127,18 @@ pub const ALL_SYNERGIES: [Synergy; 9] = [
     Synergy::Executioner,
     Synergy::Bulwark,
     Synergy::Riposte,
+    // === upgrades2 ===
+    Synergy::NightRunner,
+    Synergy::DivinersRod,
+    Synergy::LeanTimes,
+    Synergy::Cascade,
+    Synergy::EndlessHand,
+    Synergy::Regular,
+    Synergy::Flurry,
+    Synergy::Whisper,
+    Synergy::Brace,
+    Synergy::Featherlight,
+    // === end upgrades2 ===
 ];
 
 /// How long GHOST STEP keeps you phased after a dash.
@@ -812,6 +1156,18 @@ impl Synergy {
             Synergy::Executioner => "EXECUTIONER",
             Synergy::Bulwark => "BULWARK",
             Synergy::Riposte => "RIPOSTE",
+            // === upgrades2 ===
+            Synergy::NightRunner => "NIGHT RUNNER",
+            Synergy::DivinersRod => "DIVINER'S ROD",
+            Synergy::LeanTimes => "LEAN TIMES",
+            Synergy::Cascade => "CASCADE",
+            Synergy::EndlessHand => "ENDLESS HAND",
+            Synergy::Regular => "REGULAR",
+            Synergy::Flurry => "FLURRY",
+            Synergy::Whisper => "WHISPER",
+            Synergy::Brace => "BRACE",
+            Synergy::Featherlight => "FEATHERLIGHT",
+            // === end upgrades2 ===
         }
     }
 
@@ -826,6 +1182,18 @@ impl Synergy {
             Synergy::Executioner => "sneak attacks cut one deeper",
             Synergy::Bulwark => "a broken ward hits back twice as hard",
             Synergy::Riposte => "slipping a blow cuts the attacker too",
+            // === upgrades2 ===
+            Synergy::NightRunner => "10% faster again",
+            Synergy::DivinersRod => "shards turn up even more",
+            Synergy::LeanTimes => "skipping a pick pays double",
+            Synergy::Cascade => "the deck flows twice as fast",
+            Synergy::EndlessHand => "two free reshuffles",
+            Synergy::Regular => "the moth takes a further 10% off",
+            Synergy::Flurry => "strikes recover another 15% faster",
+            Synergy::Whisper => "the hush lasts half again as long",
+            Synergy::Brace => "a long breath of safety after a hit",
+            Synergy::Featherlight => "jump 15% higher",
+            // === end upgrades2 ===
         }
     }
 
@@ -842,6 +1210,18 @@ impl Synergy {
             Synergy::Executioner => [(Learn(Ability::Hush), 1), (SharpEdge, 1)],
             Synergy::Bulwark => [(Learn(Ability::Ward), 1), (Thorns, 1)],
             Synergy::Riposte => [(Learn(Ability::Dash), 1), (Counter, 1)],
+            // === upgrades2 ===
+            Synergy::NightRunner => [(Tailwind, 2), (NightOwl, 1)],
+            Synergy::DivinersRod => [(Dowsing, 2), (ShardSense, 1)],
+            Synergy::LeanTimes => [(PackRat, 1), (DustHoarder, 1)],
+            Synergy::Cascade => [(NimbleDraw, 2), (HomingCards, 1)],
+            Synergy::EndlessHand => [(FreeReshuffle, 1), (Quicken, 1)],
+            Synergy::Regular => [(MothsFavour, 1), (DustHoarder, 1)],
+            Synergy::Flurry => [(QuickHands, 1), (SharpEdge, 1)],
+            Synergy::Whisper => [(HushedSteps, 1), (Learn(Ability::Hush), 1)],
+            Synergy::Brace => [(IronNerve, 1), (Afterglow, 1)],
+            Synergy::Featherlight => [(LightBones, 1), (Spring, 1)],
+            // === end upgrades2 ===
         }
     }
 }
@@ -914,6 +1294,16 @@ pub struct Stats {
     curses: Vec<Curse>,
     /// The combat picks (they change nothing else, so they count here).
     combat: [u32; 7],
+    // === upgrades2 ===
+    gravity: f32,
+    skip_dust: u32,
+    rerolls: u32,
+    strike_cooldown: f32,
+    nerve_max: u32,
+    moth_pct_off: u32,
+    deck: crate::deck::DeckPerks,
+    afterglow: f32,
+    // === end upgrades2 ===
 }
 
 impl RunUpgrades {
@@ -983,7 +1373,7 @@ impl RunUpgrades {
         use crate::powers::power;
         let mut run = Self::default();
         for c in cards {
-            let p = power(c.theme);
+            let p = crate::powers::power_of(c);
             if abilities
                 && run.abilities.len() < ABILITY_SLOTS
                 && !run.abilities.iter().any(|a| a.ability == p.active)
@@ -1076,6 +1466,16 @@ impl RunUpgrades {
                 })
                 .collect(),
             synergies: self.synergies(),
+            // === upgrades2 ===
+            gravity: self.gravity(),
+            skip_dust: self.skip_dust(),
+            rerolls: self.rerolls_left(),
+            strike_cooldown: self.strike_cooldown(),
+            nerve_max: self.nerve_max(),
+            moth_pct_off: self.moth_pct_off(),
+            deck: self.deck_perks(),
+            afterglow: self.afterglow(),
+            // === end upgrades2 ===
             combat: [
                 Upgrade::SecondHeartbeat,
                 Upgrade::SharpEdge,
@@ -1135,7 +1535,8 @@ impl RunUpgrades {
 
     pub fn rerolls_left(&self) -> u32 {
         let free = if self.no_free_reroll { 0 } else { REROLLS_PER_RUN };
-        (free + self.bonus_rerolls).saturating_sub(self.rerolls_used)
+        (free + self.bonus_rerolls + SPARE_COIN_REROLLS * self.count(Upgrade::SpareCoin))
+            .saturating_sub(self.rerolls_used)
     }
 
     /// Cards offered at each pick.
@@ -1152,12 +1553,25 @@ impl RunUpgrades {
         self.weigh(crate::companion::Stat::Speed, 1.0) * self.speed_unburdened()
     }
     fn speed_unburdened(&self) -> f32 {
-        1.0 + 0.12 * self.n(Upgrade::SwiftFeet) as f32
+        (1.0 + 0.12 * self.n(Upgrade::SwiftFeet) as f32
             + if self.cursed(Curse::GlassCannon) {
                 0.3
             } else {
                 0.0
             }
+            // === upgrades2 ===
+            + TAILWIND_PER * self.n(Upgrade::Tailwind) as f32
+            + if self.cursed(Curse::Sleepwalker) {
+                SLEEPWALKER_SPEED
+            } else {
+                0.0
+            })
+            * if self.has(Synergy::NightRunner) {
+                NIGHT_RUNNER_MULT
+            } else {
+                1.0
+            }
+        // === end upgrades2 ===
     }
     pub fn jump(&self) -> f32 {
         self.weigh(crate::companion::Stat::Jump, 1.0) * self.jump_unburdened()
@@ -1169,6 +1583,13 @@ impl RunUpgrades {
             } else {
                 0.0
             }
+            // === upgrades2 ===
+            + if self.has(Synergy::Featherlight) {
+                FEATHERLIGHT_JUMP
+            } else {
+                0.0
+            }
+        // === end upgrades2 ===
     }
     /// Extra sight radius, world units.
     pub fn sight_bonus(&self) -> f32 {
@@ -1192,14 +1613,15 @@ impl RunUpgrades {
             } else {
                 1.0
             }
+            * (1.0 + NIGHT_OWL_PER * self.n(Upgrade::NightOwl) as f32) // === upgrades2 ===
     }
     /// Multiplies gravity (FLOAT).
     pub fn gravity(&self) -> f32 {
-        if self.active(Ability::Float) {
+        (if self.active(Ability::Float) {
             FLOAT_GRAVITY
         } else {
             1.0
-        }
+        }) * LIGHT_BONES_GRAVITY.powi(self.n(Upgrade::LightBones)) // === upgrades2 ===
     }
     /// Multiplies how far away enemies notice you.
     pub fn alert(&self) -> f32 {
@@ -1209,6 +1631,14 @@ impl RunUpgrades {
             } else {
                 1.0
             }
+            // === upgrades2 ===
+            * HUSHED_STEPS_ALERT.powi(self.n(Upgrade::HushedSteps))
+            * if self.cursed(Curse::Magpie) {
+                MAGPIE_ALERT
+            } else {
+                1.0
+            }
+        // === end upgrades2 ===
     }
     pub fn enemy_speed(&self) -> f32 {
         self.weigh(crate::companion::Stat::EnemySpeed, 1.0)
@@ -1232,11 +1662,17 @@ impl RunUpgrades {
             } else {
                 1.0
             }
+            * if self.cursed(Curse::BorrowedTime) { BORROWED_GRACE } else { 1.0 } // === upgrades2 ===
     }
     pub fn shard_bonus(&self) -> f64 {
         -(self.weigh(crate::companion::Stat::ShardBonus, 0.0) as f64)
             + 0.12 * self.n(Upgrade::ShardSense) as f64
             + if self.cursed(Curse::Greed) { 0.25 } else { 0.0 }
+            // === upgrades2 ===
+            + DOWSING_PER * self.n(Upgrade::Dowsing) as f64
+            + if self.has(Synergy::DivinersRod) { DIVINERS_ROD_BONUS } else { 0.0 }
+            + if self.cursed(Curse::Magpie) { MAGPIE_SHARDS } else { 0.0 }
+            // === end upgrades2 ===
     }
     pub fn anchors_left(&self) -> u32 {
         self.count(Upgrade::DreamAnchor)
@@ -1249,9 +1685,11 @@ impl RunUpgrades {
             } else {
                 0.0
             }
+            + TITHE_DUST * self.n(Upgrade::Tithe) as f32 // === upgrades2 ===
     }
     pub fn memory_bonus(&self) -> f32 {
         0.06 * self.n(Upgrade::LuckyMemory) as f32
+            + if self.cursed(Curse::ThinSkin) { THIN_SKIN_MEMORY } else { 0.0 } // === upgrades2 ===
     }
     /// Multiplies how strange the dream looks (not how it's built).
     pub fn calm(&self) -> f32 {
@@ -1266,6 +1704,12 @@ impl RunUpgrades {
         if self.cursed(Curse::Insomnia) {
             m *= 0.6;
         }
+        // === upgrades2 ===
+        m *= RESTFUL_COOLDOWN.powi(self.n(Upgrade::Restful));
+        if self.cursed(Curse::Hourglass) {
+            m *= HOURGLASS_COOLDOWN;
+        }
+        // === end upgrades2 ===
         if ability == Ability::Dash && self.has(Synergy::Slipstream) {
             m *= 0.5;
         }
@@ -1273,11 +1717,20 @@ impl RunUpgrades {
     }
     /// Duration multiplier for `ability`.
     pub fn duration_for(&self, ability: Ability) -> f32 {
-        if ability == Ability::Stillness && self.has(Synergy::DeepFreeze) {
+        let base = if ability == Ability::Stillness && self.has(Synergy::DeepFreeze) {
             2.0
         } else {
             1.0
-        }
+        };
+        // === upgrades2 ===
+        base * (1.0 + SLOW_BURN_PER * self.n(Upgrade::SlowBurn) as f32)
+            * if self.cursed(Curse::Hourglass) { HOURGLASS_DURATION } else { 1.0 }
+            * if ability == Ability::Hush && self.has(Synergy::Whisper) {
+                WHISPER_HUSH
+            } else {
+                1.0
+            }
+        // === end upgrades2 ===
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -1340,7 +1793,7 @@ impl RunUpgrades {
         let mut run = Self::from_loadout_passives(cards);
         for c in cards.iter().take(HAND_SIZE) {
             run.abilities
-                .push(AbilityState::new(crate::powers::power(c.theme).active));
+                .push(AbilityState::new(crate::powers::power_of(c).active));
         }
         run.deck_slots = run.abilities.len();
         run.sync_learned();
@@ -1376,6 +1829,109 @@ impl RunUpgrades {
             .collect()
     }
 }
+
+// === upgrades2 ===
+pub const TAILWIND_PER: f32 = 0.06;
+pub const SLEEPWALKER_SPEED: f32 = 0.2;
+pub const NIGHT_RUNNER_MULT: f32 = 1.1;
+pub const FEATHERLIGHT_JUMP: f32 = 0.15;
+pub const NIGHT_OWL_PER: f32 = 0.08;
+pub const LIGHT_BONES_GRAVITY: f32 = 0.93;
+pub const HUSHED_STEPS_ALERT: f32 = 0.88;
+pub const MAGPIE_ALERT: f32 = 1.25;
+pub const BORROWED_GRACE: f32 = 0.7;
+pub const DOWSING_PER: f64 = 0.05;
+pub const DIVINERS_ROD_BONUS: f64 = 0.1;
+pub const MAGPIE_SHARDS: f64 = 0.15;
+pub const TITHE_DUST: f32 = 0.6;
+pub const THIN_SKIN_MEMORY: f32 = 0.12;
+pub const RESTFUL_COOLDOWN: f32 = 0.9;
+pub const HOURGLASS_COOLDOWN: f32 = 1.25;
+pub const HOURGLASS_DURATION: f32 = 1.5;
+pub const SLOW_BURN_PER: f32 = 0.15;
+pub const WHISPER_HUSH: f32 = 1.5;
+pub const SPARE_COIN_REROLLS: u32 = 1;
+pub const PACK_RAT_DUST: u32 = 4;
+pub const LEAN_TIMES_MULT: u32 = 2;
+pub const QUICK_HANDS_MULT: f32 = 0.85;
+pub const FLURRY_MULT: f32 = 0.85;
+pub const BORROWED_STRIKE: f32 = 0.7;
+pub const MOTHS_FAVOUR_PCT: u32 = 10;
+pub const REGULAR_PCT: u32 = 10;
+pub const NIMBLE_DRAW_MULT: f32 = 0.75;
+pub const SLEEPWALKER_DRAW: f32 = 1.4;
+pub const RIGGED_DRAW: f32 = 1.3;
+pub const CASCADE_MULT: f32 = 0.5;
+pub const HOMING_MULT: f32 = 0.6;
+pub const RIGGED_SHUFFLE: f32 = 0.5;
+pub const AFTERGLOW_PER: f32 = 0.35;
+pub const BRACE_EXTRA: f32 = 0.4;
+
+impl RunUpgrades {
+    pub fn has_curse(&self, c: Curse) -> bool {
+        self.cursed(c)
+    }
+
+    /// Dust for skipping a pick, before perks.
+    pub fn skip_dust(&self) -> u32 {
+        let d = SKIP_DUST + PACK_RAT_DUST * self.count(Upgrade::PackRat);
+        if self.has(Synergy::LeanTimes) {
+            d * LEAN_TIMES_MULT
+        } else {
+            d
+        }
+    }
+
+    /// Multiplies the strike's cooldown (smaller = quicker).
+    pub fn strike_cooldown(&self) -> f32 {
+        QUICK_HANDS_MULT.powi(self.n(Upgrade::QuickHands))
+            * if self.has(Synergy::Flurry) { FLURRY_MULT } else { 1.0 }
+            * if self.cursed(Curse::BorrowedTime) { BORROWED_STRIKE } else { 1.0 }
+    }
+
+    /// Nerve the dreamer can hold, within the game's cap.
+    pub fn nerve_max(&self) -> u32 {
+        let up = crate::nerve::START + self.count(Upgrade::SecondHeartbeat) + self.count(Upgrade::IronNerve);
+        let up = if self.cursed(Curse::ThinSkin) { up.saturating_sub(1) } else { up };
+        up.clamp(2, crate::nerve::MAX)
+    }
+
+    /// Percent off the moth's shelf, from picks (perks add their own).
+    pub fn moth_pct_off(&self) -> u32 {
+        MOTHS_FAVOUR_PCT * self.count(Upgrade::MothsFavour)
+            + if self.has(Synergy::Regular) { REGULAR_PCT } else { 0 }
+    }
+
+    /// Extra seconds of safety after a nerve hit.
+    pub fn afterglow(&self) -> f32 {
+        AFTERGLOW_PER * self.count(Upgrade::Afterglow) as f32
+            + if self.has(Synergy::Brace) { BRACE_EXTRA } else { 0.0 }
+    }
+
+    /// How the deck's timers and reshuffles are bent.
+    pub fn deck_perks(&self) -> crate::deck::DeckPerks {
+        let mut draw = NIMBLE_DRAW_MULT.powi(self.n(Upgrade::NimbleDraw));
+        let mut shuffle = HOMING_MULT.powi(self.n(Upgrade::HomingCards));
+        if self.has(Synergy::Cascade) {
+            draw *= CASCADE_MULT;
+            shuffle *= CASCADE_MULT;
+        }
+        if self.cursed(Curse::Sleepwalker) {
+            draw *= SLEEPWALKER_DRAW;
+        }
+        if self.cursed(Curse::RiggedDeck) {
+            draw *= RIGGED_DRAW;
+            shuffle *= RIGGED_SHUFFLE;
+        }
+        crate::deck::DeckPerks {
+            draw_mult: draw,
+            shuffle_mult: shuffle,
+            free_reshuffles: self.count(Upgrade::FreeReshuffle)
+                + if self.has(Synergy::EndlessHand) { 1 } else { 0 },
+        }
+    }
+}
+// === end upgrades2 ===
 
 /// The cards for one pick, weighted by rarity (rarer tiers grow with depth),
 /// never one that's maxed out; sometimes one is swapped for a cursed card.
@@ -1919,8 +2475,9 @@ mod tests {
     #[test]
     fn a_shared_active_is_learned_once() {
         use crate::dream::DreamTheme::*;
-        // Both teach STILLNESS: the second fills no slot, the third does.
-        let r = RunUpgrades::from_loadout(&[card(Lobby), card(WatchingWallpaper), card(Garden)]);
+        // Both teach STILLNESS (two copies of one dream, now that no two
+        // dreams share an active): the second fills no slot, the third does.
+        let r = RunUpgrades::from_loadout(&[card(Lobby), card(Lobby), card(Garden)]);
         let actives: Vec<Ability> = r.abilities.iter().map(|a| a.ability).collect();
         assert_eq!(actives, vec![Ability::Stillness, Ability::ShardCall]);
     }
@@ -1945,6 +2502,18 @@ mod tests {
             !r.available(Upgrade::DoubleJump),
             "picks won't offer a maxed passive"
         );
+    }
+
+    #[test]
+    fn every_new_ability_can_be_learned_and_replaces_the_oldest() {
+        let mut r = RunUpgrades::default();
+        for a in crate::abilities2::NEW_ABILITIES {
+            assert!(r.available(Upgrade::Learn(a)), "{a:?}");
+            assert!(!a.name().is_empty() && !a.desc().is_empty() && a.name().len() <= 9);
+            r.take(Upgrade::Learn(a));
+            assert!(r.abilities.iter().any(|s| s.ability == a), "{a:?}");
+        }
+        assert_eq!(r.abilities.len(), ABILITY_SLOTS);
     }
 
     #[test]
@@ -2048,3 +2617,195 @@ mod tests {
         assert_eq!(slam_power(-4.0, false), (r0, s0));
     }
 }
+
+// === upgrades2 ===
+#[cfg(test)]
+mod upgrades2_tests {
+    use super::*;
+
+    fn with(list: &[(Upgrade, usize)]) -> RunUpgrades {
+        let mut r = RunUpgrades::default();
+        for &(u, n) in list {
+            for _ in 0..n {
+                r.take(u);
+            }
+        }
+        r
+    }
+    fn cursed(c: Curse) -> RunUpgrades {
+        with(&[(Upgrade::Cursed(c), 1)])
+    }
+    fn near(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+    }
+
+    #[test]
+    fn there_are_many_new_items() {
+        assert!(PASSIVES.len() - 21 >= 16);
+        assert!(ALL_SYNERGIES.len() - 9 >= 8);
+        assert!(ALL_CURSES.len() - 5 >= 5);
+        let mut names: Vec<&str> = PASSIVES.iter().map(|u| u.info().name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), PASSIVES.len(), "names are unique");
+    }
+
+    #[test]
+    fn new_passives_cover_every_tier() {
+        let tiers: Vec<Tier> = PASSIVES[21..].iter().map(|u| u.tier()).collect();
+        for t in [Tier::Common, Tier::Rare, Tier::Mythic] {
+            assert!(tiers.contains(&t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn every_new_synergy_can_be_reached_and_is_named() {
+        for &s in &ALL_SYNERGIES[9..] {
+            let mut r = RunUpgrades::default();
+            assert!(!r.has(s));
+            for (u, n) in s.parts() {
+                for _ in 0..n {
+                    r.take(u);
+                }
+            }
+            assert!(r.has(s), "{s:?}");
+            assert!(!s.name().is_empty() && !s.desc().is_empty());
+        }
+    }
+
+    #[test]
+    fn movement_and_sight_numbers() {
+        near(with(&[(Upgrade::Tailwind, 2)]).speed(), 1.12);
+        near(with(&[(Upgrade::Tailwind, 2), (Upgrade::NightOwl, 1)]).speed(), 1.12 * NIGHT_RUNNER_MULT);
+        near(with(&[(Upgrade::LightBones, 2)]).gravity(), 0.93 * 0.93);
+        near(with(&[(Upgrade::NightOwl, 2)]).sight(), 1.16);
+        near(with(&[(Upgrade::HushedSteps, 2)]).alert(), 0.88 * 0.88);
+        near(with(&[(Upgrade::LightBones, 1), (Upgrade::Spring, 1)]).jump(), 1.12 + FEATHERLIGHT_JUMP);
+    }
+
+    #[test]
+    fn shards_dust_and_skips() {
+        assert!((with(&[(Upgrade::Dowsing, 3)]).shard_bonus() - 0.15).abs() < 1e-9);
+        let rod = with(&[(Upgrade::Dowsing, 2), (Upgrade::ShardSense, 1)]);
+        assert!((rod.shard_bonus() - (0.10 + 0.12 + DIVINERS_ROD_BONUS)).abs() < 1e-9);
+        near(with(&[(Upgrade::Tithe, 1)]).dust(), 1.6);
+        assert_eq!(RunUpgrades::default().skip_dust(), SKIP_DUST);
+        assert_eq!(with(&[(Upgrade::PackRat, 2)]).skip_dust(), SKIP_DUST + 8);
+        assert_eq!(
+            with(&[(Upgrade::PackRat, 1), (Upgrade::DustHoarder, 1)]).skip_dust(),
+            (SKIP_DUST + 4) * 2
+        );
+    }
+
+    #[test]
+    fn combat_and_nerve_numbers() {
+        near(with(&[(Upgrade::QuickHands, 2)]).strike_cooldown(), 0.85 * 0.85);
+        near(with(&[(Upgrade::QuickHands, 1), (Upgrade::SharpEdge, 1)]).strike_cooldown(), 0.85 * FLURRY_MULT);
+        assert_eq!(RunUpgrades::default().nerve_max(), crate::nerve::START);
+        assert_eq!(with(&[(Upgrade::IronNerve, 1)]).nerve_max(), crate::nerve::START + 1);
+        let full = with(&[(Upgrade::SecondHeartbeat, 2), (Upgrade::IronNerve, 1)]);
+        assert_eq!(full.nerve_max(), crate::nerve::MAX);
+        near(with(&[(Upgrade::Afterglow, 2)]).afterglow(), 0.7);
+        near(with(&[(Upgrade::IronNerve, 1), (Upgrade::Afterglow, 1)]).afterglow(), AFTERGLOW_PER + BRACE_EXTRA);
+    }
+
+    #[test]
+    fn iron_nerve_is_not_offered_at_the_nerve_cap() {
+        let r = with(&[(Upgrade::SecondHeartbeat, 1)]);
+        assert_eq!(r.nerve_max(), crate::nerve::MAX - 1);
+        assert!(r.available(Upgrade::IronNerve));
+        let full = with(&[(Upgrade::SecondHeartbeat, 2)]);
+        assert_eq!(full.nerve_max(), crate::nerve::MAX);
+        assert!(!full.available(Upgrade::IronNerve));
+    }
+
+    #[test]
+    fn ability_cooldown_and_duration_tricks() {
+        near(with(&[(Upgrade::Restful, 2)]).cooldown_for(Ability::Dash), 0.81);
+        near(with(&[(Upgrade::SlowBurn, 2)]).duration_for(Ability::Dash), 1.3);
+        let whisper = with(&[(Upgrade::HushedSteps, 1), (Upgrade::Learn(Ability::Hush), 1)]);
+        near(whisper.duration_for(Ability::Hush), WHISPER_HUSH);
+        near(whisper.duration_for(Ability::Dash), 1.0);
+    }
+
+    #[test]
+    fn rerolls_and_the_moth() {
+        assert_eq!(RunUpgrades::default().rerolls_left(), REROLLS_PER_RUN);
+        assert_eq!(with(&[(Upgrade::SpareCoin, 2)]).rerolls_left(), REROLLS_PER_RUN + 2);
+        assert_eq!(with(&[(Upgrade::MothsFavour, 2)]).moth_pct_off(), 20);
+        let reg = with(&[(Upgrade::MothsFavour, 1), (Upgrade::DustHoarder, 1)]);
+        assert_eq!(reg.moth_pct_off(), 10 + REGULAR_PCT);
+    }
+
+    #[test]
+    fn deck_perks_bend_the_timers() {
+        let d = RunUpgrades::default().deck_perks();
+        assert_eq!(d, crate::deck::DeckPerks::default());
+        near(with(&[(Upgrade::NimbleDraw, 2)]).deck_perks().draw_mult, 0.5625);
+        near(with(&[(Upgrade::HomingCards, 2)]).deck_perks().shuffle_mult, 0.36);
+        let c = with(&[(Upgrade::NimbleDraw, 2), (Upgrade::HomingCards, 1)]).deck_perks();
+        near(c.draw_mult, 0.5625 * CASCADE_MULT);
+        near(c.shuffle_mult, HOMING_MULT * CASCADE_MULT);
+        assert_eq!(with(&[(Upgrade::FreeReshuffle, 1)]).deck_perks().free_reshuffles, 1);
+        let e = with(&[(Upgrade::FreeReshuffle, 1), (Upgrade::Quicken, 1)]);
+        assert_eq!(e.deck_perks().free_reshuffles, 2);
+    }
+
+    #[test]
+    fn new_curses_cut_both_ways() {
+        let h = cursed(Curse::Hourglass);
+        near(h.duration_for(Ability::Dash), 1.5);
+        near(h.cooldown_for(Ability::Dash), 1.25);
+        let s = cursed(Curse::Sleepwalker);
+        near(s.speed(), 1.2);
+        near(s.deck_perks().draw_mult, 1.4);
+        let t = cursed(Curse::ThinSkin);
+        near(t.memory_bonus(), THIN_SKIN_MEMORY);
+        assert_eq!(t.nerve_max(), crate::nerve::START - 1);
+        let m = cursed(Curse::Magpie);
+        assert!((m.shard_bonus() - MAGPIE_SHARDS).abs() < 1e-9);
+        near(m.alert(), 1.25);
+        let b = cursed(Curse::BorrowedTime);
+        near(b.strike_cooldown(), 0.7);
+        near(b.grace(), 0.7);
+        let r = cursed(Curse::RiggedDeck).deck_perks();
+        near(r.draw_mult, 1.3);
+        near(r.shuffle_mult, 0.5);
+    }
+
+    #[test]
+    fn every_new_item_is_offered_when_it_could_help() {
+        // With a deck hand and two abilities held, every new passive and
+        // curse changes something, so the roll can show it.
+        let mut run = RunUpgrades::default();
+        run.take(Upgrade::Learn(Ability::Dash));
+        run.take(Upgrade::Learn(Ability::Hush));
+        for &u in &PASSIVES[21..] {
+            assert!(run.available(u), "{u:?} would change nothing");
+        }
+        for &c in &ALL_CURSES[5..] {
+            assert!(run.available(Upgrade::Cursed(c)), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn new_items_turn_up_in_seeded_rolls() {
+        let mut run = RunUpgrades::default();
+        run.take(Upgrade::Learn(Ability::Dash));
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..600 {
+            for d in [1, 8] {
+                for u in roll_choices(seed, &run, Roll { depth: d, boss: false }) {
+                    seen.insert(u);
+                }
+            }
+        }
+        for &u in &PASSIVES[21..] {
+            assert!(seen.contains(&u), "{u:?} never rolled");
+        }
+        for &c in &ALL_CURSES[5..] {
+            assert!(seen.contains(&Upgrade::Cursed(c)), "{c:?} never rolled");
+        }
+    }
+}
+// === end upgrades2 ===
