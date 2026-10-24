@@ -1449,6 +1449,24 @@ mod tests {
                 rows.push((gen, tex, format!("{theme:?} d{depth}")));
             }
         }
+        for theme in ALL_THEMES {
+            let t = Instant::now();
+            for seed in 0..4u64 {
+                std::hint::black_box(generate_nightmare(theme, seed, 12));
+            }
+            rows.push((t.elapsed().as_secs_f64() * 1e3 / 4.0, 0.0, format!("{theme:?} NIGHTMARE")));
+        }
+        {
+            let t = Instant::now();
+            for theme in ALL_THEMES {
+                for seed in 0..8u64 {
+                    let spec = theme.spec();
+                    let mut rng = StdRng::seed_from_u64(seed);
+                    std::hint::black_box(layout::generate(spec.layout, grid_size_capped(theme, 12, 12), &mut rng));
+                }
+            }
+            println!("layout::generate alone: {:.2} ms mean", t.elapsed().as_secs_f64() * 1e3 / (ALL_THEMES.len() * 8) as f64);
+        }
         rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
         let tot: f64 = rows.iter().map(|r| r.0).sum::<f64>() / rows.len() as f64;
         let tt: f64 = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;

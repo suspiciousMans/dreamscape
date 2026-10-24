@@ -98,6 +98,7 @@ mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sorting;
+mod viewcache; // === perf ===
 mod sounds;
 mod specials;
 mod steam;
@@ -926,6 +927,9 @@ pub struct DreamscapeGame {
     booklet_return: hud::Mode,
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
+    /// === perf === sorted card lists for the menu views (rebuilt only on change).
+    view_cards: std::cell::RefCell<[viewcache::CardCache; 3]>,
+    view_attune: std::cell::RefCell<(u64, String)>,
     pack: reveal_ui::PackView,
     /// Every card the run's opened packs gave so far; pressed together at the end.
     haul: Vec<cards::Recalled>,
@@ -1302,6 +1306,8 @@ impl DreamscapeGame {
             booklet_return: hud::Mode::Journal,
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
+            view_cards: Default::default(), // === perf ===
+            view_attune: Default::default(),
             pack: reveal_ui::PackView::default(),
             haul: Vec::new(),
             pick: reveal_ui::PackPickView::default(),
@@ -3763,7 +3769,7 @@ impl DreamscapeGame {
             },
             loadout: if self.mode == hud::Mode::Loadout {
                 loadout_ui::LoadoutView {
-                    cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
+                    cards: self.view_cards(0, self.settings.sort_loadout, None),
                     sort: self.settings.sort_loadout.label(),
                     chosen: self.booklet.lore.deck.clone(), // === deck ===
                     slots: deck::DECK_MAX,
@@ -3790,7 +3796,7 @@ impl DreamscapeGame {
             },
             merge: if self.mode == hud::Mode::Merge {
                 merge_ui::MergeView {
-                    cards: self.sorted_cards(self.settings.sort_merge).into_iter().cloned().collect(),
+                    cards: self.view_cards(1, self.settings.sort_merge, None),
                     sort: self.settings.sort_merge.label(),
                     selected: self.merge_sel,
                     first: self.merge_first,
@@ -3892,20 +3898,25 @@ impl DreamscapeGame {
             },
             journal_status: self.journal_status.clone(),
             booklet_cards: if self.mode == hud::Mode::Booklet {
-                let all = self.sorted_cards(self.settings.sort_booklet);
-                all[cards::page_range(all.len(), self.booklet_page)]
-                    .iter()
-                    .map(|c| (*c).clone())
-                    .collect()
+                let range = cards::page_range(self.booklet.card_count(), self.booklet_page);
+                self.view_cards(2, self.settings.sort_booklet, Some(range))
             } else {
-                Vec::new()
+                std::sync::Arc::from(Vec::new())
             },
             booklet_sort: self.settings.sort_booklet.label(),
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
             booklet_attune: if self.mode == hud::Mode::Booklet {
-                attunement::line(&attunement::counts(self.booklet.cards()))
+{
+                    // === perf === rebuilt only when the cards change
+                    let print = viewcache::fingerprint(self.booklet.cards());
+                    let mut cache = self.view_attune.borrow_mut();
+                    if cache.1.is_empty() || cache.0 != print {
+                        *cache = (print, attunement::line(&attunement::counts(self.booklet.cards())));
+                    }
+                    cache.1.clone()
+                }
             } else {
                 String::new()
             },
@@ -3959,10 +3970,15 @@ impl DreamscapeGame {
             } else {
                 tickets_ui::TicketsView::default()
             },
+            // === perf === the screens look a card up and treat a missing one as level 0,
+            // so only cards that earned xp are listed (was: every card in the booklet).
             mastery_levels: self
                 .booklet
-                .cards()
-                .map(|c| (c.number, self.booklet.mastery.level_of(c.number)))
+                .mastery
+                .xp
+                .iter()
+                .map(|&(n, x)| (n, worth::level(x)))
+                .filter(|&(_, l)| l > 0)
                 .collect(),
             perks: if self.mode == hud::Mode::Title {
                 self.booklet
@@ -8642,9 +8658,15 @@ impl DreamscapeGame {
     /// The booklet's cards in the given order.
     fn sorted_cards(&self, sort: sorting::Sort) -> Vec<&cards::Card> {
         let all: Vec<&cards::Card> = self.booklet.cards().collect();
-        // `order` wants a slice of cards; sorting is by value so clone the (small) list.
-        let tmp: Vec<cards::Card> = all.iter().map(|c| (*c).clone()).collect();
-        sorting::order(&tmp, sort).into_iter().map(|i| all[i]).collect()
+        sorting::order(&all, sort).into_iter().map(|i| all[i]).collect()
+    }
+
+    /// === perf === `sorted_cards` for the per-frame view: cloned only when the
+    /// booklet, the sort or the slice changed. `slot`: 0 loadout, 1 merge, 2 booklet.
+    fn view_cards(&self, slot: usize, sort: sorting::Sort, range: Option<std::ops::Range<usize>>) -> std::sync::Arc<[cards::Card]> {
+        let print = viewcache::fingerprint(self.booklet.cards());
+        let range = range.unwrap_or(0..usize::MAX);
+        self.view_cards.borrow_mut()[slot].get(print, sort, range, || self.booklet.cards().cloned().collect())
     }
 
     /// `[t]` (cycle = true) or `[r]` on the booklet, merge or loadout screen: the cursor

@@ -19,7 +19,7 @@ pub const ROWS: usize = 5;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoadoutView {
     /// Every card in the booklet, in order.
-    pub cards: Vec<Card>,
+    pub cards: std::sync::Arc<[Card]>, // === perf === shared, see viewcache
     /// Booklet numbers chosen, in order.
     pub chosen: Vec<u32>,
     pub slots: usize,

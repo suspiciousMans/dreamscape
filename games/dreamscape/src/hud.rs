@@ -118,7 +118,7 @@ pub struct HudView {
     pub journal: Vec<(String, crate::cards::Rarity)>,
     /// Shown on the journal after pressing [s].
     pub journal_status: Option<String>,
-    pub booklet_cards: Vec<crate::cards::Card>,
+    pub booklet_cards: std::sync::Arc<[crate::cards::Card]>, // === perf === shared, see viewcache
     pub booklet_page: usize,
     pub booklet_pages: usize,
     pub booklet_total: usize,

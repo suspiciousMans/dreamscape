@@ -12,7 +12,7 @@ use engine::ui::egui::{self, Align2, Color32, FontId, Pos2, Rect, Vec2};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MergeView {
-    pub cards: Vec<Card>,
+    pub cards: std::sync::Arc<[Card]>, // === perf === shared, see viewcache
     pub selected: usize,
     /// The first card, once picked.
     pub first: Option<u32>,
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn the_preview_needs_two_different_dreams() {
         let mut m = MergeView {
-            cards: cards(&[Garden, MyceliumGrove, Garden]),
+            cards: cards(&[Garden, MyceliumGrove, Garden]).into(),
             ..Default::default()
         };
         assert!(preview(&m).is_none(), "nothing picked yet");
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn the_altar_follows_the_picks() {
         let mut m = MergeView {
-            cards: cards(&[Garden, MyceliumGrove, Garden]),
+            cards: cards(&[Garden, MyceliumGrove, Garden]).into(),
             ..Default::default()
         };
         assert_eq!(step(&m), Step::PickFirst);
