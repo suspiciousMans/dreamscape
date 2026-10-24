@@ -11779,7 +11779,7 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         steam::tick();
-        self.coop_tick(ctx, dt)?;
+        { let _t = engine::perf::scope("upd.coop_tick"); self.coop_tick(ctx, dt)?; }
         if let Some((seed, long, players)) = self.pending_coop_start.take() {
             self.start_coop_run(ctx, seed, long, players)?;
         }
@@ -11789,7 +11789,7 @@ impl Game for DreamscapeGame {
                 self.achievement_toast = None;
             }
         }
-        self.poll_music();
+        { let _t = engine::perf::scope("upd.poll_music"); self.poll_music(); }
         if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
             panic!("DREAMSCAPE_CRASH: test crash");
         }
@@ -12052,7 +12052,7 @@ impl Game for DreamscapeGame {
                 }
             }
         }
-        self.update_shrink();
+        { let _t = engine::perf::scope("upd.update_shrink"); self.update_shrink(); }
         // === end hazards ===
         // === ascension === 15: the eye's clock runs out once per dream
         if !self.asc_eye_failed
@@ -12069,9 +12069,9 @@ impl Game for DreamscapeGame {
         // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
-        self.update_deck(dt); // === deck ===
+        { let _t = engine::perf::scope("upd.update_deck"); self.update_deck(dt); } // === deck ===
         // === pressure ===
-        self.update_pressure(dt);
+        { let _t = engine::perf::scope("upd.update_pressure"); self.update_pressure(dt); }
         // === end pressure ===
 
         // 0b. Abilities
@@ -12115,18 +12115,18 @@ impl Game for DreamscapeGame {
         }
         // === end shop ===
         // === combat ===
-        self.update_combat(dt);
+        { let _t = engine::perf::scope("upd.update_combat"); self.update_combat(dt); }
         // === end combat ===
-        self.update_abilities2(dt); // === abilities2 ===
-        self.update_abilities3(dt); // === abilities3 ===
+        { let _t = engine::perf::scope("upd.update_abilities2"); self.update_abilities2(dt); } // === abilities2 ===
+        { let _t = engine::perf::scope("upd.update_abilities3"); self.update_abilities3(dt); } // === abilities3 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
-        self.update_objective(ctx, dt);
-        self.update_skittish(dt);
-        self.update_caches();
-        self.update_secret();
-        self.update_wager(); // === risk ===
+        { let _t = engine::perf::scope("upd.update_objective"); self.update_objective(ctx, dt); }
+        { let _t = engine::perf::scope("upd.update_skittish"); self.update_skittish(dt); }
+        { let _t = engine::perf::scope("upd.update_caches"); self.update_caches(); }
+        { let _t = engine::perf::scope("upd.update_secret"); self.update_secret(); }
+        { let _t = engine::perf::scope("upd.update_wager"); self.update_wager(); } // === risk ===
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
@@ -12450,9 +12450,9 @@ impl Game for DreamscapeGame {
                 self.anchor = None;
             }
         }
-        self.update_specials(dt, held)?;
-        self.update_newfoes(dt, held); // enemies-a
-        self.update_features();
+        { let _t = engine::perf::scope("upd.update_specials"); self.update_specials(dt, held)?; }
+        { let _t = engine::perf::scope("upd.update_newfoes"); self.update_newfoes(dt, held); } // enemies-a
+        { let _t = engine::perf::scope("upd.update_features"); self.update_features(); }
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
             if b.defeated {
@@ -12491,7 +12491,7 @@ impl Game for DreamscapeGame {
             }
             log::info!("Boss: {e:?}");
         }
-        self.sync_boss_fx();
+        { let _t = engine::perf::scope("upd.sync_boss_fx"); self.sync_boss_fx(); }
 
         // 3. Physics: gravity, collision, trigger overlaps
         let physics = PhysicsParams {
@@ -12505,8 +12505,8 @@ impl Game for DreamscapeGame {
             ..PhysicsParams::default()
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
-        self.update_slam();
-        self.update_climb();
+        { let _t = engine::perf::scope("upd.update_slam"); self.update_slam(); }
+        { let _t = engine::perf::scope("upd.update_climb"); self.update_climb(); }
         if let Some(p) = self.player {
             if self.world.get::<&RigidBody>(p).is_ok_and(|b| b.grounded) {
                 self.rewind_trail.push(self.dream_age, self.player_position);
@@ -12525,12 +12525,12 @@ impl Game for DreamscapeGame {
                 dt,
                 self.twists.camera_zoom(),
             );
-        self.update_door_hum(dt);
-        self.update_echoes(player, dt)?;
-        self.update_echo_ghost()?;
-        self.update_bursts(ctx.gl())?;
-        self.update_ability_fx(ctx.gl(), player, dt)?;
-        self.update_adaptive_music(dt);
+        { let _t = engine::perf::scope("upd.update_door_hum"); self.update_door_hum(dt); }
+        { let _t = engine::perf::scope("upd.update_echoes"); self.update_echoes(player, dt)?; }
+        { let _t = engine::perf::scope("upd.update_echo_ghost"); self.update_echo_ghost()?; }
+        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; }
+        { let _t = engine::perf::scope("upd.update_ability_fx"); self.update_ability_fx(ctx.gl(), player, dt)?; }
+        { let _t = engine::perf::scope("upd.update_adaptive_music"); self.update_adaptive_music(dt); }
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self
@@ -12875,7 +12875,10 @@ impl Game for DreamscapeGame {
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        let mut hud_view = self.hud_view();
+        let mut hud_view = {
+            let _t = engine::perf::scope("rnd.hud_view");
+            self.hud_view()
+        };
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
@@ -13090,6 +13093,7 @@ impl Game for DreamscapeGame {
         // back faces), so it reads on bright floors as well as dark ones.
         // 2 (translucent): water. 3: the dreamer's silhouette wherever
         // something stands in front of it.
+        let world_scope = engine::perf::scope("rnd.world passes");
         for pass in 0..4 {
             unsafe {
                 match pass {
@@ -13189,6 +13193,7 @@ impl Game for DreamscapeGame {
                 mesh_renderer.mesh.draw(gl);
             }
         }
+        drop(world_scope);
         unsafe {
             gl.depth_func(engine::glow::LESS);
             gl.depth_mask(true);
@@ -13198,6 +13203,7 @@ impl Game for DreamscapeGame {
             }
         }
 
+        let present_scope = engine::perf::scope("rnd.present (post)");
         renderer.present(
             gl,
             drawable_size,
@@ -13208,6 +13214,7 @@ impl Game for DreamscapeGame {
                 tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
             },
         );
+        drop(present_scope);
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
@@ -13238,6 +13245,7 @@ impl Game for DreamscapeGame {
             || tunnel && hud_view.mode == hud::Mode::Paused;
         if let Some(ui) = self.ui.as_mut() {
             ui.ui_scale = hud::ui_scale(hud_view.mode, drawable_size.0 as f32, drawable_size.1 as f32);
+            let ui_run = engine::perf::scope("rnd.egui run (hud::draw)");
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
@@ -13274,6 +13282,8 @@ impl Game for DreamscapeGame {
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack, pick, packs_art);
             });
+            drop(ui_run);
+            let _t = engine::perf::scope("rnd.egui paint");
             ui.paint(drawable_size, output);
         }
         if std::mem::take(&mut self.export_requested) && self.mode == hud::Mode::Booklet {
