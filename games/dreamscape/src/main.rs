@@ -2089,6 +2089,7 @@ impl DreamscapeGame {
                 shown: true,
                 draw_count: d.draw_len(),
                 riffle_since: self.deck_clock - self.deck_riffle_at,
+                back: Some(self.booklet.stash.card_back).filter(|b| *b != store::CardBack::Dusk), // === smallfixes ===
                 leaving: self
                     .deck_leaving
                     .iter()
@@ -6668,10 +6669,6 @@ impl DreamscapeGame {
     /// the reroll.
     fn show_moth_shop(&mut self, selected: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
-        if shelf.is_empty() {
-            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
-            return;
-        }
         let terms = self.moth_terms();
         let mut cards: Vec<upgrade_ui::ChoiceCard> = shelf
             .cards
@@ -6728,6 +6725,17 @@ impl DreamscapeGame {
             });
         }
         // === end toolcards ===
+        // A sold-out shelf keeps the shop open: one EMPTY row stands first.
+        if shelf.is_empty() {
+            cards.push(upgrade_ui::ChoiceCard {
+                name: "EMPTY".into(),
+                desc: moth_shop::EMPTY.into(),
+                icon: upgrades::Icon::Eye,
+                color: [110, 110, 130],
+                frame: [80, 80, 100],
+                tag: "nothing for sale".into(),
+            });
+        }
         let rr = moth_shop::reroll_price(shelf.rerolls);
         let can_rr = self.bonus_dust >= rr;
         cards.push(upgrade_ui::ChoiceCard {
@@ -6771,6 +6779,17 @@ impl DreamscapeGame {
     /// card past the last one is the reroll.
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
+        // A sold-out shelf shows one EMPTY row first: it is not for sale.
+        let index = if shelf.is_empty() {
+            if index == 0 {
+                self.sfx(Sound::Denied);
+                self.show_moth_shop(0);
+                return;
+            }
+            index - 1
+        } else {
+            index
+        };
         let terms = self.moth_terms();
         if index == shelf.rows() + 1 {
             self.open_gamble_stakes(); // === risk ===
@@ -6825,7 +6844,7 @@ impl DreamscapeGame {
                 self.sfx(Sound::Denied);
             }
         }
-        // Sold out: the moth shrugs and you are back in the dream.
+        // Sold out: the shop stays open (EMPTY row, reroll, coin, leave).
         self.show_moth_shop(index);
     }
 
@@ -6887,7 +6906,7 @@ impl DreamscapeGame {
     // === risk ===
     /// The gamble row's index in the shop (after the shelf and the reroll).
     fn gamble_row(&self) -> usize {
-        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1)
+        self.moth_stock.as_ref().map_or(0, |s| s.rows() + 1 + usize::from(s.is_empty()))
     }
 
     fn risk_allowed(&self) -> bool {
@@ -7735,7 +7754,12 @@ impl DreamscapeGame {
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
-            gamble: self.gamble.clone(), // === risk ===
+            gamble: {
+                // === risk === the baseline and visit count ride along
+                let mut g = self.gamble.clone();
+                g.stamp(self.wager_dust_start, self.gamble_visit);
+                g
+            },
             tool_cards: self.tool_cards_held(), // === toolcards ===
             deck: self.deck.as_ref().map(|d| d.snapshot()), // === decksave ===
         };
@@ -9833,7 +9857,7 @@ impl DreamscapeGame {
         );
         self.pressure_phase = pressure::Phase::Calm;
         self.pressure_dust_start = self.bonus_dust;
-        self.wager_dust_start = self.bonus_dust; // === risk ===
+        self.wager_dust_start = self.gamble.take_wager_start(self.bonus_dust); // === risk ===
         // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
@@ -10061,7 +10085,7 @@ impl DreamscapeGame {
         self.caches.clear();
         self.secret = None;
         self.moth_stock = None;
-        self.gamble_visit = 0; // === risk ===
+        self.gamble_visit = self.gamble.take_visit_flips(); // === risk === a resumed visit keeps its count
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -11309,8 +11333,7 @@ impl Game for DreamscapeGame {
                         }
                     }
                     Keycode::G if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
-                        self.choose(at + 1); // === risk ===
+                        self.choose(self.gamble_row()); // === risk ===
                     }
                     Keycode::X | Keycode::Escape if matches!(self.choice, Some(ChoiceKind::Gamble(_))) => {
                         self.gamble_back(); // === risk ===
@@ -11319,8 +11342,7 @@ impl Game for DreamscapeGame {
                         self.choose(1); // === risk === not now
                     }
                     Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
-                        let at = self.moth_stock.as_ref().map_or(0, |s| s.rows());
-                        self.choose(at);
+                        self.choose(self.gamble_row() - 1);
                     }
                     Keycode::R => self.reroll_choice(),
                     Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
@@ -15305,6 +15327,50 @@ mod screen_smoke {
     }
 
     #[test]
+    fn every_bought_card_back_paints_its_own_stack_and_draw_flight() {
+        use store::CardBack::*;
+        let mut g = game("backs");
+        g.mode = hud::Mode::Playing;
+        let pile = |back: Option<store::CardBack>| hand::HandPile {
+            shown: true,
+            draw_count: 5,
+            riffle_since: hand::NEVER,
+            leaving: vec![],
+            back,
+        };
+        let paint = |back: Option<store::CardBack>, since_draw: f32, reduced: bool| {
+            let mut s = String::new();
+            let sh = frame_with(&g, 1280.0, 720.0, &|v| {
+                let mut c = card("DASH", hand::NEVER);
+                c.since_draw = since_draw;
+                v.hand = vec![c];
+                v.hand_pile = pile(back);
+                v.settings_snapshot.reduced_motion = reduced;
+            });
+            for x in &sh {
+                s.push_str(&format!("{x:?}"));
+            }
+            (sh.len(), s)
+        };
+        let mut seen = std::collections::HashSet::new();
+        let base = paint(None, hand::NEVER, false);
+        for b in [Moth, Eye, Stars, Checker, Ember] {
+            let st = paint(Some(b), hand::NEVER, false);
+            assert!(st.0 > base.0, "{b:?}: the pattern adds shapes");
+            assert!(seen.insert(st.1), "{b:?} paints a different stack");
+            let fl = paint(Some(b), 0.1, false);
+            assert_ne!(fl.1, paint(Some(b), hand::NEVER, false).1, "{b:?}: the flight shows a back");
+            assert_eq!(
+                paint(Some(b), 0.1, true).1,
+                paint(Some(b), hand::NEVER, true).1,
+                "reduced motion keeps the card still"
+            );
+        }
+        // The default back is untouched.
+        assert_eq!(paint(None, hand::NEVER, false).1, base.1);
+    }
+
+    #[test]
     fn the_hand_draws_at_rest_and_popping_adds_a_ring_without_panicking() {
         let mut g = game("hand");
         g.mode = hud::Mode::Playing;
@@ -15372,6 +15438,7 @@ mod screen_smoke {
             draw_count: count,
             riffle_since: riffle,
             leaving,
+            back: None,
         };
         let none = n_shapes(false, hand::HandPile::default(), hand::NEVER);
         let stack = n_shapes(false, shown(5, hand::NEVER, vec![]), hand::NEVER);
@@ -15890,6 +15957,45 @@ mod screen_smoke {
     }
 
     #[test]
+    fn a_sold_out_shelf_keeps_the_shop_open_with_reroll_coin_and_leave() {
+        let mut g = reward_game("shop_soldout");
+        g.choose(0);
+        g.bonus_dust = 5000;
+        for _ in 0..40 {
+            if g.moth_stock.as_ref().is_some_and(|s| s.cards.is_empty()) {
+                break;
+            }
+            g.choose(0);
+        }
+        g.moth_stock.as_mut().unwrap().tools.clear();
+        g.show_moth_shop(0);
+        assert!(g.moth_stock.as_ref().unwrap().is_empty());
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "still open");
+        let names: Vec<_> = g.choice_view.cards.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(names, ["EMPTY", "REROLL", gamble::ROW_NAME], "{names:?}");
+        assert!(g.choice_view.cards[0].desc.contains("NOTHING LEFT"));
+        // The EMPTY row is not for sale.
+        let dust = g.bonus_dust;
+        g.choose(0);
+        assert_eq!((g.bonus_dust, g.choice.clone()), (dust, Some(ChoiceKind::MothShop)));
+        // The reroll refills the shelf.
+        g.choose(1);
+        assert!(g.bonus_dust < dust, "the reroll was paid");
+        assert!(!g.moth_stock.as_ref().unwrap().is_empty(), "refilled");
+        // Sell it out again by hand: the coin row is reachable by [g].
+        g.moth_stock.as_mut().unwrap().cards.clear();
+        g.moth_stock.as_mut().unwrap().tools.clear();
+        g.show_moth_shop(0);
+        assert_eq!(g.gamble_row(), 2);
+        g.choose(g.gamble_row());
+        assert!(matches!(g.choice, Some(ChoiceKind::Gamble(_))), "{:?}", g.choice);
+        g.gamble_back();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+    }
+
+    #[test]
     fn skipping_a_nightmare_reward_also_opens_the_shop_once() {
         let mut g = reward_game("shop_skip");
         let dust = g.bonus_dust;
@@ -16004,6 +16110,30 @@ mod screen_smoke {
     }
 
     #[test]
+    fn quitting_cannot_reset_the_visit_count_or_the_wager_baseline() {
+        let mut g = coin_game("risk_quit", 400);
+        g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_quit_run.ron");
+        let _ = std::fs::remove_file(&g.save_path);
+        g.run_active = true;
+        g.wager_dust_start = 123;
+        for _ in 0..gamble::MAX_PER_VISIT {
+            flip(&mut g, 0);
+            g.choose(0);
+        }
+        let start = g.wager_dust_start;
+        let saved = progress::load(&g.save_path).expect("saved");
+        // What the continue path and load_dream do with it.
+        g.gamble = saved.gamble.clone();
+        g.bonus_dust = saved.bonus_dust;
+        g.wager_dust_start = g.gamble.take_wager_start(g.bonus_dust);
+        g.gamble_visit = g.gamble.take_visit_flips();
+        assert_eq!(g.gamble_visit, gamble::MAX_PER_VISIT, "no extra flips after a reload");
+        assert_eq!(g.wager_dust_start, start, "not the current dust");
+        assert_ne!(g.wager_dust_start, g.bonus_dust);
+        let _ = std::fs::remove_file(&g.save_path);
+    }
+
+    #[test]
     fn the_outcome_is_saved_before_it_shows_and_a_reload_cannot_reroll_it() {
         let mut g = coin_game("risk_save", 100);
         g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_save_run.ron");
@@ -16012,7 +16142,9 @@ mod screen_smoke {
         flip(&mut g, 2);
         let saved = progress::load(&g.save_path).expect("saved at commit");
         assert_eq!(saved.bonus_dust, g.bonus_dust, "the dust and the counter were saved together");
-        assert_eq!(saved.gamble, g.gamble);
+        assert_eq!(saved.gamble.visit_flips, Some(1));
+        assert_eq!(saved.gamble.wager_start, Some(g.wager_dust_start));
+        assert_eq!(saved.gamble.flips, g.gamble.flips);
         assert_eq!(saved.gamble.flips, 1);
         // Same dream, reloaded state: the next flip is the same draw.
         let seed = g.director.dream_seed();

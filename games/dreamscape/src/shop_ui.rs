@@ -315,29 +315,32 @@ fn preview(p: &egui::Painter, r: Rect, item: Item, v: &HudView) {
     }
 }
 
+/// Is cell (x, y) of an nx-by-ny grid lit in this back's pattern?
+pub(crate) fn card_back_cell(b: CardBack, x: i32, y: i32, nx: i32, ny: i32) -> bool {
+    match b {
+        CardBack::Dusk => (x + y) % 4 == 0,
+        CardBack::Moth => {
+            let (cx, cy) = (nx / 2, ny / 2);
+            let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
+            dx + dy / 2 == 2 || (dx == 0 && dy < 3)
+        }
+        CardBack::Eye => {
+            let (dx, dy) = ((x - nx / 2).abs(), (y - ny / 2).abs());
+            dx * dx + 4 * dy * dy <= 20 && dx * dx + 4 * dy * dy >= 6 || (dx == 0 && dy == 0)
+        }
+        CardBack::Stars => (x * 7 + y * 13) % 11 == 0,
+        CardBack::Checker => (x + y) % 2 == 0,
+        CardBack::Ember => y > ny / 2 && (x + y * 2) % 3 == 0,
+    }
+}
+
 /// A simple pixel pattern for each back (also the DECK stream's to reuse).
 pub(crate) fn card_back_pattern(p: &egui::Painter, r: Rect, b: CardBack, col: [u8; 3]) {
     let cell = 8.0;
     let (nx, ny) = ((r.width() / cell) as i32, (r.height() / cell) as i32);
     for y in 0..ny {
         for x in 0..nx {
-            let on = match b {
-                CardBack::Dusk => (x + y) % 4 == 0,
-                CardBack::Moth => {
-                    let (cx, cy) = (nx / 2, ny / 2);
-                    let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
-                    dx + dy / 2 == 2 || (dx == 0 && dy < 3)
-                }
-                CardBack::Eye => {
-                    let (dx, dy) = ((x - nx / 2).abs(), (y - ny / 2).abs());
-                    dx * dx + 4 * dy * dy <= 20 && dx * dx + 4 * dy * dy >= 6
-                        || (dx == 0 && dy == 0)
-                }
-                CardBack::Stars => (x * 7 + y * 13) % 11 == 0,
-                CardBack::Checker => (x + y) % 2 == 0,
-                CardBack::Ember => y > ny / 2 && (x + y * 2) % 3 == 0,
-            };
-            if on {
+            if card_back_cell(b, x, y, nx, ny) {
                 let at = r.min + Vec2::new(x as f32 * cell, y as f32 * cell);
                 p.rect_filled(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), 0.0, rgba(col, 0.8));
             }
