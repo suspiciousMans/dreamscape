@@ -1062,6 +1062,32 @@ mod tests {
     }
 
     #[test]
+    fn cards_in_flight_stay_on_screen_at_every_moment_and_size() {
+        for (w, h) in [(1280.0, 720.0), (960.0, 540.0), (1920.0, 1080.0)] {
+            let s = Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h));
+            let u = crate::pixel_ui::scale(s);
+            for n in 1..=3 {
+                let rests = layout(s, n);
+                let stack = stack_rect(s, &rests, u);
+                assert!(s.contains_rect(stack), "{w}x{h} n={n}");
+                for (i, rest) in rests.iter().enumerate() {
+                    let mut t = 0.0;
+                    while t < LEAVE_TOTAL.max(DRAW_SECS) {
+                        for pose in [leave_pose(t, *rest, stack, u, false), Some(draw_pose(t, *rest, stack, u, false))]
+                            .into_iter()
+                            .flatten()
+                        {
+                            let c = pose.rect.center();
+                            assert!(c.x > 0.0 && c.x < w && c.y > 0.0 && c.y < h, "{w}x{h} n={n} i={i} t={t}: {c:?}");
+                        }
+                        t += 0.01;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_stack_shows_up_to_four_layers() {
         assert_eq!(stack_layers(0), 0);
         assert_eq!(stack_layers(1), 1);
