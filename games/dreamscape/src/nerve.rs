@@ -160,6 +160,19 @@ impl Nerve {
         self.cur - before
     }
 
+    // === abilities3 ===
+    /// BARGAIN pays `n` nerve of its own free will: no hit, no invulnerability,
+    /// nothing for REWIND to give back, and never the last nerve.
+    pub fn spend(&mut self, n: u32) -> bool {
+        if self.cur > n {
+            self.cur -= n;
+            true
+        } else {
+            false
+        }
+    }
+    // === end abilities3 ===
+
     /// Restores up to `n` nerve (never past the max).
     pub fn heal(&mut self, n: u32) {
         self.cur = (self.cur + n).min(self.max);
@@ -380,4 +393,18 @@ mod tests {
         n.lower_max(5);
         assert_eq!(n.max(), 2);
     }
+
+    // === abilities3 ===
+    #[test]
+    fn spending_nerve_never_takes_the_last_one_and_is_not_a_hit() {
+        let mut n = Nerve::new(3);
+        assert!(n.spend(1));
+        assert_eq!(n.cur(), 2);
+        assert!(!n.invulnerable());
+        assert!(n.spend(1));
+        assert!(!n.spend(1), "the last nerve stays");
+        assert_eq!(n.cur(), 1);
+        assert_eq!(n.recover(), 0, "REWIND has nothing to give back");
+    }
+    // === end abilities3 ===
 }

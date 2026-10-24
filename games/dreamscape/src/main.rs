@@ -24,6 +24,7 @@ use engine::ui::EguiState;
 use engine::ui::egui;
 
 mod abilities2;
+mod abilities3;
 mod access;
 mod attunement;
 mod achievements;
@@ -248,6 +249,21 @@ struct SlashStart {
     half_arc: f32,
     flip: bool,
 }
+
+// === abilities3 ===
+/// The hand slot a settings action stands for.
+fn ability_slot(a: Option<settings::Action>) -> Option<usize> {
+    use settings::Action::*;
+    match a? {
+        Ability1 => Some(0),
+        Ability2 => Some(1),
+        Ability3 => Some(2),
+        Ability4 => Some(3),
+        Ability5 => Some(4),
+        _ => None,
+    }
+}
+// === end abilities3 ===
 
 /// Something a strike, a dash or a shock can hit.
 struct CombatTarget {
@@ -670,6 +686,25 @@ pub struct DreamscapeGame {
     /// PULSE: pillars standing over what hides behind walls.
     pulse_marks: Vec<Entity>,
     // === end abilities2 ===
+    // === abilities3 ===
+    /// ECHO: the ability it would repeat.
+    echo_last: Option<Ability>,
+    /// WAGER: rolls this dream, wagers since a jackpot, the line on the HUD.
+    wager_n: u32,
+    wager_dry: u32,
+    wager_line: Option<(String, f32)>,
+    /// Extra duration for an ability fired from a borrowed state (a jackpot).
+    borrow_stretch: f32,
+    /// OVERLOAD: the charge in progress, the ring that shows it, and the
+    /// charge being released right now.
+    overload: Option<abilities3::Charge>,
+    overload_ring: Option<Entity>,
+    overload_fire: Option<f32>,
+    /// Which ability keys are down right now.
+    ability_held: [bool; upgrades::HAND_SIZE],
+    bargain: abilities3::Bargain,
+    snares: abilities3::Snares<Option<Entity>>,
+    // === end abilities3 ===
     steps: Vec<Entity>,
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
@@ -1083,6 +1118,19 @@ impl DreamscapeGame {
             haste: None,
             pulse_marks: Vec::new(),
             // === end abilities2 ===
+            // === abilities3 ===
+            echo_last: None,
+            wager_n: 0,
+            wager_dry: 0,
+            wager_line: None,
+            borrow_stretch: 1.0,
+            overload: None,
+            overload_ring: None,
+            overload_fire: None,
+            ability_held: [false; upgrades::HAND_SIZE],
+            bargain: abilities3::Bargain::default(),
+            snares: abilities3::Snares::new(),
+            // === end abilities3 ===
             steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -2082,6 +2130,7 @@ impl DreamscapeGame {
             // === deck === spent ghosts finishing an effect are not cards in hand
             .take(if self.run.deck_slots > 0 { self.run.deck_slots } else { usize::MAX })
             // === end deck ===
+            .filter(|(_, a)| self.run.deck_slots > 0 || !a.spent) // === abilities3 === a borrowed ability finishing its effect
             .map(|(k, a)| {
                 let (tint, tint2) = self
                     .ability_tints
@@ -2124,7 +2173,11 @@ impl DreamscapeGame {
                     key: upgrades::SLOT_KEYS[k],
                     charge: a.charge(self.run.cooldown_for(a.ability)),
                     active: a.is_active()
-                        || (a.ability == Ability::Anchor && self.anchor.is_some()),
+                        || (a.ability == Ability::Anchor && self.anchor.is_some())
+                        // === abilities3 ===
+                        || (a.ability == Ability::Bargain && self.bargain.active())
+                        || (a.ability == Ability::Overload && self.overload.is_some()),
+                        // === end abilities3 ===
                     tint,
                     tint2,
                     since_use,
@@ -2543,7 +2596,7 @@ impl DreamscapeGame {
         // === edges2 === AMBUSH, OPENER, PUNISHER
         dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
         // === end edges2 ===
-        dmg
+        dmg * self.bargain.mult() // === abilities3 === BARGAIN cuts deeper
     }
 
     /// Damages one target: the shared end of a strike, a dash, a shock.
@@ -2712,6 +2765,7 @@ impl DreamscapeGame {
             }
         }
         self.flourish_now = false;
+        self.bargain.spend_strike(); // === abilities3 ===
         // === combat === the nightmare: wisps fall to a blow; the hunter only
         // can be hurt while it rests.
         if let Some((entity, b, _)) = self.hunter.as_mut() {
@@ -3697,7 +3751,12 @@ impl DreamscapeGame {
             } else {
                 summary_ui::SummaryView::default()
             },
-            hint: self.dream_hint.clone(),
+            // === abilities3 === the wager's roll shows for a moment
+            hint: match &self.wager_line {
+                Some((line, _)) => line.clone(),
+                None => self.dream_hint.clone(),
+            },
+            // === end abilities3 ===
             menu: if self.mode == hud::Mode::Title {
                 self.title_items()
                     .into_iter()
@@ -5409,16 +5468,26 @@ impl DreamscapeGame {
     }
 
     fn use_ability(&mut self, slot: usize) {
+        self.fire_ability(slot, false);
+    }
+
+    /// `borrowed`: the state is a temporary one made by WAGER or ECHO (see
+    /// `fire_borrowed`), not a card in hand.
+    fn fire_ability(&mut self, slot: usize, borrowed: bool) {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
         };
         // === deck === a used card is gone until its slot draws again
-        if state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots) {
+        if !borrowed
+            && (state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots))
+        {
             return;
         }
         // === end deck ===
         let mult = self.run.cooldown_for(state.ability);
-        let stretch = self.run.duration_for(state.ability);
+        let stretch = self.run.duration_for(state.ability) * self.borrow_stretch; // === abilities3 ===
+        // === abilities3 === the card in this slot, before it is played
+        let slot_card = self.deck.as_ref().and_then(|d| d.hand().get(slot).copied().flatten());
         let origin = self.player_position; // combat: where you were
         if state.cooldown > 0.0 {
             self.sfx(Sound::Denied);
@@ -5430,6 +5499,20 @@ impl DreamscapeGame {
             return;
         }
         // === end abilities2 ===
+        // === abilities3 === refused with nothing to act on (the charge is kept)
+        if !self.abilities3_ready(state.ability, slot_card) {
+            self.sfx(Sound::Denied);
+            return;
+        }
+        // OVERLOAD: the key down starts the charge; the release fires it.
+        if state.ability == Ability::Overload && !borrowed && self.overload_fire.is_none() {
+            if self.overload.is_none() {
+                self.overload = Some(abilities3::Charge::new(slot));
+                self.sfx(Sound::OverloadCharge);
+            }
+            return;
+        }
+        // === end abilities3 ===
         // Chained soon after another ability: a combo.
         let combo = self
             .last_ability
@@ -5581,10 +5664,12 @@ impl DreamscapeGame {
             self.anchor_snapped = false;
             // === end combat ===
             self.abilities2_on_use(state.ability, mult, stretch); // === abilities2 ===
+            let wager = self.abilities3_before_play(slot, state.ability); // === abilities3 ===
             if cracks {
                 self.open_secret();
             }
             self.deck_on_use(slot); // === deck ===
+            self.abilities3_after_play(state.ability, slot_card, wager); // === abilities3 ===
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -5656,6 +5741,16 @@ impl DreamscapeGame {
                 Ability::Haste => [1.0, 0.6, 0.5],
                 Ability::Bind => [0.6, 0.9, 0.4],
                 // === end abilities2 ===
+                // === abilities3 ===
+                Ability::Wager => [1.0, 0.85, 0.4],
+                Ability::Echo => [0.7, 0.8, 1.0],
+                Ability::Swap => [0.9, 0.6, 1.0],
+                Ability::Mulligan => [0.95, 0.95, 0.8],
+                Ability::Recall => [0.6, 1.0, 0.9],
+                Ability::Overload => [1.0, 0.5, 0.3],
+                Ability::Bargain => [0.8, 0.2, 0.3],
+                Ability::Snare => [0.7, 0.9, 0.5],
+                // === end abilities3 ===
             };
             let tint = self
                 .ability_tints
@@ -5694,8 +5789,23 @@ impl DreamscapeGame {
                 Ability::Haste => Sound::HasteOn,
                 Ability::Bind => Sound::BindClamp,
                 // === end abilities2 ===
+                // === abilities3 ===
+                Ability::Wager => Sound::WagerRoll,
+                Ability::Echo => Sound::EchoRepeat,
+                Ability::Swap => Sound::SwapPop,
+                Ability::Mulligan => Sound::MulliganShuffle,
+                Ability::Recall => Sound::RecallDraw,
+                Ability::Overload => Sound::OverloadBlast,
+                Ability::Bargain => Sound::BargainPact,
+                Ability::Snare => Sound::SnarePlant,
+                // === end abilities3 ===
             });
             self.last_ability = Some((state.ability, self.dream_age));
+            // === abilities3 === ECHO repeats a real ability, never itself (or a wager's shell)
+            if !matches!(state.ability, Ability::Echo | Ability::Wager) {
+                self.echo_last = Some(state.ability);
+            }
+            // === end abilities3 ===
             self.ability_used.retain(|u| u.0 != state.ability);
             self.ability_used.push((state.ability, self.dream_age));
             if let Some(c) = combo {
@@ -5886,6 +5996,281 @@ impl DreamscapeGame {
         }
     }
     // === end abilities2 ===
+
+    // === abilities3 ===
+    /// Is there anything for `a` to act on? (If not the charge is kept.)
+    fn abilities3_ready(&self, a: Ability, slot_card: Option<u32>) -> bool {
+        match a {
+            Ability::Echo => abilities3::echo_target(self.echo_last).is_some(),
+            Ability::Swap => self.swap_target().is_some(),
+            Ability::Mulligan => self.deck.is_some(),
+            Ability::Recall => self
+                .deck
+                .as_ref()
+                .is_some_and(|d| d.recall_candidate(slot_card).is_some()),
+            Ability::Bargain => abilities3::bargain_allowed(self.nerve.cur()),
+            _ => true,
+        }
+    }
+
+    /// Roots one foe for `secs`: a pacer is stunned, the rest stagger.
+    fn root_foe(&mut self, t: &CombatTarget, secs: f32) {
+        if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, secs);
+        } else {
+            self.staggered.insert(t.entity, secs);
+        }
+    }
+
+    /// What SWAP would trade with: (the foe, or `None` for the decoy, and
+    /// where it stands).
+    fn swap_target(&self) -> Option<(Option<CombatTarget>, Vec3)> {
+        let mut who: Vec<Option<CombatTarget>> = Vec::new();
+        let mut pts: Vec<Vec3> = Vec::new();
+        for t in self.combat_targets() {
+            pts.push(t.pos);
+            who.push(Some(t));
+        }
+        if let Some((at, _)) = self.decoy {
+            pts.push(at);
+            who.push(None);
+        }
+        let i = abilities3::swap_pick(self.player_position, &pts)?;
+        let pos = pts[i];
+        Some((who.swap_remove(i), pos))
+    }
+
+    /// Runs before the card leaves the hand: WAGER rolls (so its cooldown
+    /// can be bent before the deck takes it) and SWAP/OVERLOAD/BARGAIN/SNARE act.
+    fn abilities3_before_play(
+        &mut self,
+        slot: usize,
+        a: Ability,
+    ) -> Option<abilities3::WagerRoll> {
+        let me = self.player_position;
+        match a {
+            Ability::Swap => {
+                if let Some((foe, pos)) = self.swap_target() {
+                    match foe {
+                        Some(t) => {
+                            if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
+                                tr.position = me;
+                            }
+                            self.root_foe(&t, abilities3::SWAP_STAGGER);
+                        }
+                        None => {
+                            if let Some((_, e)) = self.decoy {
+                                if let Ok(mut tr) = self.world.get::<&mut Transform>(e) {
+                                    tr.position = me;
+                                }
+                                self.decoy = Some((me, e));
+                            }
+                        }
+                    }
+                    self.burst_pending = Some((me, [230, 160, 255], [255, 255, 255]));
+                    self.teleport_player(pos);
+                }
+            }
+            Ability::Overload => {
+                let secs = self.overload_fire.take().unwrap_or(abilities3::OVERLOAD_AUTO);
+                let reach = abilities3::overload_radius(secs);
+                self.shock(me, reach, 0.0, abilities3::overload_stagger(secs));
+                self.alert_enemies(upgrades::SLAM_NOISE);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+            Ability::Bargain => {
+                if self.nerve.spend(1) {
+                    self.bargain.arm();
+                }
+            }
+            Ability::Snare => self.plant_snare(),
+            Ability::Wager => {
+                let roll = abilities3::wager_roll(self.director.dream_seed(), self.wager_n, self.wager_dry);
+                self.wager_n += 1;
+                self.wager_dry = if roll.kind == abilities3::WagerKind::Jackpot { 0 } else { self.wager_dry + 1 };
+                let timed = roll.ability.duration() > 0.0;
+                let full = self.run.abilities.get(slot).map_or(0.0, |s| s.cooldown);
+                if let Some(s) = self.run.abilities.get_mut(slot) {
+                    s.cooldown = abilities3::wager_cooldown(roll.kind, full, timed);
+                }
+                self.wager_line = Some((abilities3::wager_line(roll), abilities3::WAGER_LINE_SECS));
+                log::info!("Wager: {roll:?}");
+                if roll.kind == abilities3::WagerKind::Jackpot {
+                    self.sfx(Sound::WagerJackpot);
+                }
+                return Some(roll);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Runs after the card went to the discard: the effects that need the
+    /// hand's empty slot (MULLIGAN, RECALL) and the borrowed ones (WAGER, ECHO).
+    fn abilities3_after_play(
+        &mut self,
+        a: Ability,
+        slot_card: Option<u32>,
+        wager: Option<abilities3::WagerRoll>,
+    ) {
+        match a {
+            Ability::Mulligan => {
+                let snaps = self.hand_view();
+                let thrown = self.deck.as_mut().map(|d| d.mulligan()).unwrap_or_default();
+                for (slot, _) in thrown {
+                    if let Some(snap) = snaps.get(slot).cloned() {
+                        self.deck_leaving.push((snap, slot, self.deck_clock));
+                    }
+                }
+                // Every slot waits for its redraw; none can be used meanwhile.
+                for s in self.run.abilities.iter_mut().take(self.run.deck_slots) {
+                    s.spent = true;
+                }
+                self.deck_riffle_at = self.deck_clock;
+            }
+            Ability::Recall => {
+                if let Some(d) = self.deck.as_mut() {
+                    d.recall(slot_card);
+                }
+            }
+            Ability::Echo => {
+                if let Some(target) = abilities3::echo_target(self.echo_last) {
+                    self.fire_borrowed(target, 1.0);
+                }
+            }
+            Ability::Wager => {
+                if let Some(roll) = wager {
+                    match roll.kind {
+                        abilities3::WagerKind::Fizzle => {}
+                        kind => {
+                            let timed = roll.ability.duration() > 0.0;
+                            let fired =
+                                self.fire_borrowed(roll.ability, abilities3::wager_stretch(kind, timed));
+                            if !fired {
+                                self.wager_line = Some((
+                                    format!("WAGER: {} (nothing to use it on)", roll.ability.name()),
+                                    abilities3::WAGER_LINE_SECS,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Uses `a` without it being in hand and without starting its own
+    /// recharge: a temporary state is added, fired, and left to run out.
+    /// False if it had nothing to act on.
+    fn fire_borrowed(&mut self, a: Ability, stretch: f32) -> bool {
+        self.run.abilities.push(upgrades::AbilityState::new(a));
+        let idx = self.run.abilities.len() - 1;
+        let held = std::mem::replace(&mut self.borrow_stretch, stretch);
+        self.fire_ability(idx, true);
+        self.borrow_stretch = held;
+        let Some(st) = self.run.abilities.get_mut(idx) else {
+            return false;
+        };
+        let fired = st.cooldown > 0.0;
+        st.spent = true;
+        st.cooldown = 0.0;
+        if !fired || !st.is_active() {
+            self.run.abilities.remove(idx);
+        }
+        fired
+    }
+
+    /// SNARE: a trap at your feet; the third takes up the oldest.
+    fn plant_snare(&mut self) {
+        let me = self.player_position;
+        let entity = match (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+            (Some(tex), Ok(mesh)) => Some(self.world.spawn((
+                Transform {
+                    position: me - Vec3::Y * 0.95,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(abilities3::SNARE_RADIUS * 2.0, 0.03, abilities3::SNARE_RADIUS * 2.0),
+                },
+                MeshRenderer { mesh, texture: Some(tex) },
+                Translucent,
+                Lit,
+            ))),
+            _ => None,
+        };
+        if let Some(Some(old)) = self.snares.plant(me, entity) {
+            let _ = self.world.despawn(old);
+        }
+    }
+
+    /// Per frame: the OVERLOAD charge and its ring, BARGAIN's clock, the
+    /// traps, the wager line.
+    fn update_abilities3(&mut self, dt: f32) {
+        if let Some((_, left)) = self.wager_line.as_mut() {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.wager_line = None;
+            }
+        }
+        self.bargain.tick(dt);
+        // OVERLOAD
+        if let Some(mut c) = self.overload.take() {
+            let still = self.run.abilities.get(c.slot).is_some_and(|s| s.ability == Ability::Overload && !s.spent);
+            if !still {
+                if let Some(e) = self.overload_ring.take() {
+                    let _ = self.world.despawn(e);
+                }
+            } else {
+                c.tick(dt);
+                if self.ability_held[c.slot] && self.mode == hud::Mode::Playing {
+                    self.overload = Some(c);
+                    let r = abilities3::overload_radius(c.secs) * 2.0;
+                    if self.overload_ring.is_none() {
+                        if let (Some(tex), Ok(mesh)) = (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+                            self.overload_ring = Some(self.world.spawn((
+                                Transform {
+                                    position: self.player_position - Vec3::Y * 0.95,
+                                    rotation: Quat::IDENTITY,
+                                    scale: Vec3::new(r, 0.02, r),
+                                },
+                                MeshRenderer { mesh, texture: Some(tex) },
+                                Translucent,
+                                Lit,
+                            )));
+                        }
+                    }
+                    if let Some(e) = self.overload_ring {
+                        if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                            t.position = self.player_position - Vec3::Y * 0.95;
+                            t.scale = Vec3::new(r, 0.02, r);
+                        }
+                    }
+                } else {
+                    // Released: the blast.
+                    if let Some(e) = self.overload_ring.take() {
+                        let _ = self.world.despawn(e);
+                    }
+                    self.overload_fire = Some(c.secs);
+                    self.fire_ability(c.slot, false);
+                    self.overload_fire = None;
+                }
+            }
+        }
+        // SNARE
+        if self.snares.len() != 0 {
+            let pts: Vec<Vec3> = self.combat_targets().iter().map(|t| t.pos).collect();
+            for (handle, i) in self.snares.step(&pts) {
+                if let Some(e) = handle {
+                    let _ = self.world.despawn(e);
+                }
+                if let Some(t) = self.combat_targets().into_iter().find(|t| t.pos == pts[i]) {
+                    self.root_foe(&t, abilities3::SNARE_ROOT);
+                }
+                self.burst_pending = Some((pts[i], [180, 230, 130], [255, 255, 255]));
+                self.sfx(Sound::SnareTrip);
+            }
+        }
+    }
+    // === end abilities3 ===
 
     /// SHARD CALL: the shard (and its beacon) drift toward the dreamer.
     fn pull_shard(&mut self, dt: f32) {
@@ -7939,6 +8324,7 @@ impl DreamscapeGame {
             log::info!("Ascension {}: {}", asc.0, progress::ascension_rule(asc.0));
         }
         self.stats = RunStats::default();
+        self.wager_dry = 0; // === abilities3 ===
         self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
@@ -8954,6 +9340,16 @@ impl DreamscapeGame {
         self.surge.clear();
         self.dash_boost = 1.0;
         // === end abilities2 ===
+        // === abilities3 === (the old world's rings and traps are gone with it)
+        self.echo_last = None;
+        self.wager_n = 0;
+        self.wager_line = None;
+        self.overload = None;
+        self.overload_ring = None;
+        self.overload_fire = None;
+        self.bargain = abilities3::Bargain::default();
+        self.snares = abilities3::Snares::new();
+        // === end abilities3 ===
         self.last_ability = None;
         self.ability_used.clear();
         self.passive_fired.clear();
@@ -10115,6 +10511,13 @@ impl Game for DreamscapeGame {
         if matches!(event, Event::KeyDown { .. }) {
             self.using_pad = false;
         }
+        // === abilities3 === OVERLOAD charges while its key is held
+        if !repeat {
+            if let Some(i) = ability_slot(self.settings.action_for(key)) {
+                self.ability_held[i] = down;
+            }
+        }
+        // === end abilities3 ===
         // Ctrl+V in the code box pastes from the clipboard.
         if let Event::KeyDown {
             keycode: Some(Keycode::V),
@@ -10870,6 +11273,7 @@ impl Game for DreamscapeGame {
         self.update_combat(dt);
         // === end combat ===
         self.update_abilities2(dt); // === abilities2 ===
+        self.update_abilities3(dt); // === abilities3 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }

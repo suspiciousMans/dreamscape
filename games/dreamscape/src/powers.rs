@@ -53,7 +53,7 @@ pub fn power(theme: DreamTheme) -> Power {
 
 /// A resonant pair carries a way of moving neither dream teaches alone:
 /// the fused card's ability (and flavour) become the pair's own.
-pub const PAIR_ABILITIES: [(DreamTheme, DreamTheme, Ability, &str); 4] = [
+pub const PAIR_ABILITIES: [(DreamTheme, DreamTheme, Ability, &str); 10] = [
     (
         DreamTheme::MirrorHall,
         DreamTheme::WatchingWallpaper,
@@ -78,6 +78,44 @@ pub const PAIR_ABILITIES: [(DreamTheme, DreamTheme, Ability, &str); 4] = [
         Ability::Haste,
         "every hour leaves a faster copy behind",
     ),
+    // === abilities3 ===
+    (
+        DreamTheme::SynesthesiaHall,
+        DreamTheme::Lobby,
+        Ability::Echo,
+        "the hall says it again, softer",
+    ),
+    (
+        DreamTheme::DrownedLibrary,
+        DreamTheme::JellyfishSky,
+        Ability::Recall,
+        "what sank comes drifting back up",
+    ),
+    (
+        DreamTheme::SkyStairs,
+        DreamTheme::VoidPlatforms,
+        Ability::Swap,
+        "up and down trade places",
+    ),
+    (
+        DreamTheme::FractalCathedral,
+        DreamTheme::Elfworks,
+        Ability::Mulligan,
+        "the pattern deals itself again",
+    ),
+    (
+        DreamTheme::CursedForest,
+        DreamTheme::WhiteDissolve,
+        Ability::Wager,
+        "the forest keeps no promises",
+    ),
+    (
+        DreamTheme::Garden,
+        DreamTheme::MyceliumGrove,
+        Ability::Overload,
+        "the roots gather, then let go",
+    ),
+    // === end abilities3 ===
 ];
 
 /// The power of a card as it stands: its dream's, except that a resonant
@@ -132,7 +170,9 @@ mod tests {
         for a in ALL_ABILITIES {
             let on_a_dream = ALL_THEMES.iter().any(|&t| power(t).active == a);
             let on_a_pair = PAIR_ABILITIES.iter().any(|p| p.2 == a);
-            assert!(on_a_dream || on_a_pair, "{a:?}");
+            // === abilities3 === BARGAIN and SNARE come from the moth only
+            let pick_only = crate::abilities3::PICK_ONLY.contains(&a);
+            assert!(on_a_dream || on_a_pair || pick_only, "{a:?}");
         }
     }
 

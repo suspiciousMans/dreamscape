@@ -19,6 +19,13 @@ pub const SHUFFLE_DELAY: f32 = 0.30;
 /// Mixed into the dream seed for the deck's shuffles.
 pub const SEED_MIX: u64 = 0xDEC0_DEC0;
 
+// === abilities3 ===
+/// How many played cards RECALL can look back through.
+pub const RECALL_MEMORY: usize = 8;
+/// The share of a recalled card's cooldown that is still left.
+pub const RECALL_COOLDOWN_LEFT: f32 = 0.5;
+// === end abilities3 ===
+
 // === upgrades2 ===
 /// How run upgrades bend the deck (`RunUpgrades::deck_perks`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +85,10 @@ pub struct Deck {
     pub perks: DeckPerks,
     free_used: u32,
     // === end upgrades2 ===
+    // === abilities3 ===
+    /// Cards played, oldest first (RECALL looks back through it).
+    played: Vec<u32>,
+    // === end abilities3 ===
 }
 
 impl Deck {
@@ -105,6 +116,7 @@ impl Deck {
             events: Vec::new(),
             perks: DeckPerks::default(),
             free_used: 0,
+            played: Vec::new(),
         }
     }
 
@@ -151,8 +163,67 @@ impl Deck {
         self.waiting.push((slot, DRAW_DELAY * self.perks.draw_mult));
         // === end upgrades2 ===
         self.events.push(DeckEvent::Played { slot, card });
+        self.played.push(card); // === abilities3 ===
+        if self.played.len() > RECALL_MEMORY {
+            self.played.remove(0);
+        }
         Some(Played { card, slot })
     }
+
+    // === abilities3 ===
+    /// MULLIGAN: every card in hand goes back into the draw pile, the pile
+    /// is shuffled (the deck's own stream), and every empty slot draws.
+    /// Returns the slots that were thrown back, with their cards.
+    pub fn mulligan(&mut self) -> Vec<(usize, u32)> {
+        let mut thrown = Vec::new();
+        for slot in 0..self.hand.len() {
+            if let Some(card) = self.hand[slot].take() {
+                self.draw.push(card);
+                self.events.push(DeckEvent::Played { slot, card });
+                thrown.push((slot, card));
+            }
+        }
+        for i in (1..self.draw.len()).rev() {
+            self.draw.swap(i, self.rng.gen_range(0..=i));
+        }
+        if let Some(&(_, card)) = thrown.first() {
+            self.events.push(DeckEvent::Shuffled { card });
+        }
+        for slot in 0..self.hand.len() {
+            if self.hand[slot].is_none() && self.draw_into(slot) {
+                self.waiting.retain(|w| w.0 != slot);
+            }
+        }
+        thrown
+    }
+
+    /// The card RECALL would bring back: the most recently played card
+    /// (other than `except`, RECALL's own) that is not already in hand.
+    pub fn recall_candidate(&self, except: Option<u32>) -> Option<u32> {
+        self.played
+            .iter()
+            .rev()
+            .copied()
+            .find(|&c| Some(c) != except && !self.hand.contains(&Some(c)))
+    }
+
+    /// RECALL: that card leaves the discard or the draw pile and lands in
+    /// the first empty slot, with `RECALL_COOLDOWN_LEFT` of its cooldown
+    /// left. `None` (nothing changes) when there is no card or no free slot.
+    pub fn recall(&mut self, except: Option<u32>) -> Option<(usize, u32)> {
+        let card = self.recall_candidate(except)?;
+        let slot = self.hand.iter().position(|h| h.is_none())?;
+        self.discard.retain(|d| d.0 != card);
+        self.draw.retain(|&c| c != card);
+        self.waiting.retain(|w| w.0 != slot);
+        self.hand[slot] = Some(card);
+        if let Some(c) = self.cooldowns.iter_mut().find(|c| c.0 == card) {
+            c.1 *= RECALL_COOLDOWN_LEFT;
+        }
+        self.events.push(DeckEvent::Drawn { slot, card });
+        Some((slot, card))
+    }
+    // === end abilities3 ===
 
     /// Advances every timer: cooldowns (all cards, wherever they are), the
     /// discard's shuffle-back, and the empty slots' draws.
@@ -288,6 +359,87 @@ mod tests {
         v.sort_unstable();
         v
     }
+
+    // === abilities3 ===
+    #[test]
+    fn mulligan_redeals_the_whole_hand_and_loses_nothing() {
+        for seed in 0..20 {
+            let mut d = Deck::new(&[1, 2, 3, 4, 5, 6, 7, 8], seed);
+            d.draw_to_fill(5);
+            d.events();
+            let thrown = d.mulligan();
+            assert_eq!(thrown.len(), 5);
+            assert!(d.hand().iter().all(|h| h.is_some()), "a fresh full hand");
+            assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7, 8], "nothing lost or doubled");
+            let ev = d.events();
+            assert_eq!(ev.iter().filter(|e| matches!(e, DeckEvent::Played { .. })).count(), 5);
+            assert_eq!(ev.iter().filter(|e| matches!(e, DeckEvent::Drawn { .. })).count(), 5);
+            assert!(ev.iter().any(|e| matches!(e, DeckEvent::Shuffled { .. })));
+        }
+    }
+
+    #[test]
+    fn mulligan_after_playing_keeps_the_played_card_in_the_discard() {
+        let mut d = Deck::new(&[1, 2, 3, 4, 5, 6], 4);
+        d.draw_to_fill(3);
+        let used = d.hand()[0].unwrap();
+        d.play(0, 5.0);
+        d.mulligan();
+        assert_eq!(d.hand().iter().flatten().count(), 3);
+        assert!(!d.hand().contains(&Some(used)), "the played card is not redealt yet");
+        assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6]);
+        d.tick(DRAW_DELAY + 1.0);
+        assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn recall_brings_back_the_last_played_card_without_duplicating_any() {
+        for seed in 0..30 {
+            for wait in [0.0_f32, 0.1, 0.5, 2.0] {
+                let mut d = Deck::new(&[1, 2, 3, 4, 5, 6, 7], seed);
+                d.draw_to_fill(5);
+                let first = d.hand()[1].unwrap();
+                d.play(1, 8.0);
+                d.tick(wait);
+                if d.hand().contains(&Some(first)) {
+                    continue; // it was drawn straight back: nothing to recall
+                }
+                let recall_card = d.hand()[3].unwrap();
+                d.play(3, 14.0);
+                let got = d.recall(Some(recall_card));
+                let (slot, card) = got.expect("a played card to recall");
+                assert_eq!(card, first, "the last card before Recall itself");
+                assert_eq!(d.hand()[slot], Some(first));
+                assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7], "seed {seed} wait {wait}");
+                d.tick(5.0);
+                assert_eq!(sorted(d.all_cards()), vec![1, 2, 3, 4, 5, 6, 7]);
+                assert_eq!(d.all_cards().iter().filter(|&&c| c == first).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn recall_has_nothing_to_take_before_anything_was_played_or_when_it_is_back_in_hand() {
+        let mut d = Deck::new(&[1, 2, 3], 1);
+        d.draw_to_fill(3);
+        assert_eq!(d.recall_candidate(None), None);
+        assert_eq!(d.recall(None), None);
+        d.play(0, 1.0);
+        let c = d.recall(None);
+        assert!(c.is_some());
+        assert_eq!(d.recall_candidate(None), None, "already in hand");
+    }
+
+    #[test]
+    fn a_recalled_card_keeps_half_its_cooldown() {
+        let mut d = Deck::new(&[1, 2, 3, 4], 2);
+        d.draw_to_fill(3);
+        let c = d.hand()[0].unwrap();
+        d.play(0, 10.0);
+        d.recall(None);
+        assert!((d.cooldown(c) - 10.0 * RECALL_COOLDOWN_LEFT).abs() < 1e-4);
+    }
+    // === end abilities3 ===
 
     #[test]
     fn a_new_deck_fills_the_hand_from_the_top() {
