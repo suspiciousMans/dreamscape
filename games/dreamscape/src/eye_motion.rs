@@ -200,8 +200,6 @@ mod tests {
         }
     }
 
-    use super::*;
-
     #[test]
     fn entrance_starts_above_the_screen_with_lid_shut() {
         let e = Entrance::new();

@@ -160,7 +160,6 @@ mod tests {
         assert!(cues(Kind::Mask, idle, (true, true, 3)).is_empty(), "other enemies are not its business");
     }
 
-    use super::*;
     use crate::dream::ALL_THEMES;
 
     fn count(plan: &[(Kind, usize)], kind: Kind) -> usize {
