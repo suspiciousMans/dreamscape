@@ -26,10 +26,28 @@ pub enum Edge {
     Quickdraw,
     /// A strike marks its target: the next blow on it cuts deeper.
     Hexmark,
+    // === edges2 ===
+    /// The fan of a strike is much wider.
+    Cleave,
+    /// A strike reaches a quarter further.
+    Longarm,
+    /// A strike at something that has not noticed you cuts deeper.
+    Ambush,
+    /// The first blow on an untouched foe cuts deeper.
+    Opener,
+    /// A blow rattles the foes standing near its target.
+    Ripple,
+    /// Every enemy you undo leaves a calm mote.
+    Lantern,
+    /// A reeling foe takes a deeper cut.
+    Opportunist,
+    /// Every enemy you undo leaves extra dust.
+    Windfall,
+    // === end edges2 ===
 }
 
 #[cfg(test)]
-pub const ALL_EDGES: [Edge; 8] = [
+pub const ALL_EDGES: [Edge; 16] = [
     Edge::Rending,
     Edge::Lunge,
     Edge::Reprisal,
@@ -38,6 +56,14 @@ pub const ALL_EDGES: [Edge; 8] = [
     Edge::Siphon,
     Edge::Quickdraw,
     Edge::Hexmark,
+    Edge::Cleave,
+    Edge::Longarm,
+    Edge::Ambush,
+    Edge::Opener,
+    Edge::Ripple,
+    Edge::Lantern,
+    Edge::Opportunist,
+    Edge::Windfall,
 ];
 
 impl Edge {
@@ -51,6 +77,14 @@ impl Edge {
             Edge::Siphon => "SIPHON",
             Edge::Quickdraw => "QUICKDRAW",
             Edge::Hexmark => "HEXMARK",
+            Edge::Cleave => "CLEAVE",
+            Edge::Longarm => "LONGARM",
+            Edge::Ambush => "AMBUSH",
+            Edge::Opener => "OPENER",
+            Edge::Ripple => "RIPPLE",
+            Edge::Lantern => "LANTERN",
+            Edge::Opportunist => "PUNISHER",
+            Edge::Windfall => "WINDFALL",
         }
     }
 
@@ -64,6 +98,14 @@ impl Edge {
             Edge::Siphon => "every third enemy undone steadies you",
             Edge::Quickdraw => "recover from a strike much faster",
             Edge::Hexmark => "a strike marks it: the next blow cuts deeper",
+            Edge::Cleave => "your strike fans out much wider",
+            Edge::Longarm => "your strike reaches a quarter further",
+            Edge::Ambush => "strikes cut deeper at the unaware",
+            Edge::Opener => "the first blow on a fresh foe cuts deeper",
+            Edge::Ripple => "a blow rattles the foes beside its target",
+            Edge::Lantern => "every enemy undone leaves a calm mote",
+            Edge::Opportunist => "a reeling foe takes a deeper cut",
+            Edge::Windfall => "every enemy undone leaves extra dust",
         }
     }
 
@@ -77,11 +119,19 @@ impl Edge {
             Edge::Siphon => [150, 255, 190],
             Edge::Quickdraw => [200, 170, 255],
             Edge::Hexmark => [190, 110, 255],
+            Edge::Cleave => [255, 200, 150],
+            Edge::Longarm => [130, 200, 255],
+            Edge::Ambush => [170, 150, 220],
+            Edge::Opener => [255, 255, 160],
+            Edge::Ripple => [110, 210, 230],
+            Edge::Lantern => [255, 240, 170],
+            Edge::Opportunist => [255, 130, 110],
+            Edge::Windfall => [255, 215, 90],
         }
     }
 }
 
-/// Which dreams teach an edge: eight attributes of the twenty.
+/// Which dreams teach an edge: sixteen attributes of the twenty.
 pub fn edge_of(attribute: Attribute) -> Option<Edge> {
     Some(match attribute {
         Attribute::Rust => Edge::Rending,
@@ -92,6 +142,16 @@ pub fn edge_of(attribute: Attribute) -> Option<Edge> {
         Attribute::Spore => Edge::Siphon,
         Attribute::Hour => Edge::Quickdraw,
         Attribute::Hex => Edge::Hexmark,
+        // === edges2 === only attributes that had none
+        Attribute::Dawn => Edge::Cleave,
+        Attribute::Aether => Edge::Longarm,
+        Attribute::Blank => Edge::Ambush,
+        Attribute::Static => Edge::Opener,
+        Attribute::Tide => Edge::Ripple,
+        Attribute::Trace => Edge::Lantern,
+        Attribute::Gaze => Edge::Opportunist,
+        Attribute::Velvet => Edge::Windfall,
+        // === end edges2 ===
         _ => return None,
     })
 }
@@ -119,6 +179,52 @@ pub const SIPHON_EVERY: u32 = 3;
 pub const HEXMARK_SECS: f32 = 3.0;
 /// The extra damage from REPRISAL, FLOURISH and a HEXMARK.
 pub const EDGE_BONUS: f32 = 1.0;
+
+// === edges2 ===
+/// CLEAVE: the fan's half-arc cosine (smaller = wider than WIDE EYES).
+pub const CLEAVE_ARC_COS: f32 = 0.1;
+/// LONGARM: reach multiplier.
+pub const LONGARM_REACH: f32 = 1.25;
+/// RIPPLE: how far from the target other foes are rattled, and for how long.
+pub const RIPPLE_REACH: f32 = 2.5;
+pub const RIPPLE_STAGGER: f32 = 0.6;
+/// WINDFALL: extra dust per enemy undone.
+pub const WINDFALL_DUST: u32 = 2;
+
+/// The strike's fan, given its normal half-arc cosine.
+pub fn arc_cos(base: f32, cleave: bool) -> f32 {
+    if cleave {
+        base.min(CLEAVE_ARC_COS)
+    } else {
+        base
+    }
+}
+
+/// The strike's reach, given its normal reach.
+pub fn reach(base: f32, longarm: bool) -> f32 {
+    if longarm {
+        base * LONGARM_REACH
+    } else {
+        base
+    }
+}
+
+/// Extra damage from AMBUSH, OPENER and PUNISHER for one blow.
+pub fn bonus(edges: &[Edge], unaware: bool, staggered: bool, fresh: bool) -> f32 {
+    let on = |e| edges.contains(&e);
+    let mut b = 0.0;
+    if on(Edge::Ambush) && unaware {
+        b += EDGE_BONUS;
+    }
+    if on(Edge::Opener) && fresh {
+        b += EDGE_BONUS;
+    }
+    if on(Edge::Opportunist) && staggered {
+        b += EDGE_BONUS;
+    }
+    b
+}
+// === end edges2 ===
 
 /// FLOURISH's chain of strikes.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -184,13 +290,13 @@ mod tests {
     use crate::dream::ALL_THEMES;
 
     #[test]
-    fn eight_attributes_teach_eight_different_edges_and_the_rest_none() {
+    fn sixteen_attributes_teach_sixteen_different_edges_and_the_rest_none() {
         let with: Vec<Edge> = ALL_THEMES.iter().filter_map(|&t| edge(t)).collect();
-        assert_eq!(with.len(), 8, "{with:?}");
+        assert_eq!(with.len(), 16, "{with:?}");
         for e in ALL_EDGES {
             assert_eq!(with.iter().filter(|&&x| x == e).count(), 1, "{e:?}");
         }
-        assert!(ALL_THEMES.iter().filter(|&&t| edge(t).is_none()).count() == 12);
+        assert!(ALL_THEMES.iter().filter(|&&t| edge(t).is_none()).count() == 4);
     }
 
     #[test]
@@ -237,6 +343,44 @@ mod tests {
         assert_eq!(lunge_speed(0.05), LUNGE_SPEED);
         assert_eq!(lunge_speed(0.0), 0.0);
         assert!(LUNGE_DIST < crate::combat::REACH, "a step, not a dash");
+    }
+
+    #[test]
+    fn the_original_eight_edges_keep_their_attributes() {
+        let old = [
+            (Attribute::Rust, Edge::Rending),
+            (Attribute::Abyss, Edge::Lunge),
+            (Attribute::Glass, Edge::Reprisal),
+            (Attribute::Chord, Edge::Flourish),
+            (Attribute::Jest, Edge::Haymaker),
+            (Attribute::Spore, Edge::Siphon),
+            (Attribute::Hour, Edge::Quickdraw),
+            (Attribute::Hex, Edge::Hexmark),
+        ];
+        for (a, e) in old {
+            assert_eq!(edge_of(a), Some(e));
+        }
+    }
+
+    #[test]
+    fn cleave_widens_the_fan_and_longarm_stretches_it() {
+        assert!(arc_cos(crate::combat::ARC_COS, true) < crate::combat::ARC_COS_WIDE);
+        assert_eq!(arc_cos(crate::combat::ARC_COS, false), crate::combat::ARC_COS);
+        assert_eq!(arc_cos(0.0, true), 0.0, "never narrows");
+        assert!((reach(2.0, true) - 2.5).abs() < 1e-4);
+        assert_eq!(reach(2.0, false), 2.0);
+    }
+
+    #[test]
+    fn ambush_opener_and_punisher_each_add_a_point_only_when_their_condition_holds() {
+        let all = [Edge::Ambush, Edge::Opener, Edge::Opportunist];
+        assert_eq!(bonus(&all, false, false, false), 0.0);
+        assert_eq!(bonus(&[Edge::Ambush], true, true, true), EDGE_BONUS);
+        assert_eq!(bonus(&[Edge::Opener], true, true, true), EDGE_BONUS);
+        assert_eq!(bonus(&[Edge::Opportunist], true, true, true), EDGE_BONUS);
+        assert_eq!(bonus(&all, true, true, true), 3.0 * EDGE_BONUS);
+        assert_eq!(bonus(&[], true, true, true), 0.0, "no edge, no bonus");
+        assert_eq!(bonus(&[Edge::Ambush], false, true, true), 0.0);
     }
 
     #[test]

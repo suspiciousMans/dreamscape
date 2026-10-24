@@ -65,6 +65,27 @@ API names use the `snake_case` Steamworks requires.
 
 That's 29 achievements. 21 are computable from state the game already saves or tracks; 8 need a small new counter.
 
+### Wave 2 (items): 15 more, all from saved state or existing events
+| API name | Name | Condition |
+|---|---|---|
+| `first_fusion` | Two Become One | Own a fused or resonant card |
+| `resonant_card` | Resonance | Own a resonant card |
+| `lucid_card` | Clear as Day | Own a Lucid or Prophetic card |
+| `cards_25` | Pocketful | 25 cards in the booklet |
+| `cards_50` | Shoebox | 50 cards in the booklet |
+| `ten_dreams` | Wanderer | Visit 10 different dreams |
+| `five_enemies` | Acquaintances | Meet 5 kinds of enemy |
+| `bare_depth_5` | Empty Pockets | Wake at depth 5+ without taking an upgrade |
+| `long_depth_15` | Marathon | Wake from a long run at depth 15+ |
+| `nightmares_5` | Regular at the Door | Beat 5 nightmares |
+| `purchases_10` | Regular Customer | 10 Lucid Store purchases |
+| `dust_500` | Dust Bunny | Hold 500 dream dust |
+| `early_wake` | Light Sleeper | Wake from a short run in 90 seconds or less |
+| `deep_clean` | Untroubled | Wake at depth 12+ without being caught or falling |
+| `depth_50` | Bottomless | Reach depth 50 |
+
+Register these 15 API names in Steamworks too (44 in all).
+
 ## Implementation (done)
 - `src/achievements.rs`: all 29, `check(&Booklet, Option<Event>)`, unlocks kept in the booklet (`achievements`), with a purchase counter. Ascension ones unlock on waking from a long run at level 5 / 10.
 - `src/steam.rs`: behind the `steam` feature. It initialises with App ID 480 (Spacewar) until Dreamscape has its own, pushes offline unlocks at start, and sets and stores on unlock. `steam_appid.txt` holds the placeholder ID.
