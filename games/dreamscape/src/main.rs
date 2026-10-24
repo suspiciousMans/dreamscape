@@ -12794,12 +12794,13 @@ mod screen_smoke {
         assert_eq!(g.settings.sort_merge.key, sorting::SortKey::Rarity);
         assert_eq!(g.merge_first, Some(newest), "the picked card survives a re-sort");
         assert_eq!(g.settings.sort_booklet, sorting::Sort::default(), "per screen");
-        // Loadout: Return equips the card under the (sorted) cursor.
         g.open_loadout();
         g.loadout_key(Keycode::R);
         g.loadout_sel = 0;
+        g.booklet.lore.deck.clear(); // opening pre-fills the deck with the default picks
         g.loadout_key(Keycode::Return);
-        assert_eq!(g.booklet.lore.loadout, vec![newest]);
+        // Return puts the card under the (sorted) cursor into the deck.
+        assert_eq!(g.booklet.lore.deck, vec![newest]);
         // Booklet: paging follows the sorted order.
         g.mode = hud::Mode::Booklet;
         g.booklet_page = 0;
