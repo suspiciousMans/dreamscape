@@ -1,0 +1,7 @@
+# Items wave 2: shared context ("add a lot more items to everything")
+Wave 1 (deck, sort, moth shop, store catalog 25 -> 56) is merged. This wave adds MORE GAME CONTENT in three non-overlapping streams. The owner wants volume AND real, wired, tested effects: nothing defined-but-unwired.
+
+Same rules as `plans/deck-briefs/CONTEXT.md` (read it: worktree/branch discipline, pure modules + unit tests, `// === <stream> ===` marker blocks, TDD, one commit per green task, build etiquette with your own `CARGO_TARGET_DIR` + `CARGO_BUILD_JOBS=2`, focused tests only, no full suite, no warnings, NOTES file, 5-line final reply). Also read the `dreamscape-dev` skill: array lengths, `Stats` for new Upgrades, `PASSIVES` order (append at END, it feeds seeded rolls so existing seeds must replay), `ALL_SOUNDS` length, `HudView` fixtures.
+Facts: the hand is now a deck (`deck.rs`); the moth shop sells run `Upgrade`s for run dust (`moth_shop.rs`); `Learn(Ability)` picks and the shop use `ALL_ABILITIES`; cards' powers come from `powers.rs` (attribute -> ability + passive + edge).
+Text rule: any NEW player-facing story/lore line goes in a list in your NOTES file for owner approval; names/blurbs of items are fine. Co-op and the autopilot: new effects must not break them (simply inert is fine).
+Balance: every number is a named const; new items must be rollable (picks, shop) and each has a unit test of its effect. Tiers: Common/Rare/Mythic odds stay as they are.
