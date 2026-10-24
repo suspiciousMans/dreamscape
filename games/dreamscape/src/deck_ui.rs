@@ -48,6 +48,18 @@ pub fn note(len: usize, owned: usize) -> String {
     }
 }
 
+// === decklife ===
+/// "7 of 10 passives active", plus a word on the highlighted card when the
+/// cap left its passive out (`selected_benched`: `None` = not in the deck).
+pub fn passives_note(active: usize, selected_benched: Option<bool>) -> String {
+    let base = format!("{active} of {} passives active", crate::upgrades::KIT_PASSIVES);
+    match selected_benched {
+        Some(true) => format!("{base} · this card's is benched"),
+        _ => base,
+    }
+}
+// === end decklife ===
+
 /// The pips for `DECK_MAX` cards, in a row across the top of the screen.
 pub fn pips(screen: Rect) -> Vec<Rect> {
     let lay = loadout_ui::layout(screen);
@@ -95,7 +107,8 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         match m.chosen.get(i).and_then(|&n| m.cards.iter().find(|c| c.number == n)) {
             Some(cd) => {
                 let col = card_frame(cd, v.time);
-                pixel_ui::panel(p, r, col, rgba(col, 0.16), c * 0.7, 1.0);
+                let off = m.benched.contains(&cd.number); // === decklife ===
+                pixel_ui::panel(p, r, col, rgba(col, 0.16), c * 0.7, if off { 0.45 } else { 1.0 });
                 let pw = crate::powers::power_of(cd);
                 pixel_ui::icon(p, r.center(), icons::ability(pw.active), (c * 0.5).max(1.5), pw.tint, pixel_ui::lighter(pw.tint), 1.0);
                 p.text(
@@ -133,8 +146,17 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         FontId::monospace(13.0 * u),
         rgba(col, 0.95),
     );
+    if !m.passives.is_empty() {
+        p.text(
+            Pos2::new(cx, bar.bottom() + 20.0 * u),
+            Align2::CENTER_TOP,
+            &m.passives,
+            FontId::monospace(11.0 * u),
+            rgba([190, 180, 230], 0.9),
+        );
+    }
     if let Some(line) = &m.companion {
-        p.text(Pos2::new(cx, bar.bottom() + 26.0 * u), Align2::CENTER_TOP, v.k(line), FontId::monospace(14.0 * u), rgba([200, 170, 230], 0.9));
+        p.text(Pos2::new(cx, bar.bottom() + 36.0 * u), Align2::CENTER_TOP, v.k(line), FontId::monospace(14.0 * u), rgba([200, 170, 230], 0.9));
     }
 
     let lay = loadout_ui::layout(screen);
@@ -184,6 +206,13 @@ mod tests {
         assert_eq!(meter(3, 20), Meter::Ready);
         assert_eq!(meter(DECK_MAX, 20), Meter::Full);
         assert_eq!(meter(1, 1), Meter::Ready, "a one-card booklet is ready");
+    }
+
+    #[test]
+    fn the_passive_note_counts_and_flags_a_benched_card() {
+        assert_eq!(passives_note(7, None), "7 of 10 passives active");
+        assert_eq!(passives_note(10, Some(false)), "10 of 10 passives active");
+        assert!(passives_note(10, Some(true)).contains("benched"));
     }
 
     #[test]
