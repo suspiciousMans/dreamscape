@@ -16340,13 +16340,26 @@ mod screen_smoke {
             }));
         }
         // === end pressure ===
+        // === handscore === the longest rank name over the hand, and on the summary
+        bad.extend(overflows_with(&g, "HUD-handscore", &|v| {
+            v.hand_pile.shown = true;
+            v.hand_pile.score = handscore::HandRank::FiveOfAKind;
+        }));
+        g.run_best_hand = handscore::HandRank::FiveOfAKind;
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-handscore"));
+        g.mode = hud::Mode::Playing;
+        // === end handscore ===
         g.open_settings();
         bad.extend(overflows(&g, "Settings"));
         g.open_codex();
         bad.extend(overflows(&g, "Codex"));
         g.open_booklet();
         bad.extend(overflows(&g, "Booklet"));
+        let picks: Vec<u32> = g.booklet.cards().take(4).map(|c| c.number).collect(); // === handscore ===
+        g.booklet.lore.deck = picks;
         g.open_loadout();
+        assert!(g.hud_view().loadout.chosen.len() >= deck::DECK_MIN, "the deck builder shows its best-hand line"); // === handscore ===
         bad.extend(overflows(&g, "Loadout"));
         g.open_merge(hud::Mode::Title);
         bad.extend(overflows(&g, "Merge"));
