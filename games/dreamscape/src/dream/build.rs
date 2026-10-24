@@ -1424,6 +1424,41 @@ mod tests {
             .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
     }
 
+    // === perf === `cargo test -p dreamscape --release dream_gen_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dream_gen_timing() {
+        use std::time::Instant;
+        let mut rows: Vec<(f64, f64, String)> = Vec::new();
+        for theme in ALL_THEMES {
+            for depth in [1u32, 12, 24] {
+                let n = 8u64;
+                let t = Instant::now();
+                let mut dreams = Vec::new();
+                for seed in 0..n {
+                    dreams.push(generate(theme, seed, depth, None, true));
+                }
+                let gen = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                let t = Instant::now();
+                for d in &dreams {
+                    for s in [&d.surfaces.floor, &d.surfaces.wall, &d.surfaces.prop, &d.surfaces.shard, &d.surfaces.enemy] {
+                        std::hint::black_box(s.rgba());
+                    }
+                }
+                let tex = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                rows.push((gen, tex, format!("{theme:?} d{depth}")));
+            }
+        }
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let tot: f64 = rows.iter().map(|r| r.0).sum::<f64>() / rows.len() as f64;
+        let tt: f64 = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
+        println!("mean generate {tot:.2} ms, mean 5 textures {tt:.2} ms");
+        for r in rows.iter().take(8) {
+            println!("  {:<28} generate {:.2} ms  textures {:.2} ms", r.2, r.0, r.1);
+        }
+    }
+    // === end perf ===
+
     #[test]
     fn a_calmed_dream_has_nothing_that_can_hurt_and_keeps_its_way_through() {
         for theme in crate::dream::ALL_THEMES {
