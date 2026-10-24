@@ -1475,6 +1475,33 @@ mod tests {
             println!("  {:<28} generate {:.2} ms  textures {:.2} ms", r.2, r.0, r.1);
         }
     }
+
+    /// Prints one hash over the observable output of many dreams. Run before and
+    /// after a generation change: the number must not move (same seeds, same dreams).
+    /// `cargo test -p dreamscape dream_golden_hash -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dream_golden_hash() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let goals = Goals { note: true, fragments: true, secret: true };
+        for theme in ALL_THEMES {
+            for seed in 0..12u64 {
+                for depth in [0u32, 7, 20] {
+                    let d = generate_with(theme, seed, depth, None, seed % 2 == 0, Pressure::default(), goals);
+                    format!(
+                        "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+                        d.blocks, d.route, d.lucid_route, d.shard, d.note, d.fragments, d.patrols,
+                        d.secret, d.spawn, d.portal, d.specials
+                    )
+                    .hash(&mut h);
+                }
+                let n = generate_nightmare(theme, seed, 12);
+                format!("{:?}{:?}{:?}{:?}", n.blocks, n.route, n.lucid_route, n.sigils).hash(&mut h);
+            }
+        }
+        println!("GOLDEN {:016x}", h.finish());
+    }
     // === end perf ===
 
     #[test]
