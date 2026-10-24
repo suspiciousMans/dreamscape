@@ -2084,6 +2084,7 @@ impl DreamscapeGame {
                 shown: true,
                 draw_count: d.draw_len(),
                 riffle_since: self.deck_clock - self.deck_riffle_at,
+                back: Some(self.booklet.stash.card_back).filter(|b| *b != store::CardBack::Dusk), // === smallfixes ===
                 leaving: self
                     .deck_leaving
                     .iter()
@@ -15221,6 +15222,50 @@ mod screen_smoke {
     }
 
     #[test]
+    fn every_bought_card_back_paints_its_own_stack_and_draw_flight() {
+        use store::CardBack::*;
+        let mut g = game("backs");
+        g.mode = hud::Mode::Playing;
+        let pile = |back: Option<store::CardBack>| hand::HandPile {
+            shown: true,
+            draw_count: 5,
+            riffle_since: hand::NEVER,
+            leaving: vec![],
+            back,
+        };
+        let paint = |back: Option<store::CardBack>, since_draw: f32, reduced: bool| {
+            let mut s = String::new();
+            let sh = frame_with(&g, 1280.0, 720.0, &|v| {
+                let mut c = card("DASH", hand::NEVER);
+                c.since_draw = since_draw;
+                v.hand = vec![c];
+                v.hand_pile = pile(back);
+                v.settings_snapshot.reduced_motion = reduced;
+            });
+            for x in &sh {
+                s.push_str(&format!("{x:?}"));
+            }
+            (sh.len(), s)
+        };
+        let mut seen = std::collections::HashSet::new();
+        let base = paint(None, hand::NEVER, false);
+        for b in [Moth, Eye, Stars, Checker, Ember] {
+            let st = paint(Some(b), hand::NEVER, false);
+            assert!(st.0 > base.0, "{b:?}: the pattern adds shapes");
+            assert!(seen.insert(st.1), "{b:?} paints a different stack");
+            let fl = paint(Some(b), 0.1, false);
+            assert_ne!(fl.1, paint(Some(b), hand::NEVER, false).1, "{b:?}: the flight shows a back");
+            assert_eq!(
+                paint(Some(b), 0.1, true).1,
+                paint(Some(b), hand::NEVER, true).1,
+                "reduced motion keeps the card still"
+            );
+        }
+        // The default back is untouched.
+        assert_eq!(paint(None, hand::NEVER, false).1, base.1);
+    }
+
+    #[test]
     fn the_hand_draws_at_rest_and_popping_adds_a_ring_without_panicking() {
         let mut g = game("hand");
         g.mode = hud::Mode::Playing;
@@ -15288,6 +15333,7 @@ mod screen_smoke {
             draw_count: count,
             riffle_since: riffle,
             leaving,
+            back: None,
         };
         let none = n_shapes(false, hand::HandPile::default(), hand::NEVER);
         let stack = n_shapes(false, shown(5, hand::NEVER, vec![]), hand::NEVER);
