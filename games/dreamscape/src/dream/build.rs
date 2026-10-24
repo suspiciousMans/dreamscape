@@ -705,10 +705,11 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
                 .min()
                 .unwrap_or(0)
         };
+        let lens = g.path_lens(spawn); // === perf ===
         let pick = g
             .cells_of(Cell::Floor)
             .into_iter()
-            .filter(|&c| !taken.contains(&c) && g.path(spawn, c).is_some())
+            .filter(|&c| !taken.contains(&c) && g.path_len_in(&lens, c).is_some())
             .max_by_key(|&c| (far(c), c))
             .expect("an arena has spare floor");
         sigil_cells.push(pick);
@@ -835,11 +836,12 @@ fn watchers(grid: &Grid, rng: &mut StdRng) -> Vec<(Vec3, Vec3)> {
 /// A reachable floor cell off the direct route, biased toward far-away ones
 /// so fetching it is a real detour.
 fn pick_shard(grid: &Grid, on_path: &HashSet<P>, spawn: P, rng: &mut StdRng) -> Option<P> {
+    let lens = grid.path_lens(spawn); // === perf === one BFS, not one per cell
     let mut candidates: Vec<(usize, P)> = grid
         .cells_of(Cell::Floor)
         .into_iter()
         .filter(|c| !on_path.contains(c))
-        .filter_map(|c| grid.path(spawn, c).map(|p| (p.len(), c)))
+        .filter_map(|c| grid.path_len_in(&lens, c).map(|n| (n, c)))
         .collect();
     if candidates.is_empty() {
         return None;
