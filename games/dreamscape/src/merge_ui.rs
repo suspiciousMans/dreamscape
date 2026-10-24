@@ -31,6 +31,7 @@ pub fn preview(m: &MergeView) -> Option<Card> {
     fusion::can_merge(a, b).then(|| fusion::merge(a, b))
 }
 
+#[cfg(test)]
 /// Any two cards in the booklet can merge.
 pub fn any_pair(cards: &[Card]) -> bool {
     cards

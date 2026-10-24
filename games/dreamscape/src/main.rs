@@ -625,7 +625,7 @@ pub struct DreamscapeGame {
     /// The crack's hint has been shown this launch.
     secret_hint_given: bool,
     /// What the moth still has on the shelf in this dream.
-    moth_stock: Option<Vec<Upgrade>>,
+    moth_stock: Option<moth_shop::Shelf>,
     skittish: Option<Skittish>,
     /// Height of the ground you last stood on (for the climbing sound).
     ground_y: f32,
@@ -1597,18 +1597,33 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
     }
 
-    /// After a beaten nightmare's reward, the moth offers to merge cards.
+    // === shop ===
+    /// After a beaten nightmare's reward (and on every `SHOP_EVERY`th depth)
+    /// the moth opens her shop. Merging lives in the store's `[m]` now.
+    /// Called once per pick, before `boss_reward` is cleared.
     fn moth_after_nightmare(&mut self) {
-        let cards: Vec<cards::Card> = self.booklet.cards().cloned().collect();
-        if self.boss_reward
-            && !self.autopilot
-            && self.prologue.is_none()
-            && self.coop.is_none()
-            && merge_ui::any_pair(&cards)
+        if self.autopilot
+            || self.prologue.is_some()
+            || self.coop.is_some()
+            || !moth_shop::due(
+                self.boss_reward,
+                self.director.depth,
+                self.director.sanctuary(),
+            )
         {
-            self.open_merge(hud::Mode::Playing);
+            return;
         }
+        self.open_moth_shop_after_pick();
     }
+
+    fn moth_terms(&self) -> moth_shop::Terms {
+        moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks))
+    }
+
+    fn perk_fx(&self) -> store::PerkFx {
+        store::PerkFx::of(&self.perks)
+    }
+    // === end shop ===
 
     fn skip_choice(&mut self) {
         if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
@@ -1622,7 +1637,7 @@ impl DreamscapeGame {
         self.moth_after_nightmare();
         self.boss_reward = false;
         if !pacts::effects(&self.pacts).skip_pays_nothing {
-            self.bonus_dust += upgrades::SKIP_DUST; // === pacts ===
+            self.bonus_dust += upgrades::SKIP_DUST + self.perk_fx().skip_bonus; // === pacts ===
         }
         self.stats.skipped += 1;
         self.coop_ready();
@@ -1677,6 +1692,7 @@ impl DreamscapeGame {
                 // === pacts ===
                 if let (true, Some(p)) = (index == options.len(), self.pact_offer) {
                     self.take_pact(p);
+                    self.moth_after_nightmare();
                     self.boss_reward = false;
                     self.coop_ready();
                     return;
@@ -5547,37 +5563,58 @@ impl DreamscapeGame {
         if let Some(sec) = self.secret.as_mut() {
             sec.armed = false;
         }
+        self.ensure_moth_stock();
+        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+        self.show_moth_shop(0);
+    }
+
+    // === shop ===
+    fn ensure_moth_stock(&mut self) {
         if self.moth_stock.is_none() {
             self.moth_stock = Some(moth_shop::stock(
                 self.director.dream_seed(),
                 &self.run,
                 self.director.depth,
+                self.moth_terms(),
             ));
         }
-        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+    }
+
+    /// The shop after a pick: same shelf as the secret room of this dream.
+    fn open_moth_shop_after_pick(&mut self) {
+        self.ensure_moth_stock();
+        log::info!(
+            "The moth's shop opens (depth {}, {} dust)",
+            self.director.depth,
+            self.bonus_dust
+        );
         self.show_moth_shop(0);
     }
 
-    /// Paints the shelf with the ordinary choice screen.
+    /// Paints the shelf with the ordinary choice screen. The last card is
+    /// the reroll.
     fn show_moth_shop(&mut self, selected: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
         if shelf.is_empty() {
             self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
             return;
         }
-        let cards = shelf
+        let terms = self.moth_terms();
+        let mut cards: Vec<upgrade_ui::ChoiceCard> = shelf
+            .cards
             .iter()
             .enumerate()
             .map(|(i, &u)| {
                 let info = u.info();
-                let cost = moth_shop::price(info.tier).unwrap_or(0);
-                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run).is_ok();
+                let cost = moth_shop::price_at(&shelf, i, terms).unwrap_or(0);
+                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run, terms).is_ok();
                 let have = self.run.count(u);
                 let level = if have > 0 {
                     format!(" · {} / {}", have + 1, info.max)
                 } else {
                     String::new()
                 };
+                let special = if shelf.special == Some(i) { "special · " } else { "" };
                 upgrade_ui::ChoiceCard {
                     name: info.name.into(),
                     desc: info.desc.into(),
@@ -5585,7 +5622,7 @@ impl DreamscapeGame {
                     color: if can { info.color } else { [110, 110, 130] },
                     frame: if can { info.tier.frame() } else { [80, 80, 100] },
                     tag: if can {
-                        format!("{cost} dust · {}{level}", info.tier.label())
+                        format!("{special}{cost} dust · {}{level}", info.tier.label())
                     } else if self.bonus_dust < cost {
                         format!("needs {cost} dust")
                     } else {
@@ -5594,11 +5631,26 @@ impl DreamscapeGame {
                 }
             })
             .collect();
+        let rr = moth_shop::reroll_price(shelf.rerolls);
+        let can_rr = self.bonus_dust >= rr;
+        cards.push(upgrade_ui::ChoiceCard {
+            name: "REROLL".into(),
+            desc: "the moth shuffles her shelf. the special stays.".into(),
+            icon: upgrades::Icon::Eye,
+            color: if can_rr { [255, 210, 80] } else { [110, 110, 130] },
+            frame: if can_rr { [255, 210, 80] } else { [80, 80, 100] },
+            tag: if can_rr {
+                format!("{rr} dust")
+            } else {
+                format!("needs {rr} dust")
+            },
+        });
+        let last = cards.len() - 1;
         self.choice_view = upgrade_ui::ChoiceView {
             title: moth_shop::TITLE.into(),
-            subtitle: format!("{} · you have {} dust", moth_shop::SUBTITLE, self.bonus_dust),
+            subtitle: format!("you have {} dust · {}", self.bonus_dust, moth_shop::SUBTITLE),
             cards,
-            selected: selected.min(shelf.len() - 1),
+            selected: selected.min(last),
             age: 0.0,
             hint: "[a/d] choose   [enter] buy   [x] leave".into(),
         };
@@ -5607,10 +5659,36 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Choice;
     }
 
-    /// [enter] on a card: pay run dust for it (never the banked stash).
+    /// [enter] on a card: pay run dust for it (never the banked stash). The
+    /// card past the last one is the reroll.
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
-        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run) {
+        let terms = self.moth_terms();
+        if index == shelf.cards.len() {
+            match moth_shop::reroll(
+                &shelf,
+                self.director.dream_seed(),
+                &self.run,
+                self.director.depth,
+                self.bonus_dust,
+                terms,
+            ) {
+                Ok((next, cost)) => {
+                    self.bonus_dust -= cost;
+                    self.moth_stock = Some(next);
+                    self.sfx(Sound::Reroll);
+                    self.save_run();
+                    log::info!("Moth rerolled the shelf for {cost} dust");
+                }
+                Err(why) => {
+                    log::info!("Moth refused the reroll: {why:?}");
+                    self.sfx(Sound::Denied);
+                }
+            }
+            self.show_moth_shop(index);
+            return;
+        }
+        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run, terms) {
             Ok((u, cost)) => {
                 let before = self.run.synergies();
                 self.bonus_dust -= cost;
@@ -5629,11 +5707,14 @@ impl DreamscapeGame {
                 self.sfx(Sound::Denied);
             }
         }
-        if self.moth_stock.as_ref().is_some_and(|s| s.is_empty()) {
-            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
-            return;
-        }
+        // Sold out: the moth shrugs and you are back in the dream.
         self.show_moth_shop(index);
+    }
+
+    #[cfg(test)]
+    fn enter_moth_shop_for_test(&mut self) {
+        self.ensure_moth_stock();
+        self.show_moth_shop(0);
     }
 
     /// [x]: back to the dream, exactly where you stood.
@@ -5645,6 +5726,7 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         self.sfx(Sound::Reroll);
     }
+    // === end shop ===
 
     /// What a freshly taken upgrade does around the edges (shared by the
     /// moth's shelf; the after-dream pick has its own copy of this).
@@ -7370,6 +7452,11 @@ impl DreamscapeGame {
             log::info!("Perks this run: {:?}", self.perks);
             self.persist_booklet();
         }
+        // === shop ===
+        let fx = self.perk_fx();
+        self.bonus_dust += fx.start_dust;
+        self.run.bonus_rerolls += fx.rerolls;
+        // === end shop ===
         if self.has_perk(store::Perk::FirstLight) {
             self.director.collect_shard();
             self.director.shard_this_dream = false;
@@ -9553,14 +9640,32 @@ impl Game for DreamscapeGame {
                     Keycode::D | Keycode::Right => {
                         self.choice_view.selected = (self.choice_view.selected + 1) % n;
                     }
-                    Keycode::Num1 | Keycode::Num2 | Keycode::Num3 => {
-                        let i = [Keycode::Num1, Keycode::Num2, Keycode::Num3]
+                    Keycode::Num1
+                    | Keycode::Num2
+                    | Keycode::Num3
+                    | Keycode::Num4
+                    | Keycode::Num5
+                    | Keycode::Num6
+                    | Keycode::Num7 => {
+                        let i = [
+                            Keycode::Num1,
+                            Keycode::Num2,
+                            Keycode::Num3,
+                            Keycode::Num4,
+                            Keycode::Num5,
+                            Keycode::Num6,
+                            Keycode::Num7,
+                        ]
                             .iter()
                             .position(|&k| k == key)
                             .expect("matched above");
                         if i < n {
                             self.choose(i);
                         }
+                    }
+                    Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        self.choose(at);
                     }
                     Keycode::R => self.reroll_choice(),
                     Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
@@ -10003,7 +10108,7 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Choice {
             self.choice_view.age += dt;
             // E2E runs: take the first card (WAKE at the door) after a beat.
-            if self.autopilot && self.choice_view.age > 0.6 {
+            if self.autopilot && self.choice_view.age > 0.6 && crate::dev::var("DREAMSCAPE_SCREEN").is_err() {
                 self.choose(0);
             }
             return Ok(());
@@ -10044,6 +10149,14 @@ impl Game for DreamscapeGame {
                     "codex" => self.open_codex(),
                     "booklet" => self.open_booklet(),
                     "store" => self.open_store(),
+                    // === shop === "store:<shelf>:<col>" for shelf screenshots.
+                    st if st.starts_with("store:") => {
+                        let mut n = st[6..].split(':').map(|x| x.parse::<usize>().unwrap_or(0));
+                        self.open_store();
+                        self.shop_shelf = n.next().unwrap_or(0).min(store::Shelf::ALL.len() - 1);
+                        self.shop_col = shop_ui::clamp_col(self.shop_shelf, n.next().unwrap_or(0));
+                    }
+                    // === end shop ===
                     "lottery" => {
                         self.open_store();
                         self.store_tab = 1;
@@ -10204,6 +10317,24 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === shop ===
+        // Dev: DREAMSCAPE_SCREEN=moth opens the moth's room at 1 s of dream
+        // time with the autopilot (which then stops picking), for screenshots.
+        if self.autopilot && self.dream_age >= 1.0 && !self.dev_fired {
+            if let Ok(what) = crate::dev::var("DREAMSCAPE_SCREEN") {
+                self.dev_fired = true;
+                let mut it = what.split(':');
+                match it.next() {
+                    Some("moth") => {
+                        self.bonus_dust = 40;
+                        self.ensure_moth_stock();
+                        self.show_moth_shop(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // === end shop ===
         // === combat ===
         self.update_combat(dt);
         // === end combat ===
@@ -10895,7 +11026,9 @@ impl Game for DreamscapeGame {
             self.stats.twists.extend(self.twists.0.iter().copied());
             if self.director.nightmare {
                 self.stats.nightmares += 1;
-                self.bonus_dust += 10 * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier);
+                self.bonus_dust += 10
+                    * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier)
+                    * self.perk_fx().nightmare_mult; // === shop ===
                 self.boss_reward = true;
                 if self.run_active {
                     self.booklet.codex.nightmares_beaten += 1;
@@ -13338,6 +13471,145 @@ mod screen_smoke {
         assert_eq!(g.bonus_dust, 15);
     }
     // === end pacts ===
+
+    // === shop ===
+    /// A game one pick away from a nightmare reward, with a mergeable booklet
+    /// (so the old merge popup would have fired).
+    fn reward_game(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        three_cards(&mut g);
+        assert!(merge_ui::any_pair(&g.booklet.cards().cloned().collect::<Vec<_>>()));
+        g.director.depth = 1;
+        g.boss_reward = true;
+        g.open_upgrade_choice();
+        assert!(matches!(g.choice, Some(ChoiceKind::Upgrade(_))));
+        g
+    }
+
+    #[test]
+    fn a_nightmare_reward_opens_the_shop_not_the_merge_menu() {
+        let mut g = reward_game("shop_reward");
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.mode, hud::Mode::Choice);
+        assert_ne!(g.mode, hud::Mode::Merge);
+        assert!(!g.boss_reward, "the reward is spent");
+        assert_eq!(g.choice_view.title, moth_shop::TITLE);
+        // Shelf cards plus the reroll card.
+        let shelf = g.moth_stock.clone().expect("stocked");
+        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 1);
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+        // Once: a further pick-less call does nothing.
+        g.moth_after_nightmare();
+        assert_eq!(g.choice, None);
+    }
+
+    #[test]
+    fn skipping_a_nightmare_reward_also_opens_the_shop_once() {
+        let mut g = reward_game("shop_skip");
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.bonus_dust, dust + upgrades::SKIP_DUST);
+        assert!(!g.boss_reward);
+        g.leave_moth_shop();
+        assert_eq!(g.mode, hud::Mode::Playing);
+        assert_eq!(g.choice, None);
+    }
+
+    #[test]
+    fn no_shop_in_autopilot_coop_or_for_an_ordinary_pick() {
+        let mut g = reward_game("shop_autopilot");
+        g.autopilot = true;
+        g.choose(0);
+        assert_eq!(g.choice, None);
+        let mut g = game("shop_plain");
+        g.director.depth = 2;
+        g.open_upgrade_choice();
+        g.choose(0);
+        assert_eq!((g.choice.clone(), g.mode), (None, hud::Mode::Playing));
+    }
+
+    #[test]
+    fn every_third_depth_opens_the_shop_after_the_pick() {
+        let mut g = game("shop_depth");
+        g.director.depth = moth_shop::SHOP_EVERY;
+        g.open_upgrade_choice();
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.mode, hud::Mode::Choice);
+    }
+
+    #[test]
+    fn buying_and_rerolling_spend_run_dust_only() {
+        let mut g = game("shop_buy");
+        g.director.depth = 6;
+        g.booklet.stash.dust = 500;
+        g.bonus_dust = 100;
+        g.enter_moth_shop_for_test();
+        let shelf = g.moth_stock.clone().unwrap();
+        let cost = moth_shop::price_at(&shelf, 0, g.moth_terms()).unwrap();
+        let card = shelf.cards[0];
+        g.choose(0);
+        assert_eq!(g.bonus_dust, 100 - cost);
+        assert_eq!(g.booklet.stash.dust, 500, "the bank is untouched");
+        assert_eq!(g.run.count(card), 1);
+        assert_eq!(g.moth_stock.as_ref().unwrap().cards.len(), shelf.cards.len() - 1);
+        // Reroll is the card after the last one (and the R key).
+        let left = g.bonus_dust;
+        let n = g.moth_stock.as_ref().unwrap().cards.len();
+        g.choose(n);
+        assert_eq!(g.bonus_dust, left - moth_shop::reroll_price(0));
+        assert_eq!(g.moth_stock.as_ref().unwrap().rerolls, 1);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        // Too poor: nothing changes.
+        g.bonus_dust = 0;
+        let before = g.moth_stock.clone();
+        let n = before.as_ref().unwrap().cards.len();
+        g.choose(n);
+        assert_eq!((g.bonus_dust, g.moth_stock.clone()), (0, before));
+    }
+
+    #[test]
+    fn perks_change_the_run_the_way_they_say() {
+        let mut g = game("shop_perks");
+        g.perks = vec![store::Perk::Shrug, store::Perk::Haggler, store::Perk::DeepShelves];
+        g.director.depth = 2;
+        g.open_upgrade_choice();
+        g.skip_choice();
+        assert_eq!(g.bonus_dust, upgrades::SKIP_DUST + store::SHRUG_DUST);
+        let t = g.moth_terms();
+        assert_eq!((t.pct_off, t.extra_stock), (store::HAGGLER_PCT, 1));
+        assert_eq!(g.perk_fx().nightmare_mult, 1);
+        g.perks = vec![store::Perk::Bounty];
+        assert_eq!(g.perk_fx().nightmare_mult, store::BOUNTY_MULT);
+    }
+
+    #[test]
+    fn the_big_store_draws_every_shelf_at_every_cursor() {
+        let mut g = game("shop_screens");
+        g.mode = hud::Mode::Store;
+        for shelf in 0..store::Shelf::ALL.len() {
+            for col in 0..store::Shelf::ALL[shelf].items().len() {
+                g.shop_shelf = shelf;
+                g.shop_col = col;
+                assert!(shapes(&g) > 0);
+            }
+        }
+    }
+    #[test]
+    fn the_fullest_moth_shelf_fits_the_screen() {
+        let mut g = game("shop_fit");
+        g.director.depth = 9;
+        g.bonus_dust = 40;
+        g.perks = vec![store::Perk::DeepShelves];
+        g.enter_moth_shop_for_test();
+        assert_eq!(g.mode, hud::Mode::Choice);
+        let bad = overflows(&g, "MothShop");
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+    // === end shop ===
 
     #[test]
     fn audit_text_fits_every_screen() {
