@@ -19,6 +19,29 @@ pub const SHUFFLE_DELAY: f32 = 0.30;
 /// Mixed into the dream seed for the deck's shuffles.
 pub const SEED_MIX: u64 = 0xDEC0_DEC0;
 
+// === upgrades2 ===
+/// How run upgrades bend the deck (`RunUpgrades::deck_perks`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckPerks {
+    /// Multiplies [`DRAW_DELAY`] (smaller = sooner).
+    pub draw_mult: f32,
+    /// Multiplies [`SHUFFLE_DELAY`].
+    pub shuffle_mult: f32,
+    /// How many cards, the first used, go straight back, ready.
+    pub free_reshuffles: u32,
+}
+
+impl Default for DeckPerks {
+    fn default() -> Self {
+        Self {
+            draw_mult: 1.0,
+            shuffle_mult: 1.0,
+            free_reshuffles: 0,
+        }
+    }
+}
+// === end upgrades2 ===
+
 /// What happened, for the animation layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeckEvent {
@@ -51,6 +74,10 @@ pub struct Deck {
     cooldowns: Vec<(u32, f32)>,
     rng: StdRng,
     events: Vec<DeckEvent>,
+    // === upgrades2 ===
+    pub perks: DeckPerks,
+    free_used: u32,
+    // === end upgrades2 ===
 }
 
 impl Deck {
@@ -76,6 +103,8 @@ impl Deck {
             waiting: Vec::new(),
             rng,
             events: Vec::new(),
+            perks: DeckPerks::default(),
+            free_used: 0,
         }
     }
 
@@ -109,8 +138,18 @@ impl Deck {
         if let Some(c) = self.cooldowns.iter_mut().find(|c| c.0 == card) {
             c.1 = cooldown.max(0.0);
         }
-        self.discard.push((card, SHUFFLE_DELAY));
-        self.waiting.push((slot, DRAW_DELAY));
+        // === upgrades2 === a free reshuffle: back at once, no cooldown
+        let free = self.free_used < self.perks.free_reshuffles;
+        if free {
+            self.free_used += 1;
+            if let Some(c) = self.cooldowns.iter_mut().find(|c| c.0 == card) {
+                c.1 = 0.0;
+            }
+        }
+        let shuffle = if free { 0.0 } else { SHUFFLE_DELAY * self.perks.shuffle_mult };
+        self.discard.push((card, shuffle));
+        self.waiting.push((slot, DRAW_DELAY * self.perks.draw_mult));
+        // === end upgrades2 ===
         self.events.push(DeckEvent::Played { slot, card });
         Some(Played { card, slot })
     }
@@ -384,4 +423,33 @@ mod tests {
         assert_eq!(needed(1), 1);
         assert_eq!(needed(50), DECK_MIN);
     }
+
+    // === upgrades2 ===
+    #[test]
+    fn perks_speed_up_the_draw_and_the_shuffle_back() {
+        let mut d = Deck::new(&[1, 2, 3, 4, 5], 3);
+        d.perks = DeckPerks { draw_mult: 0.5, shuffle_mult: 0.5, free_reshuffles: 0 };
+        d.draw_to_fill(3);
+        d.events();
+        d.play(0, 5.0).unwrap();
+        d.tick(DRAW_DELAY * 0.5 + 0.01);
+        assert!(d.hand()[0].is_some(), "drew at half the delay");
+        assert!(d.events().iter().any(|e| matches!(e, DeckEvent::Shuffled { .. })));
+    }
+
+    #[test]
+    fn the_first_free_reshuffle_comes_back_ready_and_only_once() {
+        let mut d = Deck::new(&[1, 2, 3, 4, 5], 3);
+        d.perks = DeckPerks { free_reshuffles: 1, ..DeckPerks::default() };
+        d.draw_to_fill(3);
+        d.events();
+        let a = d.play(0, 9.0).unwrap().card;
+        assert_eq!(d.cooldown(a), 0.0);
+        d.tick(0.0);
+        assert_eq!(d.discard_len(), 0, "shuffled back at once");
+        let b = d.play(1, 9.0).unwrap().card;
+        assert_eq!(d.cooldown(b), 9.0, "the second use pays in full");
+        assert_eq!(d.discard_len(), 1);
+    }
+    // === end upgrades2 ===
 }

@@ -554,6 +554,8 @@ pub struct DreamscapeGame {
     air_until: f32,
     air_refunded: bool,
     counter_cd: f32,
+    /// THIN SKIN's lost nerve has been taken off this run's max. // === upgrades2 ===
+    thin_skin_applied: bool,
     /// The combat edges the equipped cards teach.
     edges: Vec<edges::Edge>,
     /// FLOURISH's chain, SIPHON's tally, HEXMARK's marks, a LUNGE under way.
@@ -1007,6 +1009,7 @@ impl DreamscapeGame {
             air_until: 0.0,
             air_refunded: false,
             counter_cd: 0.0,
+            thin_skin_applied: false,
             edges: Vec::new(),
             flourish: edges::Chain::default(),
             siphon: edges::Tally::default(),
@@ -1386,7 +1389,7 @@ impl DreamscapeGame {
                 format!(
                     "[a/d] choose   [enter] take it   [r] reroll ({} left)   [x] skip (+{} dust)",
                     self.run.rerolls_left(),
-                    if pfx.skip_pays_nothing { 0 } else { upgrades::SKIP_DUST }
+                    if pfx.skip_pays_nothing { 0 } else { self.run.skip_dust() }
                 )
             },
         };
@@ -1639,7 +1642,9 @@ impl DreamscapeGame {
     }
 
     fn moth_terms(&self) -> moth_shop::Terms {
-        moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks))
+        let mut t = moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks));
+        t.pct_off += self.run.moth_pct_off(); // === upgrades2 ===
+        t
     }
 
     fn perk_fx(&self) -> store::PerkFx {
@@ -1659,11 +1664,11 @@ impl DreamscapeGame {
         self.moth_after_nightmare();
         self.boss_reward = false;
         if !pacts::effects(&self.pacts).skip_pays_nothing {
-            self.bonus_dust += upgrades::SKIP_DUST + self.perk_fx().skip_bonus; // === pacts ===
+            self.bonus_dust += self.run.skip_dust() + self.perk_fx().skip_bonus; // === pacts ===
         }
         self.stats.skipped += 1;
         self.coop_ready();
-        log::info!("Skipped the pick (+{} dust)", upgrades::SKIP_DUST);
+        log::info!("Skipped the pick (+{} dust)", self.run.skip_dust());
     }
 
     fn open_wake_choice(&mut self) {
@@ -1949,9 +1954,11 @@ impl DreamscapeGame {
 
     /// Deck runs: advances the deck, and turns its draws into hand slots.
     fn update_deck(&mut self, dt: f32) {
+        let perks = self.run.deck_perks(); // === upgrades2 ===
         let Some(deck) = self.deck.as_mut() else {
             return;
         };
+        deck.perks = perks; // === upgrades2 ===
         self.deck_clock += dt;
         deck.tick(dt);
         let events = deck.events();
@@ -2118,7 +2125,13 @@ impl DreamscapeGame {
         }
         let active = !self.coop_active() && (!self.autopilot || dev_from.is_some());
         // === combat passives ===
-        let want_max = (nerve::START + self.run.count(Upgrade::SecondHeartbeat)).min(nerve::MAX);
+        // === upgrades2 === THIN SKIN's price, then IRON NERVE and friends
+        if self.run.has_curse(upgrades::Curse::ThinSkin) && !self.thin_skin_applied {
+            self.thin_skin_applied = true;
+            self.nerve.lower_max(1);
+        }
+        let want_max = self.run.nerve_max();
+        // === end upgrades2 ===
         if want_max > self.nerve.max() {
             self.nerve.raise_max(want_max - self.nerve.max());
         }
@@ -2173,7 +2186,8 @@ impl DreamscapeGame {
         // === end sounds ===
         let wants = std::mem::take(&mut self.strike_request);
         if active && wants {
-            let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32);
+            let mut quick = 0.9_f32.powi(self.run.count(Upgrade::Quicken) as i32)
+                * self.run.strike_cooldown(); // === upgrades2 ===
             if self.has_edge(edges::Edge::Quickdraw) {
                 quick *= edges::QUICKDRAW_MULT;
             }
@@ -2877,6 +2891,7 @@ impl DreamscapeGame {
     fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
         let away = self.away_from_nearest_threat();
         let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
+            + self.run.afterglow() // === upgrades2 ===
             + if self.settings.gentle_nerve { nerve::GENTLE_IFRAMES } else { 0.0 };
         match self.nerve.hit(nerve::damage_from(by), away, extra) {
             nerve::Hit::Down => {
@@ -7512,6 +7527,7 @@ impl DreamscapeGame {
             nerve::Nerve::default()
         };
         self.strike_count = 0;
+        self.thin_skin_applied = false; // === upgrades2 ===
         self.calm_timer = 0.0;
         if let Some(id) = self
             .booklet
@@ -12211,6 +12227,45 @@ mod screen_smoke {
         g.update_combat(0.0);
         assert_eq!(g.nerve.max(), 5, "never past five");
     }
+
+    // === upgrades2 ===
+    #[test]
+    fn iron_nerve_raises_the_ceiling_and_thin_skin_lowers_it_once() {
+        let mut g = fighter("ironnerve", None);
+        g.run.take(Upgrade::IronNerve);
+        g.update_combat(0.0);
+        assert_eq!((g.nerve.cur(), g.nerve.max()), (4, 4));
+        let mut t = fighter("thinskin", None);
+        t.run.take(Upgrade::Cursed(upgrades::Curse::ThinSkin));
+        t.update_combat(0.0);
+        assert_eq!((t.nerve.cur(), t.nerve.max()), (2, 2));
+        t.update_combat(0.0);
+        assert_eq!(t.nerve.max(), 2, "taken off once, not every frame");
+    }
+
+    #[test]
+    fn pack_rat_pays_on_a_skip_and_the_moths_favour_cuts_prices() {
+        let mut g = reward_game("packrat");
+        g.run.take(Upgrade::PackRat);
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert_eq!(g.bonus_dust, dust + upgrades::SKIP_DUST + upgrades::PACK_RAT_DUST);
+        let base = g.moth_terms().pct_off;
+        g.run.take(Upgrade::MothsFavour);
+        assert_eq!(g.moth_terms().pct_off, base + upgrades::MOTHS_FAVOUR_PCT);
+    }
+
+    #[test]
+    fn nimble_draw_and_the_free_reshuffle_reach_the_deck() {
+        let mut g = fighter("deckperks", None);
+        g.deck = Some(deck::Deck::new(&[1, 2, 3, 4, 5], 9));
+        g.run.take(Upgrade::NimbleDraw);
+        g.update_deck(0.0);
+        let want = g.run.deck_perks();
+        assert_eq!(g.deck.as_ref().unwrap().perks, want);
+        assert!(want.draw_mult < 1.0);
+    }
+    // === end upgrades2 ===
 
     #[test]
     fn sharp_edge_cuts_deeper_into_a_reeling_foe() {
