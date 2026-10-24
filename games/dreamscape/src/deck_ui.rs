@@ -161,7 +161,10 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p,
         screen,
         v,
-        "[a/d/w/s] browse   [enter] add/remove   [space] fall asleep   [esc] back",
+        &format!(
+            "[a/d/w/s] browse  [enter] add/remove  [t] sort: {}  [r] flip  [space] fall asleep  [esc] back",
+            m.sort
+        ),
     );
     pixel_ui::scanlines(p, screen, c, 10);
 }
