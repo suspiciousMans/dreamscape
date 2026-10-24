@@ -58,6 +58,7 @@ mod worth;
 mod fpv;
 mod fusion;
 mod gamble;
+mod handscore;
 mod gameplay;
 mod hand;
 mod hud;
