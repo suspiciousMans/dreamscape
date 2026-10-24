@@ -639,10 +639,10 @@ pub(crate) mod tests {
 
     #[test]
     fn the_first_five_cards_teach_different_abilities() {
-        // Lobby and WatchingWallpaper both teach STILLNESS.
+        // Two Lobby cards both teach STILLNESS (no two dreams share an active now).
         let mut pack = vec![
             recalled(Lobby, 1, true),
-            recalled(WatchingWallpaper, 2, true),
+            recalled(Lobby, 2, true),
             recalled(Garden, 3, true),
             recalled(Awakening, 4, true),
         ];
@@ -659,7 +659,7 @@ pub(crate) mod tests {
             .enumerate()
             .map(|(i, &t)| card_from(&record(t, i as u64, 1, 0.1, false)))
             .collect();
-        let mut pack = vec![recalled(WatchingWallpaper, 9, true)];
+        let mut pack = vec![recalled(Lobby, 9, true)];
         shape_first_pack(&mut pack, &owned);
         assert!(pack[0].remembered);
     }

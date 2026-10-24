@@ -140,7 +140,11 @@ fn build(seed: u64, run: &RunUpgrades, depth: u32, terms: Terms, rerolls: u32) -
         .or_else(|| specials.first().copied());
     let mut cards = rolled(seed, run, depth, r * 8..r * 8 + 8);
     cards.retain(|u| Some(*u) != special);
-    cards.truncate(size - special.is_some() as usize);
+    // === abilities2 === a fixed-loadout run may be offered a new ability
+    let offer = ability_offer(seed, run, rerolls);
+    cards.truncate(size - special.is_some() as usize - offer.is_some() as usize);
+    cards.extend(offer);
+    // === end abilities2 ===
     let special_at = special.map(|u| {
         cards.push(u);
         cards.len() - 1
@@ -151,6 +155,24 @@ fn build(seed: u64, run: &RunUpgrades, depth: u32, terms: Terms, rerolls: u32) -
         rerolls,
     }
 }
+
+// === abilities2 ===
+/// One of the new abilities, if this run can still learn it (a deck hand
+/// takes its abilities from its cards, so it never can). Same for the same
+/// dream and the same number of rerolls.
+pub fn ability_offer(seed: u64, run: &RunUpgrades, rerolls: u32) -> Option<Upgrade> {
+    let open: Vec<Upgrade> = crate::abilities2::NEW_ABILITIES
+        .iter()
+        .map(|&a| Upgrade::Learn(a))
+        .filter(|&u| run.available(u))
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    let h = (seed ^ 0xAB11_17E5).wrapping_add(rerolls as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    Some(open[(h >> 33) as usize % open.len()])
+}
+// === end abilities2 ===
 
 /// Price of `shelf.cards[index]` with your terms (the special is cheaper).
 pub fn price_at(shelf: &Shelf, index: usize, terms: Terms) -> Option<u32> {
@@ -252,6 +274,25 @@ mod tests {
         }
         assert!(stocked > n * 4, "shelves are mostly bare: {stocked}/{n}");
         assert!(full * 10 > n * 9, "{full}/{n} shelves are full");
+    }
+
+    #[test]
+    fn a_fixed_loadout_shelf_offers_a_new_ability_and_a_deck_hand_never_does() {
+        let run = RunUpgrades::default();
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..200 {
+            let offer = ability_offer(seed, &run, 0).expect("a free dreamer can learn one");
+            let Upgrade::Learn(a) = offer else { panic!("{offer:?}") };
+            assert!(crate::abilities2::NEW_ABILITIES.contains(&a));
+            assert!(stock(seed, &run, 5, T).cards.contains(&offer), "seed {seed}");
+            assert!(price_at(&stock(seed, &run, 5, T), stock(seed, &run, 5, T).cards.iter().position(|c| *c == offer).unwrap(), T).is_some());
+            seen.insert(a);
+        }
+        assert_eq!(seen.len(), 8, "every new ability gets sold");
+        let mut hand = RunUpgrades::default();
+        hand.deck_slots = 3;
+        assert_eq!(ability_offer(1, &hand, 0), None);
+        assert!(stock(1, &hand, 5, T).cards.iter().all(|u| !u.is_ability()));
     }
 
     #[test]

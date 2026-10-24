@@ -31,16 +31,16 @@ pub fn power(theme: DreamTheme) -> Power {
         Attribute::Tide => (Float, LongBreath, "hold your breath and drift"),
         Attribute::Aether => (Step, DoubleJump, "one more step than there should be"),
         Attribute::Glass => (Ward, WideEyes, "your reflection takes the hit"),
-        Attribute::Spore => (ShardCall, ShardSense, "the roots know where it is"),
+        Attribute::Spore => (Tether, ShardSense, "the roots haul it up to you"),
         Attribute::Abyss => (Dash, SwiftFeet, "the far end pulls you in"),
         Attribute::Halo => (Hush, Quicken, "every room waits for the next"),
         Attribute::Jest => (Gust, DustHoarder, "a small hand shoves them back"),
         Attribute::Trace => (Anchor, SwiftFeet, "you left a copy back there"),
         Attribute::Chord => (Slam, Quicken, "land on the beat"),
         Attribute::Hour => (Rewind, DreamAnchor, "it's still a few seconds ago"),
-        Attribute::Lumen => (Phase, Spring, "soft as a jellyfish"),
-        Attribute::Gaze => (Stillness, ShardSense, "they stop when you look"),
-        Attribute::Blank => (Phase, DustHoarder, "less of you to catch"),
+        Attribute::Lumen => (Veil, Spring, "soft light, and nobody sees you in it"),
+        Attribute::Gaze => (Bind, ShardSense, "they stop when you look"),
+        Attribute::Blank => (Pulse, DustHoarder, "you hear where the walls are not"),
     };
     Power {
         active,
@@ -55,7 +55,7 @@ pub fn power(theme: DreamTheme) -> Power {
 mod tests {
     use super::*;
     use crate::dream::ALL_THEMES;
-    use crate::upgrades::{ALL_ABILITIES, PASSIVES};
+    use crate::upgrades::{Ability, ALL_ABILITIES, PASSIVES};
 
     #[test]
     fn every_theme_has_a_power_tinted_by_its_accent() {
@@ -74,6 +74,10 @@ mod tests {
     #[test]
     fn every_ability_is_on_some_card() {
         for a in ALL_ABILITIES {
+            // MIRROR, QUAKE, SURGE and HASTE have no card: picks and the moth only.
+            if [Ability::Mirror, Ability::Quake, Ability::Surge, Ability::Haste].contains(&a) {
+                continue;
+            }
             assert!(ALL_THEMES.iter().any(|&t| power(t).active == a), "{a:?}");
         }
     }
