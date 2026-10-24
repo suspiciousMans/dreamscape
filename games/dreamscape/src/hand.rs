@@ -213,6 +213,12 @@ pub struct HandPile {
     /// Seconds since a card was last shuffled in; [`NEVER`] if none.
     pub riffle_since: f32,
     pub leaving: Vec<Leaving>,
+    // === handscore ===
+    /// The hand's rank right now ([`crate::handscore::HandRank::None`] hides the tag).
+    pub score: crate::handscore::HandRank,
+    /// Seconds since the rank last changed; [`NEVER`] if it has not.
+    pub score_since: f32,
+    // === end handscore ===
 }
 
 impl Default for HandPile {
@@ -222,6 +228,8 @@ impl Default for HandPile {
             draw_count: 0,
             riffle_since: NEVER,
             leaving: Vec::new(),
+            score: crate::handscore::HandRank::None,
+            score_since: NEVER,
         }
     }
 }
@@ -449,6 +457,11 @@ pub fn draw(
         draw_stack(p, s, pile, u, time, reduced);
     }
     // === end deck ===
+    // === handscore ===
+    if pile.shown {
+        draw_score_tag(p, screen, &rests, pile, u, reduced);
+    }
+    // === end handscore ===
     // Rest order (later cards lie on top), then whichever is mid-pop above all.
     let rise = |c: &HandCard| pop(c.since_use).max(if (0.0..DRAW_SECS).contains(&c.since_draw) { 1.0 } else { 0.0 });
     let mut order: Vec<usize> = (0..cards.len()).collect();
@@ -538,6 +551,35 @@ pub fn draw(
     }
     // === end deck ===
 }
+
+// === handscore ===
+/// 0..1 "just changed" glow of the score tag: a soft rise and fall.
+pub fn score_pulse(since: f32, reduced: bool) -> f32 {
+    if reduced || !(0.0..crate::handscore::PULSE_SECS).contains(&since) {
+        return 0.0;
+    }
+    (std::f32::consts::PI * since / crate::handscore::PULSE_SECS).sin()
+}
+
+/// A small plain tag above the hand: the rank and its multiplier.
+fn draw_score_tag(p: &egui::Painter, screen: Rect, rests: &[Rect], pile: &HandPile, u: f32, reduced: bool) {
+    let Some((name, mult)) = crate::handscore::tag(pile.score) else {
+        return;
+    };
+    let top = rests.iter().map(|r| r.top()).fold(f32::MAX, f32::min);
+    let top = if top == f32::MAX { screen.bottom() - 60.0 * u } else { top };
+    let glow = score_pulse(pile.score_since, reduced);
+    let at = Pos2::new(screen.center().x, top - 10.0 * u);
+    let alpha = 0.75 + 0.25 * glow;
+    p.text(
+        at,
+        egui::Align2::CENTER_BOTTOM,
+        format!("{name}  {mult}"),
+        FontId::monospace((12.0 * u).max(9.0)),
+        rgba([240, 220, 150], alpha),
+    );
+}
+// === end handscore ===
 
 // === deck ===
 /// The draw pile: card backs stacked, a count badge, and the riffle.

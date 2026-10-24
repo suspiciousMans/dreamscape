@@ -226,11 +226,6 @@ pub fn tag(rank: HandRank) -> Option<(&'static str, String)> {
     (rank != HandRank::None).then(|| (rank.name(), rank.mult_label()))
 }
 
-/// The summary screen's line, or nothing when no hand ever scored.
-pub fn summary_line(best: HandRank) -> Option<String> {
-    (best != HandRank::None).then(|| format!("best hand: {}", best.name()))
-}
-
 /// The deck builder's line.
 pub fn deck_line(best: HandRank) -> String {
     format!("best hand with this deck: {}", best.name())
@@ -363,7 +358,6 @@ mod tests {
         assert_eq!(HandRank::FiveOfAKind.mult_label(), "x1.80");
         assert!(tag(HandRank::None).is_none());
         assert_eq!(tag(HandRank::FullHouse), Some(("FULL HOUSE", "x1.45".to_string())));
-        assert_eq!(summary_line(HandRank::FullHouse).unwrap(), "best hand: FULL HOUSE");
         assert!(HandRank::Flush.is_full_house_or_better());
         assert!(!HandRank::Trio.is_full_house_or_better());
         assert_eq!(HandRank::Pair.best(HandRank::Trio), HandRank::Trio);

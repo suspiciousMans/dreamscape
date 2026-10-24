@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Steamworks API names, in the order of the design doc.
 #[cfg(test)]
-pub const ALL: [&str; 44] = [
+pub const ALL: [&str; 45] = [
     "wake_once",
     "first_shard",
     "first_nightmare",
@@ -57,6 +57,9 @@ pub const ALL: [&str; 44] = [
     "deep_clean",
     "depth_50",
     // === end achievements2 ===
+    // === handscore ===
+    "full_house",
+    // === end handscore ===
 ];
 
 pub const TRIP_DREAMS: [DreamTheme; 6] = [
@@ -137,6 +140,7 @@ pub fn name(id: &str) -> &'static str {
         "deep_clean" => "Untroubled",
         "depth_50" => "Bottomless",
         // === end achievements2 ===
+        "full_house" => "Full House",
         _ => "",
     }
 }
@@ -253,6 +257,7 @@ fn state(b: &Booklet) -> Vec<&'static str> {
     when(b.stash.dust >= DUST_HOARD, "dust_500");
     when(c.fastest_wake.is_some_and(|s| s <= EARLY_WAKE_SECS), "early_wake");
     // === end achievements2 ===
+    when(b.best_hand.is_full_house_or_better(), "full_house"); // === handscore ===
     out
 }
 
@@ -349,11 +354,11 @@ mod tests {
     }
 
     #[test]
-    fn forty_four_distinct_named_achievements() {
+    fn forty_five_distinct_named_achievements() {
         let mut ids = ALL.to_vec();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 44);
+        assert_eq!(ids.len(), 45);
         for id in ALL {
             assert!(id.len() <= 28 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{id}: Steam API name");
             assert!(name(id).len() <= 28, "{id}: name fits the toast");
