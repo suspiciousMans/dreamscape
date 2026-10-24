@@ -23,6 +23,7 @@ use engine::ui::EguiState;
 
 use engine::ui::egui;
 
+mod abilities2;
 mod access;
 mod attunement;
 mod achievements;
@@ -651,6 +652,15 @@ pub struct DreamscapeGame {
     slam: u8,
     /// STEP: where the next steps go (spawned with the GL context in hand), and the live ones.
     step_pending: Option<Vec<Vec3>>,
+    // === abilities2 ===
+    surge: abilities2::Surge,
+    /// Speed multiplier of the dash in flight (a SURGE doubles it).
+    dash_boost: f32,
+    /// HASTE: the zone and the disc that draws it.
+    haste: Option<(abilities2::HasteField, Option<Entity>)>,
+    /// PULSE: pillars standing over what hides behind walls.
+    pulse_marks: Vec<Entity>,
+    // === end abilities2 ===
     steps: Vec<Entity>,
     /// REWIND: where you've stood lately.
     rewind_trail: upgrades::Trail,
@@ -1057,6 +1067,12 @@ impl DreamscapeGame {
             stunned: HashMap::new(),
             slam: 0,
             step_pending: None,
+            // === abilities2 ===
+            surge: abilities2::Surge::default(),
+            dash_boost: 1.0,
+            haste: None,
+            pulse_marks: Vec::new(),
+            // === end abilities2 ===
             steps: Vec::new(),
             rewind_trail: upgrades::Trail::default(),
             echo_timer: 0.0,
@@ -2424,7 +2440,9 @@ impl DreamscapeGame {
         let me = self.player_position;
         combat::Ctx {
             // BLINK sets up a sneak attack; HUSH deepens it.
-            unaware: t.unaware || self.dream_age < self.backstab_until,
+            unaware: t.unaware
+                || self.dream_age < self.backstab_until
+                || self.run.active(Ability::Veil), // === abilities2 ===
             airborne: !self.player_grounded
                 || self.run.active(Ability::Float)
                 || (self.run.count(Upgrade::Spring) > 0
@@ -3171,6 +3189,13 @@ impl DreamscapeGame {
                 self.knock_leech(e, false);
                 continue;
             }
+            // === abilities2 ===
+            if self.run.active(Ability::Mirror) {
+                self.break_mirror();
+                self.knock_leech(e, false);
+                continue;
+            }
+            // === end abilities2 ===
             if let Some(SpecialAI::Leech(lc)) = self.specials.iter_mut().find(|s| s.entity == e).map(|s| &mut s.ai) {
                 lc.latch_on();
             }
@@ -5316,6 +5341,12 @@ impl DreamscapeGame {
             self.sfx(Sound::Denied);
             return;
         }
+        // === abilities2 === nothing to act on: the charge is kept
+        if !self.abilities2_ready(state.ability) {
+            self.sfx(Sound::Denied);
+            return;
+        }
+        // === end abilities2 ===
         // Chained soon after another ability: a combo.
         let combo = self
             .last_ability
@@ -5466,6 +5497,7 @@ impl DreamscapeGame {
             self.combat_on_use(state.ability, origin);
             self.anchor_snapped = false;
             // === end combat ===
+            self.abilities2_on_use(state.ability, mult, stretch); // === abilities2 ===
             if cracks {
                 self.open_secret();
             }
@@ -5531,6 +5563,16 @@ impl DreamscapeGame {
                 Ability::Step => [0.6, 0.8, 1.0],
                 Ability::Hush => [0.7, 0.6, 1.0],
                 Ability::Gust => [0.8, 1.0, 0.9],
+                // === abilities2 ===
+                Ability::Tether => [0.4, 1.0, 0.7],
+                Ability::Mirror => [0.85, 0.9, 1.0],
+                Ability::Quake => [0.8, 0.6, 0.4],
+                Ability::Veil => [0.5, 0.45, 0.8],
+                Ability::Surge => [1.0, 0.85, 0.3],
+                Ability::Pulse => [0.6, 1.0, 1.0],
+                Ability::Haste => [1.0, 0.6, 0.5],
+                Ability::Bind => [0.6, 0.9, 0.4],
+                // === end abilities2 ===
             };
             let tint = self
                 .ability_tints
@@ -5559,6 +5601,16 @@ impl DreamscapeGame {
                 Ability::Step => Sound::StepRise,
                 Ability::Hush => Sound::HushOn,
                 Ability::Gust => Sound::Gust,
+                // === abilities2 ===
+                Ability::Tether => Sound::TetherPull,
+                Ability::Mirror => Sound::MirrorUp,
+                Ability::Quake => Sound::QuakeRumble,
+                Ability::Veil => Sound::VeilOn,
+                Ability::Surge => Sound::SurgeUp,
+                Ability::Pulse => Sound::PulsePing,
+                Ability::Haste => Sound::HasteOn,
+                Ability::Bind => Sound::BindClamp,
+                // === end abilities2 ===
             });
             self.last_ability = Some((state.ability, self.dream_age));
             self.ability_used.retain(|u| u.0 != state.ability);
@@ -5572,6 +5624,185 @@ impl DreamscapeGame {
             }
         }
     }
+
+    // === abilities2 ===
+    /// Can `a` be used right now? (No target, or nothing underfoot: the
+    /// charge is kept.)
+    fn abilities2_ready(&self, a: Ability) -> bool {
+        match a {
+            Ability::Quake => abilities2::quake_allowed(self.player_grounded),
+            Ability::Bind => self.bind_target().is_some(),
+            Ability::Tether => self.tether_target().is_some(),
+            _ => true,
+        }
+    }
+
+    /// The nearest thing BIND can root.
+    fn bind_target(&self) -> Option<CombatTarget> {
+        let targets = self.combat_targets();
+        let pts: Vec<Vec3> = targets.iter().map(|t| t.pos).collect();
+        let i = abilities2::bind_pick(self.player_position, &pts)?;
+        targets.into_iter().nth(i)
+    }
+
+    /// Roots one foe: a pacer is stunned, the rest stagger (a strike
+    /// cuts a staggered foe deeper).
+    fn bind_foe(&mut self, t: &CombatTarget) {
+        if matches!(t.kind, combat::Kind::Pacer { .. }) {
+            self.stunned.insert(t.entity, abilities2::BIND_SECS);
+        } else {
+            self.staggered.insert(t.entity, abilities2::BIND_SECS);
+        }
+    }
+
+    /// The nearest shard or calm mote TETHER would pull: (where it is, the
+    /// mote's entity or `None` for the shard).
+    fn tether_target(&self) -> Option<(Vec3, Option<Entity>)> {
+        let mut pts = Vec::new();
+        let mut who = Vec::new();
+        for (e, _) in &self.motes {
+            if let Ok(t) = self.world.get::<&Transform>(*e) {
+                pts.push(t.position);
+                who.push(Some(*e));
+            }
+        }
+        if let Some(&s) = self.shard_entities.first() {
+            if let Ok(t) = self.world.get::<&Transform>(s) {
+                pts.push(t.position);
+                who.push(None);
+            }
+        }
+        let i = abilities2::tether_pick(self.player_position, &pts)?;
+        Some((pts[i], who[i]))
+    }
+
+    /// The effects that happen the moment an ability fires.
+    fn abilities2_on_use(&mut self, a: Ability, _cd_mult: f32, stretch: f32) {
+        let me = self.player_position;
+        match a {
+            Ability::Surge => self.surge.arm(),
+            Ability::Dash => self.dash_boost = self.surge.take_dash(),
+            Ability::Quake => {
+                self.shock(me, abilities2::QUAKE_REACH, 0.0, abilities2::QUAKE_STAGGER);
+                self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            }
+            Ability::Bind => {
+                if let Some(t) = self.bind_target() {
+                    self.bind_foe(&t);
+                }
+            }
+            Ability::Haste => {
+                let secs = Ability::Haste.duration() * stretch;
+                let disc = match (self.player_tex.clone(), self.mesh(Shape::Cylinder)) {
+                    (Some(tex), Ok(mesh)) => Some(self.world.spawn((
+                        Transform {
+                            position: me - Vec3::Y * 0.95,
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::new(abilities2::HASTE_RADIUS * 2.0, 0.02, abilities2::HASTE_RADIUS * 2.0),
+                        },
+                        MeshRenderer { mesh, texture: Some(tex) },
+                        Translucent,
+                        Lit,
+                    ))),
+                    _ => None,
+                };
+                if let Some((_, Some(old))) = self.haste.take() {
+                    let _ = self.world.despawn(old);
+                }
+                self.haste = Some((abilities2::HasteField::new(me, secs), disc));
+            }
+            Ability::Pulse => self.pulse_reveal(),
+            _ => {}
+        }
+    }
+
+    /// PULSE: a tall pillar over the cracked wall and over every Shade.
+    fn pulse_reveal(&mut self) {
+        let (Some(tex), Ok(mesh)) = (self.player_tex.clone(), self.mesh(Shape::Cube)) else {
+            return;
+        };
+        let mut spots: Vec<Vec3> = Vec::new();
+        if let Some(s) = self.secret.as_ref().filter(|s| s.wall.is_some()) {
+            spots.push(s.at);
+        }
+        for p in self.enemies.iter().filter(|p| p.elite == Some(Elite::Shade)) {
+            if let Ok(t) = self.world.get::<&Transform>(p.entity) {
+                spots.push(t.position);
+            }
+        }
+        for at in spots {
+            let e = self.world.spawn((
+                Transform {
+                    position: at + Vec3::Y * abilities2::PULSE_PILLAR_HEIGHT * 0.5,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::new(0.2, abilities2::PULSE_PILLAR_HEIGHT, 0.2),
+                },
+                MeshRenderer { mesh: mesh.clone(), texture: Some(tex.clone()) },
+                Translucent,
+                Lit,
+            ));
+            self.pulse_marks.push(e);
+        }
+    }
+
+    /// MIRROR: the blow is thrown back; the attacker is hurt, all near reel.
+    fn break_mirror(&mut self) {
+        for a in &mut self.run.abilities {
+            if a.ability == Ability::Mirror {
+                a.active = 0.0;
+            }
+        }
+        self.grace = self.grace.max(abilities2::MIRROR_GRACE);
+        let me = self.player_position;
+        self.ward_reflect();
+        self.shock(me, abilities2::MIRROR_REACH, 0.0, abilities2::MIRROR_STUN);
+        self.flash.trigger([0.85, 0.9, 1.0], 0.5);
+        self.burst_pending = Some((me, [200, 220, 255], [255, 255, 255]));
+        self.sfx(Sound::MirrorBreak);
+        log::info!("The mirror threw the blow back");
+    }
+
+    /// Per frame: TETHER pulls, the HASTE zone fades, SURGE and PULSE end.
+    fn update_abilities2(&mut self, dt: f32) {
+        if !self.run.active(Ability::Surge) {
+            self.surge.clear();
+        }
+        if !self.run.active(Ability::Dash) {
+            self.dash_boost = 1.0;
+        }
+        if self.run.active(Ability::Tether) {
+            if let Some((pos, who)) = self.tether_target() {
+                let next = abilities2::tether_step(pos, self.player_position, dt);
+                match who {
+                    Some(e) => {
+                        if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                            t.position = next;
+                        }
+                    }
+                    None => {
+                        for &e in &self.shard_entities {
+                            if let Ok(mut t) = self.world.get::<&mut Transform>(e) {
+                                t.position += next - pos;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((mut f, disc)) = self.haste.take() {
+            if f.tick(dt) {
+                self.haste = Some((f, disc));
+            } else if let Some(e) = disc {
+                let _ = self.world.despawn(e);
+            }
+        }
+        if !self.run.active(Ability::Pulse) {
+            for e in self.pulse_marks.drain(..) {
+                let _ = self.world.despawn(e);
+            }
+        }
+    }
+    // === end abilities2 ===
 
     /// SHARD CALL: the shard (and its beacon) drift toward the dreamer.
     fn pull_shard(&mut self, dt: f32) {
@@ -6530,6 +6761,7 @@ impl DreamscapeGame {
             }
             * (1.0 + self.card_fx.speed_pct as f32 / 100.0)
             * self.active_form.speed_mult()
+            * self.haste.map_or(1.0, |h| h.0.player_mult(self.player_position)) // === abilities2 ===
             // === shards ===
             * shard_rules::heavy_mults(self.heavy_elapsed()).0
             // === end shards ===
@@ -8625,6 +8857,12 @@ impl DreamscapeGame {
         self.burst_pending = None;
         self.decoy = None; // the old dream's world (and its marker) is gone
         self.anchor = None;
+        // === abilities2 === (the world was cleared: the entities are gone)
+        self.haste = None;
+        self.pulse_marks.clear();
+        self.surge.clear();
+        self.dash_boost = 1.0;
+        // === end abilities2 ===
         self.last_ability = None;
         self.ability_used.clear();
         self.passive_fired.clear();
@@ -10538,6 +10776,7 @@ impl Game for DreamscapeGame {
         // === combat ===
         self.update_combat(dt);
         // === end combat ===
+        self.update_abilities2(dt); // === abilities2 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
@@ -10634,7 +10873,7 @@ impl Game for DreamscapeGame {
         let dashing = self.run.active(Ability::Dash);
         if let Ok(mut body) = self.world.get::<&mut RigidBody>(player) {
             let v = if dashing {
-                self.facing * gameplay::MOVE_SPEED * upgrades::DASH_SPEED_MULT
+                self.facing * gameplay::MOVE_SPEED * upgrades::DASH_SPEED_MULT * self.dash_boost
             } else {
                 desired
             };
@@ -10671,7 +10910,7 @@ impl Game for DreamscapeGame {
                 self.air_jumps_used = 0;
             }
             if wants_jump && body.grounded {
-                body.velocity.y = jump_speed;
+                body.velocity.y = jump_speed * self.surge.take_jump(); // === abilities2 ===
                 self.jump_event = true; // === combat === a leech counts it
                 if jump_pressed {
                     self.sfx(Sound::Jump);
@@ -10679,7 +10918,7 @@ impl Game for DreamscapeGame {
                 }
             } else if jump_pressed && !body.grounded && self.air_jumps_used < self.run.air_jumps() {
                 self.air_jumps_used += 1;
-                body.velocity.y = jump_speed;
+                body.velocity.y = jump_speed * self.surge.take_jump(); // === abilities2 ===
                 self.jump_event = true; // === combat === a leech counts it
                 self.sfx(Sound::AirJump);
                 fire_passive(&mut self.passive_fired, &self.run, self.dream_age, Upgrade::DoubleJump);
@@ -10716,6 +10955,11 @@ impl Game for DreamscapeGame {
         } else {
             1.0
         };
+        // === abilities2 ===
+        let veiled = self.run.active(Ability::Veil);
+        let pulsing = self.run.active(Ability::Pulse);
+        let haste = self.haste.map(|h| h.0);
+        // === end abilities2 ===
         // === shards ===
         let want_alert = shard_rules::heavy_mults(self.heavy_elapsed()).1;
         if (want_alert - self.heavy_applied).abs() > 1e-4 {
@@ -10749,7 +10993,17 @@ impl Game for DreamscapeGame {
                 } else {
                     nearest(&hunted, t.position)
                 };
-                p.ai.update(&mut t.position, target, dt * hush);
+                // === abilities2 === VEIL: they lose you; HASTE: they drag in the zone
+                if veiled && p.ai.chasing {
+                    p.ai.reset();
+                }
+                let drag = haste.map_or(1.0, |h| h.foe_mult(t.position));
+                p.ai.update(
+                    &mut t.position,
+                    abilities2::seen_from(target, veiled),
+                    dt * hush * drag,
+                );
+                // === end abilities2 ===
                 // Swell when they notice you: the tell that you've been seen.
                 let size = if p.ai.chasing { 1.25 } else { 0.9 }
                     * match p.elite {
@@ -10758,7 +11012,12 @@ impl Game for DreamscapeGame {
                         _ => 1.0,
                     };
                 let hidden = p.elite == Some(Elite::Shade)
-                    && (t.position - self.player_position).length() > specials::SHADE_SHOWS_WITHIN;
+                    && (t.position - self.player_position).length()
+                        > if pulsing {
+                            abilities2::PULSE_SHADE_SHOWS // === abilities2 ===
+                        } else {
+                            specials::SHADE_SHOWS_WITHIN
+                        };
                 t.scale = Vec3::splat(if hidden { 0.0 } else { size });
                 if p.ai.chasing && !was && !self.autopilot {
                     log::info!("An enemy noticed you");
@@ -10985,6 +11244,9 @@ impl Game for DreamscapeGame {
         let caught_by = if caught_by.is_some() && self.run.active(Ability::Ward) {
             self.break_ward();
             self.ward_reflect(); // combat
+            None
+        } else if caught_by.is_some() && self.run.active(Ability::Mirror) {
+            self.break_mirror(); // === abilities2 ===
             None
         } else {
             caught_by

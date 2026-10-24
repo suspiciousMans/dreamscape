@@ -42,9 +42,27 @@ pub enum Ability {
     Hush,
     /// A blast that throws nearby enemies back.
     Gust,
+    // === abilities2 ===
+    /// Yank the nearest shard or calm mote to you.
+    Tether,
+    /// The next hit is thrown back; everything near reels.
+    Mirror,
+    /// The floor ripples and staggers everything on it.
+    Quake,
+    /// Chasers lose you; a blow on one is a sneak attack.
+    Veil,
+    /// The next jump and the next dash are doubled.
+    Surge,
+    /// See through walls: hidden things stand out.
+    Pulse,
+    /// A zone where you are quick and chasers drag.
+    Haste,
+    /// Roots the nearest enemy.
+    Bind,
+    // === end abilities2 ===
 }
 
-pub const ALL_ABILITIES: [Ability; 16] = [
+pub const ALL_ABILITIES: [Ability; 24] = [
     Ability::Dash,
     Ability::Blink,
     Ability::Stillness,
@@ -61,6 +79,14 @@ pub const ALL_ABILITIES: [Ability; 16] = [
     Ability::Step,
     Ability::Hush,
     Ability::Gust,
+    Ability::Tether,
+    Ability::Mirror,
+    Ability::Quake,
+    Ability::Veil,
+    Ability::Surge,
+    Ability::Pulse,
+    Ability::Haste,
+    Ability::Bind,
 ];
 
 /// Shift and E.
@@ -235,6 +261,14 @@ impl Ability {
             Ability::Step => "STEP",
             Ability::Hush => "HUSH",
             Ability::Gust => "GUST",
+            Ability::Tether => "TETHER",
+            Ability::Mirror => "MIRROR",
+            Ability::Quake => "QUAKE",
+            Ability::Veil => "VEIL",
+            Ability::Surge => "SURGE",
+            Ability::Pulse => "PULSE",
+            Ability::Haste => "HASTE",
+            Ability::Bind => "BIND",
         }
     }
 
@@ -256,6 +290,14 @@ impl Ability {
             Ability::Step => "two steps of air rise ahead of you",
             Ability::Hush => "chasers crawl at a third speed for 6s",
             Ability::Gust => "throw nearby enemies back and dizzy them",
+            Ability::Tether => "yank the nearest shard or mote to you",
+            Ability::Mirror => "the next hit is thrown back, foes reel",
+            Ability::Quake => "shake the floor: everything near staggers",
+            Ability::Veil => "chasers lose you; a blow is a sneak attack",
+            Ability::Surge => "your next jump and dash go twice as far",
+            Ability::Pulse => "see through walls: shades and cracks show",
+            Ability::Haste => "a zone: you run fast, chasers drag",
+            Ability::Bind => "roots the nearest enemy for 5s",
         }
     }
 
@@ -278,6 +320,14 @@ impl Ability {
             Ability::Step => 18.0,
             Ability::Hush => 14.0,
             Ability::Gust => 11.0,
+            Ability::Tether => 12.0,
+            Ability::Mirror => 22.0,
+            Ability::Quake => 10.0,
+            Ability::Veil => 16.0,
+            Ability::Surge => 14.0,
+            Ability::Pulse => 15.0,
+            Ability::Haste => 18.0,
+            Ability::Bind => 13.0,
         }
     }
 
@@ -300,6 +350,14 @@ impl Ability {
             Ability::Step => 8.0,
             Ability::Hush => 6.0,
             Ability::Gust => 0.0,
+            Ability::Tether => 2.5,
+            Ability::Mirror => 8.0,
+            Ability::Quake => 0.0,
+            Ability::Veil => 5.0,
+            Ability::Surge => 8.0,
+            Ability::Pulse => 4.0,
+            Ability::Haste => 6.0,
+            Ability::Bind => 0.0,
         }
     }
 }

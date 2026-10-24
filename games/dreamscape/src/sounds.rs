@@ -53,6 +53,17 @@ pub enum Sound {
     HushOn,
     /// GUST: a whoosh.
     Gust,
+    // === abilities2 ===
+    TetherPull,
+    MirrorUp,
+    MirrorBreak,
+    QuakeRumble,
+    VeilOn,
+    SurgeUp,
+    PulsePing,
+    HasteOn,
+    BindClamp,
+    // === end abilities2 ===
     /// Two abilities chained into a combo.
     Combo,
     /// A high cache picked up.
@@ -125,7 +136,7 @@ pub enum Sound {
     Mote,
 }
 
-pub const ALL_SOUNDS: [Sound; 71] = [
+pub const ALL_SOUNDS: [Sound; 80] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -161,6 +172,15 @@ pub const ALL_SOUNDS: [Sound; 71] = [
     Sound::StepRise,
     Sound::HushOn,
     Sound::Gust,
+    Sound::TetherPull,
+    Sound::MirrorUp,
+    Sound::MirrorBreak,
+    Sound::QuakeRumble,
+    Sound::VeilOn,
+    Sound::SurgeUp,
+    Sound::PulsePing,
+    Sound::HasteOn,
+    Sound::BindClamp,
     Sound::Combo,
     Sound::CacheGet,
     Sound::Climb,
@@ -454,6 +474,45 @@ pub fn synth(sound: Sound) -> Vec<f32> {
             v(400.0, 1800.0, 0.35).noise(0.9).gain(0.34).curve(0.7),
             v(900.0, 200.0, 0.3).noise(0.7).gain(0.2).at(0.12),
         ],
+        // === abilities2 ===
+        TetherPull => vec![
+            v(200.0, 900.0, 0.35).wave(2).gain(0.2).curve(0.8),
+            v(300.0, 1200.0, 0.3).wave(1).gain(0.1).at(0.05),
+        ],
+        MirrorUp => vec![
+            v(1500.0, 1500.0, 0.3).wave(2).gain(0.16),
+            v(2250.0, 2250.0, 0.25).wave(2).gain(0.1).at(0.04),
+        ],
+        MirrorBreak => vec![
+            v(2400.0, 500.0, 0.3).wave(1).gain(0.2),
+            v(1800.0, 300.0, 0.3).noise(0.6).gain(0.16).at(0.02),
+        ],
+        QuakeRumble => vec![
+            v(70.0, 40.0, 0.6).wave(1).gain(0.34).curve(0.8),
+            v(120.0, 60.0, 0.5).noise(0.8).gain(0.2).at(0.03),
+        ],
+        VeilOn => vec![
+            v(900.0, 300.0, 0.7).wave(2).gain(0.14).attack(0.25).curve(1.1),
+            v(500.0, 150.0, 0.7).noise(0.5).gain(0.08).attack(0.3),
+        ],
+        SurgeUp => vec![
+            v(300.0, 1400.0, 0.3).wave(1).gain(0.2).curve(0.6),
+            v(600.0, 2000.0, 0.25).wave(2).gain(0.12).at(0.08),
+        ],
+        PulsePing => vec![
+            v(1000.0, 1000.0, 0.6).wave(2).gain(0.2).curve(2.0),
+            v(500.0, 500.0, 0.6).wave(2).gain(0.1).at(0.15).curve(2.0),
+        ],
+        HasteOn => vec![
+            v(500.0, 1600.0, 0.4).noise(0.7).gain(0.22).curve(0.7),
+            v(400.0, 800.0, 0.3).wave(2).gain(0.12).at(0.05),
+        ],
+        BindClamp => vec![
+            v(180.0, 90.0, 0.2).wave(1).gain(0.3),
+            v(1200.0, 400.0, 0.15).noise(0.5).gain(0.18).at(0.02),
+            v(800.0, 300.0, 0.15).wave(1).gain(0.12).at(0.1),
+        ],
+        // === end abilities2 ===
         Combo => vec![
             v(523.0, 523.0, 0.1).wave(2).gain(0.22),
             v(659.0, 659.0, 0.1).wave(2).gain(0.22).at(0.07),
