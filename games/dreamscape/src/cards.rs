@@ -362,6 +362,11 @@ pub struct Booklet {
     /// The daily fortune (old saves: nothing claimed yet).
     #[serde(default)]
     pub fortune: crate::fortune::FortuneState,
+    // === handscore ===
+    /// The best hand ever held in a deck run (old saves: none).
+    #[serde(default)]
+    pub best_hand: crate::handscore::HandRank,
+    // === end handscore ===
 }
 
 impl Booklet {

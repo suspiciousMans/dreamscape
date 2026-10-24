@@ -58,6 +58,12 @@ pub struct RunState {
     pub wager_active: bool,
     /// The wagered dream was left: one extra rare+ pick is due.
     pub pick_owed: bool,
+    /// Saved with the run: the run dust at the start of this dream (what a
+    /// wager doubles the gain over). `None` once a load has consumed it.
+    pub wager_start: Option<u32>,
+    /// Saved with the run: coin flips already made in this visit to the
+    /// moth, so quitting and reloading cannot buy more. `None` once consumed.
+    pub visit_flips: Option<u32>,
 }
 
 /// What the coin says before it is flipped.
@@ -179,6 +185,21 @@ impl RunState {
     }
 
     /// A dream begins: a taken wager becomes this dream's.
+    pub fn stamp(&mut self, wager_start: u32, visit_flips: u32) {
+        self.wager_start = Some(wager_start);
+        self.visit_flips = Some(visit_flips);
+    }
+
+    /// A load takes the saved baseline (or `fallback` for an old save).
+    pub fn take_wager_start(&mut self, fallback: u32) -> u32 {
+        self.wager_start.take().unwrap_or(fallback)
+    }
+
+    /// A load takes the saved visit count (an old save: none made).
+    pub fn take_visit_flips(&mut self) -> u32 {
+        self.visit_flips.take().unwrap_or(0)
+    }
+
     pub fn begin_dream(&mut self) {
         self.wager_active = std::mem::take(&mut self.wager_next);
     }
@@ -237,6 +258,21 @@ mod tests {
                 assert!(s * 2 <= dust && s >= 5);
             }
         }
+    }
+
+    #[test]
+    fn the_baseline_and_visit_count_survive_a_save_and_old_saves_fall_back() {
+        let mut s = RunState::default();
+        s.stamp(40, 2);
+        let text = ron::to_string(&s).unwrap();
+        let mut back: RunState = ron::from_str(&text).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.take_wager_start(999), 40);
+        assert_eq!(back.take_visit_flips(), 2);
+        // Consumed once: a fresh dream falls back.
+        assert_eq!((back.take_wager_start(7), back.take_visit_flips()), (7, 0));
+        let mut old: RunState = ron::from_str("(flips: 1, losses: 1)").unwrap();
+        assert_eq!((old.take_wager_start(55), old.take_visit_flips()), (55, 0));
     }
 
     #[test]

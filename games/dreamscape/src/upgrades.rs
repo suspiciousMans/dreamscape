@@ -1436,9 +1436,16 @@ impl RunUpgrades {
     }
 
     fn build_kit(cards: &[crate::cards::Card], abilities: bool) -> Self {
+        Self::build_kit_report(cards, abilities).0
+    }
+
+    /// [`Self::build_kit`], plus per card whether the passive cap left it out
+    /// (`true` = benched: every one of its passives hit [`KIT_PASSIVES`]).
+    fn build_kit_report(cards: &[crate::cards::Card], abilities: bool) -> (Self, Vec<bool>) {
         use crate::cards::Rarity;
         use crate::powers::power;
         let mut run = Self::default();
+        let mut benched = Vec::new();
         for c in cards {
             let p = crate::powers::power_of(c);
             if abilities
@@ -1454,15 +1461,32 @@ impl RunUpgrades {
             if c.rarity == Rarity::Resonant {
                 passives.push(p.passive);
             }
+            let (mut added, mut capped) = (false, false);
             for u in passives {
                 let held = run.taken.iter().filter(|t| !t.is_ability()).count();
-                if run.count(u) < u.info().max && held < KIT_PASSIVES {
-                    run.taken.push(u);
+                if run.count(u) < u.info().max {
+                    if held < KIT_PASSIVES {
+                        run.taken.push(u);
+                        added = true;
+                    } else {
+                        capped = true;
+                    }
                 }
             }
+            benched.push(capped && !added);
         }
-        run
+        (run, benched)
     }
+
+    // === deck ===
+    /// What a deck of these cards brings for the whole run: how many passive
+    /// stacks are active (of [`KIT_PASSIVES`]) and, per card in deck order,
+    /// whether the cap benched it.
+    pub fn deck_passives(cards: &[crate::cards::Card]) -> (usize, Vec<bool>) {
+        let (run, benched) = Self::build_kit_report(cards, false);
+        (run.taken.iter().filter(|t| !t.is_ability()).count(), benched)
+    }
+    // === end deck ===
 
     /// How strong a starting kit is: 2 per ability, and each passive stack
     /// by its tier (common 1, rare 1.5, mythic 2).
@@ -1866,9 +1890,10 @@ impl RunUpgrades {
 
     /// A hand of cards at the start of a deck run: one ability per card
     /// (repeats allowed), then the passives as [`Self::from_loadout`] gives.
-    pub fn from_hand(cards: &[crate::cards::Card]) -> Self {
-        let mut run = Self::from_loadout_passives(cards);
-        for c in cards.iter().take(HAND_SIZE) {
+    pub fn from_hand(hand: &[crate::cards::Card], deck: &[crate::cards::Card]) -> Self {
+        // Every card in the deck brings its passive; the hand brings the slots.
+        let mut run = Self::from_loadout_passives(deck);
+        for c in hand.iter().take(HAND_SIZE) {
             run.abilities
                 .push(AbilityState::new(crate::powers::power_of(c).active));
         }
@@ -2426,12 +2451,51 @@ mod tests {
             .enumerate()
             .map(|(i, &t)| card_from(&record(t, i as u64 + 1, 1, 0.1, false)))
             .collect();
-        let r = RunUpgrades::from_hand(&cards);
+        let r = RunUpgrades::from_hand(&cards, &cards);
         assert_eq!(r.abilities.len(), 3);
         assert_eq!(r.deck_slots, 3);
         assert_eq!(r.abilities[0].ability, r.abilities[2].ability, "repeats allowed");
         assert!(r.taken.iter().any(|u| !u.is_ability()), "passives came too");
     }
+
+    // === deck ===
+    fn deck_of(n: usize) -> Vec<crate::cards::Card> {
+        use crate::cards::{card_from, tests::record};
+        crate::dream::ALL_THEMES
+            .iter()
+            .take(n)
+            .enumerate()
+            .map(|(i, &t)| card_from(&record(t, i as u64 + 1, 1, 0.1, false)))
+            .collect()
+    }
+
+    #[test]
+    fn every_card_in_the_deck_brings_its_passive_not_just_the_hand() {
+        let deck = deck_of(12);
+        let hand: Vec<_> = deck[..5].to_vec();
+        let whole = RunUpgrades::from_hand(&hand, &deck);
+        let opening_only = RunUpgrades::from_hand(&hand, &hand);
+        let passives = |r: &RunUpgrades| r.taken.iter().filter(|u| !u.is_ability()).count();
+        assert!(passives(&whole) > passives(&opening_only), "{} vs {}", passives(&whole), passives(&opening_only));
+        assert_eq!(whole.deck_slots, 5, "the hand still sets the slots");
+        assert_eq!(whole.abilities.len(), 5);
+    }
+
+    #[test]
+    fn deck_passives_stop_at_the_cap_and_say_which_cards_were_benched() {
+        let deck = deck_of(20);
+        let (active, benched) = RunUpgrades::deck_passives(&deck);
+        assert_eq!(active, KIT_PASSIVES);
+        assert_eq!(benched.len(), deck.len());
+        assert!(!benched[0], "the first card always counts");
+        assert!(benched[19], "the last of twenty is past the cap");
+        // Benching is monotone: once the cap is hit, the rest are benched.
+        let first = benched.iter().position(|&b| b).unwrap();
+        assert!(benched[first..].iter().all(|&b| b));
+        let (small, none) = RunUpgrades::deck_passives(&deck[..3]);
+        assert!(small <= KIT_PASSIVES && none.iter().all(|&b| !b));
+    }
+    // === end deck ===
 
     #[test]
     fn abilities_cool_down_and_run_for_their_duration() {

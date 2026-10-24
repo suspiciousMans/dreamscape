@@ -86,6 +86,14 @@ That's 29 achievements. 21 are computable from state the game already saves or t
 
 Register these 15 API names in Steamworks too (44 in all).
 
+### Wave 3 (handscore): 1 more
+
+| API name | Name | Condition |
+|---|---|---|
+| `full_house` | Full House | Hold a full house or better in a deck run (saved as `best_hand`) |
+
+Register this API name in Steamworks too (45 in all).
+
 ## Implementation (done)
 - `src/achievements.rs`: all 29, `check(&Booklet, Option<Event>)`, unlocks kept in the booklet (`achievements`), with a purchase counter. Ascension ones unlock on waking from a long run at level 5 / 10.
 - `src/steam.rs`: behind the `steam` feature. It initialises with App ID 480 (Spacewar) until Dreamscape has its own, pushes offline unlocks at start, and sets and stores on unlock. `steam_appid.txt` holds the placeholder ID.

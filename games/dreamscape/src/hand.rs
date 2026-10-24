@@ -213,6 +213,15 @@ pub struct HandPile {
     /// Seconds since a card was last shuffled in; [`NEVER`] if none.
     pub riffle_since: f32,
     pub leaving: Vec<Leaving>,
+    /// The bought card back, when it is not the default (`None` = the
+    /// original look, painted exactly as before).
+    pub back: Option<crate::store::CardBack>,
+    // === handscore ===
+    /// The hand's rank right now ([`crate::handscore::HandRank::None`] hides the tag).
+    pub score: crate::handscore::HandRank,
+    /// Seconds since the rank last changed; [`NEVER`] if it has not.
+    pub score_since: f32,
+    // === end handscore ===
 }
 
 impl Default for HandPile {
@@ -222,7 +231,43 @@ impl Default for HandPile {
             draw_count: 0,
             riffle_since: NEVER,
             leaving: Vec::new(),
+            back: None,
+            score: crate::handscore::HandRank::None,
+            score_since: NEVER,
         }
+    }
+}
+
+/// Pattern grid of a painted back.
+const BACK_GRID: (i32, i32) = (8, 12);
+/// Fraction of the draw flight a card spends face-down (non-default backs).
+pub const BACK_FLIGHT: f32 = 0.4;
+
+/// The lit cells of a back's pattern inside `body` (local coordinates).
+pub fn back_cells(b: crate::store::CardBack, body: Rect) -> Vec<Rect> {
+    let (nx, ny) = BACK_GRID;
+    let area = body.shrink(body.width() * 0.14);
+    let (cw, ch) = (area.width() / nx as f32, area.height() / ny as f32);
+    let mut out = Vec::new();
+    for y in 0..ny {
+        for x in 0..nx {
+            if crate::shop_ui::card_back_cell(b, x, y, nx, ny) {
+                let at = area.min + Vec2::new(x as f32 * cw, y as f32 * ch);
+                out.push(Rect::from_min_size(at, Vec2::new(cw * 0.85, ch * 0.85)));
+            }
+        }
+    }
+    out
+}
+
+/// Paints one bought back: frame, field, pattern.
+fn paint_back(p: &egui::Painter, x: &Xf, r: Rect, b: crate::store::CardBack, a: f32, u: f32) {
+    let (field, pattern) = b.colors();
+    x.quad(p, r.translate(Vec2::new(-2.0 * u, 2.0 * u)), Color32::from_black_alpha((90.0 * a) as u8));
+    x.quad(p, r, rgba(pattern, a));
+    x.quad(p, r.shrink(2.5 * u), rgba(field, a));
+    for c in back_cells(b, r.shrink(2.5 * u)) {
+        x.quad(p, c, rgba(pattern, 0.8 * a));
     }
 }
 
@@ -449,6 +494,11 @@ pub fn draw(
         draw_stack(p, s, pile, u, time, reduced);
     }
     // === end deck ===
+    // === handscore ===
+    if pile.shown {
+        draw_score_tag(p, screen, &rests, pile, u, reduced);
+    }
+    // === end handscore ===
     // Rest order (later cards lie on top), then whichever is mid-pop above all.
     let rise = |c: &HandCard| pop(c.since_use).max(if (0.0..DRAW_SECS).contains(&c.since_draw) { 1.0 } else { 0.0 });
     let mut order: Vec<usize> = (0..cards.len()).collect();
@@ -486,7 +536,17 @@ pub fn draw(
                 rgba(c.tint, 0.8 * (1.0 - t)),
             );
         }
-        draw_card(ctx, p, r, angle, c, amount, time, u, art);
+        // === smallfixes === a bought back shows while the card is still face-down
+        let face_down = match pile.back {
+            Some(b) if !reduced && (0.0..DRAW_SECS * BACK_FLIGHT).contains(&c.since_draw) => Some(b),
+            _ => None,
+        };
+        if let Some(b) = face_down {
+            paint_back(p, &Xf::new(r.center(), angle), Rect::from_center_size(Pos2::ZERO, r.size()), b, 1.0, u);
+        } else {
+            draw_card(ctx, p, r, angle, c, amount, time, u, art);
+        }
+        // === end smallfixes ===
         // The edge's name floats up too, higher than the passive's.
         let eu = pulse(c.edge_since);
         if let (Some((name, rgb)), true) = (c.edge, eu > 0.0) {
@@ -539,10 +599,43 @@ pub fn draw(
     // === end deck ===
 }
 
+// === handscore ===
+/// 0..1 "just changed" glow of the score tag: a soft rise and fall.
+pub fn score_pulse(since: f32, reduced: bool) -> f32 {
+    if reduced || !(0.0..crate::handscore::PULSE_SECS).contains(&since) {
+        return 0.0;
+    }
+    (std::f32::consts::PI * since / crate::handscore::PULSE_SECS).sin()
+}
+
+/// A small plain tag above the hand: the rank and its multiplier.
+fn draw_score_tag(p: &egui::Painter, screen: Rect, rests: &[Rect], pile: &HandPile, u: f32, reduced: bool) {
+    let Some((name, mult)) = crate::handscore::tag(pile.score) else {
+        return;
+    };
+    let top = rests.iter().map(|r| r.top()).fold(f32::MAX, f32::min);
+    let top = if top == f32::MAX { screen.bottom() - 60.0 * u } else { top };
+    let glow = score_pulse(pile.score_since, reduced);
+    let at = Pos2::new(screen.center().x, top - 10.0 * u);
+    let alpha = 0.75 + 0.25 * glow;
+    p.text(
+        at,
+        egui::Align2::CENTER_BOTTOM,
+        format!("{name}  {mult}"),
+        FontId::monospace((12.0 * u).max(9.0)),
+        rgba([240, 220, 150], alpha),
+    );
+}
+// === end handscore ===
+
 // === deck ===
 /// The draw pile: card backs stacked, a count badge, and the riffle.
 fn draw_stack(p: &egui::Painter, stack: Rect, pile: &HandPile, u: f32, time: f32, reduced: bool) {
     let back = |x: &Xf, r: Rect, a: f32| {
+        if let Some(b) = pile.back {
+            paint_back(p, x, r, b, a, u);
+            return;
+        }
         x.quad(p, r.translate(Vec2::new(-2.0 * u, 2.0 * u)), Color32::from_black_alpha((90.0 * a) as u8));
         x.quad(p, r, rgba([150, 120, 210], a));
         x.quad(p, r.shrink(2.5 * u), rgba([26, 14, 52], a));
@@ -1112,6 +1205,19 @@ mod tests {
                         t += 0.01;
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn each_back_has_its_own_non_empty_pattern() {
+        use crate::store::CardBack::*;
+        let body = Rect::from_center_size(Pos2::ZERO, Vec2::new(60.0, 90.0));
+        let sets: Vec<Vec<Rect>> = [Dusk, Moth, Eye, Stars, Checker, Ember].iter().map(|&b| back_cells(b, body)).collect();
+        for (i, a) in sets.iter().enumerate() {
+            assert!(!a.is_empty(), "back {i} paints something");
+            for b in &sets[i + 1..] {
+                assert_ne!(a, b);
             }
         }
     }
