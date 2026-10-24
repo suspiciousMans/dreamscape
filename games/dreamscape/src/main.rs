@@ -16812,6 +16812,32 @@ mod screen_smoke {
         add(&g, "Lottery");
         g.store_tab = 2;
         add(&g, "Tickets");
+        if std::env::var("UI_HIST").is_ok() {
+            for (name, mode_tab) in [("Loadout", 0), ("Store", 1)] {
+                if mode_tab == 0 { g.open_loadout(); } else { g.open_store(); g.store_tab = 0; }
+                let mut h: std::collections::BTreeMap<String, usize> = Default::default();
+                fn walk(s: &egui::Shape, h: &mut std::collections::BTreeMap<String, usize>) {
+                    match s {
+                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, h)),
+                        egui::Shape::Rect(r) => {
+                            let k = format!("rect {}x{} {}", r.rect.width().round(), r.rect.height().round(), if r.stroke.is_empty() { "fill" } else { "stroke" });
+                            *h.entry(k).or_default() += 1;
+                        }
+                        egui::Shape::Text(_) => *h.entry("text".into()).or_default() += 1,
+                        other => *h.entry(format!("{:?}", other).chars().take(12).collect()).or_default() += 1,
+                    }
+                }
+                let v = g.hud_view();
+                let ctx = egui::Context::default();
+                hud::install_font(&ctx);
+                let (mut art, mut pa) = (booklet_ui::CardArt::default(), pack_art::PackArt::default());
+                let out = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))), ..Default::default() }, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut pa));
+                for cs in &out.shapes { walk(&cs.shape, &mut h); }
+                let mut hv: Vec<_> = h.into_iter().collect();
+                hv.sort_by_key(|x| std::cmp::Reverse(x.1));
+                eprintln!("HIST {name}: {:?}", &hv[..hv.len().min(14)]);
+            }
+        }
         eprintln!("{:<10} {:>7} {:>9} {:>10} {:>10}", "screen", "shapes", "vertices", "triangles", "tess_us");
         for (l, c) in &rows {
             eprintln!("{l:<10} {:>7} {:>9} {:>10} {:>10.0}", c.shapes, c.vertices, c.triangles, c.tessellate_us);

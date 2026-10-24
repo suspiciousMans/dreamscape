@@ -70,7 +70,32 @@ pub fn brackets(p: &egui::Painter, r: Rect, c: f32, color: Color32) {
 }
 
 /// A 9x9 icon from `pixels::icons`, centred on `centre`, `px` pixels a cell.
+// === perf === uipixels: run-merged cells in one mesh
 pub fn icon(
+    p: &egui::Painter,
+    centre: Pos2,
+    rows: &[&str; icons::SIZE],
+    px: f32,
+    base: [u8; 3],
+    accent: [u8; 3],
+    alpha: f32,
+) {
+    let mut q = Quads::new();
+    for (x, y, w, h, acc) in merge_cells(&icons::cells(rows)) {
+        q.rect(
+            Rect::from_min_size(
+                centre + Vec2::new(x as f32 - 0.5, y as f32 - 0.5) * px,
+                Vec2::new(w as f32, h as f32) * px,
+            ),
+            rgba(if acc { accent } else { base }, alpha),
+        );
+    }
+    q.paint(p);
+}
+
+/// The original icon painter, one rect per cell: the reference for tests.
+#[cfg(test)]
+fn icon_rects(
     p: &egui::Painter,
     centre: Pos2,
     rows: &[&str; icons::SIZE],
@@ -88,6 +113,7 @@ pub fn icon(
         );
     }
 }
+// === end perf ===
 
 /// The accent used for an icon's `+` cells: a lighter tone of its base.
 pub fn lighter(rgb: [u8; 3]) -> [u8; 3] {
@@ -120,18 +146,79 @@ pub fn split_text(
     p.text(at, align, text, font, core);
 }
 
+// === perf === uipixels: many solid quads as ONE mesh shape
+/// Solid quads batched into a single egui mesh: one shape, 4 vertices and 2
+/// triangles per quad (a `rect_filled` costs a shape, 8+ vertices and ~10
+/// triangles for its feathered edge). Edges are hard, so on the cell grid
+/// they are as crisp as an aligned rect's.
+#[derive(Default)]
+pub struct Quads {
+    mesh: egui::epaint::Mesh,
+}
+
+impl Quads {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn rect(&mut self, r: Rect, color: Color32) {
+        if color != Color32::TRANSPARENT && r.is_positive() {
+            self.mesh.add_colored_rect(r, color);
+        }
+    }
+    pub fn paint(self, p: &egui::Painter) {
+        if !self.mesh.is_empty() {
+            p.add(egui::Shape::mesh(self.mesh));
+        }
+    }
+}
+
+/// Greedy merge of same-kind grid cells into rectangles `(x, y, w, h, kind)`:
+/// horizontal runs first, then equal runs stacked in consecutive rows.
+pub fn merge_cells<K: Copy + PartialEq>(cells: &[(i32, i32, K)]) -> Vec<(i32, i32, i32, i32, K)> {
+    use std::collections::{BTreeMap, HashSet};
+    let grid: BTreeMap<(i32, i32), K> = cells.iter().map(|&(x, y, k)| ((y, x), k)).collect();
+    let mut used: HashSet<(i32, i32)> = HashSet::new();
+    let mut out = Vec::new();
+    for (&(y, x), &k) in &grid {
+        if used.contains(&(y, x)) {
+            continue;
+        }
+        let same = |used: &HashSet<(i32, i32)>, y: i32, x: i32| {
+            grid.get(&(y, x)) == Some(&k) && !used.contains(&(y, x))
+        };
+        let mut w = 1;
+        while same(&used, y, x + w) {
+            w += 1;
+        }
+        let mut h = 1;
+        while (0..w).all(|dx| same(&used, y + h, x + dx)) {
+            h += 1;
+        }
+        for dy in 0..h {
+            for dx in 0..w {
+                used.insert((y + dy, x + dx));
+            }
+        }
+        out.push((x, y, w, h, k));
+    }
+    out
+}
+
 /// Faint CRT scanlines across `r`: a dark line a cell high every two cells.
+/// One mesh of thin quads (they were a rect each).
 pub fn scanlines(p: &egui::Painter, r: Rect, c: f32, alpha: u8) {
+    let mut q = Quads::new();
     let mut y = r.top() + c * 0.65;
     while y < r.bottom() {
-        p.rect_filled(
+        q.rect(
             Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), c * 0.35)),
-            0.0,
             Color32::from_black_alpha(alpha),
         );
         y += c * 2.0;
     }
+    q.paint(p);
 }
+// === end perf ===
 
 /// Diagonal hatching in cells, for locked or unavailable things.
 ///
@@ -426,8 +513,11 @@ mod tests {
                 }
                 egui::Shape::Mesh(m) => {
                     // Quads of two triangles; sample the hatch tile for any managed texture.
-                    let mut done = vec![false; w * h]; // shared diagonals count once
-                    for tri in m.indices.chunks(3) {
+                    let mut done = vec![false; w * h]; // a quad's shared diagonal counts once
+                    for (ti, tri) in m.indices.chunks(3).enumerate() {
+                        if ti % 2 == 0 {
+                            done.iter_mut().for_each(|d| *d = false);
+                        }
                         let v: Vec<_> = tri.iter().map(|&i| m.vertices[i as usize]).collect();
                         let (mut lo, mut hi) = (v[0].pos, v[0].pos);
                         for q in &v {
@@ -500,6 +590,63 @@ mod tests {
             let (a, b) = (raster(&old, 300, 200), raster(&new, 300, 200));
             let bad: Vec<_> = (0..a.len()).filter(|&i| a[i] != b[i]).map(|i| (i % 300, i / 300, a[i], b[i])).collect();
             assert!(bad.is_empty(), "rect {r:?} cell {c}: {} differ, first {:?}", bad.len(), &bad[..bad.len().min(6)]);
+        }
+    }
+
+    #[test]
+    fn merged_icons_cover_the_same_pixels_as_one_rect_per_cell() {
+        for (i, rows) in icons::ALL.iter().enumerate() {
+            for (px, alpha) in [(2.0, 1.0), (3.0, 1.0), (4.0, 0.5), (12.0, 1.0)] {
+                // Cell edges on whole pixels (no sampling ties).
+                let f = (px * 0.5_f32).fract();
+                let at = Pos2::new(60.0 + (i % 3) as f32 + f, 80.0 + f);
+                let old = shapes_of(|p| icon_rects(p, at, rows, px, [200, 100, 50], [250, 240, 230], alpha));
+                let new = shapes_of(|p| icon(p, at, rows, px, [200, 100, 50], [250, 240, 230], alpha));
+                assert_eq!(new.len(), 1, "one mesh per icon");
+                let (a, b) = (raster(&old, 300, 200), raster(&new, 300, 200));
+                // Opaque icons must match exactly; translucent ones differ nowhere
+                // either, because the cells never overlap.
+                assert!(a == b, "icon {i} px {px} alpha {alpha}");
+            }
+        }
+    }
+
+    #[test]
+    fn merging_cells_loses_none_and_overlaps_none() {
+        let icon_cells = icons::cells(&icons::HEART);
+        let merged = merge_cells(&icon_cells);
+        let mut seen = std::collections::HashSet::new();
+        for &(x, y, w, h, _) in &merged {
+            for dy in 0..h {
+                for dx in 0..w {
+                    assert!(seen.insert((x + dx, y + dy)), "overlap");
+                }
+            }
+        }
+        let want: std::collections::HashSet<_> = icon_cells.iter().map(|&(x, y, _)| (x, y)).collect();
+        assert_eq!(seen, want);
+        assert!(merged.len() < icon_cells.len());
+    }
+
+    #[test]
+    fn one_mesh_of_scanlines_matches_the_rect_per_line() {
+        for (c, alpha) in [(3.0, 8u8), (2.0, 10), (4.0, 10), (5.0, 8)] {
+            let r = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0));
+            let old = shapes_of(|p| {
+                let mut y = r.top() + c * 0.65;
+                while y < r.bottom() {
+                    p.rect_filled(
+                        Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), c * 0.35)),
+                        0.0,
+                        Color32::from_black_alpha(alpha),
+                    );
+                    y += c * 2.0;
+                }
+            });
+            let new = shapes_of(|p| scanlines(p, r, c, alpha));
+            assert_eq!(new.len(), 1);
+            assert!(old.len() > 10);
+            assert_eq!(raster(&old, 300, 200), raster(&new, 300, 200), "cell {c}");
         }
     }
     // === end perf ===

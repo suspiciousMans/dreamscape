@@ -84,23 +84,32 @@ fn icon_colors(item: Item, v: &HudView) -> ([u8; 3], [u8; 3]) {
     }
 }
 
+// === perf === uipixels: shadow + fill quads, run-merged, in one mesh
 fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha: f32) {
     let (main, accent) = icon_colors(item, v);
     let o = Pos2::new(c.x.round(), c.y.round());
-    for (x, y, acc) in icons::cells(icon_for(item)) {
-        let at = o + Vec2::new(x as f32 * px, y as f32 * px);
-        p.rect_filled(
-            Rect::from_center_size(at + Vec2::splat(px * 0.25), Vec2::splat(px)),
-            0.0,
+    let cells = icons::cells(icon_for(item));
+    let mut q = crate::pixel_ui::Quads::new();
+    // Every shadow first: a shadow only ever reaches cells drawn after its own,
+    // so shadows-then-fills is the order the per-cell painter produced.
+    let silhouette: Vec<(i32, i32, ())> = cells.iter().map(|&(x, y, _)| (x, y, ())).collect();
+    for (x, y, w, h, ()) in crate::pixel_ui::merge_cells(&silhouette) {
+        let min = o + Vec2::new(x as f32 - 0.5 + 0.25, y as f32 - 0.5 + 0.25) * px;
+        q.rect(
+            Rect::from_min_size(min, Vec2::new(w as f32, h as f32) * px),
             rgba([0, 0, 0], 0.4 * alpha),
         );
-        p.rect_filled(
-            Rect::from_center_size(at, Vec2::splat(px)),
-            0.0,
+    }
+    for (x, y, w, h, acc) in crate::pixel_ui::merge_cells(&cells) {
+        let min = o + Vec2::new(x as f32 - 0.5, y as f32 - 0.5) * px;
+        q.rect(
+            Rect::from_min_size(min, Vec2::new(w as f32, h as f32) * px),
             rgba(if acc { accent } else { main }, alpha),
         );
     }
+    q.paint(p);
 }
+// === end perf ===
 
 /// The moth's pixel sprite: 18x14 cells with `o` as its top-left corner, one
 /// huge sleepy eye whose pupil looks toward `look_x` (-1..1). Shared by the
