@@ -7,5 +7,5 @@ All new lines listed in these notes were read aloud and approved as written; the
 - plans/gamble-briefs/NOTES-risk.md (moth coin and wager portal text)
 - plans/gamble-briefs/NOTES-toolcards.md (tool card shelf and hand tags)
 - the four earlier pair lines in powers.rs (Mirror, Quake, Surge, Haste)
-Event choice texts (events.rs) and the 15 achievement names (achievements.rs) were not read aloud; review them separately.
+The 12 new events' choice names and details (events.rs) and the 15 new achievement names/conditions (achievements.rs, ACHIEVEMENTS.md wave 2) were read aloud and approved too (owner, 2026-10-24).
 Any NEW story text still needs approval first.
