@@ -171,6 +171,13 @@ impl Nerve {
         self.heal(n);
     }
 
+    /// Takes `n` off the most you can hold (never below 2); // === upgrades2 ===
+    /// the current nerve is trimmed to fit.
+    pub fn lower_max(&mut self, n: u32) {
+        self.max = self.max.saturating_sub(n).max(2);
+        self.cur = self.cur.min(self.max);
+    }
+
     /// The shove right now, as an (x, z) velocity; fades to nothing.
     pub fn knock_velocity(&self) -> (f32, f32) {
         let (x, z, left) = self.knock;
@@ -363,5 +370,14 @@ mod tests {
         assert_eq!(n.flinch(), 1.0);
         n.tick(BREAK_SECS);
         assert_eq!(n.flinch(), 0.0);
+    }
+
+    #[test]
+    fn lowering_the_max_trims_nerve_and_stops_at_two() {
+        let mut n = Nerve::default();
+        n.lower_max(1);
+        assert_eq!((n.cur(), n.max()), (2, 2));
+        n.lower_max(5);
+        assert_eq!(n.max(), 2);
     }
 }
