@@ -5,7 +5,7 @@
 
 use super::theme::{DreamTheme, Feature, LayoutKind};
 use crate::gameplay::PlayerInputState;
-use crate::specials::{Trail, TRAIL_KEEP};
+use crate::specials::Trail;
 use engine::glam::Vec3;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
@@ -632,7 +632,7 @@ mod tests {
             let t = i as f32 / 60.0;
             trail.push(t, Vec3::new(t, 1.0, 0.0));
         }
-        assert!(TRAIL_KEEP > ECHO_DELAY, "the trail must reach back far enough");
+        assert!(crate::specials::TRAIL_KEEP > ECHO_DELAY, "the trail must reach back far enough");
         let g = echo_ghost(&trail, 10.0).expect("ghost");
         assert!((g.x - 5.0).abs() < 0.05, "{g:?}");
         // Nothing to show before there is five seconds of past.

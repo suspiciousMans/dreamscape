@@ -141,6 +141,7 @@ impl Sentry {
     }
 
     /// Turns the beam; true when it has just spotted the player.
+    #[cfg(test)]
     pub fn update(&mut self, at: Vec3, player: Vec3, dt: f32) -> bool {
         self.update_scaled(at, player, dt, 1.0)
     }
