@@ -102,7 +102,7 @@ pub fn power_of(card: &crate::cards::Card) -> Power {
 mod tests {
     use super::*;
     use crate::dream::ALL_THEMES;
-    use crate::upgrades::{Ability, ALL_ABILITIES, PASSIVES};
+    use crate::upgrades::{ALL_ABILITIES, PASSIVES};
 
     #[test]
     fn every_theme_has_a_power_tinted_by_its_accent() {
