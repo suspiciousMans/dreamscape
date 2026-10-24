@@ -56,6 +56,7 @@ mod streaks;
 mod worth;
 mod fpv;
 mod fusion;
+mod gamble;
 mod gameplay;
 mod hand;
 mod hud;
@@ -422,6 +423,18 @@ enum ChoiceKind {
     Event(events::Event),
     /// The moth's room behind a cracked wall (cards in `moth_stock`).
     MothShop,
+    /// === risk === the moth's coin: stakes, confirm, result.
+    Gamble(GambleStage),
+    /// === risk === the wager portal's deal.
+    Wager,
+}
+
+/// === risk === Where the moth's coin screen is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GambleStage {
+    Stakes,
+    Confirm(u32),
+    Result,
 }
 
 /// The icon on an event's choice card.
@@ -912,6 +925,19 @@ pub struct DreamscapeGame {
     // === end pressure ===
     /// Dust earned this run on top of the pack (HURRIED, GILDED).
     bonus_dust: u32,
+    // === risk ===
+    gamble: gamble::RunState,
+    /// Gambles at the moth this visit.
+    gamble_visit: u32,
+    /// Run dust when this dream began (what a wager doubles is the gain).
+    wager_dust_start: u32,
+    /// Where this dream's wager portal stands, and whether it can be touched.
+    wager_portal: Option<(Vec3, bool)>,
+    /// Entering the portal now was agreed on the deal screen.
+    wager_enter: bool,
+    /// The pick being opened is the wagered dream's extra one.
+    wager_pick: bool,
+    // === end risk ===
     // === pacts ===
     /// Pacts taken this run, and the one the open pick offers.
     pacts: Vec<pacts::Pact>,
@@ -1267,6 +1293,12 @@ impl DreamscapeGame {
             pressure_collapsed: false,
             // === end pressure ===
             bonus_dust: 0,
+            gamble: gamble::RunState::default(),
+            gamble_visit: 0,
+            wager_dust_start: 0,
+            wager_portal: None,
+            wager_enter: false,
+            wager_pick: false,
             pacts: Vec::new(),
             pact_offer: None,
             peak_difficulty: 1.0,
@@ -1304,7 +1336,9 @@ impl DreamscapeGame {
     fn pressure_base(&self) -> Pressure {
         let hard = self.director.hardness().is_some();
         Pressure {
-            enemies: gameplay::pressured_enemy_count(self.difficulty()) * self.twists.enemy_count(),
+            enemies: gameplay::pressured_enemy_count(self.difficulty())
+                * self.twists.enemy_count()
+                * gamble::enemy_mult(self.gamble.wager_active), // === risk ===
             growth_cap: if hard { 24 } else { 12 },
             // Dev switch: DREAMSCAPE_SPECIAL=Stalker puts that kind in every dream.
             force_special: crate::dev::var("DREAMSCAPE_SPECIAL").ok().and_then(|name| {
@@ -1339,6 +1373,7 @@ impl DreamscapeGame {
     fn open_upgrade_choice(&mut self) {
         let seed = self.director.dream_seed()
             ^ 0xC401_CE00
+            ^ if std::mem::take(&mut self.wager_pick) { 0x57A6_0000 } else { 0 } // === risk ===
             ^ (self.run.rerolls_used as u64).wrapping_mul(0x9E37_79B9);
         let roll = upgrades::Roll {
             depth: self.director.depth,
@@ -1674,6 +1709,15 @@ impl DreamscapeGame {
     /// the moth opens her shop. Merging lives in the store's `[m]` now.
     /// Called once per pick, before `boss_reward` is cleared.
     fn moth_after_nightmare(&mut self) {
+        // === risk === the wagered dream's extra pick comes first (rare or better)
+        if self.gamble.pick_owed && self.risk_allowed() {
+            self.gamble.pick_owed = false;
+            self.boss_reward = true;
+            self.wager_pick = true;
+            self.open_upgrade_choice();
+            return;
+        }
+        // === end risk ===
         if self.autopilot
             || self.prologue.is_some()
             || self.coop.is_some()
@@ -1804,6 +1848,8 @@ impl DreamscapeGame {
                 self.sfx(Sound::Pick);
             }
             ChoiceKind::MothShop => self.buy_from_moth(index),
+            ChoiceKind::Gamble(stage) => self.choose_gamble(stage, index), // === risk ===
+            ChoiceKind::Wager => self.choose_wager(index), // === risk ===
             ChoiceKind::Event(event) => {
                 if !self.choose_event(&event, index) {
                     self.choice = Some(ChoiceKind::Event(event));
@@ -4469,7 +4515,7 @@ impl DreamscapeGame {
     fn hazard_rule_state(&self) -> Option<theme_rules::RuleState> {
         theme_rules::RuleState::new(
             self.director.theme,
-            self.director.depth,
+            gamble::hazard_depth(self.director.depth, self.gamble.wager_active), // === risk ===
             !self.director.nightmare
                 && !self.enemy_free()
                 && self.prologue.is_none()
@@ -6156,6 +6202,17 @@ impl DreamscapeGame {
                 format!("needs {rr} dust")
             },
         });
+        // === risk === the coin, after the reroll
+        let shut = gamble::RunState::shut_reason(self.bonus_dust, self.gamble_visit);
+        cards.push(upgrade_ui::ChoiceCard {
+            name: gamble::ROW_NAME.into(),
+            desc: gamble::ROW_DESC.into(),
+            icon: upgrades::Icon::Gem,
+            color: if shut.is_none() { [255, 150, 90] } else { [110, 110, 130] },
+            frame: if shut.is_none() { [255, 150, 90] } else { [80, 80, 100] },
+            tag: shut.map_or_else(|| "double or nothing".to_string(), str::to_string),
+        });
+        // === end risk ===
         let last = cards.len() - 1;
         self.choice_view = upgrade_ui::ChoiceView {
             title: moth_shop::TITLE.into(),
@@ -6163,7 +6220,7 @@ impl DreamscapeGame {
             cards,
             selected: selected.min(last),
             age: 0.0,
-            hint: "[a/d] choose   [enter] buy   [x] leave".into(),
+            hint: "[a/d] choose   [enter] buy   [g] gamble   [x] leave".into(),
         };
         self.choice = Some(ChoiceKind::MothShop);
         self.input = PlayerInputState::default();
@@ -6175,6 +6232,10 @@ impl DreamscapeGame {
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
         let terms = self.moth_terms();
+        if index == shelf.cards.len() + 1 {
+            self.open_gamble_stakes(); // === risk ===
+            return;
+        }
         if index == shelf.cards.len() {
             match moth_shop::reroll(
                 &shelf,
@@ -6238,6 +6299,231 @@ impl DreamscapeGame {
         self.sfx(Sound::Reroll);
     }
     // === end shop ===
+
+    // === risk ===
+    /// The gamble row's index in the shop (after the shelf and the reroll).
+    fn gamble_row(&self) -> usize {
+        self.moth_stock.as_ref().map_or(0, |s| s.cards.len() + 1)
+    }
+
+    fn risk_allowed(&self) -> bool {
+        !self.autopilot && self.prologue.is_none() && self.coop.is_none()
+    }
+
+    fn gamble_card(name: &str, desc: String, tag: String, hot: bool) -> upgrade_ui::ChoiceCard {
+        let c = if hot { [255, 150, 90] } else { [150, 150, 175] };
+        upgrade_ui::ChoiceCard {
+            name: name.into(),
+            desc,
+            icon: upgrades::Icon::Gem,
+            color: c,
+            frame: c,
+            tag,
+        }
+    }
+
+    fn show_gamble(&mut self, stage: GambleStage, subtitle: String, cards: Vec<upgrade_ui::ChoiceCard>, hint: &str) {
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: gamble::STAKE_TITLE.into(),
+            subtitle,
+            cards,
+            selected: 0,
+            age: 0.0,
+            hint: hint.into(),
+        };
+        self.choice = Some(ChoiceKind::Gamble(stage));
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// Step one: choose a stake. The odds are on this screen, as rolled.
+    fn open_gamble_stakes(&mut self) {
+        let stakes = gamble::RunState::stakes(self.bonus_dust);
+        if !self.risk_allowed() || stakes.is_empty() || self.gamble_visit >= gamble::MAX_PER_VISIT {
+            self.sfx(Sound::Denied);
+            let row = self.gamble_row();
+            self.show_moth_shop(row);
+            return;
+        }
+        let odds = self.gamble.odds();
+        let mut cards: Vec<_> = stakes
+            .iter()
+            .map(|&s| Self::gamble_card(&format!("{s} DUST"), odds.line(), format!("win: you get {} · lose: {s} gone", s * 2), true))
+            .collect();
+        cards.push(Self::gamble_card("BACK", "keep your dust. nothing happens.".into(), "no stake".into(), false));
+        self.show_gamble(
+            GambleStage::Stakes,
+            format!("you have {} dust · at most half of it · {} left this visit", self.bonus_dust, gamble::MAX_PER_VISIT - self.gamble_visit),
+            cards,
+            "[a/d] choose   [enter] pick a stake   [x] back",
+        );
+    }
+
+    /// Step two: confirm. Nothing is staked until [enter] here.
+    fn open_gamble_confirm(&mut self, stake: u32) {
+        let odds = self.gamble.odds();
+        let cards = vec![
+            Self::gamble_card(&format!("FLIP FOR {stake}"), odds.line(), format!("win +{stake} · lose -{stake}"), true),
+            Self::gamble_card("NOT NOW", "keep your dust. nothing happens.".into(), "no stake".into(), false),
+        ];
+        self.show_gamble(
+            GambleStage::Confirm(stake),
+            format!("{stake} run dust on the coin · you have {}", self.bonus_dust),
+            cards,
+            "[a/d] choose   [enter] decide   [x] back",
+        );
+        self.choice_view.selected = 1; // nothing is staked by default
+    }
+
+    fn choose_gamble(&mut self, stage: GambleStage, index: usize) {
+        match stage {
+            GambleStage::Stakes => {
+                let stakes = gamble::RunState::stakes(self.bonus_dust);
+                match stakes.get(index) {
+                    Some(&s) => self.open_gamble_confirm(s),
+                    None => self.gamble_back(),
+                }
+            }
+            GambleStage::Confirm(stake) if index == 0 => self.flip_coin(stake),
+            GambleStage::Confirm(_) => self.open_gamble_stakes(),
+            GambleStage::Result => {
+                let row = self.gamble_row();
+                self.show_moth_shop(row);
+            }
+        }
+    }
+
+    /// [x] on a coin screen: one step back.
+    fn gamble_back(&mut self) {
+        match self.choice {
+            Some(ChoiceKind::Gamble(GambleStage::Confirm(_))) => self.open_gamble_stakes(),
+            Some(ChoiceKind::Gamble(_)) => {
+                let row = self.gamble_row();
+                self.show_moth_shop(row);
+            }
+            _ => {}
+        }
+    }
+
+    /// The flip: decided now from its own seed stream, paid, and saved
+    /// before the result is shown, so quitting cannot re-roll it.
+    fn flip_coin(&mut self, stake: u32) {
+        let allowed = self.risk_allowed()
+            && gamble::RunState::stakes(self.bonus_dust).contains(&stake)
+            && self.gamble_visit < gamble::MAX_PER_VISIT;
+        if !allowed {
+            self.sfx(Sound::Denied);
+            self.open_gamble_stakes();
+            return;
+        }
+        let was_owed = self.gamble.owed();
+        let won = self.gamble.roll(self.director.dream_seed());
+        self.gamble.settle(won);
+        self.gamble_visit += 1;
+        self.bonus_dust = gamble::after_flip(self.bonus_dust, stake, won);
+        // A wagered dream doubles what it earned, not what the coin moved.
+        self.wager_dust_start = if won {
+            self.wager_dust_start + stake
+        } else {
+            self.wager_dust_start.saturating_sub(stake)
+        };
+        self.save_run();
+        self.sfx(if won { Sound::Pick } else { Sound::Denied });
+        log::info!("Moth coin: stake {stake}, won {won}, owed {was_owed}, dust {}", self.bonus_dust);
+        let (name, desc, tag) = if won {
+            ("THE COIN FELL YOUR WAY", format!("your {stake} dust came back doubled: +{stake}."), format!("+{stake} dust"))
+        } else {
+            ("THE COIN FELL HER WAY", format!("the moth keeps your {stake} dust."), format!("-{stake} dust"))
+        };
+        let cards = vec![Self::gamble_card(name, desc, tag, won)];
+        self.show_gamble(
+            GambleStage::Result,
+            format!("you have {} dust", self.bonus_dust),
+            cards,
+            "[enter] back to the shelf",
+        );
+    }
+
+    /// Per frame (Playing): standing in the second door asks for the deal.
+    fn update_wager(&mut self) {
+        let Some((at, armed)) = self.wager_portal else {
+            return;
+        };
+        let inside = gamble::at_wager(self.player_position, at);
+        if !inside && !armed {
+            self.wager_portal = Some((at, true));
+        } else if inside
+            && armed
+            && self.mode == hud::Mode::Playing
+            && self.choice.is_none()
+            && !self.transition.active()
+            && self.risk_allowed()
+        {
+            self.wager_portal = Some((at, false));
+            self.open_wager_deal();
+        }
+    }
+
+    /// The plain deal screen: what gets harder, what pays double.
+    fn open_wager_deal(&mut self) {
+        let card = |name: &str, desc: &str, tag: &str, c: [u8; 3]| upgrade_ui::ChoiceCard {
+            name: name.into(),
+            desc: desc.into(),
+            icon: upgrades::Icon::Eye,
+            color: c,
+            frame: c,
+            tag: tag.into(),
+        };
+        self.choice_view = upgrade_ui::ChoiceView {
+            title: gamble::WAGER_TITLE.into(),
+            subtitle: gamble::WAGER_SUBTITLE.into(),
+            cards: vec![
+                card(gamble::WAGER_YES, gamble::WAGER_YES_DESC, "harder · x2 dust · extra pick", [255, 120, 200]),
+                card(gamble::WAGER_NO, gamble::WAGER_NO_DESC, "no change", [150, 150, 175]),
+            ],
+            selected: 1, // nothing is taken by default
+            age: 0.0,
+            hint: "[a/d] choose   [enter] decide   [x] not now".into(),
+        };
+        self.choice = Some(ChoiceKind::Wager);
+        self.input = PlayerInputState::default();
+        self.mode = hud::Mode::Choice;
+    }
+
+    /// [enter] on the deal: 0 takes the door (the dream melts as through the
+    /// ordinary portal, and the next one is wagered), 1 stays.
+    fn choose_wager(&mut self, index: usize) {
+        if index == 0 && self.risk_allowed() {
+            self.wager_enter = true;
+        }
+    }
+
+    /// Spawns this dream's second door, if it has one.
+    fn spawn_wager_portal(&mut self, gl: &engine::glow::Context, dream: &Dream) -> anyhow::Result<()> {
+        self.wager_portal = None;
+        let next = self.director.depth + 1;
+        let special = self.director.is_nightmare_depth(next) || self.director.is_sanctuary_depth(next);
+        let normal = self.pressure_applies() && !self.autopilot && self.run_active;
+        let Some(at) = gamble::wager_portal(self.director.dream_seed(), self.director.depth, normal, special, &dream.lairs) else {
+            return Ok(());
+        };
+        let tex = self.texture(gl, [255, 120, 200, 255]);
+        let mesh = self.mesh(Shape::Orb)?;
+        self.world.spawn((
+            Transform {
+                position: Vec3::new(at.x, 0.7, at.z),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.9, 1.4, 0.9),
+            },
+            MeshRenderer { mesh, texture: Some(tex) },
+            Spin(1.2),
+            Lit,
+        ));
+        self.wager_portal = Some((at, true));
+        log::info!("A wager portal stands at {at:?}");
+        Ok(())
+    }
+    // === end risk ===
 
     /// What a freshly taken upgrade does around the edges (shared by the
     /// moth's shelf; the after-dream pick has its own copy of this).
@@ -6735,6 +7021,7 @@ impl DreamscapeGame {
                 self.perks = s.perks.clone();
                 self.shards_this_run = s.shards_this_run;
                 self.bonus_dust = s.bonus_dust;
+                self.gamble = s.gamble.clone(); // === risk ===
                 self.pacts = s.pacts.clone(); // === pacts ===
                 self.peak_difficulty = s.peak_difficulty;
                 self.run_log = s.run_log.clone();
@@ -6856,6 +7143,7 @@ impl DreamscapeGame {
             burden: self.run.burden,
             loadout_scale: Some(self.loadout_scale),
             form: self.active_form,
+            gamble: self.gamble.clone(), // === risk ===
         };
         if let Err(e) = progress::save(&self.save_path, &s) {
             log::warn!("could not save the run: {e}");
@@ -8138,6 +8426,7 @@ impl DreamscapeGame {
         self.seen_kinds.clear();
         self.boss_reward = false;
         self.bonus_dust = 0;
+        self.gamble = gamble::RunState::default(); // === risk ===
         self.pressure_collapsed = false; // pressure
         self.peak_difficulty = 1.0;
         self.offer_upgrade = false;
@@ -8455,6 +8744,7 @@ impl DreamscapeGame {
                     self.coop_broadcast_plan();
                 }
                 self.nerve.heal(1); // combat: a portal steadies you
+                self.gamble.begin_dream(); // === risk ===
                 self.offer_upgrade = self.prologue.is_none();
                 self.load_dream(ctx)
             }
@@ -8471,6 +8761,7 @@ impl DreamscapeGame {
             }
             transition::Pending::Wake => {
                 self.director.wake();
+                self.gamble.clear_wager(); // === risk ===
                 if std::mem::take(&mut self.to_bottom) {
                     // The bottom: waking, blended with the first dream you kept.
                     self.director.blend = Some(DreamTheme::Garden);
@@ -8943,6 +9234,7 @@ impl DreamscapeGame {
         );
         self.pressure_phase = pressure::Phase::Calm;
         self.pressure_dust_start = self.bonus_dust;
+        self.wager_dust_start = self.bonus_dust; // === risk ===
         // === end pressure ===
         // The dream just left counts toward the clean streak (a run loaded
         // from a save has no finished dream to count).
@@ -9160,6 +9452,7 @@ impl DreamscapeGame {
         self.caches.clear();
         self.secret = None;
         self.moth_stock = None;
+        self.gamble_visit = 0; // === risk ===
         self.skittish = None;
         self.ground_y = f32::MIN;
         self.stunned.clear();
@@ -9483,6 +9776,7 @@ impl DreamscapeGame {
                 armed: true,
             });
         }
+        self.spawn_wager_portal(gl, &dream)?; // === risk ===
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
         self.shard_entities.clear();
@@ -10398,6 +10692,16 @@ impl Game for DreamscapeGame {
                             self.choose(i);
                         }
                     }
+                    Keycode::G if self.choice == Some(ChoiceKind::MothShop) => {
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        self.choose(at + 1); // === risk ===
+                    }
+                    Keycode::X | Keycode::Escape if matches!(self.choice, Some(ChoiceKind::Gamble(_))) => {
+                        self.gamble_back(); // === risk ===
+                    }
+                    Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::Wager) => {
+                        self.choose(1); // === risk === not now
+                    }
                     Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
                         let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
                         self.choose(at);
@@ -11107,6 +11411,7 @@ impl Game for DreamscapeGame {
         self.update_skittish(dt);
         self.update_caches();
         self.update_secret();
+        self.update_wager(); // === risk ===
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
@@ -11798,9 +12103,11 @@ impl Game for DreamscapeGame {
             return Ok(());
         }
         let waiting = self.coop.as_ref().is_some_and(|c| c.in_portal);
-        if touched
-            .iter()
-            .any(|&e| self.world.get::<&PortalMarker>(e).is_ok())
+        let wagered = std::mem::take(&mut self.wager_enter); // === risk ===
+        if (wagered
+            || touched
+                .iter()
+                .any(|&e| self.world.get::<&PortalMarker>(e).is_ok()))
             && !waiting
             && !self.coop_ghost()
         {
@@ -11827,6 +12134,17 @@ impl Game for DreamscapeGame {
                 self.eye_line = None;
                 self.think(eye::Moment::NightmareBeaten, false);
             }
+            // === risk === a wagered dream pays double; taking the second door
+            // makes the next one wagered
+            if self.gamble.wager_active {
+                self.bonus_dust = gamble::doubled(self.wager_dust_start, self.bonus_dust);
+            }
+            self.gamble.finish_dream();
+            if wagered {
+                self.gamble.take_wager();
+                log::info!("The wager door is taken at depth {}", self.director.depth);
+            }
+            // === end risk ===
             if self.coop_active() {
                 self.coop_enter_portal();
                 return Ok(());
@@ -14723,7 +15041,8 @@ mod screen_smoke {
         assert_eq!(g.choice_view.title, moth_shop::TITLE);
         // Shelf cards plus the reroll card.
         let shelf = g.moth_stock.clone().expect("stocked");
-        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 1);
+        // Shelf cards plus the reroll and the moth's coin.
+        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 2);
         g.leave_moth_shop();
         assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
         // Once: a further pick-less call does nothing.
@@ -14756,6 +15075,190 @@ mod screen_smoke {
         g.choose(0);
         assert_eq!((g.choice.clone(), g.mode), (None, hud::Mode::Playing));
     }
+
+    // === risk ===
+    fn coin_game(name: &str, dust: u32) -> DreamscapeGame {
+        let mut g = game(name);
+        g.director.depth = 6;
+        g.booklet.stash.dust = 500;
+        g.bonus_dust = dust;
+        g.enter_moth_shop_for_test();
+        g
+    }
+
+    /// Walk the three steps: row, stake, confirm.
+    fn flip(g: &mut DreamscapeGame, stake_index: usize) {
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Stakes)));
+        g.choose(stake_index);
+        assert!(matches!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Confirm(_)))));
+        g.choose(0);
+    }
+
+    #[test]
+    fn the_coin_costs_nothing_until_confirmed_and_odds_are_on_the_screen() {
+        let mut g = coin_game("risk_confirm", 40);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.bonus_dust, 40);
+        assert!(g.choice_view.cards[0].desc.contains("50% double · 50% lose the stake"));
+        assert_eq!(g.choice_view.cards.len(), 4, "5, 10, 20 and back");
+        g.choose(1);
+        assert_eq!(g.bonus_dust, 40, "choosing a stake stakes nothing");
+        assert_eq!(g.choice_view.selected, 1, "the safe card is the default");
+        assert!(g.choice_view.cards[0].desc.contains("50%"));
+        g.choose(1); // NOT NOW
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Stakes)));
+        assert_eq!((g.bonus_dust, g.gamble.flips), (40, 0));
+        // [x] walks back out to the shelf.
+        g.gamble_back();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.bonus_dust, 40);
+    }
+
+    #[test]
+    fn a_flip_moves_exactly_the_stake_on_run_dust_only() {
+        let mut g = coin_game("risk_flip", 40);
+        flip(&mut g, 1); // 10 dust
+        assert_eq!(g.gamble.flips, 1);
+        assert!(g.bonus_dust == 50 || g.bonus_dust == 30, "{}", g.bonus_dust);
+        assert_eq!(g.booklet.stash.dust, 500, "the bank is untouched");
+        assert_eq!(g.choice, Some(ChoiceKind::Gamble(GambleStage::Result)));
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+    }
+
+    #[test]
+    fn stakes_never_exceed_half_the_dust_and_a_visit_allows_three() {
+        let mut g = coin_game("risk_caps", 9);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "9 dust: shut");
+        let mut g = coin_game("risk_visit", 400);
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP; // the first is a win, whatever
+        for _ in 0..gamble::MAX_PER_VISIT {
+            flip(&mut g, 0);
+            g.choose(0);
+        }
+        assert_eq!(g.gamble_visit, 3);
+        let row = g.gamble_row();
+        g.choose(row);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop), "a fourth is refused");
+        assert_eq!(g.gamble.flips, 3);
+        g.flip_coin(5);
+        assert_eq!(g.gamble.flips, 3, "even called directly");
+    }
+
+    #[test]
+    fn two_losses_then_the_moth_owes_you_one_and_says_so() {
+        let mut g = coin_game("risk_owed", 400);
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP;
+        let row = g.gamble_row();
+        g.choose(row);
+        assert!(g.choice_view.cards[0].desc.contains("the moth owes you one"));
+        g.choose(0);
+        let dust = g.bonus_dust;
+        g.choose(0);
+        assert_eq!(g.bonus_dust, dust + 5, "a guaranteed win");
+        assert_eq!(g.gamble.losses, 0);
+    }
+
+    #[test]
+    fn the_outcome_is_saved_before_it_shows_and_a_reload_cannot_reroll_it() {
+        let mut g = coin_game("risk_save", 100);
+        g.save_path = std::env::temp_dir().join("dreamscape_smoke_risk_save_run.ron");
+        let _ = std::fs::remove_file(&g.save_path);
+        g.run_active = true;
+        flip(&mut g, 2);
+        let saved = progress::load(&g.save_path).expect("saved at commit");
+        assert_eq!(saved.bonus_dust, g.bonus_dust, "the dust and the counter were saved together");
+        assert_eq!(saved.gamble, g.gamble);
+        assert_eq!(saved.gamble.flips, 1);
+        // Same dream, reloaded state: the next flip is the same draw.
+        let seed = g.director.dream_seed();
+        assert_eq!(saved.gamble.roll(seed), g.gamble.roll(seed));
+        let _ = std::fs::remove_file(&g.save_path);
+    }
+
+    #[test]
+    fn the_shop_is_unchanged_when_you_do_not_gamble() {
+        let mut g = coin_game("risk_unchanged", 100);
+        let shelf = g.moth_stock.clone().unwrap();
+        let cost = moth_shop::price_at(&shelf, 0, g.moth_terms()).unwrap();
+        g.choose(0);
+        assert_eq!(g.bonus_dust, 100 - cost);
+        assert_eq!(g.gamble, gamble::RunState::default());
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+    }
+
+    #[test]
+    fn no_coin_in_autopilot_or_co_op() {
+        let mut g = coin_game("risk_inert", 100);
+        g.autopilot = true;
+        g.open_gamble_stakes();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        g.flip_coin(5);
+        assert_eq!((g.gamble.flips, g.bonus_dust), (0, 100));
+    }
+
+    #[test]
+    fn the_wager_deal_takes_nothing_by_default_and_not_now_changes_nothing() {
+        let mut g = game("risk_deal");
+        g.open_wager_deal();
+        assert_eq!(g.choice_view.selected, 1);
+        assert_eq!(g.choice_view.title, gamble::WAGER_TITLE);
+        assert_eq!(g.choice_view.subtitle, "harder dream, double reward");
+        g.choose(1);
+        assert!(!g.wager_enter && !g.gamble.wager_next);
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+        g.open_wager_deal();
+        g.choose(0);
+        assert!(g.wager_enter, "the door is entered next frame");
+    }
+
+    #[test]
+    fn a_wagered_dream_is_harder_pays_double_and_owes_a_rare_pick() {
+        let mut g = game("risk_wagered");
+        g.director.depth = 5;
+        g.pressure_applies(); // normal dream
+        let base = g.pressure_base().enemies;
+        let plain = g.hazard_rule_state().map(|r| r.strength);
+        g.gamble.take_wager();
+        g.gamble.begin_dream();
+        assert!(g.gamble.wager_active);
+        assert!((g.pressure_base().enemies - base * 1.3).abs() < 1e-4);
+        if let (Some(a), Some(b)) = (plain, g.hazard_rule_state().map(|r| r.strength)) {
+            assert!(b > a, "stronger hazards");
+        }
+        // Earn 30 in it: leaving pays 30 more.
+        g.wager_dust_start = 10;
+        g.bonus_dust = 40;
+        g.bonus_dust = gamble::doubled(g.wager_dust_start, g.bonus_dust);
+        g.gamble.finish_dream();
+        assert_eq!(g.bonus_dust, 70);
+        assert!(g.gamble.pick_owed);
+        // The next ordinary pick closes into the extra rare+ one.
+        g.director.depth = 7;
+        g.open_upgrade_choice();
+        g.choose(0);
+        let Some(ChoiceKind::Upgrade(opts)) = g.choice.clone() else {
+            panic!("the extra pick");
+        };
+        assert!(opts.iter().all(|u| u.tier() >= upgrades::Tier::Rare), "rare or better: {opts:?}");
+        assert!(!g.gamble.pick_owed);
+        g.choose(0);
+        assert!(!matches!(g.choice, Some(ChoiceKind::Upgrade(_))), "only one extra");
+    }
+
+    #[test]
+    fn nothing_is_wagered_in_a_plain_dream() {
+        let g = game("risk_plain");
+        assert!(!g.gamble.wager_active && !g.gamble.pick_owed);
+        assert_eq!(gamble::enemy_mult(g.gamble.wager_active), 1.0);
+    }
+    // === end risk ===
 
     #[test]
     fn every_third_depth_opens_the_shop_after_the_pick() {
@@ -14917,6 +15420,28 @@ mod screen_smoke {
         }
         g.open_wake_choice();
         bad.extend(overflows(&g, "WakeChoice"));
+        // === risk === the moth's coin and the second door
+        g.bonus_dust = 80;
+        g.gamble_visit = 0;
+        g.director.depth = 6;
+        g.enter_moth_shop_for_test();
+        bad.extend(overflows(&g, "MothShop+coin"));
+        g.open_gamble_stakes();
+        bad.extend(overflows(&g, "Coin-stakes"));
+        g.open_gamble_confirm(20);
+        bad.extend(overflows(&g, "Coin-confirm"));
+        g.flip_coin(20);
+        bad.extend(overflows(&g, "Coin-result"));
+        g.gamble.losses = gamble::GAMBLE_LOSS_CAP;
+        g.open_gamble_stakes();
+        bad.extend(overflows(&g, "Coin-owed"));
+        g.open_wager_deal();
+        bad.extend(overflows(&g, "Wager-deal"));
+        g.choice = None;
+        g.gamble = gamble::RunState::default();
+        g.bonus_dust = 0;
+        g.gamble_visit = 0;
+        // === end risk ===
         for depth in [1, 6, 12] {
             g.director.depth = depth;
             g.open_upgrade_choice();
