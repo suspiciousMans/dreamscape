@@ -17051,15 +17051,26 @@ mod screen_smoke {
             .collect();
         g.booklet.add_run(1, &recs);
         g.screen_size = (1280.0, 720.0);
-        let n = 2000;
+        // Best of 7 batches: other builds share this machine, so the minimum is the honest cost.
         for mode in [hud::Mode::Playing, hud::Mode::Loadout, hud::Mode::Merge, hud::Mode::Booklet, hud::Mode::Title] {
             g.mode = mode;
             std::hint::black_box(g.hud_view());
-            let t = std::time::Instant::now();
-            for _ in 0..n {
-                std::hint::black_box(g.hud_view());
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                // On-CPU ns of this thread (Linux), immune to other builds on the box.
+                let cpu = || {
+                    std::fs::read_to_string("/proc/thread-self/schedstat")
+                        .ok()
+                        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                let t = cpu();
+                for _ in 0..300 {
+                    std::hint::black_box(g.hud_view());
+                }
+                best = best.min((cpu() - t) / 1e3 / 300.0);
             }
-            println!("hud_view {mode:?}: {:.1} us/call", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+            println!("hud_view {mode:?}: {best:.1} us/call");
         }
     }
     // === end perf ===
