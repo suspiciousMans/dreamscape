@@ -58,6 +58,7 @@ mod worth;
 mod fpv;
 mod fusion;
 mod gamble;
+mod handscore;
 mod gameplay;
 mod hand;
 mod hud;
@@ -684,6 +685,12 @@ pub struct DreamscapeGame {
     /// Tool card ids bought this run (kept for the save; the deck holds the live ones).
     tool_cards: Vec<u32>,
     // === end toolcards ===
+    // === handscore ===
+    /// The hand's rank as last seen, `deck_clock` when it changed, and the best this run.
+    score_rank: handscore::HandRank,
+    score_at: f32,
+    run_best_hand: handscore::HandRank,
+    // === end handscore ===
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -1155,6 +1162,9 @@ impl DreamscapeGame {
             deck_riffle_at: hand::NEVER,
             deck_leaving: Vec::new(),
             tool_cards: Vec::new(), // === toolcards ===
+            score_rank: handscore::HandRank::None, // === handscore ===
+            score_at: hand::NEVER,
+            run_best_hand: handscore::HandRank::None,
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -2090,6 +2100,8 @@ impl DreamscapeGame {
                 draw_count: d.draw_len(),
                 riffle_since: self.deck_clock - self.deck_riffle_at,
                 back: Some(self.booklet.stash.card_back).filter(|b| *b != store::CardBack::Dusk), // === smallfixes ===
+                score: self.score_rank, // === handscore ===
+                score_since: self.deck_clock - self.score_at,
                 leaving: self
                     .deck_leaving
                     .iter()
@@ -2136,7 +2148,61 @@ impl DreamscapeGame {
         let clock = self.deck_clock;
         self.deck_leaving.retain(|l| clock - l.2 < hand::LEAVE_TOTAL);
         self.edges = self.deck_edges(); // === decklife === the hand changed, so did the edges
+        self.update_score(); // === handscore === draws and discards change the hand
     }
+
+    // === handscore ===
+    /// What the hand holds right now, for scoring. Booklet cards read their
+    /// own faces; a tool card is wild.
+    fn score_faces(&self) -> Vec<handscore::HandFace> {
+        let Some(d) = &self.deck else {
+            return Vec::new();
+        };
+        d.hand()
+            .iter()
+            .flatten()
+            .filter_map(|&n| match deck::tool_ability(n) {
+                Some(a) => Some(handscore::HandFace::wild(a)),
+                None => self.booklet.card(n).map(handscore::HandFace::of),
+            })
+            .collect()
+    }
+
+    /// The hand's rank now. Inert (none) without a deck: co-op, autopilot,
+    /// the fixed kit of a resumed run.
+    fn hand_rank(&self) -> handscore::HandRank {
+        if self.deck.is_none() || self.coop_active() || self.autopilot {
+            return handscore::HandRank::None;
+        }
+        handscore::classify(&self.score_faces())
+    }
+
+    /// Recomputes the rank; a change pulses the tag and may set a record.
+    fn update_score(&mut self) {
+        let rank = self.hand_rank();
+        if rank == self.score_rank {
+            return;
+        }
+        self.score_rank = rank;
+        self.score_at = self.deck_clock;
+        self.run_best_hand = self.run_best_hand.best(rank);
+        let better = self.booklet.best_hand.best(rank);
+        if better != self.booklet.best_hand {
+            self.booklet.best_hand = better;
+            if better.is_full_house_or_better() {
+                self.achieve(None);
+            }
+        }
+    }
+
+    /// Dust EARNED this run (loot, bonuses): scaled by the hand as it stands
+    /// now. Never used for the stash, prices, odds or the gambling.
+    fn earn_dust(&mut self, base: u32) -> u32 {
+        let n = handscore::scale_dust(base, self.hand_rank());
+        self.bonus_dust += n;
+        n
+    }
+    // === end handscore ===
 
     /// An ability just fired from `slot`: its card is discarded (the slot
     /// waits to draw) and flicks out on the HUD.
@@ -2277,6 +2343,9 @@ impl DreamscapeGame {
     fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
         self.deck = None;
         self.tool_cards.clear(); // === toolcards === bought per run, never carried over
+        self.score_rank = handscore::HandRank::None; // === handscore ===
+        self.score_at = hand::NEVER;
+        self.run_best_hand = handscore::HandRank::None;
         self.deck_opening.clear();
         self.deck_cards.clear();
         self.deck_leaving.clear();
@@ -3008,7 +3077,7 @@ impl DreamscapeGame {
     /// The nightmare comes undone: dust and calm motes. (The portal still
     /// wants every sigil.)
     fn undo_nightmare(&mut self, tier: u32, at: Vec3) {
-        self.bonus_dust += boss::UNDONE_DUST_PER_TIER * tier;
+        self.earn_dust(boss::UNDONE_DUST_PER_TIER * tier); // === handscore ===
         for k in 0..boss::UNDONE_MOTES {
             self.pending_motes.push(at + Vec3::new(1.5 * (k as f32 - 0.5), 0.0, 1.0));
         }
@@ -3206,10 +3275,10 @@ impl DreamscapeGame {
             self.run.count(Upgrade::DustHoarder),
             combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
         );
-        self.bonus_dust += loot.dust;
+        self.earn_dust(loot.dust); // === handscore ===
         // === edges2 === WINDFALL: extra dust; LANTERN: always a mote
         if self.has_edge(edges::Edge::Windfall) {
-            self.bonus_dust += edges::WINDFALL_DUST;
+            self.earn_dust(edges::WINDFALL_DUST); // === handscore ===
             self.edge_fires(edges::Edge::Windfall);
         }
         let lantern = self.has_edge(edges::Edge::Lantern);
@@ -7171,8 +7240,7 @@ impl DreamscapeGame {
         for (glow, beam) in taken {
             let _ = self.world.despawn(glow);
             let _ = self.world.despawn(beam);
-            let dust = 8 + 2 * depth.min(20);
-            self.bonus_dust += dust;
+            let dust = self.earn_dust(8 + 2 * depth.min(20)); // === handscore ===
             self.flash.trigger([1.0, 0.85, 0.3], 0.45);
             self.sfx(Sound::CacheGet);
             self.achievement_toast = Some((format!("HIGH CACHE  +{dust} DUST"), 0.0));
@@ -7229,7 +7297,7 @@ impl DreamscapeGame {
         }
         bonus += ((self.twists.dust() - 1.0) * 15.0).round() as u32;
         if bonus > 0 {
-            self.bonus_dust += bonus;
+            let bonus = self.earn_dust(bonus); // === handscore ===
             self.flash.trigger([1.0, 0.85, 0.3], 0.5);
             log::info!("Dream bonus: +{bonus} dust (run bonus {})", self.bonus_dust);
         }
@@ -8161,7 +8229,10 @@ impl DreamscapeGame {
         );
         // Run upgrades and hard runs pay out on top of the pack.
         let mult = self.dust_multiplier();
-        let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust;
+        // === handscore === the hand pays on the pack's dust (the run's own dust was scaled as earned)
+        let hand_extra = handscore::scale_dust(dust, self.hand_rank()) - dust;
+        // === end handscore ===
+        let extra = (dust as f32 * (mult - 1.0)).round() as u32 + self.bonus_dust + hand_extra;
         self.booklet.stash.earn(extra);
         let dust = dust + extra;
         let deepest = haul.iter().map(|r| r.card.depth).max().unwrap_or(0);
@@ -9250,6 +9321,11 @@ impl DreamscapeGame {
             rows.push(("pact".into(), line));
         }
         // === end pacts ===
+        // === handscore ===
+        if self.run_best_hand != handscore::HandRank::None {
+            rows.push(("best hand".into(), self.run_best_hand.name().to_string()));
+        }
+        // === end handscore ===
         summary_ui::SummaryView {
             rows,
             upgrades: self.run.summary(),
@@ -12757,9 +12833,10 @@ impl Game for DreamscapeGame {
             self.stats.twists.extend(self.twists.0.iter().copied());
             if self.director.nightmare {
                 self.stats.nightmares += 1;
-                self.bonus_dust += 10
+                let paid = 10
                     * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier)
                     * self.perk_fx().nightmare_mult; // === shop ===
+                self.earn_dust(paid); // === handscore ===
                 self.boss_reward = true;
                 if self.run_active {
                     self.booklet.codex.nightmares_beaten += 1;
@@ -15439,6 +15516,7 @@ mod screen_smoke {
             riffle_since: riffle,
             leaving,
             back: None,
+            ..hand::HandPile::default()
         };
         let none = n_shapes(false, hand::HandPile::default(), hand::NEVER);
         let stack = n_shapes(false, shown(5, hand::NEVER, vec![]), hand::NEVER);
@@ -16668,13 +16746,26 @@ mod screen_smoke {
             }));
         }
         // === end pressure ===
+        // === handscore === the longest rank name over the hand, and on the summary
+        bad.extend(overflows_with(&g, "HUD-handscore", &|v| {
+            v.hand_pile.shown = true;
+            v.hand_pile.score = handscore::HandRank::FiveOfAKind;
+        }));
+        g.run_best_hand = handscore::HandRank::FiveOfAKind;
+        g.mode = hud::Mode::Summary;
+        bad.extend(overflows(&g, "Summary-handscore"));
+        g.mode = hud::Mode::Playing;
+        // === end handscore ===
         g.open_settings();
         bad.extend(overflows(&g, "Settings"));
         g.open_codex();
         bad.extend(overflows(&g, "Codex"));
         g.open_booklet();
         bad.extend(overflows(&g, "Booklet"));
+        let picks: Vec<u32> = g.booklet.cards().take(4).map(|c| c.number).collect(); // === handscore ===
+        g.booklet.lore.deck = picks;
         g.open_loadout();
+        assert!(g.hud_view().loadout.chosen.len() >= deck::DECK_MIN, "the deck builder shows its best-hand line"); // === handscore ===
         bad.extend(overflows(&g, "Loadout"));
         g.open_merge(hud::Mode::Title);
         bad.extend(overflows(&g, "Merge"));
@@ -16831,4 +16922,101 @@ mod screen_smoke {
         assert_eq!(reveal_ui::memory_line(&[0.43, 0.43]).as_deref(), Some("REMEMBERED 43% EACH"));
         assert_eq!(reveal_ui::memory_line(&[]), None);
     }
+
+    // === handscore ===
+    /// A deck run holding five booklet cards: three Velvet, two Void (a full house).
+    fn house_game(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        let mut cs: Vec<cards::Card> = (1..=5u32)
+            .map(|n| {
+                let mut c = themed(dream::DreamTheme::SkyStairs, n as u64);
+                c.number = n;
+                c.attribute = if n <= 3 { cards::Attribute::Velvet } else { cards::Attribute::Void };
+                c.rarity = [cards::Rarity::Faint, cards::Rarity::Hazy, cards::Rarity::Vivid, cards::Rarity::Lucid, cards::Rarity::Fused][n as usize - 1];
+                c
+            })
+            .collect();
+        g.booklet.runs.push(cards::SavedRun { run_seed: 1, deepest: 1, cards: std::mem::take(&mut cs) });
+        let mut d = deck::Deck::new(&[1, 2, 3, 4, 5], 3);
+        d.draw_to_fill(5);
+        d.events();
+        g.deck = Some(d);
+        g
+    }
+
+    #[test]
+    fn handscore_scales_dust_as_it_is_earned_and_not_the_stash() {
+        let mut g = house_game("hs_earn");
+        assert_eq!(g.hand_rank(), handscore::HandRank::FullHouse);
+        let stash = g.booklet.stash.dust;
+        assert_eq!(g.earn_dust(10), 15, "x1.45 rounds half up");
+        assert_eq!(g.bonus_dust, 15);
+        assert_eq!(g.booklet.stash.dust, stash, "the banked stash is untouched");
+        g.undo_nightmare(1, Vec3::ZERO);
+        assert_eq!(g.bonus_dust, 15 + handscore::scale_dust(boss::UNDONE_DUST_PER_TIER, handscore::HandRank::FullHouse));
+        // The hand as it stands THEN: a card leaves, the rank drops.
+        let first = g.deck.as_ref().unwrap().hand()[0].unwrap();
+        g.deck.as_mut().unwrap().play(0, 5.0);
+        let _ = first;
+        assert!(g.hand_rank().pct() < handscore::FULL_HOUSE_PCT);
+    }
+
+    #[test]
+    fn handscore_is_inert_without_a_deck_or_in_autopilot() {
+        let mut g = house_game("hs_inert");
+        g.autopilot = true;
+        assert_eq!(g.earn_dust(10), 10);
+        assert_eq!(g.hand_rank(), handscore::HandRank::None);
+        g.autopilot = false;
+        g.deck = None;
+        assert_eq!(g.earn_dust(10), 10);
+        assert_eq!(g.hand_pile().score, handscore::HandRank::None);
+    }
+
+    #[test]
+    fn handscore_records_the_best_hand_pulses_and_unlocks_full_house() {
+        let mut g = house_game("hs_best");
+        assert_eq!(g.booklet.best_hand, handscore::HandRank::None);
+        g.update_deck(0.016);
+        assert_eq!(g.score_rank, handscore::HandRank::FullHouse);
+        assert_eq!(g.booklet.best_hand, handscore::HandRank::FullHouse);
+        assert_eq!(g.run_best_hand, handscore::HandRank::FullHouse);
+        assert!(g.booklet.achievements.has("full_house"));
+        let pile = g.hand_pile();
+        assert_eq!(pile.score, handscore::HandRank::FullHouse);
+        assert!(pile.score_since < 0.1, "the tag pulses when the rank changes");
+        let rows = g.summary_view().rows;
+        assert!(rows.iter().any(|r| r.0 == "best hand" && r.1 == "FULL HOUSE"), "{rows:?}");
+        // A new run starts clean, the saved best stays.
+        g.score_rank = handscore::HandRank::None;
+        g.run_best_hand = handscore::HandRank::None;
+        assert_eq!(g.booklet.best_hand, handscore::HandRank::FullHouse);
+    }
+
+    #[test]
+    fn handscore_an_old_save_loads_with_no_best_hand() {
+        let b: cards::Booklet = ron::from_str("(runs: [])").expect("old save loads");
+        assert_eq!(b.best_hand, handscore::HandRank::None);
+        let text = ron::to_string(&cards::Booklet { best_hand: handscore::HandRank::Flush, ..Default::default() }).unwrap();
+        let back: cards::Booklet = ron::from_str(&text).unwrap();
+        assert_eq!(back.best_hand, handscore::HandRank::Flush);
+    }
+
+    #[test]
+    fn handscore_tag_draws_and_pulse_respects_reduced_motion() {
+        assert_eq!(hand::score_pulse(0.0, true), 0.0);
+        assert!(hand::score_pulse(handscore::PULSE_SECS * 0.5, false) > 0.9);
+        assert_eq!(hand::score_pulse(handscore::PULSE_SECS + 1.0, false), 0.0);
+        assert_eq!(hand::score_pulse(hand::NEVER, false), 0.0);
+        let mut g = house_game("hs_draw");
+        g.mode = hud::Mode::Playing;
+        let plain = frame_with(&g, 1280.0, 720.0, &|v| v.hand_pile.shown = true).len();
+        let tagged = frame_with(&g, 1280.0, 720.0, &|v| {
+            v.hand_pile.shown = true;
+            v.hand_pile.score = handscore::HandRank::FullHouse;
+        })
+        .len();
+        assert!(tagged > plain, "the tag is one more text");
+    }
+    // === end handscore ===
 }

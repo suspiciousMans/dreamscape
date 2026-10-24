@@ -159,6 +159,24 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p.text(Pos2::new(cx, bar.bottom() + 36.0 * u), Align2::CENTER_TOP, v.k(line), FontId::monospace(14.0 * u), rgba([200, 170, 230], 0.9));
     }
 
+    // === handscore === what the deck could reach, so players can build toward it
+    if m.chosen.len() >= DECK_MIN {
+        let faces: Vec<crate::handscore::HandFace> = m
+            .chosen
+            .iter()
+            .filter_map(|&n| m.cards.iter().find(|c| c.number == n))
+            .map(crate::handscore::HandFace::of)
+            .collect();
+        let line = crate::handscore::deck_line(crate::handscore::best_in_deck(&faces));
+        p.text(
+            Pos2::new(cx, top + 38.0 * u),
+            Align2::CENTER_CENTER,
+            line,
+            FontId::monospace((12.0 * u).max(9.0)),
+            rgba([240, 220, 150], 0.85),
+        );
+    }
+    // === end handscore ===
     let lay = loadout_ui::layout(screen);
     let (grid_top, grid_w) = (lay.grid_top, lay.grid_w);
     let marks = GridMarks { marked: &m.chosen, ..Default::default() };
