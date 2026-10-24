@@ -438,7 +438,7 @@ pub fn fit(text: &str, size: f32, width: f32, min: f32) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn painter() -> (egui::Context, egui::LayerId) {

@@ -87,8 +87,20 @@ fn icon_colors(item: Item, v: &HudView) -> ([u8; 3], [u8; 3]) {
 // === perf === uipixels: shadow + fill quads, run-merged, in one mesh
 fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha: f32) {
     let (main, accent) = icon_colors(item, v);
+    shadowed_icon(p, c, px, icon_for(item), main, accent, alpha);
+}
+
+fn shadowed_icon(
+    p: &egui::Painter,
+    c: Pos2,
+    px: f32,
+    rows: &[&str; icons::SIZE],
+    main: [u8; 3],
+    accent: [u8; 3],
+    alpha: f32,
+) {
     let o = Pos2::new(c.x.round(), c.y.round());
-    let cells = icons::cells(icon_for(item));
+    let cells = icons::cells(rows);
     let mut q = crate::pixel_ui::Quads::new();
     // Every shadow first: a shadow only ever reaches cells drawn after its own,
     // so shadows-then-fills is the order the per-cell painter produced.
@@ -108,6 +120,33 @@ fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha
         );
     }
     q.paint(p);
+}
+
+/// The original painter (a shadow rect and a fill rect per cell): test reference.
+#[cfg(test)]
+fn shadowed_icon_rects(
+    p: &egui::Painter,
+    c: Pos2,
+    px: f32,
+    rows: &[&str; icons::SIZE],
+    main: [u8; 3],
+    accent: [u8; 3],
+    alpha: f32,
+) {
+    let o = Pos2::new(c.x.round(), c.y.round());
+    for (x, y, acc) in icons::cells(rows) {
+        let at = o + Vec2::new(x as f32 * px, y as f32 * px);
+        p.rect_filled(
+            Rect::from_center_size(at + Vec2::splat(px * 0.25), Vec2::splat(px)),
+            0.0,
+            rgba([0, 0, 0], 0.4 * alpha),
+        );
+        p.rect_filled(
+            Rect::from_center_size(at, Vec2::splat(px)),
+            0.0,
+            rgba(if acc { accent } else { main }, alpha),
+        );
+    }
 }
 // === end perf ===
 
@@ -592,6 +631,30 @@ fn _exhaustive(e: EyeStyle, h: HudPalette) -> (EyeStyle, HudPalette) {
 
 #[cfg(test)]
 mod tests {
+    // === perf ===
+    #[test]
+    fn the_shadowed_icon_mesh_matches_the_per_cell_rects() {
+        use crate::pixel_ui::tests::raster;
+        for (n, rows) in icons::ALL.iter().enumerate() {
+            for (px, alpha) in [(4.0, 1.0), (4.0, 0.5), (12.0, 1.0)] {
+                let at = Pos2::new(100.0 + n as f32 % 2.0, 90.0);
+                let shapes = |f: &dyn Fn(&egui::Painter)| {
+                    let ctx = egui::Context::default();
+                    let input = egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0))),
+                        ..Default::default()
+                    };
+                    ctx.run(input, |ctx| f(&ctx.layer_painter(egui::LayerId::background()))).shapes
+                };
+                let old = shapes(&|p| shadowed_icon_rects(p, at, px, rows, [200, 90, 40], [250, 230, 200], alpha));
+                let new = shapes(&|p| shadowed_icon(p, at, px, rows, [200, 90, 40], [250, 230, 200], alpha));
+                assert_eq!(new.len(), 1);
+                assert!(raster(&old, 300, 200) == raster(&new, 300, 200), "icon {n} px {px} alpha {alpha}");
+            }
+        }
+    }
+    // === end perf ===
+
     use super::*;
     use crate::store::CATALOG;
 
