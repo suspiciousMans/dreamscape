@@ -377,11 +377,11 @@ fn px_cells(
     cells: impl IntoIterator<Item = (i32, i32)>,
     color: Color32,
 ) {
+    // === perf === uipixels: run-merged cells, one mesh
     let o = Pos2::new(origin.x.round(), origin.y.round());
-    for (x, y) in cells {
-        let min = o + Vec2::new(x as f32 * px - px * 0.5, y as f32 * px - px * 0.5);
-        p.rect_filled(Rect::from_min_size(min, Vec2::splat(px)), 0.0, color);
-    }
+    let cells: Vec<(i32, i32, Color32)> = cells.into_iter().map(|(x, y)| (x, y, color)).collect();
+    crate::pixel_ui::cell_mesh(p, o - Vec2::splat(px * 0.5), px, &cells);
+    // === end perf ===
 }
 
 const EYE_PX: f32 = 6.0;

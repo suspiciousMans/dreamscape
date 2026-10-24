@@ -16719,6 +16719,133 @@ mod screen_smoke {
     // === end toolcards ===
     // === end shop ===
 
+    // === perf === egui cost of every screen (shapes, vertices, triangles, tessellation time)
+    /// What one drawn frame of the current screen costs egui.
+    #[derive(Debug, Clone, Copy)]
+    struct UiCost {
+        shapes: usize,
+        vertices: usize,
+        triangles: usize,
+        tessellate_us: f64,
+    }
+
+    fn ui_cost(g: &DreamscapeGame, w: f32, h: f32) -> UiCost {
+        let v = g.hud_view();
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let k = hud::ui_scale(v.mode, w, h);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+            ..Default::default()
+        };
+        // Two runs: the first warms the font atlas and the art caches.
+        let _ = ctx.run(input.clone(), |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let ppp = out.pixels_per_point;
+        let shapes = out.shapes.len();
+        let meshes = ctx.tessellate(out.shapes.clone(), ppp);
+        let (mut vertices, mut triangles) = (0, 0);
+        for m in &meshes {
+            if let egui::epaint::Primitive::Mesh(m) = &m.primitive {
+                vertices += m.vertices.len();
+                triangles += m.indices.len() / 3;
+            }
+        }
+        let iters = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(ctx.tessellate(out.shapes.clone(), ppp));
+        }
+        let tessellate_us = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
+        UiCost { shapes, vertices, triangles, tessellate_us }
+    }
+
+    /// A booklet of `n` cards across every theme.
+    fn big_booklet(g: &mut DreamscapeGame, n: usize) {
+        let mut i = 0usize;
+        while g.booklet.card_count() < n && i < n * 4 {
+            let recs: Vec<_> = (0..20)
+                .map(|j| {
+                    let t = dream::ALL_THEMES[(i + j) % dream::ALL_THEMES.len()];
+                    cards::tests::record(t, 1000 + (i + j) as u64, 1 + (i % 7) as u32, 0.3, (i + j) % 3 == 0)
+                })
+                .collect();
+            g.booklet.add_run(1 + i as u64, &recs);
+            i += 20;
+        }
+        g.booklet.stash.earn(5000);
+    }
+
+    /// Prints the table; `cargo test ui_cost_table -- --nocapture`.
+    #[test]
+    fn ui_cost_table() {
+        let mut g = game("uicost");
+        big_booklet(&mut g, 239);
+        eprintln!("cards in booklet: {}", g.booklet.card_count());
+        let mut rows: Vec<(String, UiCost)> = Vec::new();
+        let mut add = |g: &DreamscapeGame, label: &str| rows.push((label.to_string(), ui_cost(g, 1280.0, 720.0)));
+        for mode in [
+            hud::Mode::Warning,
+            hud::Mode::Title,
+            hud::Mode::Summary,
+            hud::Mode::Paused,
+            hud::Mode::Playing,
+        ] {
+            g.mode = mode;
+            add(&g, &format!("{mode:?}"));
+        }
+        g.open_settings();
+        add(&g, "Settings");
+        g.open_codex();
+        add(&g, "Codex");
+        g.open_booklet();
+        add(&g, "Booklet");
+        g.open_loadout();
+        add(&g, "Loadout");
+        g.open_merge(hud::Mode::Title);
+        add(&g, "Merge");
+        g.open_store();
+        add(&g, "Store");
+        g.store_tab = 1;
+        add(&g, "Lottery");
+        g.store_tab = 2;
+        add(&g, "Tickets");
+        if std::env::var("UI_HIST").is_ok() {
+            for (name, mode_tab) in [("Loadout", 0), ("Store", 1), ("Merge", 2), ("Title", 3)] {
+                match mode_tab { 0 => g.open_loadout(), 1 => { g.open_store(); g.store_tab = 0 } 2 => g.open_merge(hud::Mode::Title), _ => g.mode = hud::Mode::Title }
+                let mut h: std::collections::BTreeMap<String, usize> = Default::default();
+                fn walk(s: &egui::Shape, h: &mut std::collections::BTreeMap<String, usize>) {
+                    match s {
+                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, h)),
+                        egui::Shape::Rect(r) => {
+                            let k = format!("rect {}x{} {}", r.rect.width().round(), r.rect.height().round(), if r.stroke.is_empty() { "fill" } else { "stroke" });
+                            *h.entry(k).or_default() += 1;
+                        }
+                        egui::Shape::Text(_) => *h.entry("text".into()).or_default() += 1,
+                        other => *h.entry(format!("{:?}", other).chars().take(12).collect()).or_default() += 1,
+                    }
+                }
+                let v = g.hud_view();
+                let ctx = egui::Context::default();
+                hud::install_font(&ctx);
+                let (mut art, mut pa) = (booklet_ui::CardArt::default(), pack_art::PackArt::default());
+                let out = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))), ..Default::default() }, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut pa));
+                for cs in &out.shapes { walk(&cs.shape, &mut h); }
+                let mut hv: Vec<_> = h.into_iter().collect();
+                hv.sort_by_key(|x| std::cmp::Reverse(x.1));
+                eprintln!("HIST {name}: {:?}", &hv[..hv.len().min(14)]);
+            }
+        }
+        eprintln!("{:<10} {:>7} {:>9} {:>10} {:>10}", "screen", "shapes", "vertices", "triangles", "tess_us");
+        for (l, c) in &rows {
+            eprintln!("{l:<10} {:>7} {:>9} {:>10} {:>10.0}", c.shapes, c.vertices, c.triangles, c.tessellate_us);
+        }
+        assert!(rows.iter().all(|(_, c)| c.shapes > 0));
+    }
+    // === end perf ===
+
     #[test]
     fn audit_text_fits_every_screen() {
         use dream::DreamTheme;

@@ -861,6 +861,8 @@ fn card_back(p: &egui::Painter, r: Rect, v: &HudView, glowing: bool) {
     }
     let c = r.center();
     let px = (r.width() / 22.0).round().max(2.0);
+    // === perf === uipixels: run-merged cells, one mesh
+    let mut cells = Vec::new();
     for (x, y, k) in crate::pixels::eye_pixels(0.8, None, false) {
         let col = match k {
             crate::pixels::EyePx::Lid | crate::pixels::EyePx::Lash => rgba(ink(v), 0.6),
@@ -868,12 +870,10 @@ fn card_back(p: &egui::Painter, r: Rect, v: &HudView, glowing: bool) {
             crate::pixels::EyePx::Sclera => continue,
             _ => rgba(hue(0.75), 0.8),
         };
-        p.rect_filled(
-            Rect::from_center_size(c + Vec2::new(x as f32 * px, y as f32 * px), Vec2::splat(px)),
-            0.0,
-            col,
-        );
+        cells.push((x, y, col));
     }
+    crate::pixel_ui::cell_mesh(p, c - Vec2::splat(px * 0.5), px, &cells);
+    // === end perf ===
 }
 
 /// A dream that didn't stay: a greyed-out ghost of its name, and the dust it left.
