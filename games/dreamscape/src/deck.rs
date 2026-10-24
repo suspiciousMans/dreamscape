@@ -174,6 +174,7 @@ impl Deck {
         self.draw.len()
     }
 
+    #[cfg(test)]
     pub fn discard_len(&self) -> usize {
         self.discard.len()
     }
@@ -187,11 +188,13 @@ impl Deck {
     }
 
     /// Every card in the deck, wherever it is.
+    #[cfg(test)]
     pub fn total(&self) -> usize {
         self.cooldowns.len()
     }
 
     /// All card numbers currently held anywhere (draw, hand, discard).
+    #[cfg(test)]
     pub fn all_cards(&self) -> Vec<u32> {
         let mut v: Vec<u32> = self.draw.clone();
         v.extend(self.hand.iter().flatten());
@@ -226,9 +229,16 @@ pub fn toggle(deck: &mut Vec<u32>, card: u32) -> bool {
     }
 }
 
-/// A deck can start a run with at least [`DECK_MIN`] cards.
-pub fn valid(len: usize) -> bool {
-    (DECK_MIN..=DECK_MAX).contains(&len)
+/// Cards a deck needs to start a run: [`DECK_MIN`], or every card you own
+/// if you own fewer.
+pub fn needed(owned: usize) -> usize {
+    DECK_MIN.min(owned)
+}
+
+/// A deck can start a run when it has [`needed`] cards (none at all means
+/// "let the loadout rule choose").
+pub fn valid(len: usize, owned: usize) -> bool {
+    len == 0 || (needed(owned)..=DECK_MAX).contains(&len)
 }
 
 #[cfg(test)]
@@ -368,6 +378,10 @@ mod tests {
         assert!(!toggle(&mut d, 99), "full");
         assert!(toggle(&mut d, 0), "removing always works");
         assert_eq!(d.len(), DECK_MAX - 1);
-        assert!(!valid(2) && valid(3) && valid(12) && !valid(13));
+        assert!(!valid(2, 20) && valid(3, 20) && valid(12, 20) && !valid(13, 20));
+        assert!(valid(0, 20), "empty = automatic");
+        assert!(valid(1, 1) && valid(2, 2), "a small booklet can still start");
+        assert_eq!(needed(1), 1);
+        assert_eq!(needed(50), DECK_MIN);
     }
 }

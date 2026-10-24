@@ -168,6 +168,8 @@ pub struct HudView {
     pub hand: Vec<crate::hand::HandCard>,
     /// Synergies the hand's cards make together.
     pub hand_links: Vec<crate::hand::HandLink>,
+    /// The deck beside the hand: draw pile, riffle, cards flicking out.
+    pub hand_pile: crate::hand::HandPile,
     /// Nerve: (now, most). (0, 0) hides the hearts (co-op).
     pub nerve: (u32, u32),
     /// A nightmare's remaining hp (0..1) and whether it can be hurt now.
@@ -534,7 +536,7 @@ pub fn draw(
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
         Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
-        Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
+        Mode::Loadout => return crate::deck_ui::draw(ctx, &p, screen, v, art), // === deck ===
         Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
         Mode::Ending => return crate::ending::draw(&p, screen, v),
         Mode::Lobby => return crate::coop_game::draw_lobby(&p, screen, v),
@@ -556,7 +558,7 @@ pub fn draw(
     // === combat ===
     foe_pips(&p, screen, v);
     // === end combat ===
-    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, v.time, v.settings_snapshot.reduced_motion, art);
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);

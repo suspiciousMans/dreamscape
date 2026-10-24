@@ -52,6 +52,10 @@ pub struct HandCard {
     pub edge_since: f32,
     /// The run holds a curse: the card shows cracks.
     pub cracked: bool,
+    /// Deck hands: seconds since this card was drawn; [`NEVER`] if not freshly.
+    pub since_draw: f32,
+    /// Deck hands: nothing in this slot right now (waiting to draw).
+    pub empty: bool,
 }
 
 /// Two cards (or one, if `a == b`) that make a synergy together.
@@ -150,6 +154,186 @@ pub fn popped(rest: Rect, amount: f32, u: f32, reduced: bool) -> Rect {
     grown.translate(Vec2::new(0.0, -130.0 * u * amount))
 }
 
+// === deck === (the deck's hand: draw, flick, riffle, sway)
+
+/// Seconds a drawn card takes from the stack to its place.
+pub const DRAW_SECS: f32 = 0.40;
+/// Seconds a used card takes to flick up to the discard spot.
+pub const FLICK_SECS: f32 = 0.28;
+/// Seconds it then takes to slide into the stack, which riffles meanwhile.
+pub const RIFFLE_SECS: f32 = 0.42;
+pub const LEAVE_TOTAL: f32 = FLICK_SECS + RIFFLE_SECS;
+/// Sheets that interleave when the stack shuffles.
+pub const RIFFLE_SHEETS: usize = 3;
+
+/// Where a card is drawn: its rectangle and an extra turn (radians, fading
+/// to 0 as it settles).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    pub rect: Rect,
+    pub angle_off: f32,
+}
+
+/// One sheet of the riffle, offset from the stack (`dx`/`dy` as fractions of
+/// a card width; `angle` in radians).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheet {
+    pub dx: f32,
+    pub dy: f32,
+    pub angle: f32,
+}
+
+/// A card on its way out, snapshotted when it was used.
+#[derive(Clone, Debug)]
+pub struct Leaving {
+    pub card: HandCard,
+    pub slot: usize,
+    /// Seconds since it was used.
+    pub since: f32,
+}
+
+/// The piles beside the hand, as the HUD sees them. `Default` = no deck.
+#[derive(Clone, Debug)]
+pub struct HandPile {
+    /// Draw a stack at all (a deck run).
+    pub shown: bool,
+    pub draw_count: usize,
+    /// Seconds since a card was last shuffled in; [`NEVER`] if none.
+    pub riffle_since: f32,
+    pub leaving: Vec<Leaving>,
+}
+
+impl Default for HandPile {
+    fn default() -> Self {
+        Self {
+            shown: false,
+            draw_count: 0,
+            riffle_since: NEVER,
+            leaving: Vec::new(),
+        }
+    }
+}
+
+/// Eases out past 1 and back: a small overshoot (about 8%) then rest.
+pub fn ease_out_back(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (c1, c3) = (1.2_f32, 2.2_f32);
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The draw stack: right of the hand, a little smaller than a card.
+pub fn stack_rect(screen: Rect, rests: &[Rect], u: f32) -> Rect {
+    let (w, h) = (CARD_W * 0.8 * u, CARD_H * 0.8 * u);
+    let (left, bottom) = rests.iter().fold((screen.center().x, screen.bottom() - 26.0 * u), |a, r| {
+        (a.0.max(r.right()), a.1.max(r.bottom()))
+    });
+    let x = (left + 28.0 * u).min(screen.right() - w - 10.0 * u);
+    Rect::from_min_size(Pos2::new(x, bottom - h), Vec2::new(w, h))
+}
+
+/// Where a used card lands before it is shuffled in: above the stack.
+pub fn discard_spot(stack: Rect, u: f32) -> Pos2 {
+    Pos2::new(stack.center().x, stack.center().y - CARD_H * 0.95 * u)
+}
+
+/// A card being drawn: slides from the stack along a small arc, settles with
+/// a tiny overshoot, turning flat as it lands. Reduced motion: already there.
+pub fn draw_pose(since: f32, rest: Rect, stack: Rect, u: f32, reduced: bool) -> Pose {
+    let at_rest = Pose { rect: rest, angle_off: 0.0 };
+    if reduced || !(0.0..DRAW_SECS).contains(&since) {
+        return at_rest;
+    }
+    let t = since / DRAW_SECS;
+    let p = ease_out_back(t);
+    let from = stack.center();
+    let to = rest.center();
+    let mut c = from + (to - from) * p;
+    c.y -= 44.0 * u * (std::f32::consts::PI * t).sin();
+    let scale = 0.7 + 0.3 * smooth(t * 1.4);
+    Pose {
+        rect: Rect::from_center_size(c, rest.size() * scale),
+        angle_off: 0.7 * (1.0 - smooth(t)),
+    }
+}
+
+/// A used card: flicks up and out to the discard spot (turning over), then
+/// slides into the stack shrinking. `None` once it is in, or when reduced.
+pub fn leave_pose(since: f32, rest: Rect, stack: Rect, u: f32, reduced: bool) -> Option<Pose> {
+    if reduced || !(0.0..LEAVE_TOTAL).contains(&since) {
+        return None;
+    }
+    let spot = discard_spot(stack, u);
+    if since < FLICK_SECS {
+        let t = since / FLICK_SECS;
+        let e = 1.0 - (1.0 - t).powi(3); // fast out
+        let mut c = rest.center() + (spot - rest.center()) * e;
+        c.y -= 30.0 * u * (std::f32::consts::PI * t).sin();
+        return Some(Pose {
+            rect: Rect::from_center_size(c, rest.size() * (1.0 + 0.08 * (1.0 - t))),
+            angle_off: 0.8 * e,
+        });
+    }
+    let t = (since - FLICK_SECS) / RIFFLE_SECS;
+    let e = smooth(t);
+    let c = spot + (stack.center() - spot) * e;
+    let size = rest.size() + (stack.size() - rest.size()) * e;
+    Some(Pose {
+        rect: Rect::from_center_size(c, size * (1.0 - 0.15 * e)),
+        angle_off: 0.8 * (1.0 - e),
+    })
+}
+
+/// The sheets of a riffle shuffle: the stack splits in two, then the halves
+/// interleave back into one. Even sheets go left, odd ones right.
+pub fn riffle(since: f32, reduced: bool) -> [Sheet; RIFFLE_SHEETS] {
+    let still = Sheet { dx: 0.0, dy: 0.0, angle: 0.0 };
+    let mut out = [still; RIFFLE_SHEETS];
+    if reduced || !(0.0..RIFFLE_SECS).contains(&since) {
+        return out;
+    }
+    let t = since / RIFFLE_SECS;
+    let spread = (std::f32::consts::PI * t).sin();
+    // Past the midpoint the sheets drop in one after another.
+    for (k, s) in out.iter_mut().enumerate() {
+        let side = if k % 2 == 0 { -1.0 } else { 1.0 };
+        let drop = smooth((t - 0.4 - 0.15 * k as f32) * 4.0);
+        let k_spread = spread * (1.0 - drop * 0.5);
+        *s = Sheet {
+            dx: side * 0.55 * k_spread,
+            dy: -0.08 * (k as f32 + 1.0) * spread,
+            angle: side * 0.14 * k_spread,
+        };
+    }
+    out
+}
+
+/// Idle sway of card `i`, in radians: a few degrees, each out of step.
+pub fn sway(time: f32, i: usize, reduced: bool) -> f32 {
+    if reduced {
+        return 0.0;
+    }
+    0.02 * (time * 1.3 + i as f32 * 1.9).sin()
+}
+
+/// 0..1: a ready card breathes up and down a little. Not ready: flat.
+pub fn ready_lift(ready: bool, time: f32, i: usize, reduced: bool) -> f32 {
+    if reduced || !ready {
+        return 0.0;
+    }
+    0.5 + 0.5 * (time * 2.0 + i as f32 * 1.3).sin()
+}
+
+/// How many card backs the stack shows for a draw pile of `n`.
+pub fn stack_layers(n: usize) -> usize {
+    n.min(4)
+}
+// === end deck ===
+
 /// A card's four corners after turning `angle` about its centre.
 #[cfg(test)]
 pub fn corners(r: Rect, angle: f32) -> [Pos2; 4] {
@@ -239,6 +423,7 @@ pub fn draw(
     screen: Rect,
     cards: &[HandCard],
     links: &[HandLink],
+    pile: &HandPile,
     time: f32,
     reduced: bool,
     art: &mut crate::booklet_ui::CardArt,
@@ -246,18 +431,40 @@ pub fn draw(
     let rests = layout(screen, cards.len());
     let u = crate::pixel_ui::scale(screen);
     draw_links(p, &rests, cards, links, time, u);
+    // === deck ===
+    let stack = pile.shown.then(|| stack_rect(screen, &rests, u));
+    if let Some(s) = stack {
+        draw_stack(p, s, pile, u, time, reduced);
+    }
+    // === end deck ===
     // Rest order (later cards lie on top), then whichever is mid-pop above all.
+    let rise = |c: &HandCard| pop(c.since_use).max(if (0.0..DRAW_SECS).contains(&c.since_draw) { 1.0 } else { 0.0 });
     let mut order: Vec<usize> = (0..cards.len()).collect();
     order.sort_by(|&a, &b| {
-        pop(cards[a].since_use)
-            .partial_cmp(&pop(cards[b].since_use))
+        rise(&cards[a])
+            .partial_cmp(&rise(&cards[b]))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for i in order {
         let c = &cards[i];
+        if c.empty {
+            continue;
+        }
         let amount = pop(c.since_use);
-        let r = popped(rests[i], amount, u, reduced);
-        let angle = tilt(i, cards.len()) * (1.0 - amount);
+        let mut r = popped(rests[i], amount, u, reduced);
+        let mut angle = tilt(i, cards.len()) * (1.0 - amount);
+        // === deck === idle sway, ready lift, and the draw from the stack
+        if let Some(s) = stack {
+            let lift = ready_lift(c.charge >= 1.0 && !c.active, time, i, reduced);
+            r = r.translate(Vec2::new(0.0, -7.0 * u * lift));
+            angle += sway(time, i, reduced);
+            if (0.0..DRAW_SECS).contains(&c.since_draw) {
+                let pose = draw_pose(c.since_draw, rests[i], s, u, reduced);
+                r = pose.rect;
+                angle += pose.angle_off;
+            }
+        }
+        // === end deck ===
         if let Some(t) = ring(c.since_use) {
             let grow = if reduced { 0.0 } else { 26.0 * u * t };
             Xf::new(r.center(), angle).outline(
@@ -293,7 +500,85 @@ pub fn draw(
             );
         }
     }
+    // === deck === cards flicking out to the discard and into the stack
+    if let Some(s) = stack {
+        for l in &pile.leaving {
+            let (Some(&rest), Some(pose)) = (
+                rests.get(l.slot),
+                rests
+                    .get(l.slot)
+                    .and_then(|&r| leave_pose(l.since, r, s, u, reduced)),
+            ) else {
+                continue;
+            };
+            if let Some(t) = ring(l.since) {
+                let grow = if reduced { 0.0 } else { 26.0 * u * t };
+                Xf::new(rest.center(), tilt(l.slot, cards.len())).outline(
+                    p,
+                    Rect::from_center_size(Pos2::ZERO, rest.size()).expand(grow),
+                    2.0 * u,
+                    rgba(l.card.tint, 0.8 * (1.0 - t)),
+                );
+            }
+            let angle = tilt(l.slot, cards.len()) * (1.0 - (l.since / FLICK_SECS).min(1.0)) + pose.angle_off;
+            draw_card(ctx, p, pose.rect, angle, &l.card, 1.0, time, u, art);
+        }
+    }
+    // === end deck ===
 }
+
+// === deck ===
+/// The draw pile: card backs stacked, a count badge, and the riffle.
+fn draw_stack(p: &egui::Painter, stack: Rect, pile: &HandPile, u: f32, time: f32, reduced: bool) {
+    let back = |x: &Xf, r: Rect, a: f32| {
+        x.quad(p, r.translate(Vec2::new(-2.0 * u, 2.0 * u)), Color32::from_black_alpha((90.0 * a) as u8));
+        x.quad(p, r, rgba([150, 120, 210], a));
+        x.quad(p, r.shrink(2.5 * u), rgba([26, 14, 52], a));
+        x.outline(p, r.shrink(6.0 * u), 1.0, rgba([150, 120, 210], 0.45 * a));
+        let c = Rect::from_center_size(r.center(), Vec2::splat(9.0 * u));
+        x.quad(p, c, rgba([150, 120, 210], 0.35 * a));
+    };
+    let layers = stack_layers(pile.draw_count);
+    let body = Rect::from_center_size(Pos2::ZERO, stack.size());
+    if layers == 0 {
+        Xf::new(stack.center(), 0.0).outline(p, body, 1.5 * u, rgba([150, 120, 210], 0.3));
+    }
+    for k in 0..layers {
+        let off = (layers - 1 - k) as f32;
+        let at = stack.center() + Vec2::new(-1.8 * u * off, 1.8 * u * off);
+        back(&Xf::new(at, 0.0), body, 1.0);
+    }
+    // The riffle: sheets split and interleave on top of the stack.
+    for (k, s) in riffle(pile.riffle_since, reduced).iter().enumerate() {
+        let moving = s.dx != 0.0 || s.dy != 0.0 || s.angle != 0.0;
+        if !moving {
+            continue;
+        }
+        let at = stack.center() + Vec2::new(s.dx * stack.width(), s.dy * stack.width() - k as f32 * 1.5 * u);
+        back(&Xf::new(at, s.angle), body, 0.95);
+    }
+    // The badge.
+    let badge = Pos2::new(stack.right() - 2.0 * u, stack.top() + 2.0 * u);
+    let (cx, cy) = (badge.x, badge.y);
+    p.circle_filled(Pos2::new(cx, cy), 10.0 * u, rgba([20, 10, 40], 0.95));
+    p.circle_stroke(Pos2::new(cx, cy), 10.0 * u, Stroke::new(1.5 * u, rgba([180, 150, 240], 0.9)));
+    p.text(
+        Pos2::new(cx, cy),
+        egui::Align2::CENTER_CENTER,
+        pile.draw_count.to_string(),
+        FontId::monospace((11.0 * u).max(8.0)),
+        rgba([235, 225, 255], 1.0),
+    );
+    let pulse_a = if reduced { 0.55 } else { 0.5 + 0.1 * (time * 2.0).sin() };
+    p.text(
+        Pos2::new(stack.center().x, stack.bottom() + 3.0 * u),
+        egui::Align2::CENTER_TOP,
+        "DECK",
+        FontId::monospace((9.0 * u).max(7.0)),
+        rgba([190, 170, 235], pulse_a),
+    );
+}
+// === end deck ===
 
 /// Synergies: a glowing arc between the two cards that make one, with its
 /// name above; one card that makes it alone just shimmers its name.
@@ -667,6 +952,121 @@ mod tests {
         assert!(rects[1].top() < rects[0].top());
         assert!(rects[1].top() < rects[2].top());
         assert_eq!(rects[0].top(), rects[2].top());
+    }
+
+    fn stack_of(rests: &[Rect]) -> Rect {
+        stack_rect(screen(), rests, 1.0)
+    }
+
+    #[test]
+    fn ease_out_back_overshoots_a_little_then_lands() {
+        assert_eq!(ease_out_back(0.0), 0.0);
+        assert!((ease_out_back(1.0) - 1.0).abs() < 1e-5);
+        let peak = (0..=100).map(|i| ease_out_back(i as f32 / 100.0)).fold(0.0, f32::max);
+        assert!(peak > 1.02 && peak < 1.15, "tiny overshoot, got {peak}");
+    }
+
+    #[test]
+    fn the_stack_sits_right_of_the_hand_on_screen() {
+        for n in 1..=3 {
+            let rests = layout(screen(), n);
+            let s = stack_of(&rests);
+            let last = rests.last().unwrap();
+            assert!(s.left() > last.right(), "n = {n}");
+            assert!(screen().contains_rect(s), "n = {n}: {s:?}");
+        }
+    }
+
+    #[test]
+    fn a_drawn_card_starts_on_the_stack_and_ends_at_rest() {
+        let rests = layout(screen(), 3);
+        let stack = stack_of(&rests);
+        let start = draw_pose(0.0, rests[1], stack, 1.0, false);
+        assert!((start.rect.center() - stack.center()).length() < 1.0);
+        assert!(start.rect.width() < rests[1].width(), "small on the stack");
+        let end = draw_pose(DRAW_SECS, rests[1], stack, 1.0, false);
+        assert_eq!(end.rect, rests[1]);
+        assert_eq!(end.angle_off, 0.0);
+        assert_eq!(draw_pose(NEVER, rests[1], stack, 1.0, false).rect, rests[1]);
+    }
+
+    #[test]
+    fn a_drawn_card_arcs_above_the_straight_line_and_overshoots_its_rest() {
+        let rests = layout(screen(), 3);
+        let stack = stack_of(&rests);
+        let rest = rests[0];
+        let mid = draw_pose(DRAW_SECS * 0.5, rest, stack, 1.0, false);
+        let line_y = (stack.center().y + rest.center().y) / 2.0;
+        assert!(mid.rect.center().y < line_y - 5.0, "an arc, not a line");
+        // Moving left from the stack: somewhere it is further left than rest.
+        let over = (0..=100)
+            .map(|i| draw_pose(DRAW_SECS * i as f32 / 100.0, rest, stack, 1.0, false).rect.center().x)
+            .fold(f32::MAX, f32::min);
+        assert!(over < rest.center().x, "settles with an overshoot");
+        assert!(rest.center().x - over < rest.width() * 0.2, "a small one");
+    }
+
+    #[test]
+    fn reduced_motion_moves_instantly() {
+        let rests = layout(screen(), 3);
+        let stack = stack_of(&rests);
+        assert_eq!(draw_pose(0.05, rests[2], stack, 1.0, true).rect, rests[2]);
+        assert!(leave_pose(0.05, rests[2], stack, 1.0, true).is_none());
+        assert!(riffle(0.1, true).iter().all(|s| s.dx == 0.0 && s.dy == 0.0 && s.angle == 0.0));
+        assert_eq!(sway(1.0, 1, true), 0.0);
+        assert_eq!(ready_lift(true, 1.0, 1, true), 0.0);
+    }
+
+    #[test]
+    fn a_used_card_flicks_up_out_then_slides_into_the_stack() {
+        let rests = layout(screen(), 3);
+        let stack = stack_of(&rests);
+        let rest = rests[1];
+        let at = |t: f32| leave_pose(t, rest, stack, 1.0, false).unwrap();
+        assert_eq!(at(0.0).rect.center(), rest.center());
+        let spot = discard_spot(stack, 1.0);
+        let flicked = at(FLICK_SECS);
+        assert!((flicked.rect.center() - spot).length() < 1.0, "the flick ends at the discard spot");
+        assert!(spot.y < rest.center().y, "up and out");
+        let into = at(FLICK_SECS + RIFFLE_SECS * 0.99);
+        assert!((into.rect.center() - stack.center()).length() < 12.0);
+        assert!(into.rect.width() < rest.width());
+        assert!(leave_pose(LEAVE_TOTAL, rest, stack, 1.0, false).is_none());
+        assert!(leave_pose(NEVER, rest, stack, 1.0, false).is_none());
+        assert!(leave_pose(-0.1, rest, stack, 1.0, false).is_none());
+    }
+
+    #[test]
+    fn the_riffle_splits_interleaves_and_comes_back_together() {
+        assert_eq!(riffle(NEVER, false).len(), RIFFLE_SHEETS);
+        for s in riffle(NEVER, false).iter().chain(riffle(RIFFLE_SECS, false).iter()) {
+            assert_eq!((s.dx, s.dy, s.angle), (0.0, 0.0, 0.0), "square when still");
+        }
+        let mid = riffle(RIFFLE_SECS * 0.5, false);
+        assert!(mid[0].dx * mid[1].dx < 0.0, "neighbouring sheets sit on opposite sides");
+        assert!(mid[0].dx * mid[2].dx > 0.0, "every other sheet shares a side");
+        let spread = mid.iter().map(|s| s.dx.abs()).fold(0.0, f32::max);
+        assert!(spread > 0.5 && spread <= 1.0);
+    }
+
+    #[test]
+    fn ready_cards_lift_and_idle_cards_sway_gently() {
+        assert_eq!(ready_lift(false, 3.0, 0, false), 0.0);
+        let lifts: Vec<f32> = (0..60).map(|i| ready_lift(true, i as f32 * 0.1, 1, false)).collect();
+        assert!(lifts.iter().all(|&l| (0.0..=1.0).contains(&l)));
+        assert!(lifts.iter().any(|&l| l > 0.5), "it rises");
+        let sways: Vec<f32> = (0..200).map(|i| sway(i as f32 * 0.1, 2, false)).collect();
+        assert!(sways.iter().all(|s| s.abs() <= 0.03), "a few degrees at most");
+        assert!(sways.iter().any(|s| s.abs() > 0.005), "but it does move");
+        assert_ne!(sway(1.0, 0, false), sway(1.0, 1, false), "cards sway out of step");
+    }
+
+    #[test]
+    fn the_stack_shows_up_to_four_layers() {
+        assert_eq!(stack_layers(0), 0);
+        assert_eq!(stack_layers(1), 1);
+        assert_eq!(stack_layers(3), 3);
+        assert_eq!(stack_layers(40), 4);
     }
 
     #[test]
