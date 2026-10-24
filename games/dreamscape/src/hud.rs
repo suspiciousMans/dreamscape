@@ -124,6 +124,8 @@ pub struct HudView {
     pub booklet_total: usize,
     /// One line: which attributes the dreamer is attuned to, and the next.
     pub booklet_attune: String,
+    /// e.g. "RARITY ▼".
+    pub booklet_sort: String,
     pub seed: u64,
     pub dust: u32,
     pub eye: crate::store::EyeStyle,
@@ -168,6 +170,8 @@ pub struct HudView {
     pub hand: Vec<crate::hand::HandCard>,
     /// Synergies the hand's cards make together.
     pub hand_links: Vec<crate::hand::HandLink>,
+    /// The deck beside the hand: draw pile, riffle, cards flicking out.
+    pub hand_pile: crate::hand::HandPile,
     /// Nerve: (now, most). (0, 0) hides the hearts (co-op).
     pub nerve: (u32, u32),
     /// A nightmare's remaining hp (0..1) and whether it can be hurt now.
@@ -295,6 +299,10 @@ pub(crate) fn palette_ink(h: crate::store::HudPalette) -> [u8; 3] {
         Amber => [255, 190, 90],
         Phosphor => [140, 255, 150],
         Vapor => [255, 170, 235],
+        Ice => [190, 235, 255],
+        Rose => [255, 160, 190],
+        Blood => [255, 70, 70],
+        Mono => [225, 225, 225],
     }
 }
 
@@ -310,6 +318,10 @@ pub(crate) fn palette_ghosts(h: crate::store::HudPalette) -> ([u8; 3], [u8; 3]) 
         Amber => ([255, 80, 20], [255, 230, 120]),
         Phosphor => ([20, 120, 60], [200, 255, 120]),
         Vapor => ([90, 220, 255], [190, 90, 255]),
+        Ice => ([60, 120, 255], [230, 250, 255]),
+        Rose => ([200, 40, 110], [255, 220, 200]),
+        Blood => ([120, 0, 10], [255, 150, 60]),
+        Mono => ([90, 90, 90], [255, 255, 255]),
     }
 }
 
@@ -332,6 +344,17 @@ pub(crate) fn eye_iris(e: crate::store::EyeStyle, time: f32) -> [u8; 3] {
         Frost => [150, 230, 255],
         Gold => [255, 205, 60],
         Void => [8, 0, 16],
+        Sea => [40, 200, 190],
+        Blood => [200, 10, 30],
+        Rose => [255, 130, 170],
+        Storm => {
+            // Mostly slate, with a flicker of lightning.
+            let flash = ((time * 7.0).sin() * (time * 2.3).sin()).max(0.0);
+            let k = (flash * 255.0) as u8;
+            [90u8.saturating_add(k / 2), 110u8.saturating_add(k / 2), 170u8.saturating_add(k / 3)]
+        }
+        Sun => [255, 150, 30],
+        Moon => [215, 220, 235],
     }
 }
 
@@ -440,7 +463,7 @@ fn design_size(v: &HudView) -> Option<(f32, f32)> {
 /// `design_size` from just the screen and tab (the mouse needs it too).
 pub fn design_for(mode: Mode, store_tab: usize) -> Option<(f32, f32)> {
     match mode {
-        Mode::Store if store_tab == 0 => Some((1100.0, 600.0)),
+        Mode::Store if store_tab == 0 => Some((1100.0, 680.0)),
         Mode::Store => Some((800.0, 450.0)),
         Mode::Loadout => Some((800.0, 450.0)),
         Mode::Booklet => Some((1100.0, 112.0 + crate::booklet_ui::CARD_SIZE.y + 170.0)),
@@ -534,7 +557,7 @@ pub fn draw(
         Mode::Settings => return crate::settings_ui::draw(&p, screen, v, &v.settings),
         Mode::Codex => return crate::codex_ui::draw(&p, screen, v, &v.codex),
         Mode::Memories => return crate::memories_ui::draw(&p, screen, v, &v.memories),
-        Mode::Loadout => return crate::loadout_ui::draw(ctx, &p, screen, v, art),
+        Mode::Loadout => return crate::deck_ui::draw(ctx, &p, screen, v, art), // === deck ===
         Mode::Merge => return crate::merge_ui::draw(ctx, &p, screen, v, art),
         Mode::Ending => return crate::ending::draw(&p, screen, v),
         Mode::Lobby => return crate::coop_game::draw_lobby(&p, screen, v),
@@ -556,7 +579,7 @@ pub fn draw(
     // === combat ===
     foe_pips(&p, screen, v);
     // === end combat ===
-    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, v.time, v.settings_snapshot.reduced_motion, art);
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);

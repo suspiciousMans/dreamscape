@@ -6,7 +6,8 @@
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use crate::pixels::icons;
 use crate::store::{
-    CardStyle, Crystal, EyeStyle, HudPalette, Item, Perk, Shelf, State, MAX_CHARGES, PERK_RUNS,
+    CardBack, CardStyle, Crystal, EyeStyle, HudPalette, Item, Perk, Shelf, State, MAX_CHARGES,
+    PERK_RUNS,
 };
 use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
 
@@ -14,6 +15,16 @@ use engine::ui::egui::{self, Align2, FontId, Pos2, Rect, Stroke, Vec2};
 pub fn cursor_item(shelf: usize, col: usize) -> Item {
     let items = Shelf::ALL[shelf.min(Shelf::ALL.len() - 1)].items();
     items[col.min(items.len() - 1)]
+}
+
+/// Icons visible on one shelf row; longer shelves scroll.
+pub const ROW_SLOTS: usize = 7;
+
+/// First visible column of a shelf of `len` items with the cursor at `col`:
+/// the cursor stays inside the window, centred when there is room.
+pub fn window_start(col: usize, len: usize) -> usize {
+    col.saturating_sub(ROW_SLOTS / 2)
+        .min(len.saturating_sub(ROW_SLOTS))
 }
 
 /// Moving between shelves keeps the column if it can.
@@ -30,10 +41,17 @@ fn icon_for(item: Item) -> &'static [&'static str; icons::SIZE] {
         Item::Perk(Perk::SecondWind) => &icons::WIND,
         Item::Perk(Perk::DustMagnet) => &icons::MAGNET,
         Item::Perk(Perk::LongStride) => &icons::BOOT,
+        Item::Perk(Perk::PocketDust) => &icons::SHARD,
+        Item::Perk(Perk::Haggler) => &icons::LOCK,
+        Item::Perk(Perk::DeepShelves) => &icons::CARD,
+        Item::Perk(Perk::SpareDie) => &icons::REWIND,
+        Item::Perk(Perk::Shrug) => &icons::STEP,
+        Item::Perk(Perk::Bounty) => &icons::SLAM,
         Item::Eye(_) => &icons::EYE,
         Item::Crystal(_) => &icons::GEM,
         Item::Card(_) => &icons::CARD,
         Item::Hud(_) => &icons::INK,
+        Item::Back(_) => &icons::CARD,
     }
 }
 
@@ -51,6 +69,14 @@ fn icon_colors(item: Item, v: &HudView) -> ([u8; 3], [u8; 3]) {
         Item::Card(CardStyle::Plain) => (ink(v), [150, 150, 170]),
         Item::Card(CardStyle::Gilt) => ([255, 205, 90], [255, 235, 160]),
         Item::Card(CardStyle::Holo) => (hue(t * 0.3), hue(t * 0.3 + 0.5)),
+        Item::Card(s) => {
+            let c = crate::booklet_ui::style_frame(s, [150, 150, 170], t, 1);
+            (c, ink(v))
+        }
+        Item::Back(b) => {
+            let (field, pattern) = b.colors();
+            (pattern, field.map(|c| c.saturating_add(70)))
+        }
         Item::Hud(h) => {
             let c = crate::hud::palette_ink(h);
             (c, c)
@@ -172,6 +198,13 @@ pub fn patter(item: Item, state: State, dust: u32) -> &'static str {
             Item::Perk(Perk::SecondWind) => "the dream forgives you. once a night.",
             Item::Perk(Perk::DustMagnet) => "dust sticks to you. lovely.",
             Item::Perk(Perk::LongStride) => "longer legs. it's only a dream.",
+            Item::Perk(Perk::PocketDust) => "something jingling in your pocket.",
+            Item::Perk(Perk::Haggler) => "i'll cut my prices. only for you.",
+            Item::Perk(Perk::DeepShelves) => "i found another card under the counter.",
+            Item::Perk(Perk::SpareDie) => "roll again. who is counting?",
+            Item::Perk(Perk::Shrug) => "say no and i'll pay you for it.",
+            Item::Perk(Perk::Bounty) => "kill the big ones. i pay twice.",
+            Item::Back(_) => "how the deck looks from outside.",
             Item::Eye(_) => "a new way of seeing things.",
             Item::Crystal(_) => "a different shape to be.",
             Item::Card(_) => "frames for the pages of you.",
@@ -233,11 +266,7 @@ fn preview(p: &egui::Painter, r: Rect, item: Item, v: &HudView) {
             }
         }
         Item::Card(style) => {
-            let frame = match style {
-                CardStyle::Plain => [255, 80, 200],
-                CardStyle::Gilt => [255, 205, 90],
-                CardStyle::Holo => hue(v.time * 0.3),
-            };
+            let frame = crate::booklet_ui::style_frame(style, [255, 80, 200], v.time, 1);
             let card = Rect::from_center_size(c, Vec2::new(96.0, 140.0));
             p.rect_filled(card, 0.0, rgba([16, 9, 30], 1.0));
             p.rect_stroke(
@@ -273,8 +302,45 @@ fn preview(p: &egui::Painter, r: Rect, item: Item, v: &HudView) {
                 );
             }
         }
+        Item::Back(b) => {
+            let (field, pattern) = b.colors();
+            let card = Rect::from_center_size(c, Vec2::new(96.0, 140.0));
+            p.rect_filled(card, 0.0, rgba(field, 1.0));
+            p.rect_stroke(card.shrink(3.0), 0.0, Stroke::new(3.0_f32, rgba(pattern, 0.9)));
+            card_back_pattern(p, card.shrink(10.0), b, pattern);
+        }
         Item::Perk(_) => {
             draw_icon(p, c, 12.0, item, v, 1.0);
+        }
+    }
+}
+
+/// A simple pixel pattern for each back (also the DECK stream's to reuse).
+pub(crate) fn card_back_pattern(p: &egui::Painter, r: Rect, b: CardBack, col: [u8; 3]) {
+    let cell = 8.0;
+    let (nx, ny) = ((r.width() / cell) as i32, (r.height() / cell) as i32);
+    for y in 0..ny {
+        for x in 0..nx {
+            let on = match b {
+                CardBack::Dusk => (x + y) % 4 == 0,
+                CardBack::Moth => {
+                    let (cx, cy) = (nx / 2, ny / 2);
+                    let (dx, dy) = ((x - cx).abs(), (y - cy).abs());
+                    dx + dy / 2 == 2 || (dx == 0 && dy < 3)
+                }
+                CardBack::Eye => {
+                    let (dx, dy) = ((x - nx / 2).abs(), (y - ny / 2).abs());
+                    dx * dx + 4 * dy * dy <= 20 && dx * dx + 4 * dy * dy >= 6
+                        || (dx == 0 && dy == 0)
+                }
+                CardBack::Stars => (x * 7 + y * 13) % 11 == 0,
+                CardBack::Checker => (x + y) % 2 == 0,
+                CardBack::Ember => y > ny / 2 && (x + y * 2) % 3 == 0,
+            };
+            if on {
+                let at = r.min + Vec2::new(x as f32 * cell, y as f32 * cell);
+                p.rect_filled(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), 0.0, rgba(col, 0.8));
+            }
         }
     }
 }
@@ -344,13 +410,41 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let slot = 64.0;
     let mut y = screen.top() + 104.0;
     for (si, shelf) in Shelf::ALL.iter().enumerate() {
+        let items = shelf.items();
+        let start = if si == v.shop_shelf {
+            window_start(v.shop_col, items.len())
+        } else {
+            0
+        };
+        let label = if items.len() > ROW_SLOTS && si == v.shop_shelf {
+            format!("{}  {}/{}", shelf.label(), v.shop_col + 1, items.len())
+        } else if items.len() > ROW_SLOTS {
+            format!("{}  ({})", shelf.label(), items.len())
+        } else {
+            shelf.label().to_string()
+        };
         p.text(
             Pos2::new(left, y),
             Align2::LEFT_TOP,
-            shelf.label(),
+            label,
             FontId::monospace(16.0),
             rgba(ink(v), if si == v.shop_shelf { 0.9 } else { 0.4 }),
         );
+        // More to the left / right: little arrows at the plank's ends.
+        for (show, x, glyph) in [
+            (start > 0, left - 22.0, "<"),
+            (start + ROW_SLOTS < items.len(), left + ROW_SLOTS as f32 * slot + 10.0, ">"),
+        ] {
+            if show {
+                p.text(
+                    Pos2::new(x, y + 20.0 + slot * 0.3),
+                    Align2::LEFT_TOP,
+                    glyph,
+                    FontId::monospace(22.0),
+                    rgba(hue(v.time * 0.2), 0.9),
+                );
+            }
+        }
         let row_y = y + 20.0;
         // Wooden shelf plank.
         p.rect_filled(
@@ -369,8 +463,9 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             0.0,
             rgba([120, 80, 100], 1.0),
         );
-        for (ci, item) in shelf.items().into_iter().enumerate() {
-            let c = Pos2::new(left + ci as f32 * slot + slot * 0.5, row_y + slot * 0.45);
+        for (vi, item) in items.iter().copied().skip(start).take(ROW_SLOTS).enumerate() {
+            let ci = start + vi;
+            let c = Pos2::new(left + vi as f32 * slot + slot * 0.5, row_y + slot * 0.45);
             let is_sel = si == v.shop_shelf && ci == v.shop_col;
             let state = state_of(v, item);
             let dim = match state {
@@ -401,7 +496,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
                 rgba(col, dim.max(0.6)),
             );
         }
-        y += slot + 26.0;
+        y += slot + 18.0;
     }
 
     // Preview + details, right.
@@ -497,6 +592,19 @@ mod tests {
             }
         }
         assert_eq!(seen, CATALOG.to_vec());
+    }
+
+    #[test]
+    fn long_shelves_scroll_and_keep_the_cursor_visible() {
+        for len in 1..40 {
+            for col in 0..len {
+                let s = window_start(col, len);
+                assert!(col >= s && col < s + ROW_SLOTS, "len {len} col {col} start {s}");
+                assert!(s + ROW_SLOTS <= len.max(ROW_SLOTS));
+            }
+        }
+        assert_eq!(window_start(0, 13), 0);
+        assert_eq!(window_start(12, 13), 6);
     }
 
     #[test]

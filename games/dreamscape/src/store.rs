@@ -16,6 +16,18 @@ pub const SLOW_HEART_GRACE: f32 = 2.5;
 pub const DEEP_MEMORY_BONUS: f32 = 0.30;
 pub const DUST_MAGNET: f32 = 1.5;
 pub const LONG_STRIDE: f32 = 1.15;
+/// Dust in your pocket when a run starts (spendable at the moth's).
+pub const POCKET_DUST: u32 = 8;
+/// Percent off every price in the moth's room.
+pub const HAGGLER_PCT: u32 = 25;
+/// Extra cards on the moth's shelf.
+pub const DEEP_SHELVES_STOCK: usize = 1;
+/// Extra pick rerolls for the run.
+pub const SPARE_DIE_REROLLS: u32 = 1;
+/// Extra dust for skipping a pick.
+pub const SHRUG_DUST: u32 = 5;
+/// Nightmare bounty multiplier.
+pub const BOUNTY_MULT: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Perk {
@@ -33,6 +45,18 @@ pub enum Perk {
     DustMagnet,
     /// Move 15% faster.
     LongStride,
+    /// Start the run with [`POCKET_DUST`] dust.
+    PocketDust,
+    /// The moth's prices are [`HAGGLER_PCT`]% lower.
+    Haggler,
+    /// The moth's shelf holds one more card.
+    DeepShelves,
+    /// One extra reroll of the after-dream pick.
+    SpareDie,
+    /// Skipping a pick pays [`SHRUG_DUST`] more dust.
+    Shrug,
+    /// A beaten nightmare pays double dust.
+    Bounty,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,6 +68,12 @@ pub enum EyeStyle {
     Frost,
     Gold,
     Void,
+    Sea,
+    Blood,
+    Rose,
+    Storm,
+    Sun,
+    Moon,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,6 +82,37 @@ pub enum CardStyle {
     Plain,
     Gilt,
     Holo,
+    Ember,
+    Frost,
+    Neon,
+    Bone,
+}
+
+/// The back of a card in the deck stack and the hand (painted by the DECK
+/// stream; the store only remembers the choice).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardBack {
+    #[default]
+    Dusk,
+    Moth,
+    Eye,
+    Stars,
+    Checker,
+    Ember,
+}
+
+impl CardBack {
+    /// (field, pattern) colours for a simple painted back.
+    pub fn colors(self) -> ([u8; 3], [u8; 3]) {
+        match self {
+            CardBack::Dusk => ([30, 18, 56], [150, 130, 210]),
+            CardBack::Moth => ([40, 20, 60], [255, 210, 80]),
+            CardBack::Eye => ([10, 10, 30], [120, 230, 255]),
+            CardBack::Stars => ([8, 6, 34], [255, 255, 200]),
+            CardBack::Checker => ([60, 20, 40], [240, 200, 220]),
+            CardBack::Ember => ([50, 14, 8], [255, 130, 40]),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +122,10 @@ pub enum HudPalette {
     Amber,
     Phosphor,
     Vapor,
+    Ice,
+    Rose,
+    Blood,
+    Mono,
 }
 
 /// The dreamer's own crystal colour.
@@ -72,6 +137,11 @@ pub enum Crystal {
     Jade,
     Obsidian,
     Prism,
+    Sapphire,
+    Topaz,
+    Amethyst,
+    Opal,
+    Garnet,
 }
 
 impl Crystal {
@@ -83,6 +153,11 @@ impl Crystal {
             Crystal::Jade => [60, 220, 140, 255],
             Crystal::Obsidian => [40, 25, 60, 255],
             Crystal::Prism => [255, 255, 255, 255],
+            Crystal::Sapphire => [60, 110, 255, 255],
+            Crystal::Topaz => [255, 190, 50, 255],
+            Crystal::Amethyst => [170, 90, 230, 255],
+            Crystal::Opal => [200, 240, 230, 255],
+            Crystal::Garnet => [150, 20, 40, 255],
         }
     }
 }
@@ -94,6 +169,7 @@ pub enum Item {
     Card(CardStyle),
     Hud(HudPalette),
     Crystal(Crystal),
+    Back(CardBack),
 }
 
 pub struct Info {
@@ -110,15 +186,17 @@ pub enum Shelf {
     Crystals,
     Frames,
     Palettes,
+    Trinkets,
 }
 
 impl Shelf {
-    pub const ALL: [Shelf; 5] = [
+    pub const ALL: [Shelf; 6] = [
         Shelf::Perks,
         Shelf::Eyes,
         Shelf::Crystals,
         Shelf::Frames,
         Shelf::Palettes,
+        Shelf::Trinkets,
     ];
 
     pub fn label(self) -> &'static str {
@@ -128,6 +206,7 @@ impl Shelf {
             Shelf::Crystals => "CRYSTALS",
             Shelf::Frames => "CARD FRAMES",
             Shelf::Palettes => "HUD INK",
+            Shelf::Trinkets => "CARD BACKS",
         }
     }
 
@@ -148,6 +227,7 @@ impl Item {
             Item::Crystal(_) => Shelf::Crystals,
             Item::Card(_) => Shelf::Frames,
             Item::Hud(_) => Shelf::Palettes,
+            Item::Back(_) => Shelf::Trinkets,
         }
     }
 
@@ -163,31 +243,62 @@ impl Item {
             Perk(self::Perk::SecondWind) => ("SECOND WIND", "first catch each dream is free", 40),
             Perk(self::Perk::DustMagnet) => ("DUST MAGNET", "+50% dream dust", 50),
             Perk(self::Perk::LongStride) => ("LONG STRIDE", "move 15% faster", 35),
+            Perk(self::Perk::PocketDust) => ("POCKET DUST", "start each run with 8 dust", 30),
+            Perk(self::Perk::Haggler) => ("HAGGLER", "the moth's prices are 25% off", 40),
+            Perk(self::Perk::DeepShelves) => ("DEEP SHELVES", "the moth stocks 1 more card", 35),
+            Perk(self::Perk::SpareDie) => ("SPARE DIE", "one extra pick reroll", 30),
+            Perk(self::Perk::Shrug) => ("SHRUG", "skipping a pick pays +5 dust", 25),
+            Perk(self::Perk::Bounty) => ("BOUNTY", "nightmares pay double dust", 45),
             Eye(EyeStyle::Dream) => ("DREAMING EYE", "the eye you were born with", 0),
             Eye(EyeStyle::Ember) => ("EMBER EYE", "a coal that won't go out", 30),
             Eye(EyeStyle::Toxic) => ("TOXIC EYE", "glows like something spilled", 30),
             Eye(EyeStyle::Frost) => ("FROST EYE", "cold, clear, patient", 30),
             Eye(EyeStyle::Gold) => ("GILDED EYE", "it has seen the good ending", 80),
             Eye(EyeStyle::Void) => ("VOID EYE", "no iris. just a question", 60),
+            Eye(EyeStyle::Sea) => ("SEA EYE", "a tide pool, looking back", 35),
+            Eye(EyeStyle::Blood) => ("BLOOD EYE", "it has not slept in days", 40),
+            Eye(EyeStyle::Rose) => ("ROSE EYE", "soft, and a little sorry", 35),
+            Eye(EyeStyle::Storm) => ("STORM EYE", "lightning behind the lid", 55),
+            Eye(EyeStyle::Sun) => ("SUN EYE", "too warm for a dream", 50),
+            Eye(EyeStyle::Moon) => ("MOON EYE", "pale, round, borrowed", 45),
             Crystal(self::Crystal::Pearl) => ("PEARL", "the shape you fell asleep in", 0),
             Crystal(self::Crystal::Ruby) => ("RUBY", "a heartbeat you can see", 35),
             Crystal(self::Crystal::Jade) => ("JADE", "calm, green, lucky", 35),
             Crystal(self::Crystal::Obsidian) => ("OBSIDIAN", "a hole shaped like you", 55),
             Crystal(self::Crystal::Prism) => ("PRISM", "every colour at once", 90),
+            Crystal(self::Crystal::Sapphire) => ("SAPPHIRE", "deep water, held still", 40),
+            Crystal(self::Crystal::Topaz) => ("TOPAZ", "a streetlamp in a stone", 40),
+            Crystal(self::Crystal::Amethyst) => ("AMETHYST", "quiet, violet, sure of itself", 45),
+            Crystal(self::Crystal::Opal) => ("OPAL", "milk and a little fire", 60),
+            Crystal(self::Crystal::Garnet) => ("GARNET", "old blood, well kept", 50),
             Card(CardStyle::Plain) => ("PLAIN FRAMES", "cards as they surface", 0),
             Card(CardStyle::Gilt) => ("GILT FRAMES", "gold leaf on every card", 60),
             Card(CardStyle::Holo) => ("HOLO FRAMES", "every card catches the light", 120),
+            Card(CardStyle::Ember) => ("EMBER FRAMES", "edges that smoulder", 50),
+            Card(CardStyle::Frost) => ("FROST FRAMES", "rimed, cold to hold", 50),
+            Card(CardStyle::Neon) => ("NEON FRAMES", "tubes humming round each card", 75),
+            Card(CardStyle::Bone) => ("BONE FRAMES", "carved, yellowed, patient", 55),
             Hud(HudPalette::Dream) => ("DREAM INK", "pale violet, red and cyan ghosts", 0),
             Hud(HudPalette::Amber) => ("AMBER CRT", "a terminal left on overnight", 45),
             Hud(HudPalette::Phosphor) => ("PHOSPHOR", "green, like old radar", 45),
             Hud(HudPalette::Vapor) => ("VAPOR", "a mall at 3 am", 45),
+            Hud(HudPalette::Ice) => ("ICE INK", "breath on a cold window", 40),
+            Hud(HudPalette::Rose) => ("ROSE INK", "a letter never sent", 40),
+            Hud(HudPalette::Blood) => ("BLOOD INK", "red text, no apology", 50),
+            Hud(HudPalette::Mono) => ("MONO INK", "a photograph of a screen", 35),
+            Back(CardBack::Dusk) => ("DUSK BACK", "the back you were dealt", 0),
+            Back(CardBack::Moth) => ("MOTH BACK", "one wing on every card", 25),
+            Back(CardBack::Eye) => ("EYE BACK", "the deck watches you draw", 35),
+            Back(CardBack::Stars) => ("STAR BACK", "a sky nobody named", 30),
+            Back(CardBack::Checker) => ("CHECKER BACK", "a floor you know from somewhere", 30),
+            Back(CardBack::Ember) => ("EMBER BACK", "warm to the touch", 45),
         };
         Info { name, blurb, price }
     }
 }
 
 /// Everything on the shelves, in display order.
-pub const CATALOG: [Item; 25] = [
+pub const CATALOG: [Item; 56] = [
     Item::Perk(Perk::FirstLight),
     Item::Perk(Perk::SlowHeart),
     Item::Perk(Perk::DeepMemory),
@@ -195,24 +306,55 @@ pub const CATALOG: [Item; 25] = [
     Item::Perk(Perk::SecondWind),
     Item::Perk(Perk::DustMagnet),
     Item::Perk(Perk::LongStride),
+    Item::Perk(Perk::PocketDust),
+    Item::Perk(Perk::Haggler),
+    Item::Perk(Perk::DeepShelves),
+    Item::Perk(Perk::SpareDie),
+    Item::Perk(Perk::Shrug),
+    Item::Perk(Perk::Bounty),
     Item::Eye(EyeStyle::Dream),
     Item::Eye(EyeStyle::Ember),
     Item::Eye(EyeStyle::Toxic),
     Item::Eye(EyeStyle::Frost),
     Item::Eye(EyeStyle::Gold),
     Item::Eye(EyeStyle::Void),
+    Item::Eye(EyeStyle::Sea),
+    Item::Eye(EyeStyle::Blood),
+    Item::Eye(EyeStyle::Rose),
+    Item::Eye(EyeStyle::Storm),
+    Item::Eye(EyeStyle::Sun),
+    Item::Eye(EyeStyle::Moon),
     Item::Crystal(Crystal::Pearl),
     Item::Crystal(Crystal::Ruby),
     Item::Crystal(Crystal::Jade),
     Item::Crystal(Crystal::Obsidian),
     Item::Crystal(Crystal::Prism),
+    Item::Crystal(Crystal::Sapphire),
+    Item::Crystal(Crystal::Topaz),
+    Item::Crystal(Crystal::Amethyst),
+    Item::Crystal(Crystal::Opal),
+    Item::Crystal(Crystal::Garnet),
     Item::Card(CardStyle::Plain),
     Item::Card(CardStyle::Gilt),
     Item::Card(CardStyle::Holo),
+    Item::Card(CardStyle::Ember),
+    Item::Card(CardStyle::Frost),
+    Item::Card(CardStyle::Neon),
+    Item::Card(CardStyle::Bone),
     Item::Hud(HudPalette::Dream),
     Item::Hud(HudPalette::Amber),
     Item::Hud(HudPalette::Phosphor),
     Item::Hud(HudPalette::Vapor),
+    Item::Hud(HudPalette::Ice),
+    Item::Hud(HudPalette::Rose),
+    Item::Hud(HudPalette::Blood),
+    Item::Hud(HudPalette::Mono),
+    Item::Back(CardBack::Dusk),
+    Item::Back(CardBack::Moth),
+    Item::Back(CardBack::Eye),
+    Item::Back(CardBack::Stars),
+    Item::Back(CardBack::Checker),
+    Item::Back(CardBack::Ember),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,6 +400,9 @@ pub struct Stash {
     pub hud: HudPalette,
     #[serde(default)]
     pub crystal: Crystal,
+    /// The chosen card back (old saves: the default).
+    #[serde(default)]
+    pub card_back: CardBack,
     /// Lifetime dust earned (shown in the shop, and a little brag).
     #[serde(default)]
     pub dust_earned: u32,
@@ -274,6 +419,7 @@ impl Stash {
             Item::Card(c) => self.card == c,
             Item::Hud(h) => self.hud == h,
             Item::Crystal(c) => self.crystal == c,
+            Item::Back(b) => self.card_back == b,
             Item::Perk(_) => false,
         }
     }
@@ -284,6 +430,7 @@ impl Stash {
             Item::Card(c) => self.card = c,
             Item::Hud(h) => self.hud = h,
             Item::Crystal(c) => self.crystal = c,
+            Item::Back(b) => self.card_back = b,
             Item::Perk(_) => {}
         }
     }
@@ -377,6 +524,38 @@ impl Stash {
     }
 }
 
+/// What the run's active perks change besides the old hard-wired ones, in one
+/// place so `main.rs` only reads fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerkFx {
+    /// Dust to start the run with.
+    pub start_dust: u32,
+    /// Percent off the moth's prices.
+    pub moth_pct_off: u32,
+    /// Cards added to the moth's shelf.
+    pub shelf_bonus: usize,
+    /// Extra pick rerolls.
+    pub rerolls: u32,
+    /// Extra dust when a pick is skipped.
+    pub skip_bonus: u32,
+    /// Nightmare dust multiplier (1 = none).
+    pub nightmare_mult: u32,
+}
+
+impl PerkFx {
+    pub fn of(perks: &[Perk]) -> PerkFx {
+        let has = |p| perks.contains(&p);
+        PerkFx {
+            start_dust: if has(Perk::PocketDust) { POCKET_DUST } else { 0 },
+            moth_pct_off: if has(Perk::Haggler) { HAGGLER_PCT } else { 0 },
+            shelf_bonus: if has(Perk::DeepShelves) { DEEP_SHELVES_STOCK } else { 0 },
+            rerolls: if has(Perk::SpareDie) { SPARE_DIE_REROLLS } else { 0 },
+            skip_bonus: if has(Perk::Shrug) { SHRUG_DUST } else { 0 },
+            nightmare_mult: if has(Perk::Bounty) { BOUNTY_MULT } else { 1 },
+        }
+    }
+}
+
 /// Dust for a finished run. `deepest` depth, `shards` collected, `kept` cards
 /// remembered, `new_names` cards whose name wasn't already in the booklet.
 pub fn run_dust(deepest: u32, shards: u32, new_names: u32, magnet: bool) -> u32 {
@@ -415,7 +594,8 @@ mod tests {
                 Item::Eye(EyeStyle::Dream),
                 Item::Crystal(Crystal::Pearl),
                 Item::Card(CardStyle::Plain),
-                Item::Hud(HudPalette::Dream)
+                Item::Hud(HudPalette::Dream),
+                Item::Back(CardBack::Dusk)
             ]
         );
         for i in CATALOG {
@@ -524,6 +704,86 @@ mod tests {
         assert_eq!(s.runs_left(Perk::FirstLight), 1);
         let saved = ron::to_string(&s).unwrap();
         assert!(!saved.contains("armed"), "{saved}");
+    }
+
+    #[test]
+    fn the_catalog_is_big_and_priced_against_a_run() {
+        let n = |s: Shelf| s.items().len();
+        assert!(n(Shelf::Perks) >= 13 && n(Shelf::Eyes) >= 12 && n(Shelf::Crystals) >= 10);
+        assert!(n(Shelf::Frames) >= 7 && n(Shelf::Palettes) >= 8 && n(Shelf::Trinkets) >= 6);
+        let typical = run_dust(6, 3, 4, false);
+        for i in CATALOG {
+            let p = i.info().price;
+            assert!(p <= 120, "{:?} costs {p}", i);
+            if matches!(i, Item::Perk(_)) {
+                assert!(p <= typical, "{:?} is out of reach of one run", i);
+            }
+        }
+    }
+
+    #[test]
+    fn each_new_perk_has_a_real_strength() {
+        let none = PerkFx::of(&[]);
+        assert_eq!(
+            none,
+            PerkFx {
+                start_dust: 0,
+                moth_pct_off: 0,
+                shelf_bonus: 0,
+                rerolls: 0,
+                skip_bonus: 0,
+                nightmare_mult: 1
+            }
+        );
+        assert_eq!(PerkFx::of(&[Perk::PocketDust]).start_dust, POCKET_DUST);
+        assert_eq!(PerkFx::of(&[Perk::Haggler]).moth_pct_off, HAGGLER_PCT);
+        assert_eq!(PerkFx::of(&[Perk::DeepShelves]).shelf_bonus, DEEP_SHELVES_STOCK);
+        assert_eq!(PerkFx::of(&[Perk::SpareDie]).rerolls, SPARE_DIE_REROLLS);
+        assert_eq!(PerkFx::of(&[Perk::Shrug]).skip_bonus, SHRUG_DUST);
+        assert_eq!(PerkFx::of(&[Perk::Bounty]).nightmare_mult, BOUNTY_MULT);
+        // The old perks change none of these.
+        assert_eq!(PerkFx::of(&[Perk::FirstLight, Perk::DustMagnet]), none);
+    }
+
+    #[test]
+    fn card_backs_are_bought_once_and_equipped() {
+        let mut s = Stash {
+            dust: 60,
+            ..Default::default()
+        };
+        assert_eq!(s.state(Item::Back(CardBack::Dusk)), State::Equipped);
+        assert_eq!(s.select(Item::Back(CardBack::Moth)), Outcome::Bought);
+        assert_eq!((s.dust, s.card_back), (35, CardBack::Moth));
+        assert_eq!(s.select(Item::Back(CardBack::Dusk)), Outcome::Equipped);
+        assert_eq!(s.select(Item::Back(CardBack::Moth)), Outcome::Equipped);
+        assert_eq!(s.dust, 35);
+        assert_eq!(Shelf::Trinkets.items().len(), 6);
+    }
+
+    #[test]
+    fn an_old_booklet_stash_loses_nothing() {
+        // Written before the Trinkets shelf, the new perks and cosmetics.
+        let old = "(dust: 77, owned: [Eye(Gold), Crystal(Ruby), Card(Holo), Hud(Vapor)], \
+                   charges: [(FirstLight, 2), (LongStride, 9)], eye: Gold, card: Holo, \
+                   hud: Vapor, crystal: Ruby, dust_earned: 300)";
+        let mut s: Stash = ron::from_str(old).unwrap();
+        s.migrate();
+        assert_eq!((s.dust, s.dust_earned), (77, 300));
+        assert_eq!(s.card_back, CardBack::Dusk);
+        assert_eq!(s.runs_left(Perk::FirstLight), 2);
+        assert_eq!(s.runs_left(Perk::LongStride), 9);
+        assert_eq!(s.state(Item::Eye(EyeStyle::Gold)), State::Equipped);
+        assert_eq!(s.state(Item::Card(CardStyle::Holo)), State::Equipped);
+        assert_eq!(s.state(Item::Hud(HudPalette::Vapor)), State::Equipped);
+        assert_eq!(s.state(Item::Crystal(Crystal::Ruby)), State::Equipped);
+        // Everything bought before is still owned, nothing new is free.
+        s.eye = EyeStyle::Dream;
+        assert_eq!(s.state(Item::Eye(EyeStyle::Gold)), State::Owned);
+        assert!(matches!(s.state(Item::Eye(EyeStyle::Sea)), State::Buy(_)));
+        assert!(matches!(s.state(Item::Back(CardBack::Moth)), State::Buy(_)));
+        // And it round-trips with the new field.
+        let again: Stash = ron::from_str(&ron::to_string(&s).unwrap()).unwrap();
+        assert_eq!(again, s);
     }
 
     #[test]

@@ -375,6 +375,17 @@ impl Booklet {
         self.cards().find(|c| c.number == number)
     }
 
+    /// The card numbers of the deck this run draws from: the deck built on
+    /// the loadout screen (cards no longer in the booklet drop out), or
+    /// with none chosen, whatever the loadout rule would bring.
+    pub fn deck_numbers(&self) -> Vec<u32> {
+        let d = crate::deck::clean(&self.lore.deck, |n| self.card(n).is_some());
+        if !d.is_empty() {
+            return d;
+        }
+        self.loadout_cards().iter().map(|c| c.number).collect()
+    }
+
     /// The cards this run brings: the saved loadout (cards no longer in the
     /// booklet drop out), up to the unlocked slots. With nothing chosen,
     /// the newest cards with different abilities fill the slots.
@@ -586,6 +597,25 @@ pub(crate) mod tests {
             "a vanished card falls back to the default"
         );
         assert!(Booklet::default().loadout_cards().is_empty());
+    }
+
+    #[test]
+    fn the_deck_is_the_saved_cards_or_falls_back_to_the_loadout_rule() {
+        let mut b = Booklet::default();
+        b.add_run(
+            1,
+            &[
+                record(TheTunnel, 1, 1, 0.1, false),
+                record(SynesthesiaHall, 2, 2, 0.1, false),
+                record(Garden, 3, 3, 0.1, false),
+            ],
+        );
+        assert_eq!(b.deck_numbers(), vec![3], "old save: the loadout rule");
+        b.lore.deck = vec![2, 99, 1, 2];
+        assert_eq!(b.deck_numbers(), vec![2, 1], "unknown and repeated cards drop");
+        assert!(Booklet::default().deck_numbers().is_empty());
+        let old: crate::lore::Lore = ron::from_str("(loadout: [1])").unwrap();
+        assert!(old.deck.is_empty());
     }
 
     fn recalled(theme: DreamTheme, seed: u64, remembered: bool) -> Recalled {

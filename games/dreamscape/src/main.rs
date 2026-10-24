@@ -35,6 +35,8 @@ mod companion;
 mod coop;
 mod coop_game;
 mod crash;
+mod deck;
+mod deck_ui;
 mod dev;
 mod dissolve;
 mod dream;
@@ -90,6 +92,7 @@ mod settings;
 mod secrets;
 mod settings_ui;
 mod shop_ui;
+mod sorting;
 mod sounds;
 mod specials;
 mod steam;
@@ -614,6 +617,20 @@ pub struct DreamscapeGame {
     passive_fired: Vec<(Upgrade, f32)>,
     /// Names of the cards that hold the abilities, for the hand.
     hand_cards: Vec<(Ability, cards::Card)>,
+    // === deck ===
+    /// The run's deck (`None` = the fixed loadout: co-op, autopilot, resumed runs).
+    deck: Option<deck::Deck>,
+    /// The cards dealt first: they give the run's passives, edges and dreams.
+    deck_opening: Vec<cards::Card>,
+    /// Animation clock for the deck (seconds, runs while playing).
+    deck_clock: f32,
+    /// Per hand slot: `deck_clock` when its card was drawn (future = not yet).
+    deck_drawn_at: [f32; upgrades::HAND_SIZE],
+    /// `deck_clock` when a card was last shuffled in.
+    deck_riffle_at: f32,
+    /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
+    deck_leaving: Vec<(hand::HandCard, usize, f32)>,
+    // === end deck ===
     /// SLAM: the highest point of the hop, and whether LEAP made it a meteor.
     slam_apex: f32,
     slam_meteor: bool,
@@ -624,7 +641,7 @@ pub struct DreamscapeGame {
     /// The crack's hint has been shown this launch.
     secret_hint_given: bool,
     /// What the moth still has on the shelf in this dream.
-    moth_stock: Option<Vec<Upgrade>>,
+    moth_stock: Option<moth_shop::Shelf>,
     skittish: Option<Skittish>,
     /// Height of the ground you last stood on (for the climbing sound).
     ground_y: f32,
@@ -897,7 +914,7 @@ pub struct DreamscapeGame {
     /// Last direction the dreamer moved in (dash / blink aim).
     facing: Vec3,
     /// Ability keys pressed since the last update.
-    ability_requests: [bool; upgrades::ABILITY_SLOTS],
+    ability_requests: [bool; upgrades::HAND_SIZE],
 }
 
 /// Notes that a passive just did its work (only if the run holds it), so its
@@ -1023,6 +1040,12 @@ impl DreamscapeGame {
             ability_used: Vec::new(),
             passive_fired: Vec::new(),
             hand_cards: Vec::new(),
+            deck: None,
+            deck_opening: Vec::new(),
+            deck_clock: 0.0,
+            deck_drawn_at: [f32::MIN; upgrades::HAND_SIZE],
+            deck_riffle_at: hand::NEVER,
+            deck_leaving: Vec::new(),
             slam_apex: 0.0,
             slam_meteor: false,
             caches: Vec::new(),
@@ -1216,7 +1239,7 @@ impl DreamscapeGame {
             air_jumps_used: 0,
             jump_was_down: false,
             facing: Vec3::Z,
-            ability_requests: [false; upgrades::ABILITY_SLOTS],
+            ability_requests: [false; upgrades::HAND_SIZE],
         }
     }
 
@@ -1596,18 +1619,33 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
     }
 
-    /// After a beaten nightmare's reward, the moth offers to merge cards.
+    // === shop ===
+    /// After a beaten nightmare's reward (and on every `SHOP_EVERY`th depth)
+    /// the moth opens her shop. Merging lives in the store's `[m]` now.
+    /// Called once per pick, before `boss_reward` is cleared.
     fn moth_after_nightmare(&mut self) {
-        let cards: Vec<cards::Card> = self.booklet.cards().cloned().collect();
-        if self.boss_reward
-            && !self.autopilot
-            && self.prologue.is_none()
-            && self.coop.is_none()
-            && merge_ui::any_pair(&cards)
+        if self.autopilot
+            || self.prologue.is_some()
+            || self.coop.is_some()
+            || !moth_shop::due(
+                self.boss_reward,
+                self.director.depth,
+                self.director.sanctuary(),
+            )
         {
-            self.open_merge(hud::Mode::Playing);
+            return;
         }
+        self.open_moth_shop_after_pick();
     }
+
+    fn moth_terms(&self) -> moth_shop::Terms {
+        moth_shop::Terms::from_perks(&store::PerkFx::of(&self.perks))
+    }
+
+    fn perk_fx(&self) -> store::PerkFx {
+        store::PerkFx::of(&self.perks)
+    }
+    // === end shop ===
 
     fn skip_choice(&mut self) {
         if !matches!(self.choice, Some(ChoiceKind::Upgrade(_)))
@@ -1621,7 +1659,7 @@ impl DreamscapeGame {
         self.moth_after_nightmare();
         self.boss_reward = false;
         if !pacts::effects(&self.pacts).skip_pays_nothing {
-            self.bonus_dust += upgrades::SKIP_DUST; // === pacts ===
+            self.bonus_dust += upgrades::SKIP_DUST + self.perk_fx().skip_bonus; // === pacts ===
         }
         self.stats.skipped += 1;
         self.coop_ready();
@@ -1676,6 +1714,7 @@ impl DreamscapeGame {
                 // === pacts ===
                 if let (true, Some(p)) = (index == options.len(), self.pact_offer) {
                     self.take_pact(p);
+                    self.moth_after_nightmare();
                     self.boss_reward = false;
                     self.coop_ready();
                     return;
@@ -1874,11 +1913,145 @@ impl DreamscapeGame {
     }
 
     /// The equipped cards that hold abilities, with how long ago each was used.
+    // === deck ===
+    /// The card in hand slot `k` (the deck's, or for the fixed loadout the
+    /// card that teaches `ability`).
+    fn card_for_slot(&self, k: usize, ability: Ability) -> Option<&(Ability, cards::Card)> {
+        match &self.deck {
+            Some(d) => {
+                let number = d.hand().get(k).copied().flatten()?;
+                self.hand_cards.iter().find(|n| n.1.number == number)
+            }
+            None => self.hand_cards.iter().find(|n| n.0 == ability),
+        }
+    }
+
+    /// The deck's piles for the HUD.
+    fn hand_pile(&self) -> hand::HandPile {
+        match &self.deck {
+            Some(d) => hand::HandPile {
+                shown: true,
+                draw_count: d.draw_len(),
+                riffle_since: self.deck_clock - self.deck_riffle_at,
+                leaving: self
+                    .deck_leaving
+                    .iter()
+                    .map(|(card, slot, at)| hand::Leaving {
+                        card: card.clone(),
+                        slot: *slot,
+                        since: self.deck_clock - at,
+                    })
+                    .collect(),
+            },
+            None => hand::HandPile::default(),
+        }
+    }
+
+    /// Deck runs: advances the deck, and turns its draws into hand slots.
+    fn update_deck(&mut self, dt: f32) {
+        let Some(deck) = self.deck.as_mut() else {
+            return;
+        };
+        self.deck_clock += dt;
+        deck.tick(dt);
+        let events = deck.events();
+        for ev in events {
+            match ev {
+                deck::DeckEvent::Drawn { slot, card } => {
+                    let cd = self.deck.as_ref().map_or(0.0, |d| d.cooldown(card));
+                    if let Some(n) = self.hand_cards.iter().find(|n| n.1.number == card) {
+                        let ability = n.0;
+                        self.run.deck_draw(slot, ability, cd);
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                    }
+                }
+                deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
+                deck::DeckEvent::Played { .. } => {}
+            }
+        }
+        let clock = self.deck_clock;
+        self.deck_leaving.retain(|l| clock - l.2 < hand::LEAVE_TOTAL);
+    }
+
+    /// An ability just fired from `slot`: its card is discarded (the slot
+    /// waits to draw) and flicks out on the HUD.
+    fn deck_on_use(&mut self, slot: usize) {
+        if self.deck.is_none() || slot >= self.run.deck_slots {
+            return;
+        }
+        if let Some(snap) = self.hand_view().get(slot).cloned() {
+            self.deck_leaving.push((snap, slot, self.deck_clock));
+        }
+        let cooldown = self.run.abilities[slot].cooldown;
+        if let Some(d) = self.deck.as_mut() {
+            d.play(slot, cooldown);
+        }
+        self.run.abilities[slot].spent = true;
+    }
+
+    /// Which booklet cards this run's deck is built from, if it uses one.
+    /// `DREAMSCAPE_DECK=1,2,3` forces a deck (even on the autopilot).
+    fn deck_wanted(&self) -> Option<Vec<u32>> {
+        if self.prologue.is_some() || self.coop.is_some() {
+            return None;
+        }
+        if let Ok(list) = crate::dev::var("DREAMSCAPE_DECK") {
+            let forced: Vec<u32> = list.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            let forced = deck::clean(&forced, |n| self.booklet.card(n).is_some());
+            if !forced.is_empty() {
+                return Some(forced);
+            }
+        }
+        if self.autopilot {
+            return None;
+        }
+        let nums = self.booklet.deck_numbers();
+        (!nums.is_empty()).then_some(nums)
+    }
+
+    /// Starts the deck for a run and returns the opening hand. `None` for
+    /// the fixed loadout.
+    fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
+        self.deck = None;
+        self.deck_opening.clear();
+        self.deck_leaving.clear();
+        self.deck_riffle_at = hand::NEVER;
+        let nums = self.deck_wanted()?;
+        // Ascension rule 13 takes a slot from the hand, as it did from the loadout.
+        let cut = self.booklet.lore.slots().saturating_sub(self.asc_slots());
+        let hand_size = upgrades::HAND_SIZE.saturating_sub(cut).max(1);
+        let mut d = deck::Deck::new(&nums, self.director.dream_seed());
+        d.draw_to_fill(hand_size);
+        let mut opening = Vec::new();
+        for ev in d.events() {
+            if let deck::DeckEvent::Drawn { slot, card } = ev {
+                if let Some(c) = self.booklet.card(card) {
+                    opening.push(c.clone());
+                }
+                // The first hand fans out one card after another.
+                self.deck_drawn_at[slot] = self.deck_clock + 0.45 + 0.14 * slot as f32;
+            }
+        }
+        log::info!("Deck: {:?} (hand {hand_size})", nums);
+        self.hand_cards = nums
+            .iter()
+            .filter_map(|&n| self.booklet.card(n))
+            .map(|c| (powers::power(c.theme).active, c.clone()))
+            .collect();
+        self.deck = Some(d);
+        self.deck_opening = opening.clone();
+        Some(opening)
+    }
+    // === end deck ===
+
     fn hand_view(&self) -> Vec<hand::HandCard> {
         self.run
             .abilities
             .iter()
             .enumerate()
+            // === deck === spent ghosts finishing an effect are not cards in hand
+            .take(if self.run.deck_slots > 0 { self.run.deck_slots } else { usize::MAX })
+            // === end deck ===
             .map(|(k, a)| {
                 let (tint, tint2) = self
                     .ability_tints
@@ -1890,17 +2063,19 @@ impl DreamscapeGame {
                     .iter()
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
-                let passive = self
-                    .hand_cards
-                    .iter()
-                    .find(|n| n.0 == a.ability)
-                    .map(|n| powers::power(n.1.theme).passive);
-                let edge = self
-                    .hand_cards
-                    .iter()
-                    .find(|n| n.0 == a.ability)
-                    .and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
+                let slot_card = self.card_for_slot(k, a.ability);
+                let passive = slot_card.map(|n| powers::power(n.1.theme).passive);
+                let edge = slot_card.and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
+                // === deck ===
+                let since_draw = if self.deck.is_some() {
+                    self.deck_clock - self.deck_drawn_at[k.min(upgrades::HAND_SIZE - 1)]
+                } else {
+                    hand::NEVER
+                };
+                // === end deck ===
                 hand::HandCard {
+                    since_draw: if since_draw < 0.0 { 0.0 } else { since_draw },
+                    empty: a.spent || since_draw < 0.0,
                     edge: edge.map(|e| (e.name(), e.color())),
                     edge_since: edge
                         .and_then(|e| self.edge_fired.iter().find(|f| f.0 == e))
@@ -1915,11 +2090,7 @@ impl DreamscapeGame {
                         .iter()
                         .any(|u| matches!(u, Upgrade::Cursed(_))),
                     ability: a.ability.name(),
-                    card: self
-                        .hand_cards
-                        .iter()
-                        .find(|n| n.0 == a.ability)
-                        .map(|n| n.1.clone()),
+                    card: slot_card.map(|n| n.1.clone()),
                     key: upgrades::SLOT_KEYS[k],
                     charge: a.charge(self.run.cooldown_for(a.ability)),
                     active: a.is_active()
@@ -1985,7 +2156,12 @@ impl DreamscapeGame {
         } else {
             self.heart_timer = HEARTBEAT_EVERY * 0.6;
         }
-        let ready_now: Vec<bool> = self.run.abilities.iter().map(|a| a.cooldown <= 0.0).collect();
+        let ready_now: Vec<bool> = self
+            .run
+            .abilities
+            .iter()
+            .map(|a| a.cooldown <= 0.0 && !a.spent)
+            .collect();
         if self.was_ready.len() == ready_now.len()
             && ready_now.iter().zip(&self.was_ready).any(|(now, was)| *now && !*was)
             && self.mode == hud::Mode::Playing
@@ -3091,17 +3267,17 @@ impl DreamscapeGame {
     /// instead of a card have nothing to link.
     fn hand_links(&self) -> Vec<hand::HandLink> {
         let gives = |i: usize, u: Upgrade| {
-            let Some(a) = self.run.abilities.get(i).map(|s| s.ability) else {
+            let Some(a) = self.run.abilities.get(i).filter(|s| !s.spent).map(|s| s.ability) else {
                 return false;
             };
-            let card = self.hand_cards.iter().find(|n| n.0 == a).map(|n| &n.1);
+            let card = self.card_for_slot(i, a).map(|n| &n.1);
             u == Upgrade::Learn(a)
                 || card.is_some_and(|c| {
                     powers::power(c.theme).passive == u
                         || c.fused.is_some_and(|b| powers::power(b).passive == u)
                 })
         };
-        let n = self.run.abilities.len();
+        let n = if self.run.deck_slots > 0 { self.run.deck_slots } else { self.run.abilities.len() };
         self.run
             .synergies()
             .into_iter()
@@ -3154,9 +3330,10 @@ impl DreamscapeGame {
             },
             loadout: if self.mode == hud::Mode::Loadout {
                 loadout_ui::LoadoutView {
-                    cards: self.booklet.cards().cloned().collect(),
-                    chosen: self.booklet.lore.loadout.clone(),
-                    slots: self.asc_slots(),
+                    cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
+                    sort: self.settings.sort_loadout.label(),
+                    chosen: self.booklet.lore.deck.clone(), // === deck ===
+                    slots: deck::DECK_MAX,
                     selected: self.loadout_sel,
                     companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
                         let l = &self.booklet.lore;
@@ -3178,7 +3355,8 @@ impl DreamscapeGame {
             },
             merge: if self.mode == hud::Mode::Merge {
                 merge_ui::MergeView {
-                    cards: self.booklet.cards().cloned().collect(),
+                    cards: self.sorted_cards(self.settings.sort_merge).into_iter().cloned().collect(),
+                    sort: self.settings.sort_merge.label(),
                     selected: self.merge_sel,
                     first: self.merge_first,
                     status: self.merge_status.clone(),
@@ -3279,7 +3457,7 @@ impl DreamscapeGame {
             },
             journal_status: self.journal_status.clone(),
             booklet_cards: if self.mode == hud::Mode::Booklet {
-                let all: Vec<&cards::Card> = self.booklet.cards().collect();
+                let all = self.sorted_cards(self.settings.sort_booklet);
                 all[cards::page_range(all.len(), self.booklet_page)]
                     .iter()
                     .map(|c| (*c).clone())
@@ -3287,6 +3465,7 @@ impl DreamscapeGame {
             } else {
                 Vec::new()
             },
+            booklet_sort: self.settings.sort_booklet.label(),
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
@@ -3371,6 +3550,7 @@ impl DreamscapeGame {
                 .collect(),
             hand: self.hand_view(),
             hand_links: self.hand_links(),
+            hand_pile: self.hand_pile(), // === deck ===
             foe_pips: Vec::new(),
             boss_hp: self.hunter.as_ref().map(|(_, b, _)| (b.hp / b.max_hp, b.vulnerable())),
             // === combat ===
@@ -5124,6 +5304,11 @@ impl DreamscapeGame {
         let Some(state) = self.run.abilities.get(slot).copied() else {
             return;
         };
+        // === deck === a used card is gone until its slot draws again
+        if state.spent || (self.run.deck_slots > 0 && slot >= self.run.deck_slots) {
+            return;
+        }
+        // === end deck ===
         let mult = self.run.cooldown_for(state.ability);
         let stretch = self.run.duration_for(state.ability);
         let origin = self.player_position; // combat: where you were
@@ -5284,6 +5469,7 @@ impl DreamscapeGame {
             if cracks {
                 self.open_secret();
             }
+            self.deck_on_use(slot); // === deck ===
             self.stats.abilities += 1;
             if self.run_active {
                 self.achieve(Some(achievements::Event::AbilityUsed {
@@ -5543,37 +5729,58 @@ impl DreamscapeGame {
         if let Some(sec) = self.secret.as_mut() {
             sec.armed = false;
         }
+        self.ensure_moth_stock();
+        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+        self.show_moth_shop(0);
+    }
+
+    // === shop ===
+    fn ensure_moth_stock(&mut self) {
         if self.moth_stock.is_none() {
             self.moth_stock = Some(moth_shop::stock(
                 self.director.dream_seed(),
                 &self.run,
                 self.director.depth,
+                self.moth_terms(),
             ));
         }
-        log::info!("Entered the moth's room ({} dust)", self.bonus_dust);
+    }
+
+    /// The shop after a pick: same shelf as the secret room of this dream.
+    fn open_moth_shop_after_pick(&mut self) {
+        self.ensure_moth_stock();
+        log::info!(
+            "The moth's shop opens (depth {}, {} dust)",
+            self.director.depth,
+            self.bonus_dust
+        );
         self.show_moth_shop(0);
     }
 
-    /// Paints the shelf with the ordinary choice screen.
+    /// Paints the shelf with the ordinary choice screen. The last card is
+    /// the reroll.
     fn show_moth_shop(&mut self, selected: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
         if shelf.is_empty() {
             self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
             return;
         }
-        let cards = shelf
+        let terms = self.moth_terms();
+        let mut cards: Vec<upgrade_ui::ChoiceCard> = shelf
+            .cards
             .iter()
             .enumerate()
             .map(|(i, &u)| {
                 let info = u.info();
-                let cost = moth_shop::price(info.tier).unwrap_or(0);
-                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run).is_ok();
+                let cost = moth_shop::price_at(&shelf, i, terms).unwrap_or(0);
+                let can = moth_shop::buy(&shelf, i, self.bonus_dust, &self.run, terms).is_ok();
                 let have = self.run.count(u);
                 let level = if have > 0 {
                     format!(" · {} / {}", have + 1, info.max)
                 } else {
                     String::new()
                 };
+                let special = if shelf.special == Some(i) { "special · " } else { "" };
                 upgrade_ui::ChoiceCard {
                     name: info.name.into(),
                     desc: info.desc.into(),
@@ -5581,7 +5788,7 @@ impl DreamscapeGame {
                     color: if can { info.color } else { [110, 110, 130] },
                     frame: if can { info.tier.frame() } else { [80, 80, 100] },
                     tag: if can {
-                        format!("{cost} dust · {}{level}", info.tier.label())
+                        format!("{special}{cost} dust · {}{level}", info.tier.label())
                     } else if self.bonus_dust < cost {
                         format!("needs {cost} dust")
                     } else {
@@ -5590,11 +5797,26 @@ impl DreamscapeGame {
                 }
             })
             .collect();
+        let rr = moth_shop::reroll_price(shelf.rerolls);
+        let can_rr = self.bonus_dust >= rr;
+        cards.push(upgrade_ui::ChoiceCard {
+            name: "REROLL".into(),
+            desc: "the moth shuffles her shelf. the special stays.".into(),
+            icon: upgrades::Icon::Eye,
+            color: if can_rr { [255, 210, 80] } else { [110, 110, 130] },
+            frame: if can_rr { [255, 210, 80] } else { [80, 80, 100] },
+            tag: if can_rr {
+                format!("{rr} dust")
+            } else {
+                format!("needs {rr} dust")
+            },
+        });
+        let last = cards.len() - 1;
         self.choice_view = upgrade_ui::ChoiceView {
             title: moth_shop::TITLE.into(),
-            subtitle: format!("{} · you have {} dust", moth_shop::SUBTITLE, self.bonus_dust),
+            subtitle: format!("you have {} dust · {}", self.bonus_dust, moth_shop::SUBTITLE),
             cards,
-            selected: selected.min(shelf.len() - 1),
+            selected: selected.min(last),
             age: 0.0,
             hint: "[a/d] choose   [enter] buy   [x] leave".into(),
         };
@@ -5603,10 +5825,36 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Choice;
     }
 
-    /// [enter] on a card: pay run dust for it (never the banked stash).
+    /// [enter] on a card: pay run dust for it (never the banked stash). The
+    /// card past the last one is the reroll.
     fn buy_from_moth(&mut self, index: usize) {
         let shelf = self.moth_stock.clone().unwrap_or_default();
-        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run) {
+        let terms = self.moth_terms();
+        if index == shelf.cards.len() {
+            match moth_shop::reroll(
+                &shelf,
+                self.director.dream_seed(),
+                &self.run,
+                self.director.depth,
+                self.bonus_dust,
+                terms,
+            ) {
+                Ok((next, cost)) => {
+                    self.bonus_dust -= cost;
+                    self.moth_stock = Some(next);
+                    self.sfx(Sound::Reroll);
+                    self.save_run();
+                    log::info!("Moth rerolled the shelf for {cost} dust");
+                }
+                Err(why) => {
+                    log::info!("Moth refused the reroll: {why:?}");
+                    self.sfx(Sound::Denied);
+                }
+            }
+            self.show_moth_shop(index);
+            return;
+        }
+        match moth_shop::buy(&shelf, index, self.bonus_dust, &self.run, terms) {
             Ok((u, cost)) => {
                 let before = self.run.synergies();
                 self.bonus_dust -= cost;
@@ -5625,11 +5873,14 @@ impl DreamscapeGame {
                 self.sfx(Sound::Denied);
             }
         }
-        if self.moth_stock.as_ref().is_some_and(|s| s.is_empty()) {
-            self.achievement_toast = Some((moth_shop::EMPTY.into(), 0.0));
-            return;
-        }
+        // Sold out: the moth shrugs and you are back in the dream.
         self.show_moth_shop(index);
+    }
+
+    #[cfg(test)]
+    fn enter_moth_shop_for_test(&mut self) {
+        self.ensure_moth_stock();
+        self.show_moth_shop(0);
     }
 
     /// [x]: back to the dream, exactly where you stood.
@@ -5641,6 +5892,7 @@ impl DreamscapeGame {
         self.mode = hud::Mode::Playing;
         self.sfx(Sound::Reroll);
     }
+    // === end shop ===
 
     /// What a freshly taken upgrade does around the edges (shared by the
     /// moth's shelf; the after-dream pick has its own copy of this).
@@ -6125,6 +6377,7 @@ impl DreamscapeGame {
                 self.director = s.director();
                 self.director.nightmare_every = self.active_asc.nightmare_every();
                 self.run = s.upgrades();
+                self.deck = None; // === deck === a resumed run keeps its fixed kit
                 self.loadout_scale = s.loadout_scale.unwrap_or(1.0);
                 self.active_form = s.form;
                 self.run.penalty_cards =
@@ -6525,11 +6778,11 @@ impl DreamscapeGame {
             hud::Mode::Loadout => {
                 let lay = loadout_ui::layout(screen);
                 if click {
-                    // An equipped slot: click it to take the card out.
-                    if let Some(k) = lay.slots.iter().position(|r| r.contains(at)) {
-                        let chosen = self.booklet.lore.loadout.clone();
+                    // A card in the deck: click its pip to take it out. // === deck ===
+                    if let Some(k) = deck_ui::pips(screen).iter().position(|r| r.contains(at)) {
+                        let chosen = self.booklet.lore.deck.clone();
                         if let Some(&number) = chosen.get(k) {
-                            self.booklet.lore.loadout.retain(|&n| n != number);
+                            self.booklet.lore.deck.retain(|&n| n != number);
                             self.sfx(Sound::Unequip);
                             self.persist_booklet();
                         }
@@ -6886,9 +7139,66 @@ impl DreamscapeGame {
             .take(b.lore.slots())
             .collect();
         self.booklet.lore.loadout = kept;
+        // === deck === the deck: cards still owned; empty starts as what would be used
+        let b = &self.booklet;
+        let mut d = deck::clean(&b.lore.deck, |n| b.card(n).is_some());
+        if d.is_empty() {
+            d = b.deck_numbers();
+        }
+        self.booklet.lore.deck = d;
+        // === end deck ===
         self.loadout_sel = self.loadout_sel.min(self.booklet.card_count() - 1);
         self.mode = hud::Mode::Loadout;
     }
+
+    // === sort ===
+    /// The booklet's cards in the given order.
+    fn sorted_cards(&self, sort: sorting::Sort) -> Vec<&cards::Card> {
+        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        // `order` wants a slice of cards; sorting is by value so clone the (small) list.
+        let tmp: Vec<cards::Card> = all.iter().map(|c| (*c).clone()).collect();
+        sorting::order(&tmp, sort).into_iter().map(|i| all[i]).collect()
+    }
+
+    /// `[t]` (cycle = true) or `[r]` on the booklet, merge or loadout screen: the cursor
+    /// stays on the same card.
+    fn sort_press(&mut self, cycle: bool) {
+        let mode = self.mode;
+        let sort_of = |s: &settings::Settings| match mode {
+            hud::Mode::Booklet => s.sort_booklet,
+            hud::Mode::Merge => s.sort_merge,
+            _ => s.sort_loadout,
+        };
+        let old = sort_of(&self.settings);
+        let cursor = match mode {
+            hud::Mode::Booklet => self.booklet_page * cards::CARDS_PER_PAGE,
+            hud::Mode::Merge => self.merge_sel,
+            _ => self.loadout_sel,
+        };
+        let number = self.sorted_cards(old).get(cursor).map(|c| c.number);
+        let mut new = old;
+        if cycle {
+            new.cycle_key();
+        } else {
+            new.flip();
+        }
+        match mode {
+            hud::Mode::Booklet => self.settings.sort_booklet = new,
+            hud::Mode::Merge => self.settings.sort_merge = new,
+            _ => self.settings.sort_loadout = new,
+        }
+        let at = number
+            .and_then(|n| self.sorted_cards(new).iter().position(|c| c.number == n))
+            .unwrap_or(0);
+        match mode {
+            hud::Mode::Booklet => self.booklet_page = at / cards::CARDS_PER_PAGE,
+            hud::Mode::Merge => self.merge_sel = at,
+            _ => self.loadout_sel = at,
+        }
+        self.sfx(Sound::Pick);
+        self.save_settings();
+    }
+    // === end sort ===
 
     /// The moth's merge screen; `back` is where escape returns to.
     fn open_merge(&mut self, back: hud::Mode) {
@@ -6916,7 +7226,7 @@ impl DreamscapeGame {
         }
         match key {
             Keycode::Return | Keycode::Space => {
-                let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number)
+                let Some(number) = self.sorted_cards(self.settings.sort_merge).get(self.merge_sel).map(|c| c.number)
                 else {
                     return;
                 };
@@ -6933,8 +7243,8 @@ impl DreamscapeGame {
                             self.merge_status = Some(format!("{}: {}", c.rarity.label(), c.name));
                             self.merge_first = None;
                             self.merge_sel = self
-                                .booklet
-                                .cards()
+                                .sorted_cards(self.settings.sort_merge)
+                                .iter()
                                 .position(|x| x.number == a)
                                 .unwrap_or(0);
                             self.flash.trigger([1.0, 0.8, 1.0], 0.5);
@@ -6948,12 +7258,14 @@ impl DreamscapeGame {
             // Change your mind without hunting for the first card: Tab makes the
             // card under the cursor the first one, Backspace puts it back.
             Keycode::Tab => {
-                if let Some(number) = self.booklet.cards().nth(self.merge_sel).map(|c| c.number) {
+                if let Some(number) = self.sorted_cards(self.settings.sort_merge).get(self.merge_sel).map(|c| c.number) {
                     self.merge_first = Some(number);
                     self.merge_status = None;
                     self.sfx(Sound::Pick);
                 }
             }
+            Keycode::T => self.sort_press(true),
+            Keycode::R => self.sort_press(false),
             Keycode::Backspace if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape if self.merge_first.is_some() => self.merge_first = None,
             Keycode::Escape => self.mode = self.merge_return,
@@ -6976,23 +7288,32 @@ impl DreamscapeGame {
         }
         match key {
             Keycode::Return => {
-                let Some(number) = self.booklet.cards().nth(self.loadout_sel).map(|c| c.number)
+                let Some(number) = self.sorted_cards(self.settings.sort_loadout).get(self.loadout_sel).map(|c| c.number)
                 else {
                     return;
                 };
-                let slots = self.asc_slots();
-                let was_in = self.booklet.lore.loadout.contains(&number);
-                if loadout_ui::toggle(&mut self.booklet.lore.loadout, number, slots) {
+                // === deck === choosing cards builds the deck
+                let was_in = self.booklet.lore.deck.contains(&number);
+                if deck::toggle(&mut self.booklet.lore.deck, number) {
                     self.sfx(if was_in { Sound::Unequip } else { Sound::Equip });
                     self.persist_booklet();
                 } else {
                     self.sfx(Sound::Denied); // the slots are full
                 }
             }
+            Keycode::T => self.sort_press(true),
+            Keycode::R => self.sort_press(false),
             Keycode::C if !self.booklet.lore.dreamers.is_empty() => {
                 self.booklet.lore.companion = self.booklet.lore.next_companion();
                 self.persist_booklet();
             }
+            // === deck === too small a deck cannot start (none = automatic)
+            Keycode::Space
+                if !deck::valid(self.booklet.lore.deck.len(), self.booklet.card_count()) =>
+            {
+                self.sfx(Sound::Denied)
+            }
+            // === end deck ===
             Keycode::Space => self.start_from_title(),
             Keycode::Escape => self.mode = hud::Mode::Title,
             _ => {}
@@ -7056,6 +7377,8 @@ impl DreamscapeGame {
     fn refresh_card_effects(&mut self) {
         let cards = if self.prologue.is_some() {
             Vec::new()
+        } else if self.deck.is_some() {
+            self.deck_opening.clone() // === deck ===
         } else {
             // === ascension === (rule 13: one fewer slot)
             let mut c = self.booklet.loadout_cards();
@@ -7135,7 +7458,10 @@ impl DreamscapeGame {
         // Abilities come from the loadout's cards (none in the prologue),
         // and each card's dream is planned into the run.
         let cards = if self.prologue.is_some() {
+            self.deck = None;
             Vec::new()
+        } else if let Some(hand) = self.start_deck() {
+            hand // === deck === the opening hand
         } else {
             // === ascension === (rule 13: one fewer slot)
             let mut c = self.booklet.loadout_cards();
@@ -7173,8 +7499,12 @@ impl DreamscapeGame {
                 .map(attunement::reward)
                 .collect()
         };
-        self.run = RunUpgrades::from_loadout(&cards)
-            .with_attunements(&gifts)
+        self.run = if self.deck.is_some() {
+            RunUpgrades::from_hand(&cards) // === deck ===
+        } else {
+            RunUpgrades::from_loadout(&cards)
+        }
+        .with_attunements(&gifts)
             .with_start_ability(self.active_form.start_ability());
         self.nerve = if self.settings.gentle_nerve {
             nerve::Nerve::new(nerve::GENTLE_START)
@@ -7218,12 +7548,19 @@ impl DreamscapeGame {
         };
         self.flourish.reset();
         self.siphon.reset();
-        self.hand_cards = cards
-            .iter()
-            .map(|c| (powers::power(c.theme).active, c.clone()))
-            .collect();
-        self.ability_tints = cards
-            .iter()
+        if self.deck.is_none() {
+            self.hand_cards = cards
+                .iter()
+                .map(|c| (powers::power(c.theme).active, c.clone()))
+                .collect();
+        }
+        let tint_cards: Vec<&cards::Card> = if self.deck.is_some() {
+            self.hand_cards.iter().map(|n| &n.1).collect()
+        } else {
+            cards.iter().collect()
+        };
+        self.ability_tints = tint_cards
+            .into_iter()
             .map(|c| {
                 let accents = c.fused.unwrap_or(c.theme).spec().accents;
                 (
@@ -7313,6 +7650,11 @@ impl DreamscapeGame {
             log::info!("Perks this run: {:?}", self.perks);
             self.persist_booklet();
         }
+        // === shop ===
+        let fx = self.perk_fx();
+        self.bonus_dust += fx.start_dust;
+        self.run.bonus_rerolls += fx.rerolls;
+        // === end shop ===
         if self.has_perk(store::Perk::FirstLight) {
             self.director.collect_shard();
             self.director.shard_this_dream = false;
@@ -9496,14 +9838,32 @@ impl Game for DreamscapeGame {
                     Keycode::D | Keycode::Right => {
                         self.choice_view.selected = (self.choice_view.selected + 1) % n;
                     }
-                    Keycode::Num1 | Keycode::Num2 | Keycode::Num3 => {
-                        let i = [Keycode::Num1, Keycode::Num2, Keycode::Num3]
+                    Keycode::Num1
+                    | Keycode::Num2
+                    | Keycode::Num3
+                    | Keycode::Num4
+                    | Keycode::Num5
+                    | Keycode::Num6
+                    | Keycode::Num7 => {
+                        let i = [
+                            Keycode::Num1,
+                            Keycode::Num2,
+                            Keycode::Num3,
+                            Keycode::Num4,
+                            Keycode::Num5,
+                            Keycode::Num6,
+                            Keycode::Num7,
+                        ]
                             .iter()
                             .position(|&k| k == key)
                             .expect("matched above");
                         if i < n {
                             self.choose(i);
                         }
+                    }
+                    Keycode::R if self.choice == Some(ChoiceKind::MothShop) => {
+                        let at = self.moth_stock.as_ref().map_or(0, |s| s.cards.len());
+                        self.choose(at);
                     }
                     Keycode::R => self.reroll_choice(),
                     Keycode::X | Keycode::Escape if self.choice == Some(ChoiceKind::MothShop) => {
@@ -9649,6 +10009,14 @@ impl Game for DreamscapeGame {
                 }
                 (hud::Mode::Booklet | hud::Mode::Store, Keycode::Escape) => {
                     self.mode = self.booklet_return;
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::T) => {
+                    self.sort_press(true);
+                    return;
+                }
+                (hud::Mode::Booklet, Keycode::R) => {
+                    self.sort_press(false);
                     return;
                 }
                 (hud::Mode::Booklet, Keycode::P) => {
@@ -9817,6 +10185,7 @@ impl Game for DreamscapeGame {
             Some(Action::Jump) => self.input.jump = down,
             Some(Action::Ability1) if down && !repeat => self.ability_requests[0] = true,
             Some(Action::Ability2) if down && !repeat => self.ability_requests[1] = true,
+            Some(Action::Ability3) if down && !repeat => self.ability_requests[2] = true,
             Some(Action::Strike) if down && !repeat => self.strike_request = true,
             _ => {}
         }
@@ -9938,7 +10307,7 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Choice {
             self.choice_view.age += dt;
             // E2E runs: take the first card (WAKE at the door) after a beat.
-            if self.autopilot && self.choice_view.age > 0.6 {
+            if self.autopilot && self.choice_view.age > 0.6 && crate::dev::var("DREAMSCAPE_SCREEN").is_err() {
                 self.choose(0);
             }
             return Ok(());
@@ -9979,6 +10348,14 @@ impl Game for DreamscapeGame {
                     "codex" => self.open_codex(),
                     "booklet" => self.open_booklet(),
                     "store" => self.open_store(),
+                    // === shop === "store:<shelf>:<col>" for shelf screenshots.
+                    st if st.starts_with("store:") => {
+                        let mut n = st[6..].split(':').map(|x| x.parse::<usize>().unwrap_or(0));
+                        self.open_store();
+                        self.shop_shelf = n.next().unwrap_or(0).min(store::Shelf::ALL.len() - 1);
+                        self.shop_col = shop_ui::clamp_col(self.shop_shelf, n.next().unwrap_or(0));
+                    }
+                    // === end shop ===
                     "lottery" => {
                         self.open_store();
                         self.store_tab = 1;
@@ -9992,10 +10369,16 @@ impl Game for DreamscapeGame {
                     // The first card picked, the cursor on one that can merge with it.
                     "merge2" => {
                         self.open_merge(hud::Mode::Title);
-                        let cards: Vec<&cards::Card> = self.booklet.cards().collect();
-                        if let Some(a) = cards.first() {
-                            self.merge_first = Some(a.number);
-                            if let Some(i) = cards.iter().position(|b| fusion::can_merge(a, b)) {
+                        let picked = {
+                            let cards = self.sorted_cards(self.settings.sort_merge);
+                            cards.first().map(|a| {
+                                let i = cards.iter().position(|b| fusion::can_merge(a, b));
+                                (a.number, i)
+                            })
+                        };
+                        if let Some((number, i)) = picked {
+                            self.merge_first = Some(number);
+                            if let Some(i) = i {
                                 self.merge_sel = i;
                             }
                         }
@@ -10107,6 +10490,7 @@ impl Game for DreamscapeGame {
         // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
+        self.update_deck(dt); // === deck ===
         // === pressure ===
         self.update_pressure(dt);
         // === end pressure ===
@@ -10133,6 +10517,24 @@ impl Game for DreamscapeGame {
                 }
             }
         }
+        // === shop ===
+        // Dev: DREAMSCAPE_SCREEN=moth opens the moth's room at 1 s of dream
+        // time with the autopilot (which then stops picking), for screenshots.
+        if self.autopilot && self.dream_age >= 1.0 && !self.dev_fired {
+            if let Ok(what) = crate::dev::var("DREAMSCAPE_SCREEN") {
+                self.dev_fired = true;
+                let mut it = what.split(':');
+                match it.next() {
+                    Some("moth") => {
+                        self.bonus_dust = 40;
+                        self.ensure_moth_stock();
+                        self.show_moth_shop(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // === end shop ===
         // === combat ===
         self.update_combat(dt);
         // === end combat ===
@@ -10824,7 +11226,9 @@ impl Game for DreamscapeGame {
             self.stats.twists.extend(self.twists.0.iter().copied());
             if self.director.nightmare {
                 self.stats.nightmares += 1;
-                self.bonus_dust += 10 * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier);
+                self.bonus_dust += 10
+                    * self.hunter.as_ref().map_or(1, |(_, b, _)| b.tier)
+                    * self.perk_fx().nightmare_mult; // === shop ===
                 self.boss_reward = true;
                 if self.run_active {
                     self.booklet.codex.nightmares_beaten += 1;
@@ -11294,7 +11698,7 @@ impl DreamscapeGame {
             log::error!("could not create {dir:?}: {e}");
             return;
         }
-        let all: Vec<&cards::Card> = self.booklet.cards().collect();
+        let all = self.sorted_cards(self.settings.sort_booklet);
         let page = &all[cards::page_range(all.len(), self.booklet_page)];
         let screen = egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -11396,6 +11800,9 @@ mod screen_smoke {
         let mut g = DreamscapeGame::new(7);
         g.booklet = cards::Booklet::default();
         g.booklet_path = path;
+        // Never read or write the shared settings file (sort choices persist there).
+        g.settings = settings::Settings::default();
+        g.settings_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_settings.ron"));
         g
     }
 
@@ -11527,6 +11934,8 @@ mod screen_smoke {
             edge: Some(("LUNGE", [120, 220, 255])),
             edge_since: hand::NEVER,
             cracked: false,
+            since_draw: hand::NEVER,
+            empty: false,
         }
     }
 
@@ -12282,15 +12691,139 @@ mod screen_smoke {
         assert_eq!(g.loadout_sel, 1);
         g.loadout_key(Keycode::Return);
         let first = g.booklet.cards().nth(1).map(|c| c.number).unwrap();
-        assert!(g.booklet.lore.loadout.contains(&first), "equipped");
-        // Click the slot it sits in: out it comes.
-        let s = lay.slots[g.booklet.lore.loadout.iter().position(|&n| n == first).unwrap()].center();
+        assert!(g.booklet.lore.deck.contains(&first), "added to the deck");
+        // Click the pip it sits in: out it comes.
+        let s = deck_ui::pips(screen)[g.booklet.lore.deck.iter().position(|&n| n == first).unwrap()].center();
         assert_eq!(g.menu_pointer(s.x as i32, s.y as i32, Pointer::Click), None);
-        assert!(!g.booklet.lore.loadout.contains(&first), "unequipped by clicking its slot");
+        assert!(!g.booklet.lore.deck.contains(&first), "removed by clicking its pip");
         // A small window scales the screen down, and the mouse scales with it.
         let (pt, small) = hud::to_layout(hud::design_for(hud::Mode::Loadout, 0), (400.0, 225.0), 200.0, 100.0);
         assert!((pt.x - 400.0).abs() < 1e-3 && (pt.y - 200.0).abs() < 1e-3, "{pt:?}");
         assert!((small.width() - 800.0).abs() < 1e-3);
+    }
+
+    // === deck ===
+    #[test]
+    fn a_small_deck_cannot_start_but_an_empty_or_big_enough_one_can() {
+        let mut g = game("deck_start");
+        three_cards(&mut g);
+        g.open_loadout();
+        assert_eq!(g.booklet.lore.deck.len(), 1, "prefilled with what would be used");
+        g.mode = hud::Mode::Loadout;
+        g.loadout_key(Keycode::Space);
+        assert_eq!(g.mode, hud::Mode::Loadout, "1 of 3 cards: denied");
+        for n in g.booklet.cards().map(|c| c.number).collect::<Vec<_>>() {
+            if !g.booklet.lore.deck.contains(&n) {
+                g.booklet.lore.deck.push(n);
+            }
+        }
+        assert!(deck::valid(g.booklet.lore.deck.len(), g.booklet.card_count()));
+    }
+
+    #[test]
+    fn a_deck_run_deals_three_cards_and_a_used_one_is_redrawn_with_its_cooldown() {
+        let mut g = game("deck_run");
+        three_cards(&mut g);
+        g.booklet.lore.deck = g.booklet.cards().map(|c| c.number).collect();
+        g.begin_run();
+        assert!(g.deck.is_some());
+        assert_eq!(g.run.deck_slots, 3);
+        assert_eq!(g.run.abilities.len(), 3);
+        let view = g.hand_view();
+        assert_eq!(view.len(), 3);
+        assert_eq!(view.iter().map(|c| c.key).collect::<Vec<_>>(), vec!["shift", "e", "q"]);
+        assert!(view.iter().all(|c| c.card.is_some()), "every slot knows its card");
+        // Use slot 1.
+        let before = view[1].card.as_ref().unwrap().number;
+        assert!(g.run.abilities[1].try_use(1.0, 1.0));
+        g.deck_on_use(1);
+        assert!(g.run.abilities[1].spent);
+        assert_eq!(g.deck_leaving.len(), 1);
+        assert!(g.hand_view()[1].empty, "the slot waits to draw");
+        assert_eq!(g.hand_pile().leaving.len(), 1);
+        g.update_deck(deck::DRAW_DELAY + 0.05);
+        assert!(!g.run.abilities[1].spent, "drew again");
+        let again = g.hand_view();
+        assert_eq!(again[1].card.as_ref().unwrap().number, before, "a deck as small as the hand deals it back");
+        assert!(again[1].since_draw < 0.2 && !again[1].empty);
+        assert!(g.run.abilities[1].cooldown > 0.0, "its cooldown came with it");
+        assert!(g.hand_pile().riffle_since < 0.5, "the stack shuffled");
+        // The flick finishes and is forgotten.
+        g.update_deck(hand::LEAVE_TOTAL);
+        assert!(g.deck_leaving.is_empty());
+        // Co-op keeps the fixed loadout.
+        g.coop = None;
+        g.prologue = None;
+    }
+
+    #[test]
+    fn a_fixed_loadout_run_has_no_deck() {
+        let mut g = game("deck_none");
+        three_cards(&mut g);
+        g.autopilot = true;
+        g.begin_run();
+        assert!(g.deck.is_none());
+        assert_eq!(g.run.deck_slots, 0);
+        assert!(g.hand_view().iter().all(|c| !c.empty && c.since_draw == hand::NEVER));
+        assert!(!g.hand_pile().shown);
+    }
+    // === end deck ===
+
+    #[test]
+    fn sorting_keeps_the_cursor_on_the_card_and_the_mouse_follows_the_order() {
+        let mut g = game("sort_keys");
+        three_cards(&mut g);
+        let nums: Vec<u32> = g.booklet.cards().map(|c| c.number).collect();
+        let newest = *nums.iter().max().unwrap();
+        let oldest = *nums.iter().min().unwrap();
+        // Merge: flip to newest-first; the cursor (on the oldest) follows its card.
+        g.open_merge(hud::Mode::Title);
+        g.merge_sel = 0;
+        g.merge_key(Keycode::R);
+        assert_eq!(g.settings.sort_merge.dir, sorting::Dir::Desc);
+        assert_eq!(g.merge_sel, nums.len() - 1);
+        assert_eq!(g.sorted_cards(g.settings.sort_merge)[g.merge_sel].number, oldest);
+        // A mouse click on the first tile picks the newest card.
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 720.0));
+        let lay = merge_ui::layout(screen);
+        let (x, y) = tile_centre(&g, g.merge_sel, lay.grid_top, lay.grid_w, 0);
+        assert_eq!(g.menu_pointer(x, y, Pointer::Click), Some(Keycode::Return));
+        g.merge_key(Keycode::Return);
+        assert_eq!(g.merge_first, Some(newest));
+        g.merge_key(Keycode::T);
+        assert_eq!(g.settings.sort_merge.key, sorting::SortKey::Rarity);
+        assert_eq!(g.merge_first, Some(newest), "the picked card survives a re-sort");
+        assert_eq!(g.settings.sort_booklet, sorting::Sort::default(), "per screen");
+        g.open_loadout();
+        g.loadout_key(Keycode::R);
+        g.loadout_sel = 0;
+        g.booklet.lore.deck.clear(); // opening pre-fills the deck with the default picks
+        g.loadout_key(Keycode::Return);
+        // Return puts the card under the (sorted) cursor into the deck.
+        assert_eq!(g.booklet.lore.deck, vec![newest]);
+        // Booklet: paging follows the sorted order.
+        g.mode = hud::Mode::Booklet;
+        g.booklet_page = 0;
+        g.settings.sort_booklet = sorting::Sort { key: sorting::SortKey::Number, dir: sorting::Dir::Desc };
+        assert_eq!(g.hud_view().booklet_cards.first().map(|c| c.number), Some(newest));
+    }
+
+    #[test]
+    fn sorted_screens_draw_and_old_settings_still_load() {
+        let mut g = game("sort_frames");
+        three_cards(&mut g);
+        g.settings.sort_booklet = sorting::Sort { key: sorting::SortKey::Rarity, dir: sorting::Dir::Desc };
+        g.settings.sort_merge = sorting::Sort { key: sorting::SortKey::Ability, dir: sorting::Dir::Asc };
+        g.settings.sort_loadout = sorting::Sort { key: sorting::SortKey::Dream, dir: sorting::Dir::Desc };
+        for mode in [hud::Mode::Booklet, hud::Mode::Merge, hud::Mode::Loadout] {
+            g.mode = mode;
+            assert!(shapes(&g) > 10, "{mode:?} drew nothing");
+        }
+        let old: settings::Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert_eq!(old.sort_merge, sorting::Sort::default());
+        let text = ron::ser::to_string(&g.settings).unwrap();
+        let back: settings::Settings = ron::from_str(&text).unwrap();
+        assert_eq!(back.sort_loadout, g.settings.sort_loadout);
     }
 
     #[test]
@@ -12742,6 +13275,43 @@ mod screen_smoke {
             });
         }
     }
+
+    // === deck ===
+    #[test]
+    fn the_deck_stack_draws_a_riffle_and_cards_in_flight() {
+        let mut g = game("deck_draw");
+        g.mode = hud::Mode::Playing;
+        let n_shapes = |reduced: bool, pile: hand::HandPile, draw: f32| {
+            frame_with(&g, 1280.0, 720.0, &|v| {
+                v.settings_snapshot.reduced_motion = reduced;
+                let mut c = card("DASH", hand::NEVER);
+                c.since_draw = draw;
+                v.hand = vec![c, card("PHASE", hand::NEVER), card("BLINK", hand::NEVER)];
+                v.hand_pile = pile.clone();
+            })
+            .len()
+        };
+        let shown = |count: usize, riffle: f32, leaving: Vec<hand::Leaving>| hand::HandPile {
+            shown: true,
+            draw_count: count,
+            riffle_since: riffle,
+            leaving,
+        };
+        let none = n_shapes(false, hand::HandPile::default(), hand::NEVER);
+        let stack = n_shapes(false, shown(5, hand::NEVER, vec![]), hand::NEVER);
+        assert!(stack > none, "a stack with a badge draws");
+        assert!(n_shapes(false, shown(5, 0.2, vec![]), hand::NEVER) > stack, "a riffle adds sheets");
+        let flying = vec![hand::Leaving { card: card("DASH", hand::NEVER), slot: 1, since: 0.1 }];
+        assert!(n_shapes(false, shown(5, hand::NEVER, flying.clone()), hand::NEVER) > stack, "a flicked card draws");
+        assert_eq!(
+            n_shapes(true, shown(5, hand::NEVER, flying), hand::NEVER),
+            n_shapes(true, shown(5, hand::NEVER, vec![]), hand::NEVER),
+            "reduced motion: no flick"
+        );
+        assert!(n_shapes(false, shown(0, hand::NEVER, vec![]), hand::NEVER) > none, "an empty pile is an outline");
+        n_shapes(false, shown(5, hand::NEVER, vec![]), 0.1); // a card mid-draw paints
+    }
+    // === end deck ===
 
     #[test]
     fn the_pickup_ring_and_door_glow_draw_only_when_active() {
@@ -13208,6 +13778,145 @@ mod screen_smoke {
         assert_eq!(g.bonus_dust, 15);
     }
     // === end pacts ===
+
+    // === shop ===
+    /// A game one pick away from a nightmare reward, with a mergeable booklet
+    /// (so the old merge popup would have fired).
+    fn reward_game(name: &str) -> DreamscapeGame {
+        let mut g = game(name);
+        three_cards(&mut g);
+        assert!(merge_ui::any_pair(&g.booklet.cards().cloned().collect::<Vec<_>>()));
+        g.director.depth = 1;
+        g.boss_reward = true;
+        g.open_upgrade_choice();
+        assert!(matches!(g.choice, Some(ChoiceKind::Upgrade(_))));
+        g
+    }
+
+    #[test]
+    fn a_nightmare_reward_opens_the_shop_not_the_merge_menu() {
+        let mut g = reward_game("shop_reward");
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.mode, hud::Mode::Choice);
+        assert_ne!(g.mode, hud::Mode::Merge);
+        assert!(!g.boss_reward, "the reward is spent");
+        assert_eq!(g.choice_view.title, moth_shop::TITLE);
+        // Shelf cards plus the reroll card.
+        let shelf = g.moth_stock.clone().expect("stocked");
+        assert_eq!(g.choice_view.cards.len(), shelf.cards.len() + 1);
+        g.leave_moth_shop();
+        assert_eq!((g.mode, g.choice.clone()), (hud::Mode::Playing, None));
+        // Once: a further pick-less call does nothing.
+        g.moth_after_nightmare();
+        assert_eq!(g.choice, None);
+    }
+
+    #[test]
+    fn skipping_a_nightmare_reward_also_opens_the_shop_once() {
+        let mut g = reward_game("shop_skip");
+        let dust = g.bonus_dust;
+        g.skip_choice();
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.bonus_dust, dust + upgrades::SKIP_DUST);
+        assert!(!g.boss_reward);
+        g.leave_moth_shop();
+        assert_eq!(g.mode, hud::Mode::Playing);
+        assert_eq!(g.choice, None);
+    }
+
+    #[test]
+    fn no_shop_in_autopilot_coop_or_for_an_ordinary_pick() {
+        let mut g = reward_game("shop_autopilot");
+        g.autopilot = true;
+        g.choose(0);
+        assert_eq!(g.choice, None);
+        let mut g = game("shop_plain");
+        g.director.depth = 2;
+        g.open_upgrade_choice();
+        g.choose(0);
+        assert_eq!((g.choice.clone(), g.mode), (None, hud::Mode::Playing));
+    }
+
+    #[test]
+    fn every_third_depth_opens_the_shop_after_the_pick() {
+        let mut g = game("shop_depth");
+        g.director.depth = moth_shop::SHOP_EVERY;
+        g.open_upgrade_choice();
+        g.choose(0);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        assert_eq!(g.mode, hud::Mode::Choice);
+    }
+
+    #[test]
+    fn buying_and_rerolling_spend_run_dust_only() {
+        let mut g = game("shop_buy");
+        g.director.depth = 6;
+        g.booklet.stash.dust = 500;
+        g.bonus_dust = 100;
+        g.enter_moth_shop_for_test();
+        let shelf = g.moth_stock.clone().unwrap();
+        let cost = moth_shop::price_at(&shelf, 0, g.moth_terms()).unwrap();
+        let card = shelf.cards[0];
+        g.choose(0);
+        assert_eq!(g.bonus_dust, 100 - cost);
+        assert_eq!(g.booklet.stash.dust, 500, "the bank is untouched");
+        assert_eq!(g.run.count(card), 1);
+        assert_eq!(g.moth_stock.as_ref().unwrap().cards.len(), shelf.cards.len() - 1);
+        // Reroll is the card after the last one (and the R key).
+        let left = g.bonus_dust;
+        let n = g.moth_stock.as_ref().unwrap().cards.len();
+        g.choose(n);
+        assert_eq!(g.bonus_dust, left - moth_shop::reroll_price(0));
+        assert_eq!(g.moth_stock.as_ref().unwrap().rerolls, 1);
+        assert_eq!(g.choice, Some(ChoiceKind::MothShop));
+        // Too poor: nothing changes.
+        g.bonus_dust = 0;
+        let before = g.moth_stock.clone();
+        let n = before.as_ref().unwrap().cards.len();
+        g.choose(n);
+        assert_eq!((g.bonus_dust, g.moth_stock.clone()), (0, before));
+    }
+
+    #[test]
+    fn perks_change_the_run_the_way_they_say() {
+        let mut g = game("shop_perks");
+        g.perks = vec![store::Perk::Shrug, store::Perk::Haggler, store::Perk::DeepShelves];
+        g.director.depth = 2;
+        g.open_upgrade_choice();
+        g.skip_choice();
+        assert_eq!(g.bonus_dust, upgrades::SKIP_DUST + store::SHRUG_DUST);
+        let t = g.moth_terms();
+        assert_eq!((t.pct_off, t.extra_stock), (store::HAGGLER_PCT, 1));
+        assert_eq!(g.perk_fx().nightmare_mult, 1);
+        g.perks = vec![store::Perk::Bounty];
+        assert_eq!(g.perk_fx().nightmare_mult, store::BOUNTY_MULT);
+    }
+
+    #[test]
+    fn the_big_store_draws_every_shelf_at_every_cursor() {
+        let mut g = game("shop_screens");
+        g.mode = hud::Mode::Store;
+        for shelf in 0..store::Shelf::ALL.len() {
+            for col in 0..store::Shelf::ALL[shelf].items().len() {
+                g.shop_shelf = shelf;
+                g.shop_col = col;
+                assert!(shapes(&g) > 0);
+            }
+        }
+    }
+    #[test]
+    fn the_fullest_moth_shelf_fits_the_screen() {
+        let mut g = game("shop_fit");
+        g.director.depth = 9;
+        g.bonus_dust = 40;
+        g.perks = vec![store::Perk::DeepShelves];
+        g.enter_moth_shop_for_test();
+        assert_eq!(g.mode, hud::Mode::Choice);
+        let bad = overflows(&g, "MothShop");
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+    // === end shop ===
 
     #[test]
     fn audit_text_fits_every_screen() {

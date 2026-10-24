@@ -37,7 +37,8 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
         Mode::Playing => match button {
             P::A => s.key_for(Action::Jump),
             P::LeftShoulder | P::RightShoulder => s.key_for(Action::Ability1),
-            P::X | P::Y => s.key_for(Action::Ability2),
+            P::X => s.key_for(Action::Ability2),
+            P::Y => s.key_for(Action::Ability3),
             P::B => s.key_for(Action::Strike),
             P::Start => Some(Keycode::Escape),
             // Arrows turn the head in first-person dreams.
@@ -77,6 +78,8 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::LeftShoulder => Some(Keycode::Left),
             P::RightShoulder => Some(Keycode::Right),
             P::X => Some(Keycode::P),
+            P::Y => Some(Keycode::T),
+            P::Back => Some(Keycode::R),
             P::B => Some(Keycode::Escape),
             _ => dpad,
         },
@@ -122,6 +125,8 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
         },
         Mode::Merge => match button {
             P::A => Some(Keycode::Return),
+            P::RightShoulder => Some(Keycode::T),
+            P::LeftShoulder => Some(Keycode::R),
             P::B => Some(Keycode::Escape),
             _ => dpad,
         },
@@ -129,6 +134,8 @@ pub fn key_for(button: Button, mode: Mode, s: &Settings) -> Option<Keycode> {
             P::A => Some(Keycode::Return),
             P::Y => Some(Keycode::C),
             P::X => Some(Keycode::Space),
+            P::RightShoulder => Some(Keycode::T),
+            P::LeftShoulder => Some(Keycode::R),
             P::B => Some(Keycode::Escape),
             _ => dpad,
         },
@@ -262,7 +269,8 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
     v.extend(if pad {
         [
             ("LB/RB", "ability 1"),
-            ("X/Y", "ability 2"),
+            ("X", "ability 2"),
+            ("Y", "ability 3"),
             ("B", "strike"),
             ("START", "pause"),
         ]
@@ -270,6 +278,7 @@ pub fn controls(pad: bool, first_person: bool) -> Vec<(&'static str, &'static st
         [
             ("SHIFT", "ability 1"),
             ("E", "ability 2"),
+            ("Q", "ability 3"),
             ("F", "strike"),
             ("ESC / P", "pause"),
         ]
@@ -338,6 +347,7 @@ mod tests {
         (Mode::Summary, "[enter] see what you remember"),
         (Mode::Playing, "[shift]"),
         (Mode::Playing, "[e]"),
+        (Mode::Playing, "[q]"),
     ];
 
     #[test]
@@ -371,6 +381,7 @@ mod tests {
         assert_eq!(p(Mode::Reveal, "[s] press"), "[X] press");
         assert_eq!(p(Mode::Paused, "[m] wake up"), "[Y] wake up");
         assert_eq!(p(Mode::Playing, "[shift]"), "[LB]");
+        assert_eq!(p(Mode::Playing, "[q]"), "[Y]");
         assert_eq!(prompt("[r] reroll", Mode::Choice, &s, false), "[r] reroll");
     }
 

@@ -219,8 +219,31 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p,
         screen,
         v,
-        "[a/d] turn page      [p] save these cards as images      [esc] back",
+        &format!(
+            "[a/d] turn page   [t] sort: {}   [r] flip   [p] save as images   [esc] back",
+            v.booklet_sort
+        ),
     );
+}
+
+/// The frame colour for a bought card frame style; `plain` is what the
+/// default frame would be for this card.
+pub(crate) fn style_frame(
+    style: crate::store::CardStyle,
+    plain: [u8; 3],
+    time: f32,
+    number: u32,
+) -> [u8; 3] {
+    use crate::store::CardStyle::*;
+    match style {
+        Plain => plain,
+        Gilt => [255, 205, 90],
+        Holo => hue(time * 0.3 + number as f32 * 0.13),
+        Ember => [255, (110.0 + 50.0 * (time * 3.0 + number as f32).sin()) as u8, 30],
+        Frost => [170, 225, 255],
+        Neon => hue(time * 0.9 + number as f32 * 0.07),
+        Bone => [225, 215, 180],
+    }
 }
 
 pub fn card(
@@ -232,11 +255,7 @@ pub fn card(
     art: &mut CardArt,
     scale: f32,
 ) {
-    let frame = match v.card_style {
-        crate::store::CardStyle::Plain => card_frame(c, v.time),
-        crate::store::CardStyle::Gilt => [255, 205, 90],
-        crate::store::CardStyle::Holo => hue(v.time * 0.3 + c.number as f32 * 0.13),
-    };
+    let frame = style_frame(v.card_style, card_frame(c, v.time), v.time, c.number);
     let s = scale;
     p.rect_filled(r, 0.0, rgba([16, 9, 30], 1.0));
     p.rect_stroke(r.shrink(2.0), 0.0, Stroke::new(4.0_f32, rgba(frame, 1.0)));
