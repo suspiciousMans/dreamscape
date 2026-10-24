@@ -149,6 +149,37 @@ impl Grid {
         out
     }
 
+    /// === perf === `path(from, c).map(|p| p.len())` for every cell at once, in one
+    /// BFS instead of one per cell (index = `index(c)`; `None` = unreachable, or
+    /// `from` is not floor). Callers that ask "how far is every cell" were O(n^2).
+    pub fn path_lens(&self, from: P) -> Vec<Option<usize>> {
+        let mut lens: Vec<Option<usize>> = vec![None; self.cells.len()];
+        if self.get(from) != Cell::Floor {
+            return lens;
+        }
+        let mut queue = VecDeque::from([from]);
+        lens[self.index(from).expect("floor cells are in bounds")] = Some(1);
+        while let Some(p) = queue.pop_front() {
+            let here = lens[self.index(p).expect("in bounds")].expect("queued cells have a length");
+            for (next, _) in self.moves(p) {
+                let i = self.index(next).expect("floor cells are in bounds");
+                if lens[i].is_none() {
+                    lens[i] = Some(here + 1);
+                    queue.push_back(next);
+                }
+            }
+        }
+        lens
+    }
+
+    /// `path(from, to).map(|p| p.len())` out of a `path_lens` table.
+    pub fn path_len_in(&self, lens: &[Option<usize>], to: P) -> Option<usize> {
+        if self.get(to) != Cell::Floor {
+            return None;
+        }
+        lens[self.index(to)?]
+    }
+
     /// Shortest route (BFS). Each entry is (cell, reached_by_jump).
     pub fn path(&self, from: P, to: P) -> Option<Vec<(P, bool)>> {
         if self.get(from) != Cell::Floor || self.get(to) != Cell::Floor {
@@ -243,5 +274,20 @@ mod tests {
         let g = Grid::new(3, 3, Cell::Floor);
         assert_eq!(g.world((1, 1)), Vec3::ZERO);
         assert_eq!(g.world((2, 1)), Vec3::new(CELL, 0.0, 0.0));
+    }
+
+    #[test]
+    fn path_lens_agrees_with_a_bfs_per_cell() {
+        // === perf === one BFS must give every cell the length `path` gives.
+        let g = from_rows(&["..#...", ".##.#.", "....#.", "..  ..", "#....."]);
+        for from in g.cells_of(Cell::Floor).into_iter().chain([(2, 0), (9, 9)]) {
+            let lens = g.path_lens(from);
+            for y in -1..7 {
+                for x in -1..8 {
+                    let want = g.path(from, (x, y)).map(|p| p.len());
+                    assert_eq!(g.path_len_in(&lens, (x, y)), want, "{from:?} -> {:?}", (x, y));
+                }
+            }
+        }
     }
 }

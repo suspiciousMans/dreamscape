@@ -705,10 +705,11 @@ pub fn generate_nightmare(theme: DreamTheme, seed: u64, depth: u32) -> Dream {
                 .min()
                 .unwrap_or(0)
         };
+        let lens = g.path_lens(spawn); // === perf ===
         let pick = g
             .cells_of(Cell::Floor)
             .into_iter()
-            .filter(|&c| !taken.contains(&c) && g.path(spawn, c).is_some())
+            .filter(|&c| !taken.contains(&c) && g.path_len_in(&lens, c).is_some())
             .max_by_key(|&c| (far(c), c))
             .expect("an arena has spare floor");
         sigil_cells.push(pick);
@@ -835,11 +836,12 @@ fn watchers(grid: &Grid, rng: &mut StdRng) -> Vec<(Vec3, Vec3)> {
 /// A reachable floor cell off the direct route, biased toward far-away ones
 /// so fetching it is a real detour.
 fn pick_shard(grid: &Grid, on_path: &HashSet<P>, spawn: P, rng: &mut StdRng) -> Option<P> {
+    let lens = grid.path_lens(spawn); // === perf === one BFS, not one per cell
     let mut candidates: Vec<(usize, P)> = grid
         .cells_of(Cell::Floor)
         .into_iter()
         .filter(|c| !on_path.contains(c))
-        .filter_map(|c| grid.path(spawn, c).map(|p| (p.len(), c)))
+        .filter_map(|c| grid.path_len_in(&lens, c).map(|n| (n, c)))
         .collect();
     if candidates.is_empty() {
         return None;
@@ -1423,6 +1425,92 @@ mod tests {
             .iter()
             .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
     }
+
+    // === perf === `cargo test -p dreamscape --release dream_gen_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dream_gen_timing() {
+        use std::time::Instant;
+        let mut rows: Vec<(f64, f64, String)> = Vec::new();
+        for theme in ALL_THEMES {
+            for depth in [1u32, 12, 24] {
+                let n = 8u64;
+                let t = Instant::now();
+                let mut dreams = Vec::new();
+                for seed in 0..n {
+                    dreams.push(generate(theme, seed, depth, None, true));
+                }
+                let gen = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                let t = Instant::now();
+                for d in &dreams {
+                    for s in [&d.surfaces.floor, &d.surfaces.wall, &d.surfaces.prop, &d.surfaces.shard, &d.surfaces.enemy] {
+                        std::hint::black_box(s.rgba());
+                    }
+                }
+                let tex = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+                rows.push((gen, tex, format!("{theme:?} d{depth}")));
+            }
+        }
+        for theme in ALL_THEMES {
+            let t = Instant::now();
+            for seed in 0..4u64 {
+                std::hint::black_box(generate_nightmare(theme, seed, 12));
+            }
+            rows.push((t.elapsed().as_secs_f64() * 1e3 / 4.0, 0.0, format!("{theme:?} NIGHTMARE")));
+        }
+        {
+            let t = Instant::now();
+            for theme in ALL_THEMES {
+                for seed in 0..8u64 {
+                    let spec = theme.spec();
+                    let mut rng = StdRng::seed_from_u64(seed);
+                    std::hint::black_box(layout::generate(spec.layout, grid_size_capped(theme, 12, 12), &mut rng));
+                }
+            }
+            println!("layout::generate alone: {:.2} ms mean", t.elapsed().as_secs_f64() * 1e3 / (ALL_THEMES.len() * 8) as f64);
+        }
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let tot: f64 = rows.iter().map(|r| r.0).sum::<f64>() / rows.len() as f64;
+        let tt: f64 = rows.iter().map(|r| r.1).sum::<f64>() / rows.len() as f64;
+        println!("mean generate {tot:.2} ms, mean 5 textures {tt:.2} ms");
+        // Peak resident memory of this test process (Linux): 480 dreams were built and dropped.
+        if let Ok(st) = std::fs::read_to_string("/proc/self/status") {
+            for l in st.lines().filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS")) {
+                println!("{l}");
+            }
+        }
+        for r in rows.iter().take(8) {
+            println!("  {:<28} generate {:.2} ms  textures {:.2} ms", r.2, r.0, r.1);
+        }
+    }
+
+    /// Prints one hash over the observable output of many dreams. Run before and
+    /// after a generation change: the number must not move (same seeds, same dreams).
+    /// `cargo test -p dreamscape dream_golden_hash -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dream_golden_hash() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let goals = Goals { note: true, fragments: true, secret: true };
+        for theme in ALL_THEMES {
+            for seed in 0..12u64 {
+                for depth in [0u32, 7, 20] {
+                    let d = generate_with(theme, seed, depth, None, seed % 2 == 0, Pressure::default(), goals);
+                    format!(
+                        "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+                        d.blocks, d.route, d.lucid_route, d.shard, d.note, d.fragments, d.patrols,
+                        d.secret, d.spawn, d.portal, d.specials
+                    )
+                    .hash(&mut h);
+                }
+                let n = generate_nightmare(theme, seed, 12);
+                format!("{:?}{:?}{:?}{:?}", n.blocks, n.route, n.lucid_route, n.sigils).hash(&mut h);
+            }
+        }
+        println!("GOLDEN {:016x}", h.finish());
+    }
+    // === end perf ===
 
     #[test]
     fn a_calmed_dream_has_nothing_that_can_hurt_and_keeps_its_way_through() {

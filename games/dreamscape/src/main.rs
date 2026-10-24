@@ -99,6 +99,8 @@ mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sorting;
+mod texprefetch; // === perf ===
+mod viewcache; // === perf ===
 mod sounds;
 mod specials;
 mod steam;
@@ -519,6 +521,8 @@ pub struct DreamscapeGame {
     textures: HashMap<[u8; 4], Arc<GpuTexture>>,
     /// Per-dream procedural textures; destroyed when the dream changes.
     dream_textures: Vec<Arc<GpuTexture>>,
+    /// === perf === textures made ahead (on threads) for the dream being loaded.
+    tex_prefetch: texprefetch::Prefetched,
     time: f32,
     audio: Option<AudioContext>,
 
@@ -931,6 +935,9 @@ pub struct DreamscapeGame {
     booklet_return: hud::Mode,
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
+    /// === perf === sorted card lists for the menu views (rebuilt only on change).
+    view_cards: std::cell::RefCell<[viewcache::CardCache; 3]>,
+    view_attune: std::cell::RefCell<(u64, String)>,
     pack: reveal_ui::PackView,
     /// Every card the run's opened packs gave so far; pressed together at the end.
     haul: Vec<cards::Recalled>,
@@ -1074,6 +1081,7 @@ impl DreamscapeGame {
             meshes: HashMap::new(),
             textures: HashMap::new(),
             dream_textures: Vec::new(),
+            tex_prefetch: Default::default(), // === perf ===
             time: 0.0,
             audio: None,
             world: World::new(),
@@ -1309,6 +1317,8 @@ impl DreamscapeGame {
             booklet_return: hud::Mode::Journal,
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
+            view_cards: Default::default(), // === perf ===
+            view_attune: Default::default(),
             pack: reveal_ui::PackView::default(),
             haul: Vec::new(),
             pick: reveal_ui::PackPickView::default(),
@@ -1978,7 +1988,7 @@ impl DreamscapeGame {
     ) -> anyhow::Result<Arc<GpuTexture>> {
         let tex = Arc::new(GpuTexture::from_rgba8(
             gl,
-            &spec.rgba(),
+            &self.tex_prefetch.pixels(spec), // === perf === usually made ahead
             TEX_SIZE,
             TEX_SIZE,
             // Bilinear: nearest-filtered 64px patterns shimmer into static at range.
@@ -3770,7 +3780,7 @@ impl DreamscapeGame {
             },
             loadout: if self.mode == hud::Mode::Loadout {
                 loadout_ui::LoadoutView {
-                    cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
+                    cards: self.view_cards(0, self.settings.sort_loadout, None),
                     sort: self.settings.sort_loadout.label(),
                     chosen: self.booklet.lore.deck.clone(), // === deck ===
                     slots: deck::DECK_MAX,
@@ -3797,7 +3807,7 @@ impl DreamscapeGame {
             },
             merge: if self.mode == hud::Mode::Merge {
                 merge_ui::MergeView {
-                    cards: self.sorted_cards(self.settings.sort_merge).into_iter().cloned().collect(),
+                    cards: self.view_cards(1, self.settings.sort_merge, None),
                     sort: self.settings.sort_merge.label(),
                     selected: self.merge_sel,
                     first: self.merge_first,
@@ -3899,20 +3909,25 @@ impl DreamscapeGame {
             },
             journal_status: self.journal_status.clone(),
             booklet_cards: if self.mode == hud::Mode::Booklet {
-                let all = self.sorted_cards(self.settings.sort_booklet);
-                all[cards::page_range(all.len(), self.booklet_page)]
-                    .iter()
-                    .map(|c| (*c).clone())
-                    .collect()
+                let range = cards::page_range(self.booklet.card_count(), self.booklet_page);
+                self.view_cards(2, self.settings.sort_booklet, Some(range))
             } else {
-                Vec::new()
+                std::sync::Arc::from(Vec::new())
             },
             booklet_sort: self.settings.sort_booklet.label(),
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
             booklet_attune: if self.mode == hud::Mode::Booklet {
-                attunement::line(&attunement::counts(self.booklet.cards()))
+{
+                    // === perf === rebuilt only when the cards change
+                    let print = viewcache::fingerprint(self.booklet.cards());
+                    let mut cache = self.view_attune.borrow_mut();
+                    if cache.1.is_empty() || cache.0 != print {
+                        *cache = (print, attunement::line(&attunement::counts(self.booklet.cards())));
+                    }
+                    cache.1.clone()
+                }
             } else {
                 String::new()
             },
@@ -3966,10 +3981,15 @@ impl DreamscapeGame {
             } else {
                 tickets_ui::TicketsView::default()
             },
+            // === perf === the screens look a card up and treat a missing one as level 0,
+            // so only cards that earned xp are listed (was: every card in the booklet).
             mastery_levels: self
                 .booklet
-                .cards()
-                .map(|c| (c.number, self.booklet.mastery.level_of(c.number)))
+                .mastery
+                .xp
+                .iter()
+                .map(|&(n, x)| (n, worth::level(x)))
+                .filter(|&(_, l)| l > 0)
                 .collect(),
             perks: if self.mode == hud::Mode::Title {
                 self.booklet
@@ -8649,9 +8669,15 @@ impl DreamscapeGame {
     /// The booklet's cards in the given order.
     fn sorted_cards(&self, sort: sorting::Sort) -> Vec<&cards::Card> {
         let all: Vec<&cards::Card> = self.booklet.cards().collect();
-        // `order` wants a slice of cards; sorting is by value so clone the (small) list.
-        let tmp: Vec<cards::Card> = all.iter().map(|c| (*c).clone()).collect();
-        sorting::order(&tmp, sort).into_iter().map(|i| all[i]).collect()
+        sorting::order(&all, sort).into_iter().map(|i| all[i]).collect()
+    }
+
+    /// === perf === `sorted_cards` for the per-frame view: cloned only when the
+    /// booklet, the sort or the slice changed. `slot`: 0 loadout, 1 merge, 2 booklet.
+    fn view_cards(&self, slot: usize, sort: sorting::Sort, range: Option<std::ops::Range<usize>>) -> std::sync::Arc<[cards::Card]> {
+        let print = viewcache::fingerprint(self.booklet.cards());
+        let range = range.unwrap_or(0..usize::MAX);
+        self.view_cards.borrow_mut()[slot].get(print, sort, range, || self.booklet.cards().cloned().collect())
     }
 
     /// `[t]` (cycle = true) or `[r]` on the booklet, merge or loadout screen: the cursor
@@ -9895,6 +9921,7 @@ impl DreamscapeGame {
     }
 
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        let _t_all = engine::perf::scope("load.total"); // === perf ===
         let theme = self.director.theme;
         let spec = theme.spec();
         self.twists = if self.director.nightmare || self.prologue.is_some() || self.enemy_free() {
@@ -9963,6 +9990,7 @@ impl DreamscapeGame {
         }
         self.air_jumps_used = 0;
         let goals = self.plan_goals();
+        let t_gen = engine::perf::scope("load.generate"); // === perf ===
         let mut dream = if self.director.nightmare {
             dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
         } else {
@@ -9976,6 +10004,7 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        drop(t_gen); // === perf ===
         // === sanctuary === nothing here can hurt you
         if self.enemy_free() {
             dream.calm();
@@ -10108,6 +10137,7 @@ impl DreamscapeGame {
             dream.surfaces.prop.pattern,
         );
 
+        let t_clear = engine::perf::scope("load.clear"); // === perf ===
         self.world.clear();
         {
             let gl = ctx.gl();
@@ -10116,6 +10146,7 @@ impl DreamscapeGame {
                 unsafe { tex.destroy(gl) };
             }
         }
+        drop(t_clear); // === perf ===
         self.enemies.clear();
         self.specials.clear();
         self.newfoes.clear(); // enemies-a
@@ -10196,17 +10227,55 @@ impl DreamscapeGame {
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
-        self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        {
+            let _t = engine::perf::scope("load.music_start"); // === perf ===
+            self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        }
 
         let gl = ctx.gl();
         let player_mesh = self.mesh(Shape::Octahedron)?;
         let enemy_mesh = self.mesh(Shape::Orb)?;
+        // === perf === every spec this dream needs up front, so the pixels are made
+        // side by side instead of one upload after another.
+        let cb = self.settings.colorblind_markers;
+        let shard_spec = if cb {
+            access::shard(dream.surfaces.shard.seed)
+        } else {
+            dream.surfaces.shard.clone()
+        };
+        let preview = if theme == DreamTheme::Awakening {
+            DreamTheme::Awakening
+        } else {
+            self.director.next
+        };
+        let (portal_spec, wake_spec) = if cb {
+            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
+        } else {
+            (
+                dream::portal_surface(preview, dream.seed ^ 0x5EED),
+                dream::portal_surface(DreamTheme::Awakening, dream.seed),
+            )
+        };
+        {
+            let _t = engine::perf::scope("load.textures_gen");
+            self.tex_prefetch.fill(&[
+                &dream.surfaces.floor,
+                &dream.surfaces.wall,
+                &dream.surfaces.prop,
+                &shard_spec,
+                &portal_spec,
+                &wake_spec,
+                &dream.surfaces.enemy,
+            ]);
+        }
+        // === end perf ===
+        let t_up = engine::perf::scope("load.textures_upload"); // === perf ===
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
         // A cracked wall wears the wall pattern with a bright hairline split.
         let crack_tex = if dream.secret.is_some() {
-            let mut px = dream.surfaces.wall.rgba();
+            let mut px = self.tex_prefetch.pixels(&dream.surfaces.wall);
             secrets::draw_crack(&mut px, TEX_SIZE, dream.seed);
             let tex = Arc::new(GpuTexture::from_rgba8(
                 gl,
@@ -10221,28 +10290,10 @@ impl DreamscapeGame {
             None
         };
         let mut cracked: Option<(Entity, Vec3, f32)> = None;
-        let cb = self.settings.colorblind_markers;
-        let shard_spec = if cb {
-            access::shard(dream.surfaces.shard.seed)
-        } else {
-            dream.surfaces.shard.clone()
-        };
         self.shard_tex = Some(self.upload_surface(gl, &shard_spec)?);
-        let preview = if theme == DreamTheme::Awakening {
-            DreamTheme::Awakening
-        } else {
-            self.director.next
-        };
-        let (portal_spec, wake_spec) = if cb {
-            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
-        } else {
-            (
-                dream::portal_surface(preview, dream.seed ^ 0x5EED),
-                dream::portal_surface(DreamTheme::Awakening, dream.seed),
-            )
-        };
         let portal_tex = self.upload_surface(gl, &portal_spec)?;
         self.wake_tex = Some(self.upload_surface(gl, &wake_spec)?);
+        drop(t_up); // === perf ===
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
@@ -10289,6 +10340,7 @@ impl DreamscapeGame {
             }
         }
         // === end hazards ===
+        let t_tiles = engine::perf::scope("load.spawn_tiles"); // === perf ===
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
@@ -10492,6 +10544,7 @@ impl DreamscapeGame {
                 armed: true,
             });
         }
+        drop(t_tiles); // === perf ===
         self.spawn_wager_portal(gl, &dream)?; // === risk ===
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
@@ -10743,6 +10796,7 @@ impl DreamscapeGame {
                 split: false,
             });
         }
+        let t_foes = engine::perf::scope("load.spawn_foes"); // === perf ===
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
         self.spawn_newfoes(gl, &dream, player_speed)?; // enemies-a
         // === shards ===
@@ -10753,6 +10807,7 @@ impl DreamscapeGame {
         }
         // === end shards ===
         self.spawn_enemies_b(gl, &dream)?; // === combat ===
+        drop(t_foes); // === perf ===
         // === sanctuary === a place to breathe: nerve refills
         if self.sanctuary() {
             self.nerve.heal(self.nerve.max());
@@ -10823,7 +10878,10 @@ impl DreamscapeGame {
             gone: 0,
         });
         // === end hazards ===
-        self.spawn_features(gl, &dream)?;
+        {
+            let _t = engine::perf::scope("load.spawn_features"); // === perf ===
+            self.spawn_features(gl, &dream)?;
+        }
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
             let tiles = dream
@@ -10974,6 +11032,7 @@ impl DreamscapeGame {
             .props
             .get((dream.seed % spec.props.len() as u64) as usize)
             .copied();
+        self.tex_prefetch = Default::default(); // === perf === free the spare pixels
         self.dream = Some(dream);
         if !self.autopilot && self.director.depth > self.best_depth {
             self.best_depth = self.director.depth;
@@ -17270,4 +17329,39 @@ mod screen_smoke {
         assert!(tagged > plain, "the tag is one more text");
     }
     // === end handscore ===
+
+    // === perf === `cargo test -p dreamscape --release hud_view_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hud_view_cost() {
+        let mut g = game("hud_cost");
+        let themes = dream::ALL_THEMES;
+        let recs: Vec<_> = (0..239u64)
+            .map(|i| cards::tests::record(themes[i as usize % themes.len()], i + 1, 1 + (i % 9) as u32, 0.3, false))
+            .collect();
+        g.booklet.add_run(1, &recs);
+        g.screen_size = (1280.0, 720.0);
+        // Best of 7 batches: other builds share this machine, so the minimum is the honest cost.
+        for mode in [hud::Mode::Playing, hud::Mode::Loadout, hud::Mode::Merge, hud::Mode::Booklet, hud::Mode::Title] {
+            g.mode = mode;
+            std::hint::black_box(g.hud_view());
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                // On-CPU ns of this thread (Linux), immune to other builds on the box.
+                let cpu = || {
+                    std::fs::read_to_string("/proc/thread-self/schedstat")
+                        .ok()
+                        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                let t = cpu();
+                for _ in 0..300 {
+                    std::hint::black_box(g.hud_view());
+                }
+                best = best.min((cpu() - t) / 1e3 / 300.0);
+            }
+            println!("hud_view {mode:?}: {best:.1} us/call");
+        }
+    }
+    // === end perf ===
 }

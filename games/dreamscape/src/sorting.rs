@@ -76,10 +76,10 @@ impl Sort {
 /// Indices into `cards`, sorted. Stable; ties break by card number (in the sort's direction,
 /// so flipping always reverses the whole list). Number Desc = newest first.
 /// Asc = Faint..Prophetic.. / A..Z / A..Z by ability name / oldest first.
-pub fn order(cards: &[Card], sort: Sort) -> Vec<usize> {
+pub fn order<C: std::borrow::Borrow<Card>>(cards: &[C], sort: Sort) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..cards.len()).collect();
     idx.sort_by(|&a, &b| {
-        let (ca, cb) = (&cards[a], &cards[b]);
+        let (ca, cb): (&Card, &Card) = (cards[a].borrow(), cards[b].borrow());
         let primary = match sort.key {
             SortKey::Rarity => ca.rarity.cmp(&cb.rarity),
             SortKey::Dream => ca.name.to_lowercase().cmp(&cb.name.to_lowercase()),
@@ -182,7 +182,7 @@ mod tests {
                 assert_eq!(o, vec![0, 1, 2, 3]);
             }
         }
-        assert!(order(&[], Sort::default()).is_empty());
+        assert!(order::<Card>(&[], Sort::default()).is_empty());
     }
 
     #[test]

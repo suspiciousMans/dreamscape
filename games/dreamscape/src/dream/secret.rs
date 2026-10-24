@@ -53,6 +53,7 @@ pub fn hosts(kind: LayoutKind) -> bool {
 pub(super) fn pick(grid: &Grid, taken: &HashSet<P>, spawn: P, seed: u64) -> Option<(P, P)> {
     let mut rng = StdRng::seed_from_u64(seed ^ 0x5EC2_E7A1);
     let mut candidates: Vec<(usize, P, P)> = Vec::new();
+    let lens = grid.path_lens(spawn); // === perf === one BFS, not one per wall
     for wall in grid.cells_of(Cell::Wall) {
         let floors: Vec<(i32, i32)> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
             .into_iter()
@@ -68,8 +69,8 @@ pub(super) fn pick(grid: &Grid, taken: &HashSet<P>, spawn: P, seed: u64) -> Opti
         if grid.level(approach) != grid.level(wall) {
             continue;
         }
-        if let Some(p) = grid.path(spawn, approach) {
-            candidates.push((p.len(), wall, approach));
+        if let Some(n) = grid.path_len_in(&lens, approach) {
+            candidates.push((n, wall, approach));
         }
     }
     candidates.sort();
