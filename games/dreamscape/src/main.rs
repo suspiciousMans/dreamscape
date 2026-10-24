@@ -429,6 +429,13 @@ fn event_icon(plan: events::Plan) -> upgrades::Icon {
         VoiceCard => Icon::Shard,
         FreeReroll => Icon::Brain,
         MoonBlink | MoonSteady => Icon::Eye,
+        // === events2 ===
+        DustGamble | Handout | ChordGamble | SwapUpgrade => Icon::Gem,
+        BorrowedPick | TwoRerolls => Icon::Brain,
+        CurseForShard | ShardOnly | ShardThin => Icon::Shard,
+        ShedCurse => Icon::Lid,
+        TwistOnly | TwistDust | GildOnly | GildThin => Icon::Eye,
+        // === end events2 ===
     }
 }
 
@@ -2196,14 +2203,14 @@ impl DreamscapeGame {
                 }
                 // Every other swing comes back, a little lower.
                 self.sfx_pitched(Sound::Strike, if self.strike_count % 2 == 1 { 0.9 } else { 1.0 });
-                let arc = if self.run.count(Upgrade::WideEyes) > 0 {
-                    combat::ARC_COS_WIDE
-                } else {
-                    combat::ARC_COS
-                };
+                let arc = self.strike_arc_cos();
+                // === edges2 === CLEAVE and LONGARM show on the swing
+                self.edge_fires(edges::Edge::Cleave);
+                self.edge_fires(edges::Edge::Longarm);
+                // === end edges2 ===
                 self.slash_pending = Some(SlashStart {
                     facing: self.flat_facing(),
-                    reach: combat::reach_with(self.run.count(Upgrade::LongReach)),
+                    reach: self.strike_reach(),
                     half_arc: arc.acos(),
                     flip: self.strike_count % 2 == 1, // every other swing comes back
                 });
@@ -2442,6 +2449,31 @@ impl DreamscapeGame {
         }
     }
 
+    // === edges2 ===
+    /// The strike's reach: LONG REACH cards, then LONGARM.
+    fn strike_reach(&self) -> f32 {
+        edges::reach(
+            combat::reach_with(self.run.count(Upgrade::LongReach)),
+            self.has_edge(edges::Edge::Longarm),
+        )
+    }
+
+    /// The strike's half-arc cosine: WIDE EYES, then CLEAVE.
+    fn strike_arc_cos(&self) -> f32 {
+        let base = if self.run.count(Upgrade::WideEyes) > 0 {
+            combat::ARC_COS_WIDE
+        } else {
+            combat::ARC_COS
+        };
+        edges::arc_cos(base, self.has_edge(edges::Edge::Cleave))
+    }
+
+    /// Is this foe still untouched?
+    fn foe_is_fresh(&self, t: &CombatTarget) -> bool {
+        self.foes.get(&t.entity).map_or(true, |f| f.hp >= f.max)
+    }
+    // === end edges2 ===
+
     fn has_edge(&self, e: edges::Edge) -> bool {
         self.edges.contains(&e)
     }
@@ -2476,6 +2508,9 @@ impl DreamscapeGame {
             dmg += edges::EDGE_BONUS;
         }
         // === end edges ===
+        // === edges2 === AMBUSH, OPENER, PUNISHER
+        dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
+        // === end edges2 ===
         dmg
     }
 
@@ -2500,6 +2535,11 @@ impl DreamscapeGame {
                     self.marks.insert(t.entity, edges::HEXMARK_SECS);
                 }
                 // === end edges ===
+                // === edges2 === RIPPLE: the foes beside the target reel
+                if self.has_edge(edges::Edge::Ripple) {
+                    self.ripple(t);
+                }
+                // === end edges2 ===
                 let away = Vec3::new(t.pos.x - from.x, 0.0, t.pos.z - from.z).normalize_or_zero();
                 if knock > 0.0 && !self.run.active(Ability::Stillness) {
                     if let Ok(mut tr) = self.world.get::<&mut Transform>(t.entity) {
@@ -2544,6 +2584,28 @@ impl DreamscapeGame {
         }
     }
 
+    // === edges2 ===
+    /// RIPPLE: every other foe near `t` reels briefly. Returns how many.
+    fn ripple(&mut self, t: &CombatTarget) -> usize {
+        let near: Vec<CombatTarget> = self
+            .combat_targets()
+            .into_iter()
+            .filter(|o| o.entity != t.entity && o.pos.distance(t.pos) <= edges::RIPPLE_REACH)
+            .collect();
+        for o in &near {
+            if matches!(o.kind, combat::Kind::Pacer { .. }) {
+                self.stunned.insert(o.entity, edges::RIPPLE_STAGGER);
+            } else {
+                self.staggered.insert(o.entity, edges::RIPPLE_STAGGER);
+            }
+        }
+        if !near.is_empty() {
+            self.edge_fires(edges::Edge::Ripple);
+        }
+        near.len()
+    }
+    // === end edges2 ===
+
     /// An area effect: every foe within `reach` of `centre` takes `dmg`
     /// (0 = stagger only) and reels. Returns how many were touched.
     fn shock(&mut self, centre: Vec3, reach: f32, dmg: f32, stagger: f32) -> usize {
@@ -2572,12 +2634,8 @@ impl DreamscapeGame {
         let me = self.player_position;
         let facing = self.flat_facing();
         let mut struck = false;
-        let reach = combat::reach_with(self.run.count(Upgrade::LongReach));
-        let arc = if self.run.count(Upgrade::WideEyes) > 0 {
-            combat::ARC_COS_WIDE
-        } else {
-            combat::ARC_COS
-        };
+        let reach = self.strike_reach();
+        let arc = self.strike_arc_cos();
         let mut knock = combat::KNOCKBACK
             * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
         // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
@@ -2863,8 +2921,18 @@ impl DreamscapeGame {
             combat::LUCKY_MOTE_PER * self.run.count(Upgrade::LuckyMemory) as f32,
         );
         self.bonus_dust += loot.dust;
+        // === edges2 === WINDFALL: extra dust; LANTERN: always a mote
+        if self.has_edge(edges::Edge::Windfall) {
+            self.bonus_dust += edges::WINDFALL_DUST;
+            self.edge_fires(edges::Edge::Windfall);
+        }
+        let lantern = self.has_edge(edges::Edge::Lantern);
+        if lantern {
+            self.edge_fires(edges::Edge::Lantern);
+        }
+        // === end edges2 ===
         self.sfx_pitched(Sound::Coin, 1.0 + 0.04 * loot.dust.min(5) as f32);
-        if loot.mote {
+        if loot.mote || lantern {
             self.pending_motes.push(pos);
         }
         log::info!("Unravelled (+{} dust{})", loot.dust, if loot.mote { ", a calm mote" } else { "" });
@@ -12980,6 +13048,91 @@ mod screen_smoke {
         let quick = strike_gap(Some(edges::Edge::Quickdraw));
         assert!(quick < slow, "{quick} < {slow}");
     }
+
+    // === edges2 ===
+    fn hp_after_one_blow(edge: Option<edges::Edge>, setup: impl Fn(&mut DreamscapeGame, Entity)) -> f32 {
+        let mut g = fighter("e2", None);
+        g.edges = edge.into_iter().collect();
+        let e = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        g.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+        setup(&mut g, e);
+        g.resolve_strike();
+        g.foes[&e].hp
+    }
+
+    #[test]
+    fn opener_ambush_and_punisher_each_cut_a_point_deeper_when_they_apply() {
+        let nothing = |_: &mut DreamscapeGame, _: Entity| {};
+        let plain = hp_after_one_blow(None, nothing);
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opener), nothing), plain - 1.0);
+        // Not fresh: no opener bonus.
+        let hurt = |g: &mut DreamscapeGame, e: Entity| {
+            g.foes.insert(e, combat::Foe { hp: 8.0, max: 9.0 });
+        };
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opener), hurt), 8.0 - (9.0 - plain));
+        // Ambush: an unaware foe (not chasing) takes a point more than without it.
+        let calm = |g: &mut DreamscapeGame, _: Entity| {
+            for p in &mut g.enemies {
+                p.ai.chasing = false;
+            }
+        };
+        assert_eq!(
+            hp_after_one_blow(Some(edges::Edge::Ambush), calm),
+            hp_after_one_blow(None, calm) - 1.0
+        );
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Ambush), nothing), plain, "it was aware");
+        // Punisher: a stunned foe.
+        let stun = |g: &mut DreamscapeGame, e: Entity| {
+            g.stunned.insert(e, 5.0);
+        };
+        assert_eq!(
+            hp_after_one_blow(Some(edges::Edge::Opportunist), stun),
+            hp_after_one_blow(None, stun) - 1.0
+        );
+        assert_eq!(hp_after_one_blow(Some(edges::Edge::Opportunist), nothing), plain);
+    }
+
+    #[test]
+    fn cleave_hits_to_the_side_and_longarm_hits_further() {
+        let hit = |edge: Option<edges::Edge>, at: Vec3| {
+            let mut g = fighter("e2reach", None);
+            g.edges = edge.into_iter().collect();
+            let e = put_pacer(&mut g, at, true);
+            g.foes.insert(e, combat::Foe { hp: 9.0, max: 9.0 });
+            g.resolve_strike();
+            g.foes[&e].hp < 9.0
+        };
+        let side = Vec3::new(2.0, 1.0, 0.8);
+        assert!(!hit(None, side));
+        assert!(hit(Some(edges::Edge::Cleave), side));
+        let far = Vec3::new(0.0, 1.0, 2.8);
+        assert!(!hit(None, far));
+        assert!(hit(Some(edges::Edge::Longarm), far));
+        assert!(!hit(Some(edges::Edge::Longarm), Vec3::new(0.0, 1.0, 3.2)), "still a limit");
+    }
+
+    #[test]
+    fn ripple_rattles_the_neighbours_and_windfall_and_lantern_pay_on_unravel() {
+        let mut g = with_edge("ripple", edges::Edge::Ripple);
+        let a = put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), true);
+        let b = put_pacer(&mut g, Vec3::new(1.5, 1.0, 2.0), true);
+        let far = put_pacer(&mut g, Vec3::new(20.0, 1.0, 20.0), true);
+        g.resolve_strike();
+        assert!(g.stunned.contains_key(&b) || g.staggered.contains_key(&b), "the neighbour reels");
+        assert!(!g.stunned.contains_key(&far));
+        let _ = a;
+        // Windfall: extra dust. Lantern: a mote.
+        let mut w = with_edge("windfall", edges::Edge::Windfall);
+        let base = w.bonus_dust;
+        let e = put_pacer(&mut w, Vec3::new(0.0, 1.0, 40.0), false);
+        w.unravel(e, Vec3::ZERO);
+        assert!(w.bonus_dust - base >= edges::WINDFALL_DUST);
+        let mut l = with_edge("lantern", edges::Edge::Lantern);
+        let e = put_pacer(&mut l, Vec3::new(0.0, 1.0, 40.0), false);
+        l.unravel(e, Vec3::ZERO);
+        assert_eq!(l.pending_motes.len(), 1, "a calm mote");
+    }
+    // === end edges2 ===
 
     /// Seconds between one swing and the next, with an edge.
     fn strike_gap(edge: Option<edges::Edge>) -> f32 {

@@ -357,6 +357,8 @@ pub fn power_lines(
     let (active, passive) = describe(c, slot);
     let ipx = (3.0 * u).round().max(2.0);
     let row_h = ipx * 9.0 + 8.0 * u;
+    // A card with an edge has a fourth block: tighten the gaps to fit panels.
+    let gap = if edges_of(c).is_empty() { 6.0 * u } else { 2.0 * u };
     // The ability.
     pixel_ui::icon(
         p,
@@ -388,7 +390,7 @@ pub fn power_lines(
         rgba([200, 180, 225], 0.75),
     );
     // The passive.
-    let y2 = at.y + row_h + 6.0 * u;
+    let y2 = at.y + row_h + gap;
     let info = pw.passive.info();
     pixel_ui::icon(
         p,
@@ -414,7 +416,7 @@ pub fn power_lines(
         rgba([160, 220, 190], 0.7),
     );
     // The combat edges, if this dream teaches any.
-    let mut y3 = y2 + row_h + 6.0 * u;
+    let mut y3 = y2 + row_h + gap;
     for e in edges_of(c) {
         pixel_ui::icon(
             p,
@@ -439,25 +441,24 @@ pub fn power_lines(
             FontId::monospace(pixel_ui::fit(e.desc(), 12.0 * u, width - ipx * 10.5, 7.0)),
             rgba([220, 190, 190], 0.75),
         );
-        y3 += row_h + 6.0 * u;
+        y3 += row_h + gap;
     }
-    // The flavour, a little glitchy.
-    let wob = if (time * 0.7).fract() < 0.04 {
-        1.0
-    } else {
-        0.0
-    };
-    pixel_ui::split_text(
-        p,
-        Pos2::new(at.x + wob, y3),
-        Align2::LEFT_TOP,
-        pw.flavour,
-        pixel_ui::fit(pw.flavour, 13.0 * u, width, 7.0),
-        rgba([190, 180, 220], 0.9),
-        1.0,
-        0.5,
-    );
-    y3 + 18.0 * u - at.y
+    // The flavour, a little glitchy. A card with an edge has no room for it.
+    if edges_of(c).is_empty() {
+        let wob = if (time * 0.7).fract() < 0.04 { 1.0 } else { 0.0 };
+        pixel_ui::split_text(
+            p,
+            Pos2::new(at.x + wob, y3),
+            Align2::LEFT_TOP,
+            pw.flavour,
+            pixel_ui::fit(pw.flavour, 13.0 * u, width, 7.0),
+            rgba([190, 180, 220], 0.9),
+            1.0,
+            0.5,
+        );
+        return y3 + 18.0 * u - at.y;
+    }
+    y3 - at.y
 }
 
 /// The bottom hint line, in a pixel strip.

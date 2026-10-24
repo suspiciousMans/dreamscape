@@ -24,6 +24,25 @@ pub const KNOCK_DUST: u32 = 8;
 pub const CHAIR_DUST: u32 = 10;
 /// Dust when an event has nothing else to give.
 const CONSOLATION: i32 = 5;
+// === events2 ===
+/// Dust a coin costs at the well, and what a lucky toss returns.
+pub const WELL_COST: u32 = 10;
+pub const WELL_WIN: i32 = 30;
+/// Dust for a handout (the bakery, the sleeping giant's blanket).
+pub const HANDOUT_DUST: i32 = 8;
+/// Dust the stairs and a lost chord give.
+pub const STAIRS_DUST: i32 = 10;
+pub const CHORD_CONSOLATION: i32 = 4;
+/// Prices at the vendor, tailor, bakery, lighthouse, library, piano, crows.
+pub const CUPFUL_DUST: u32 = 6;
+pub const LANTERN_DUST: u32 = 18;
+pub const SEAM_DUST: u32 = 12;
+pub const ROLL_DUST: u32 = 4;
+pub const BEACON_DUST: u32 = 14;
+pub const PAGE_DUST: u32 = 8;
+pub const TUNING_DUST: u32 = 10;
+pub const CROW_DUST: u32 = 20;
+// === end events2 ===
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Id {
@@ -32,14 +51,40 @@ pub enum Id {
     EmptyChair,
     LostAndFound,
     SecondMoon,
+    // === events2 ===
+    LanternVendor,
+    WishingWell,
+    PatientTailor,
+    DryLighthouse,
+    NightBakery,
+    MirrorPond,
+    UnfinishedLibrary,
+    DrownedPiano,
+    DownStaircase,
+    TellingCrows,
+    SleepingGiant,
+    ForgottenBirthday,
+    // === end events2 ===
 }
 
-pub const ALL: [Id; 5] = [
+pub const ALL: [Id; 17] = [
     Id::HummingDoor,
     Id::Voice,
     Id::EmptyChair,
     Id::LostAndFound,
     Id::SecondMoon,
+    Id::LanternVendor,
+    Id::WishingWell,
+    Id::PatientTailor,
+    Id::DryLighthouse,
+    Id::NightBakery,
+    Id::MirrorPond,
+    Id::UnfinishedLibrary,
+    Id::DrownedPiano,
+    Id::DownStaircase,
+    Id::TellingCrows,
+    Id::SleepingGiant,
+    Id::ForgottenBirthday,
 ];
 
 /// What a choice does. Random parts are settled in [`resolve`].
@@ -66,6 +111,36 @@ pub enum Plan {
     MoonBlink,
     /// WIDE EYES.
     MoonSteady,
+    // === events2 ===
+    /// 50/50: a good deal of dust, or nothing (the coin is gone).
+    DustGamble,
+    /// Lose a held upgrade, take a random one.
+    SwapUpgrade,
+    /// A pick now; the next pick is thinner.
+    BorrowedPick,
+    /// Two free rerolls.
+    TwoRerolls,
+    /// A curse, and a shard.
+    CurseForShard,
+    /// Let go of a curse you hold.
+    ShedCurse,
+    /// A shard, banked.
+    ShardOnly,
+    /// A shard, and a thinner next pick.
+    ShardThin,
+    /// The next dream gets a random extra twist.
+    TwistOnly,
+    /// The next dream is gilded.
+    GildOnly,
+    /// The next dream is twisted; a little dust.
+    TwistDust,
+    /// The next dream is gilded; the next pick is thinner.
+    GildThin,
+    /// A little dust.
+    Handout,
+    /// 50/50: a random upgrade, or a little dust.
+    ChordGamble,
+    // === end events2 ===
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +271,128 @@ pub fn event(id: Id) -> Event {
                 WALK_AWAY("Don't look up"),
             ],
         },
+        // === events2 ===
+        Id::LanternVendor => Event {
+            id,
+            title: "THE LANTERN VENDOR",
+            prompt: "A vendor sells light by the cupful.",
+            choices: [
+                Choice { text: "Buy a cupful", detail: "a random common upgrade, for 6 dust", cost: CUPFUL_DUST, plan: Plan::CommonUpgrade },
+                Choice { text: "Buy the lantern", detail: "a safe upgrade, for 18 dust", cost: LANTERN_DUST, plan: Plan::Upgrade },
+                WALK_AWAY("Walk on"),
+            ],
+        },
+        Id::WishingWell => Event {
+            id,
+            title: "THE WISHING WELL",
+            prompt: "The well is dry, but it still listens.",
+            choices: [
+                Choice { text: "Toss a coin", detail: "10 dust. even odds of 30 back", cost: WELL_COST, plan: Plan::DustGamble },
+                Choice { text: "Toss something heavy", detail: "lose an upgrade, take a random one", cost: 0, plan: Plan::SwapUpgrade },
+                WALK_AWAY("Let it be"),
+            ],
+        },
+        Id::PatientTailor => Event {
+            id,
+            title: "THE PATIENT TAILOR",
+            prompt: "A tailor mends a coat made of fog. Pins in her mouth.",
+            choices: [
+                Choice { text: "Be measured", detail: "an extra pick, one card fewer, for 8 dust", cost: PAGE_DUST, plan: Plan::BorrowedPick },
+                Choice { text: "Let out a seam", detail: "two free rerolls, for 12 dust", cost: SEAM_DUST, plan: Plan::TwoRerolls },
+                WALK_AWAY("Say you're late"),
+            ],
+        },
+        Id::DryLighthouse => Event {
+            id,
+            title: "THE DRY LIGHTHOUSE",
+            prompt: "A lighthouse stands far from any water. Its lamp is out.",
+            choices: [
+                Choice { text: "Climb it", detail: "next dream: a random extra twist", cost: 0, plan: Plan::TwistOnly },
+                Choice { text: "Light the lamp", detail: "next dream: gilded, for 14 dust", cost: BEACON_DUST, plan: Plan::GildOnly },
+                WALK_AWAY("Watch from the shore"),
+            ],
+        },
+        Id::NightBakery => Event {
+            id,
+            title: "THE NIGHT BAKERY",
+            prompt: "Warm bread, and no baker. A bell on the counter.",
+            choices: [
+                Choice { text: "Buy a roll", detail: "one free reroll, for 4 dust", cost: ROLL_DUST, plan: Plan::FreeReroll },
+                Choice { text: "Take yesterday's bread", detail: "+8 dust", cost: 0, plan: Plan::Handout },
+                WALK_AWAY("Don't ring the bell"),
+            ],
+        },
+        Id::MirrorPond => Event {
+            id,
+            title: "THE MIRROR POND",
+            prompt: "The pond shows you a little ahead of yourself.",
+            choices: [
+                Choice { text: "Reach through", detail: "take a curse. bank a shard", cost: 0, plan: Plan::CurseForShard },
+                Choice { text: "Drink from it", detail: "let go of a curse you hold", cost: 0, plan: Plan::ShedCurse },
+                WALK_AWAY("Look away"),
+            ],
+        },
+        Id::UnfinishedLibrary => Event {
+            id,
+            title: "THE UNFINISHED LIBRARY",
+            prompt: "Every book stops mid-sentence. A few pages are loose.",
+            choices: [
+                Choice { text: "Read a page", detail: "a random common upgrade, for 8 dust", cost: PAGE_DUST, plan: Plan::CommonUpgrade },
+                Choice { text: "Tear one out", detail: "bank a shard. next pick: one fewer card", cost: 0, plan: Plan::ShardThin },
+                WALK_AWAY("Shush the room"),
+            ],
+        },
+        Id::DrownedPiano => Event {
+            id,
+            title: "THE DROWNED PIANO",
+            prompt: "A piano sits knee-deep in a puddle. One key still rings.",
+            choices: [
+                Choice { text: "Play a chord", detail: "an upgrade, or a little dust", cost: 0, plan: Plan::ChordGamble },
+                Choice { text: "Tune it", detail: "next dream: gilded, for 10 dust", cost: TUNING_DUST, plan: Plan::GildOnly },
+                WALK_AWAY("Close the lid"),
+            ],
+        },
+        Id::DownStaircase => Event {
+            id,
+            title: "THE DOWN STAIRCASE",
+            prompt: "Stairs go down into the next dream. The rail is smooth.",
+            choices: [
+                Choice { text: "Take the stairs", detail: "next dream: a random twist. +10 dust", cost: 0, plan: Plan::TwistDust },
+                Choice { text: "Slide the banister", detail: "next dream gilded. next pick: one fewer", cost: 0, plan: Plan::GildThin },
+                WALK_AWAY("Turn back"),
+            ],
+        },
+        Id::TellingCrows => Event {
+            id,
+            title: "THE TELLING CROWS",
+            prompt: "Crows on a wire, all facing the way you came.",
+            choices: [
+                Choice { text: "Listen", detail: "next dream: a random extra twist", cost: 0, plan: Plan::TwistOnly },
+                Choice { text: "Pay them", detail: "bank a shard, for 20 dust", cost: CROW_DUST, plan: Plan::ShardOnly },
+                WALK_AWAY("Shoo them"),
+            ],
+        },
+        Id::SleepingGiant => Event {
+            id,
+            title: "THE SLEEPING GIANT",
+            prompt: "A giant sleeps on its side. Its coat pocket is open.",
+            choices: [
+                Choice { text: "Pick its pocket", detail: "an upgrade, or a curse. even odds", cost: 0, plan: Plan::DoorGamble },
+                Choice { text: "Tuck in its blanket", detail: "+8 dust", cost: 0, plan: Plan::Handout },
+                WALK_AWAY("Tiptoe past"),
+            ],
+        },
+        Id::ForgottenBirthday => Event {
+            id,
+            title: "THE FORGOTTEN BIRTHDAY",
+            prompt: "A cake, lit. No guests. The candles keep burning.",
+            choices: [
+                Choice { text: "Blow out the candles", detail: "an upgrade, or a little dust", cost: 0, plan: Plan::ChordGamble },
+                Choice { text: "Cut the cake", detail: "+8 dust", cost: 0, plan: Plan::Handout },
+                WALK_AWAY("Sing, quietly"),
+            ],
+        },
+        // === end events2 ===
     }
 }
 
@@ -247,7 +444,10 @@ pub fn available(c: &Choice, run: &RunUpgrades, dust: u32) -> bool {
         return false;
     }
     match c.plan {
-        Plan::VoiceCard => held_passive(run).is_some(),
+        Plan::VoiceCard | Plan::SwapUpgrade => held_passive(run).is_some(),
+        // === events2 ===
+        Plan::ShedCurse => held_curse(run).is_some(),
+        // === end events2 ===
         _ => true,
     }
 }
@@ -258,6 +458,12 @@ fn held_passive(run: &RunUpgrades) -> Option<Upgrade> {
         .copied()
         .find(|u| !u.is_ability() && !matches!(u, Upgrade::Cursed(_)))
 }
+
+// === events2 ===
+fn held_curse(run: &RunUpgrades) -> Option<Upgrade> {
+    run.taken.iter().copied().find(|u| matches!(u, Upgrade::Cursed(_)))
+}
+// === end events2 ===
 
 fn rng_for(seed: u64, choice: usize) -> StdRng {
     StdRng::seed_from_u64(seed ^ 0xE7E4_7502 ^ (choice as u64).wrapping_mul(0x9E37_79B9))
@@ -377,6 +583,91 @@ pub fn resolve(
             ));
             "the steady moon holds still for you".into()
         }
+        // === events2 ===
+        Plan::DustGamble => {
+            if rng.gen_bool(0.5) {
+                applied.push(Applied::Dust(WELL_WIN));
+                "far below, something drops a coin back".into()
+            } else {
+                "the coin falls, and falls".into()
+            }
+        }
+        Plan::SwapUpgrade => {
+            let lost = held_passive(run)?;
+            applied.push(Applied::Lose(lost));
+            applied.extend(gift(random_upgrade(&mut rng, run, depth, false)));
+            "the well swallows it, and hands back another".into()
+        }
+        Plan::BorrowedPick => {
+            // The thin flag is spent by the pick opened right here.
+            applied.push(Applied::ThinNextPick);
+            applied.push(Applied::OpenPick);
+            "she pins up the hem, and lets you choose".into()
+        }
+        Plan::TwoRerolls => {
+            applied.push(Applied::FreeReroll);
+            applied.push(Applied::FreeReroll);
+            "there was more room in it than you thought".into()
+        }
+        Plan::CurseForShard => {
+            if let Some(curse) = random_curse(&mut rng, run) {
+                applied.push(Applied::Take(curse));
+            }
+            applied.push(Applied::BankShard);
+            "your hand comes back holding something".into()
+        }
+        Plan::ShedCurse => {
+            applied.push(Applied::Lose(held_curse(run)?));
+            "it tastes like nothing, and you feel lighter".into()
+        }
+        Plan::ShardOnly => {
+            applied.push(Applied::BankShard);
+            "they drop it at your feet".into()
+        }
+        Plan::ShardThin => {
+            applied.push(Applied::BankShard);
+            applied.push(Applied::ThinNextPick);
+            "the page was a shard all along".into()
+        }
+        Plan::TwistOnly => {
+            if let Some(v) = random_twist(&mut rng, next_theme) {
+                applied.push(Applied::TwistNext(v));
+                "you see what is coming, a little".into()
+            } else {
+                applied.push(Applied::Dust(CONSOLATION));
+                "nothing is coming, and that is a comfort".into()
+            }
+        }
+        Plan::GildOnly => {
+            applied.push(Applied::GildNext);
+            "the next dream will shine".into()
+        }
+        Plan::TwistDust => {
+            if let Some(v) = random_twist(&mut rng, next_theme) {
+                applied.push(Applied::TwistNext(v));
+            }
+            applied.push(Applied::Dust(STAIRS_DUST));
+            "you find dust on the landing".into()
+        }
+        Plan::GildThin => {
+            applied.push(Applied::GildNext);
+            applied.push(Applied::ThinNextPick);
+            "you land too well, and something is left behind".into()
+        }
+        Plan::Handout => {
+            applied.push(Applied::Dust(HANDOUT_DUST));
+            "nobody minds".into()
+        }
+        Plan::ChordGamble => {
+            if rng.gen_bool(0.5) {
+                applied.extend(gift(random_upgrade(&mut rng, run, depth, false)));
+                "the note hangs, and something answers".into()
+            } else {
+                applied.push(Applied::Dust(CHORD_CONSOLATION));
+                "the note drifts off by itself".into()
+            }
+        }
+        // === end events2 ===
     };
     Some(Resolved { applied, line })
 }
@@ -690,6 +981,154 @@ mod tests {
         }
         assert_eq!(run.choice_count(), full - 1, "the chair's price");
     }
+
+    // === events2 ===
+    fn go(id: Id, choice: usize, run: &RunUpgrades, dust: u32, seed: u64) -> Option<Resolved> {
+        resolve(&event(id), choice, seed, run, 6, DreamTheme::Garden, dust)
+    }
+
+    fn with_curse() -> RunUpgrades {
+        let mut run = loaded_run();
+        run.take(Upgrade::Cursed(ALL_CURSES[0]));
+        run
+    }
+
+    #[test]
+    fn there_are_seventeen_events_each_turning_up() {
+        assert_eq!(ALL.len(), 17);
+        let ids: HashSet<Id> = ALL.iter().copied().collect();
+        assert_eq!(ids.len(), 17);
+        let seen: HashSet<Id> = (0..3000).map(|s| pick(s, None)).collect();
+        assert_eq!(seen.len(), 17);
+    }
+
+    #[test]
+    fn shops_charge_and_hand_over_an_upgrade() {
+        let run = loaded_run();
+        for (id, choice, cost) in [
+            (Id::LanternVendor, 0, CUPFUL_DUST),
+            (Id::LanternVendor, 1, LANTERN_DUST),
+            (Id::UnfinishedLibrary, 0, PAGE_DUST),
+        ] {
+            assert!(go(id, choice, &run, cost - 1, 1).is_none(), "{id:?} needs {cost}");
+            let r = go(id, choice, &run, cost, 1).unwrap();
+            assert_eq!(r.applied[0], Applied::Dust(-(cost as i32)));
+            assert!(matches!(r.applied[1], Applied::Take(u) if !matches!(u, Upgrade::Cursed(_))));
+        }
+        // The cupful is a common upgrade.
+        for seed in 0..100 {
+            let r = go(Id::LanternVendor, 0, &run, 99, seed).unwrap();
+            assert!(matches!(r.applied[1], Applied::Take(u) if u.tier() == Tier::Common));
+        }
+    }
+
+    #[test]
+    fn the_well_pays_out_about_half_the_time_and_the_swap_trades_one_for_one() {
+        let run = loaded_run();
+        let wins = (0..400)
+            .filter(|&s| go(Id::WishingWell, 0, &run, 99, s).unwrap().applied.contains(&Applied::Dust(WELL_WIN)))
+            .count();
+        assert!((140..260).contains(&wins), "{wins}");
+        let r = go(Id::WishingWell, 1, &run, 0, 3).unwrap();
+        assert!(matches!(r.applied[0], Applied::Lose(_)));
+        assert!(matches!(r.applied[1], Applied::Take(_)));
+        let mut bare = RunUpgrades::default();
+        bare.take(Upgrade::Learn(Ability::Dash));
+        assert!(go(Id::WishingWell, 1, &bare, 0, 3).is_none(), "nothing to throw");
+    }
+
+    #[test]
+    fn the_tailor_lends_a_thin_pick_and_the_bakery_and_tailor_give_rerolls() {
+        let run = loaded_run();
+        let r = go(Id::PatientTailor, 0, &run, PAGE_DUST, 1).unwrap();
+        assert!(r.applied.contains(&Applied::ThinNextPick) && r.applied.contains(&Applied::OpenPick));
+        let mut after = run.clone();
+        let before = after.rerolls_left();
+        for a in &go(Id::PatientTailor, 1, &run, SEAM_DUST, 1).unwrap().applied {
+            apply_to_run(&mut after, a);
+        }
+        assert_eq!(after.rerolls_left(), before + 2);
+        let mut after = run.clone();
+        for a in &go(Id::NightBakery, 0, &run, ROLL_DUST, 1).unwrap().applied {
+            apply_to_run(&mut after, a);
+        }
+        assert_eq!(after.rerolls_left(), before + 1);
+        assert_eq!(go(Id::NightBakery, 1, &run, 0, 1).unwrap().applied, vec![Applied::Dust(HANDOUT_DUST)]);
+    }
+
+    #[test]
+    fn the_pond_trades_a_curse_for_a_shard_and_lets_a_held_one_go() {
+        let run = loaded_run();
+        let r = go(Id::MirrorPond, 0, &run, 0, 1).unwrap();
+        assert!(matches!(r.applied[0], Applied::Take(Upgrade::Cursed(_))));
+        assert!(r.applied.contains(&Applied::BankShard));
+        // Drinking needs a curse to let go of, and removes it.
+        assert!(go(Id::MirrorPond, 1, &run, 0, 1).is_none());
+        let held = with_curse();
+        let r = go(Id::MirrorPond, 1, &held, 0, 1).unwrap();
+        let mut after = held.clone();
+        for a in &r.applied {
+            apply_to_run(&mut after, a);
+        }
+        assert!(!after.taken.iter().any(|u| matches!(u, Upgrade::Cursed(_))));
+    }
+
+    #[test]
+    fn the_lighthouse_piano_stairs_and_crows_bend_the_next_dream() {
+        let run = loaded_run();
+        let has_twist = |r: &Resolved| r.applied.iter().any(|a| matches!(a, Applied::TwistNext(_)));
+        assert!(has_twist(&go(Id::DryLighthouse, 0, &run, 0, 2).unwrap()));
+        assert!(has_twist(&go(Id::TellingCrows, 0, &run, 0, 2).unwrap()));
+        assert!(has_twist(&go(Id::DownStaircase, 0, &run, 0, 2).unwrap()));
+        assert!(go(Id::DownStaircase, 0, &run, 0, 2).unwrap().applied.contains(&Applied::Dust(STAIRS_DUST)));
+        for (id, cost) in [(Id::DryLighthouse, BEACON_DUST), (Id::DrownedPiano, TUNING_DUST)] {
+            assert!(go(id, 1, &run, cost - 1, 2).is_none());
+            assert!(go(id, 1, &run, cost, 2).unwrap().applied.contains(&Applied::GildNext));
+        }
+        let r = go(Id::DownStaircase, 1, &run, 0, 2).unwrap();
+        assert_eq!(r.applied, vec![Applied::GildNext, Applied::ThinNextPick]);
+        // A calm dream cannot twist: the lighthouse gives a little dust instead.
+        let r = resolve(&event(Id::DryLighthouse), 0, 2, &run, 6, DreamTheme::Lobby, 0).unwrap();
+        assert_eq!(r.applied, vec![Applied::Dust(CONSOLATION)]);
+    }
+
+    #[test]
+    fn the_crows_sell_a_shard_and_the_library_tears_one_out() {
+        let run = loaded_run();
+        assert!(go(Id::TellingCrows, 1, &run, CROW_DUST - 1, 1).is_none());
+        let r = go(Id::TellingCrows, 1, &run, CROW_DUST, 1).unwrap();
+        assert_eq!(r.applied, vec![Applied::Dust(-(CROW_DUST as i32)), Applied::BankShard]);
+        let r = go(Id::UnfinishedLibrary, 1, &run, 0, 1).unwrap();
+        assert_eq!(r.applied, vec![Applied::BankShard, Applied::ThinNextPick]);
+    }
+
+    #[test]
+    fn the_chord_gives_an_upgrade_or_a_little_dust_and_the_giant_gambles() {
+        let run = loaded_run();
+        for id in [Id::DrownedPiano, Id::ForgottenBirthday] {
+            let (mut up, mut dust) = (0, 0);
+            for seed in 0..200 {
+                match go(id, if id == Id::DrownedPiano { 0 } else { 0 }, &run, 0, seed).unwrap().applied[..] {
+                    [Applied::Take(_)] => up += 1,
+                    [Applied::Dust(n)] if n == CHORD_CONSOLATION => dust += 1,
+                    ref other => panic!("{other:?}"),
+                }
+            }
+            assert!(up > 50 && dust > 50, "{id:?}: {up} / {dust}");
+        }
+        let (mut gifts, mut curses) = (0, 0);
+        for seed in 0..200 {
+            match go(Id::SleepingGiant, 0, &run, 0, seed).unwrap().applied[..] {
+                [Applied::Take(Upgrade::Cursed(_))] => curses += 1,
+                [Applied::Take(_)] => gifts += 1,
+                ref other => panic!("{other:?}"),
+            }
+        }
+        assert!(gifts > 50 && curses > 50);
+        assert_eq!(go(Id::SleepingGiant, 1, &run, 0, 1).unwrap().applied, vec![Applied::Dust(HANDOUT_DUST)]);
+        assert_eq!(go(Id::ForgottenBirthday, 1, &run, 0, 1).unwrap().applied, vec![Applied::Dust(HANDOUT_DUST)]);
+    }
+    // === end events2 ===
 
     #[test]
     fn apply_to_run_takes_and_loses_exactly_one() {
