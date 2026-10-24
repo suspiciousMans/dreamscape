@@ -29,6 +29,7 @@ fn cells(r: Rect, x: f32, y: f32, w: f32, h: f32) -> Rect {
 
 /// A panel with a hard border and chipped corners, like a card's frame.
 /// `c` is the cell size; `alpha` fades the border.
+// === perf === uipixels: the seven body/edge bars as one mesh (same draw order)
 pub fn panel(p: &egui::Painter, r: Rect, edge: [u8; 3], fill: Color32, c: f32, alpha: f32) {
     let (w, h) = (r.width(), r.height());
     if w < 4.0 * c || h < 4.0 * c {
@@ -36,7 +37,29 @@ pub fn panel(p: &egui::Painter, r: Rect, edge: [u8; 3], fill: Color32, c: f32, a
         p.rect_stroke(r, 0.0, Stroke::new(c.min(2.0), rgba(edge, alpha)));
         return;
     }
+    let e = rgba(edge, alpha);
+    let mut q = Quads::new();
     // The body, minus the four corner cells.
+    q.rect(cells(r, c, 0.0, w - 2.0 * c, h), fill);
+    q.rect(cells(r, 0.0, c, c, h - 2.0 * c), fill);
+    q.rect(cells(r, w - c, c, c, h - 2.0 * c), fill);
+    q.rect(cells(r, c, 0.0, w - 2.0 * c, c), e);
+    q.rect(cells(r, c, h - c, w - 2.0 * c, c), e);
+    q.rect(cells(r, 0.0, c, c, h - 2.0 * c), e);
+    q.rect(cells(r, w - c, c, c, h - 2.0 * c), e);
+    q.paint(p);
+    // A faint inner line, as on the cards.
+    p.rect_stroke(
+        r.shrink(c * 2.0),
+        0.0,
+        Stroke::new(1.0_f32, rgba(edge, alpha * 0.3)),
+    );
+}
+
+/// The original panel, a rect per bar: the reference for tests.
+#[cfg(test)]
+fn panel_rects(p: &egui::Painter, r: Rect, edge: [u8; 3], fill: Color32, c: f32, alpha: f32) {
+    let (w, h) = (r.width(), r.height());
     p.rect_filled(cells(r, c, 0.0, w - 2.0 * c, h), 0.0, fill);
     p.rect_filled(cells(r, 0.0, c, c, h - 2.0 * c), 0.0, fill);
     p.rect_filled(cells(r, w - c, c, c, h - 2.0 * c), 0.0, fill);
@@ -45,13 +68,8 @@ pub fn panel(p: &egui::Painter, r: Rect, edge: [u8; 3], fill: Color32, c: f32, a
     p.rect_filled(cells(r, c, h - c, w - 2.0 * c, c), 0.0, e);
     p.rect_filled(cells(r, 0.0, c, c, h - 2.0 * c), 0.0, e);
     p.rect_filled(cells(r, w - c, c, c, h - 2.0 * c), 0.0, e);
-    // A faint inner line, as on the cards.
-    p.rect_stroke(
-        r.shrink(c * 2.0),
-        0.0,
-        Stroke::new(1.0_f32, rgba(edge, alpha * 0.3)),
-    );
 }
+// === end perf ===
 
 /// Four corner brackets round `r`: the cursor.
 pub fn brackets(p: &egui::Painter, r: Rect, c: f32, color: Color32) {
@@ -470,7 +488,7 @@ pub(crate) mod tests {
     fn panels_chip_their_corners_and_survive_tiny_sizes() {
         let big = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(200.0, 80.0));
         let n = draw(|p| panel(p, big, [255, 0, 0], Color32::BLACK, 3.0, 1.0));
-        assert!(n >= 8, "body + four edges + line: {n}");
+        assert!(n >= 2, "body+edge mesh and the faint line: {n}");
         let tiny = Rect::from_min_size(Pos2::ZERO, Vec2::new(5.0, 5.0));
         assert!(draw(|p| panel(p, tiny, [255, 0, 0], Color32::BLACK, 3.0, 1.0)) > 0);
     }
@@ -647,6 +665,26 @@ pub(crate) mod tests {
             assert_eq!(new.len(), 1);
             assert!(old.len() > 10);
             assert_eq!(raster(&old, 300, 200), raster(&new, 300, 200), "cell {c}");
+        }
+    }
+
+    #[test]
+    fn the_panel_mesh_matches_the_rect_per_bar() {
+        for (r, c, fill, alpha) in [
+            (Rect::from_min_size(Pos2::new(10.0, 12.0), Vec2::new(120.0, 90.0)), 3.0, Color32::from_rgba_unmultiplied(14, 8, 28, 180), 0.6),
+            (Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(200.0, 60.0)), 4.0, Color32::from_rgb(20, 10, 40), 1.0),
+            (Rect::from_min_size(Pos2::new(5.0, 7.0), Vec2::new(41.0, 33.0)), 2.0, Color32::from_rgba_unmultiplied(40, 20, 80, 99), 0.9),
+        ] {
+            let old = shapes_of(|p| panel_rects(p, r, [200, 120, 255], fill, c, alpha));
+            let new = shapes_of(|p| {
+                panel(p, r, [200, 120, 255], fill, c, alpha);
+            });
+            // Compare the bars only (the faint inner stroke is the same shape in both).
+            let bars = |s: &[egui::epaint::ClippedShape]| {
+                raster(&s.iter().filter(|c| !matches!(c.shape, egui::Shape::Rect(ref r) if !r.stroke.is_empty())).cloned().collect::<Vec<_>>(), 300, 200)
+            };
+            assert_eq!(bars(&old), bars(&new), "panel {r:?}");
+            assert!(new.len() <= 2);
         }
     }
     // === end perf ===

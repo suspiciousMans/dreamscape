@@ -16813,8 +16813,8 @@ mod screen_smoke {
         g.store_tab = 2;
         add(&g, "Tickets");
         if std::env::var("UI_HIST").is_ok() {
-            for (name, mode_tab) in [("Loadout", 0), ("Store", 1)] {
-                if mode_tab == 0 { g.open_loadout(); } else { g.open_store(); g.store_tab = 0; }
+            for (name, mode_tab) in [("Loadout", 0), ("Store", 1), ("Merge", 2), ("Title", 3)] {
+                match mode_tab { 0 => g.open_loadout(), 1 => { g.open_store(); g.store_tab = 0 } 2 => g.open_merge(hud::Mode::Title), _ => g.mode = hud::Mode::Title }
                 let mut h: std::collections::BTreeMap<String, usize> = Default::default();
                 fn walk(s: &egui::Shape, h: &mut std::collections::BTreeMap<String, usize>) {
                     match s {
