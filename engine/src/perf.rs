@@ -6,14 +6,33 @@
 //! (a parent's time includes its children's). Disabled, a scope costs one
 //! relaxed atomic load.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
+
+/// A frame whose wall time (start of one `frame_end` to the next) is longer
+/// than this is logged on its own with its biggest scopes: spikes hide in
+/// the averages.
+pub const SPIKE_MS: f64 = 25.0;
+/// Frames ignored at start-up before spikes are logged (window creation and
+/// the first dream are expected to be slow; they are logged with `first`).
+const SPIKE_LOG_LIMIT: u32 = 40;
 
 /// Frames between reports.
 pub const REPORT_EVERY: u32 = 300;
 
 static STATE: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 off, 2 on
+
+/// The spike threshold: [`SPIKE_MS`], or `ENGINE_SPIKE_MS` if set.
+fn spike_ms() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("ENGINE_SPIKE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SPIKE_MS)
+    })
+}
 
 /// Is profiling on? (The environment is read once.)
 pub fn enabled() -> bool {
@@ -34,6 +53,8 @@ struct Stat {
     worst_ms: f64,
     calls: u32,
     frame_ms: f64,
+    /// A `count` row, not a timer: left out of spike reports.
+    is_count: bool,
 }
 
 #[derive(Default)]
@@ -44,6 +65,8 @@ struct Table {
 
 thread_local! {
     static TABLE: RefCell<Table> = RefCell::new(Table::default());
+    static LAST_FRAME: Cell<Option<Instant>> = const { Cell::new(None) };
+    static SPIKES_LOGGED: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Times from creation to drop.
@@ -96,6 +119,7 @@ pub fn count(name: &'static str, n: usize) {
             }
         };
         let s = &mut t.rows[i].1;
+        s.is_count = true;
         s.total_ms += n as f64;
         s.calls += 1;
         s.frame_ms += n as f64;
@@ -108,9 +132,31 @@ pub fn frame_end() {
     if !enabled() {
         return;
     }
+    let now = Instant::now();
+    let wall_ms = LAST_FRAME
+        .with(|l| l.replace(Some(now)))
+        .map(|prev| now.duration_since(prev).as_secs_f64() * 1000.0);
     TABLE.with(|t| {
         let mut t = t.borrow_mut();
         t.frames += 1;
+        if let Some(ms) = wall_ms.filter(|&ms| ms > spike_ms()) {
+            let logged = SPIKES_LOGGED.with(|c| c.replace(c.get() + 1));
+            if logged < SPIKE_LOG_LIMIT {
+                let mut hot: Vec<(&str, f64)> = t
+                    .rows
+                    .iter()
+                    .filter(|r| r.1.frame_ms >= 1.0 && !r.1.is_count)
+                    .map(|r| (r.0, r.1.frame_ms))
+                    .collect();
+                hot.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let parts: Vec<String> = hot
+                    .iter()
+                    .take(6)
+                    .map(|(n, m)| format!("{n} {m:.1}"))
+                    .collect();
+                log::info!("spike {ms:.1} ms: {}", parts.join(", "));
+            }
+        }
         for r in t.rows.iter_mut() {
             r.1.worst_ms = r.1.worst_ms.max(r.1.frame_ms);
             r.1.frame_ms = 0.0;

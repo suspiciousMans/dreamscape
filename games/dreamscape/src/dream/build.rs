@@ -1426,6 +1426,31 @@ mod tests {
             .any(|p| (0..3).all(|i| (c[i] as i32 - p[i] as i32).abs() <= 40))
     }
 
+    // === perf === generation budget: catches a quadratic search creeping back in
+    /// A dream must generate quickly or the next-dream hitch grows. The limits
+    /// are loose (about 10x today's cost in the test profile) so only a real
+    /// regression, like one BFS per cell, trips them.
+    #[test]
+    fn dream_generation_stays_inside_its_time_budget() {
+        use std::time::Instant;
+        let (mut total, mut worst, mut n) = (0.0f64, 0.0f64, 0u32);
+        for theme in ALL_THEMES {
+            for seed in 0..3u64 {
+                let t = Instant::now();
+                std::hint::black_box(generate(theme, seed, 12, None, true));
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                total += ms;
+                worst = worst.max(ms);
+                n += 1;
+            }
+        }
+        let mean = total / n as f64;
+        eprintln!("dream generation: mean {mean:.1} ms, worst {worst:.1} ms over {n}");
+        assert!(mean < 5.0, "mean {mean:.1} ms (budget 5)");
+        assert!(worst < 25.0, "worst {worst:.1} ms (budget 25)");
+    }
+    // === end perf ===
+
     // === perf === `cargo test -p dreamscape --release dream_gen_timing -- --ignored --nocapture`
     #[test]
     #[ignore]
