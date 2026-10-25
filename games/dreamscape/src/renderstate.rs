@@ -207,10 +207,125 @@ impl PassLists {
     }
 }
 
+/// What entities must share to be drawn by one instanced call: the same mesh,
+/// texture and per-draw uniform values (only the model matrix differs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BatchKey {
+    /// Address of the shared `Arc<GpuMesh>`.
+    pub mesh: usize,
+    pub texture: Option<glow::Texture>,
+    pub uv: u32,
+    pub lit: u32,
+    pub melt: u32,
+}
+
+/// One instanced draw: its key, the matrices (16 floats each) and a payload
+/// the first entity of the group supplies (the mesh and texture to draw with).
+pub struct Group<P> {
+    pub key: BatchKey,
+    pub matrices: Vec<f32>,
+    pub payload: P,
+}
+
+/// Collects `(key, model matrix)` pairs into per-key groups for instanced
+/// drawing. Groups keep the order their key first appeared in, and the
+/// matrices inside a group keep their push order, so the draw order only
+/// changes between groups. The Vecs are reused between frames.
+pub struct Batcher<P> {
+    groups: Vec<Group<P>>,
+    used: usize,
+    last: usize,
+}
+
+impl<P> Default for Batcher<P> {
+    fn default() -> Self {
+        Self { groups: Vec::new(), used: 0, last: 0 }
+    }
+}
+
+impl<P> Batcher<P> {
+    pub fn clear(&mut self) {
+        for g in &mut self.groups[..self.used] {
+            g.matrices.clear();
+        }
+        self.used = 0;
+        self.last = 0;
+    }
+
+    /// Adds one instance. `payload` is only called for the first one of a key.
+    pub fn push(&mut self, key: BatchKey, matrix: &[f32; 16], payload: impl FnOnce() -> P) {
+        // Entities of one kind come in runs: try the last group first.
+        let i = if self.last < self.used && self.groups[self.last].key == key {
+            self.last
+        } else if let Some(i) = self.groups[..self.used].iter().position(|g| g.key == key) {
+            i
+        } else {
+            let group = Group { key, matrices: Vec::new(), payload: payload() };
+            if self.used == self.groups.len() {
+                self.groups.push(group);
+            } else {
+                let keep = std::mem::take(&mut self.groups[self.used].matrices);
+                self.groups[self.used] = Group { matrices: keep, ..group };
+            }
+            self.used += 1;
+            self.used - 1
+        };
+        self.last = i;
+        self.groups[i].matrices.extend_from_slice(matrix);
+    }
+
+    /// The groups, in first-appearance order.
+    pub fn groups(&self) -> &[Group<P>] {
+        &self.groups[..self.used]
+    }
+
+    pub fn instances(&self) -> usize {
+        self.groups().iter().map(|g| g.matrices.len() / 16).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine::ecs::World;
+
+    fn key(mesh: usize, uv: f32) -> BatchKey {
+        BatchKey { mesh, texture: None, uv: uv.to_bits(), lit: 0, melt: 0 }
+    }
+
+    #[test]
+    fn batcher_groups_by_key_in_first_appearance_order_and_keeps_push_order() {
+        let mut b: Batcher<()> = Batcher::default();
+        let m = |v: f32| [v; 16];
+        b.push(key(1, 0.0), &m(1.0), || ());
+        b.push(key(2, 0.0), &m(2.0), || ());
+        b.push(key(1, 0.0), &m(3.0), || ());
+        b.push(key(1, 0.5), &m(4.0), || ()); // same mesh, different uv: its own group
+        b.push(key(2, 0.0), &m(5.0), || ());
+        let g = b.groups();
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].key, key(1, 0.0));
+        assert_eq!(g[1].key, key(2, 0.0));
+        assert_eq!(g[2].key, key(1, 0.5));
+        assert_eq!(g[0].matrices.len(), 32);
+        assert_eq!((g[0].matrices[0], g[0].matrices[16]), (1.0, 3.0), "push order inside a group");
+        assert_eq!((g[1].matrices[0], g[1].matrices[16]), (2.0, 5.0));
+        assert_eq!(b.instances(), 5);
+    }
+
+    #[test]
+    fn batcher_clear_reuses_slots_and_forgets_old_keys() {
+        let mut b: Batcher<u8> = Batcher::default();
+        b.push(key(1, 0.0), &[0.0; 16], || 1);
+        b.push(key(2, 0.0), &[0.0; 16], || 2);
+        b.clear();
+        assert!(b.groups().is_empty());
+        b.push(key(9, 0.0), &[7.0; 16], || 9);
+        assert_eq!(b.groups().len(), 1);
+        assert_eq!(b.groups()[0].key, key(9, 0.0));
+        assert_eq!(b.groups()[0].payload, 9, "the payload is the new key's");
+        assert_eq!(b.groups()[0].matrices, vec![7.0; 16], "old matrices are gone");
+    }
 
     #[test]
     fn cache_skips_repeats_and_sets_changes() {

@@ -3,7 +3,15 @@ layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aUV;
 layout (location = 3) in vec3 aColor;
 
+// With INSTANCED each copy's model matrix comes from a per-instance vertex
+// attribute (one draw call for many identical blocks); otherwise from uModel.
+#ifdef INSTANCED
+layout (location = 4) in mat4 aModel;
+#define MODEL aModel
+#else
 uniform mat4 uModel;
+#define MODEL uModel
+#endif
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec3 uLightDir;
@@ -46,8 +54,8 @@ out float vFogFactor;
 out vec3 vWorld;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    vec3 worldNormal = normalize(mat3(uModel) * aNormal);
+    vec4 worldPos = MODEL * vec4(aPos, 1.0);
+    vec3 worldNormal = normalize(mat3(MODEL) * aNormal);
 
     // World-space (tri-planar style) UVs, from the un-warped position so the
     // pattern stays glued to the surface while the geometry breathes.

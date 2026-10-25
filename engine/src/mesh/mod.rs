@@ -1,8 +1,10 @@
 mod gltf_loader;
 mod obj_loader;
+pub mod instancing;
 pub mod primitives;
 
 pub use gltf_loader::{load_gltf, GltfImage, GltfMeshEntry, GltfScene};
+pub use instancing::InstanceBuffer;
 pub use obj_loader::load_obj;
 
 use bytemuck::{Pod, Zeroable};

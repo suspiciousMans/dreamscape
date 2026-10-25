@@ -2,13 +2,14 @@
 //! 1. World (mesh.frag): past `sight_radius` from the player, surfaces sink
 //!    into darkness. Things you steer by — you, shards, beacons, the portal,
 //!    the wake door — carry `Lit` and glow through it.
-//! 2. Screen (egui, under the HUD): a soft vignette ring centred on the
-//!    player's screen position, plus animated film grain.
+//! 2. Screen (the composite pass, under the HUD): a soft vignette ring
+//!    centred on the player's screen position, plus animated film grain.
 //! Everything here is pure (geometry, curves, noise) and unit-tested; the
 //! drawing call is `draw_overlay`.
 
 use crate::gameplay::CELL;
-use engine::ui::egui::{self, Color32, Mesh, Pos2, Rect, TextureId};
+#[cfg(test)]
+use engine::ui::egui::{self, Color32, Mesh, Pos2};
 
 /// World units you can see clearly at strangeness 0.
 pub const SIGHT_CLEAR: f32 = 4.2 * CELL;
@@ -51,6 +52,7 @@ pub fn vignette_alpha(d: f32, inner: f32, outer: f32) -> f32 {
 /// A ring-shaped mesh: `rings` concentric circles of `segments` vertices
 /// from radius 0 out past the screen corner, coloured by `alpha(d)` where d
 /// is the radius / `scale`. The centre vertex is shared.
+#[cfg(test)]
 pub fn vignette_mesh(
     centre: Pos2,
     scale: f32,
@@ -115,22 +117,34 @@ pub fn grain_pixels(seed: u32) -> Vec<u8> {
     out
 }
 
-/// The grain as an egui image. Premultiplied by hand, in gamma space (the
-/// space egui blends in): `ColorImage::from_rgba_unmultiplied` premultiplies
-/// in *linear* space, which turns a 6%-alpha white speck into a +27% one and
-/// lays a bright haze over everything.
-pub fn grain_image(seed: u32) -> egui::ColorImage {
-    let pixels = grain_pixels(seed)
+/// The grain tile as premultiplied RGBA8 bytes (what the composite pass
+/// samples): premultiplied by hand in gamma space, because a straight-alpha
+/// upload would be premultiplied in *linear* space, which turns a 6%-alpha
+/// white speck into a +27% one and lays a bright haze over everything.
+pub fn grain_premultiplied(seed: u32) -> Vec<u8> {
+    grain_pixels(seed)
         .chunks(4)
-        .map(|p| {
+        .flat_map(|p| {
             let c = (p[0] as u32 * p[3] as u32 / 255) as u8;
-            Color32::from_rgba_premultiplied(c, c, c, p[3])
+            [c, c, c, p[3]]
         })
-        .collect();
-    egui::ColorImage {
-        size: [GRAIN_SIZE, GRAIN_SIZE],
-        pixels,
-    }
+        .collect()
+}
+
+/// The grain strength as the shader multiplies it: a whole 8-bit tint step.
+pub fn grain_tint(strength: f32) -> f32 {
+    (strength.clamp(0.0, 1.0) * 255.0) as u8 as f32 / 255.0
+}
+
+/// The vignette's darkness at the 11 rings `inner + (outer - inner) * i / 10`,
+/// quantised to 8 bits exactly as the vertex alphas of the mesh it replaced
+/// (the composite shader interpolates linearly between them).
+pub fn vignette_rings(inner: f32, outer: f32, strength: f32) -> [f32; 11] {
+    let s = strength.clamp(0.0, 1.0);
+    std::array::from_fn(|i| {
+        let r = inner + (outer - inner) * i as f32 / 10.0;
+        ((vignette_alpha(r, inner, outer) * s * 255.0) as u8) as f32 / 255.0
+    })
 }
 
 /// Where the grain tile is offset this frame (UV units). Jumps GRAIN_FPS
@@ -138,48 +152,6 @@ pub fn grain_image(seed: u32) -> egui::ColorImage {
 pub fn grain_offset(time: f32) -> (f32, f32) {
     let frame = (time * GRAIN_FPS) as u32;
     (crate::hud::hash01(frame, 11), crate::hud::hash01(frame, 12))
-}
-
-/// Draws the vignette and grain into `p`, beneath the HUD.
-pub fn draw_overlay(
-    p: &egui::Painter,
-    screen: Rect,
-    player_px: Pos2,
-    strangeness: f32,
-    time: f32,
-    grain: Option<TextureId>,
-    grain_strength: f32,
-    vignette_strength: f32,
-) {
-    let half_diag = screen.size().length() * 0.5;
-    let (inner, outer) = vignette_radii(strangeness, time);
-    // Rings: dense through the fade, then one far ring past every corner.
-    let steps = 10;
-    let mut radii: Vec<f32> = (0..=steps)
-        .map(|i| inner + (outer - inner) * i as f32 / steps as f32)
-        .collect();
-    radii.insert(0, inner * 0.5);
-    radii.push(3.0);
-    let mesh = vignette_mesh(player_px, half_diag, &radii, 48, [0, 0, 0], |d| {
-        vignette_alpha(d, inner, outer) * vignette_strength.clamp(0.0, 1.0)
-    });
-    p.add(egui::Shape::mesh(mesh));
-    let g = (grain_strength.clamp(0.0, 1.0) * 255.0) as u8;
-    if let (Some(tex), true) = (grain, g > 0) {
-        let (ox, oy) = grain_offset(time);
-        let texel = GRAIN_TEXEL;
-        let uv = Rect::from_min_size(
-            Pos2::new(ox, oy),
-            egui::vec2(
-                screen.width() / (GRAIN_SIZE as f32 * texel),
-                screen.height() / (GRAIN_SIZE as f32 * texel),
-            ),
-        );
-        let mut m = Mesh::with_texture(tex);
-        // Premultiplied tint: scales the whole speck, colour and alpha alike.
-        m.add_rect_with_uv(screen, uv, Color32::from_rgba_premultiplied(g, g, g, g));
-        p.add(egui::Shape::mesh(m));
-    }
 }
 
 #[cfg(test)]
@@ -279,13 +251,49 @@ mod tests {
     }
 
     #[test]
-    fn grain_image_adds_no_more_light_than_its_alpha() {
-        let img = grain_image(7);
-        assert_eq!(img.pixels.len(), GRAIN_SIZE * GRAIN_SIZE);
+    fn grain_tile_adds_no_more_light_than_its_alpha() {
+        let img = grain_premultiplied(7);
+        assert_eq!(img.len(), GRAIN_SIZE * GRAIN_SIZE * 4);
         let max_a = (GRAIN_ALPHA * 255.0) as u8;
-        for p in &img.pixels {
-            assert!(p.r() <= p.a() && p.a() <= max_a, "{p:?}");
+        for p in img.chunks(4) {
+            assert!(p[0] <= p[3] && p[3] <= max_a, "{p:?}");
+            assert!(p[0] == p[1] && p[1] == p[2]);
         }
+    }
+
+    #[test]
+    fn the_ring_table_is_exactly_the_old_meshs_vertex_alphas() {
+        // The composite shader interpolates this table; the egui mesh it
+        // replaced interpolated the same values between its rings.
+        for (s, t, strength) in [(0.0, 0.0, 1.0), (0.5, 3.1, 1.0), (1.0, 7.7, 0.6), (0.2, 1.0, 0.0)] {
+            let (inner, outer) = vignette_radii(s, t);
+            let mut radii: Vec<f32> = (0..=10)
+                .map(|i| inner + (outer - inner) * i as f32 / 10.0)
+                .collect();
+            radii.insert(0, inner * 0.5);
+            radii.push(3.0);
+            let segments = 48u32;
+            let mesh = vignette_mesh(Pos2::new(0.0, 0.0), 100.0, &radii, segments, [0, 0, 0], |d| {
+                vignette_alpha(d, inner, outer) * strength
+            });
+            let rings = vignette_rings(inner, outer, strength);
+            for (i, a) in rings.iter().enumerate() {
+                let v = &mesh.vertices[1 + (i + 1) * segments as usize];
+                assert_eq!(v.color.a() as f32 / 255.0, *a, "ring {i} at strength {strength}");
+            }
+            // Clear at the centre, and the far ring is as dark as the last one.
+            assert_eq!(rings[0], 0.0);
+            let far = &mesh.vertices[1 + (radii.len() - 1) * segments as usize];
+            assert_eq!(far.color.a() as f32 / 255.0, rings[10]);
+        }
+    }
+
+    #[test]
+    fn the_grain_tint_is_a_whole_8_bit_step() {
+        assert_eq!(grain_tint(0.0), 0.0);
+        assert_eq!(grain_tint(1.0), 1.0);
+        assert_eq!(grain_tint(2.0), 1.0);
+        assert!((grain_tint(0.5) - 127.0 / 255.0).abs() < 1e-6);
     }
 
     #[test]
