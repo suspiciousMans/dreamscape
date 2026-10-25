@@ -11171,7 +11171,11 @@ impl Game for DreamscapeGame {
         let vertex_src = read(&first.vertex_shader)?;
         let fragment_src = read(&first.fragment_shader)?;
         let post_src = read(&first.post_fragment_shader)?;
-        self.shader_cache = Some(ShaderVariantCache::new(vertex_src, fragment_src));
+        let mut shader_cache = ShaderVariantCache::new(vertex_src, fragment_src);
+        // === perf === compile every variant now, not at a dream change
+        shader_cache.prewarm(gl, &ShaderVariantCache::ALL_FLAGS);
+        // === end perf ===
+        self.shader_cache = Some(shader_cache);
         self.renderer = Some(Renderer::new(
             gl,
             ctx.drawable_size(),
@@ -13033,13 +13037,19 @@ impl Game for DreamscapeGame {
             tunnel::darkness(fog)
         };
         let clear = if tunnel { dark } else { fog };
-        renderer.resize_if_needed(gl, drawable_size)?;
+        {
+            let _t = engine::perf::scope("rnd.resize_if_needed");
+            renderer.resize_if_needed(gl, drawable_size)?;
+        }
         renderer.set_trails(if self.mode == hud::Mode::Title {
             0.0
         } else {
             mood.trails * motion
         });
-        renderer.begin_scene(gl);
+        {
+            let _t = engine::perf::scope("rnd.begin_scene");
+            renderer.begin_scene(gl);
+        }
         unsafe {
             // egui (drawn last frame) leaves depth test off and blending/scissor on.
             gl.enable(engine::glow::DEPTH_TEST);
@@ -13061,7 +13071,10 @@ impl Game for DreamscapeGame {
         } else {
             0
         };
-        let program = shader_cache.get_or_compile(gl, flags)?;
+        let program = {
+            let _t = engine::perf::scope("rnd.shader get_or_compile");
+            shader_cache.get_or_compile(gl, flags)?
+        };
         // === perf === uniform locations are looked up once per program
         if self.world_locs.as_ref().is_none_or(|w| w.program != program) {
             self.world_locs = Some(renderstate::WorldLocs::new(gl, program));
@@ -16941,12 +16954,10 @@ mod screen_smoke {
         g.booklet.stash.earn(5000);
     }
 
-    /// Prints the table; `cargo test ui_cost_table -- --nocapture`.
-    #[test]
-    fn ui_cost_table() {
+    /// The cost of every screen with a 240-card booklet at 1280x720.
+    fn all_screen_costs() -> Vec<(String, UiCost)> {
         let mut g = game("uicost");
         big_booklet(&mut g, 239);
-        eprintln!("cards in booklet: {}", g.booklet.card_count());
         let mut rows: Vec<(String, UiCost)> = Vec::new();
         let mut add = |g: &DreamscapeGame, label: &str| rows.push((label.to_string(), ui_cost(g, 1280.0, 720.0)));
         for mode in [
@@ -16975,37 +16986,58 @@ mod screen_smoke {
         add(&g, "Lottery");
         g.store_tab = 2;
         add(&g, "Tickets");
-        if std::env::var("UI_HIST").is_ok() {
-            for (name, mode_tab) in [("Loadout", 0), ("Store", 1), ("Merge", 2), ("Title", 3)] {
-                match mode_tab { 0 => g.open_loadout(), 1 => { g.open_store(); g.store_tab = 0 } 2 => g.open_merge(hud::Mode::Title), _ => g.mode = hud::Mode::Title }
-                let mut h: std::collections::BTreeMap<String, usize> = Default::default();
-                fn walk(s: &egui::Shape, h: &mut std::collections::BTreeMap<String, usize>) {
-                    match s {
-                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, h)),
-                        egui::Shape::Rect(r) => {
-                            let k = format!("rect {}x{} {}", r.rect.width().round(), r.rect.height().round(), if r.stroke.is_empty() { "fill" } else { "stroke" });
-                            *h.entry(k).or_default() += 1;
-                        }
-                        egui::Shape::Text(_) => *h.entry("text".into()).or_default() += 1,
-                        other => *h.entry(format!("{:?}", other).chars().take(12).collect()).or_default() += 1,
-                    }
-                }
-                let v = g.hud_view();
-                let ctx = egui::Context::default();
-                hud::install_font(&ctx);
-                let (mut art, mut pa) = (booklet_ui::CardArt::default(), pack_art::PackArt::default());
-                let out = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))), ..Default::default() }, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut pa));
-                for cs in &out.shapes { walk(&cs.shape, &mut h); }
-                let mut hv: Vec<_> = h.into_iter().collect();
-                hv.sort_by_key(|x| std::cmp::Reverse(x.1));
-                eprintln!("HIST {name}: {:?}", &hv[..hv.len().min(14)]);
-            }
-        }
+        rows
+    }
+
+    /// Prints the table; `cargo test ui_cost_table -- --nocapture`.
+    #[test]
+    fn ui_cost_table() {
+        let rows = all_screen_costs();
         eprintln!("{:<10} {:>7} {:>9} {:>10} {:>10}", "screen", "shapes", "vertices", "triangles", "tess_us");
         for (l, c) in &rows {
             eprintln!("{l:<10} {:>7} {:>9} {:>10} {:>10.0}", c.shapes, c.vertices, c.triangles, c.tessellate_us);
         }
         assert!(rows.iter().all(|(_, c)| c.shapes > 0));
+    }
+
+    /// The perf budget: how many shapes and triangles each screen may cost
+    /// egui (about 1.4x what it costs today). A screen over budget means a
+    /// painter went back to one shape per pixel: use the run-merged mesh
+    /// helpers in `pixel_ui` (see plans/perf-briefs/BASELINE.md) or raise the
+    /// number here on purpose, with a measurement.
+    #[test]
+    fn every_screen_stays_inside_its_ui_budget() {
+        // (screen, max shapes, max triangles)
+        const BUDGET: [(&str, usize, usize); 13] = [
+            ("Warning", 120, 2_800),
+            ("Title", 550, 3_900),
+            ("Summary", 80, 600),
+            ("Paused", 270, 1_200),
+            ("Playing", 160, 800),
+            ("Settings", 120, 1_700),
+            ("Codex", 130, 1_400),
+            ("Booklet", 240, 3_900),
+            ("Loadout", 450, 7_000),
+            ("Merge", 500, 7_200),
+            ("Store", 340, 5_800),
+            ("Lottery", 500, 5_500),
+            ("Tickets", 100, 1_600),
+        ];
+        let rows = all_screen_costs();
+        let mut over = Vec::new();
+        for (name, max_shapes, max_tris) in BUDGET {
+            let Some((_, c)) = rows.iter().find(|(l, _)| l == name) else {
+                over.push(format!("{name}: not measured"));
+                continue;
+            };
+            if c.shapes > max_shapes || c.triangles > max_tris {
+                over.push(format!(
+                    "{name}: {} shapes (max {max_shapes}), {} triangles (max {max_tris})",
+                    c.shapes, c.triangles
+                ));
+            }
+        }
+        assert!(over.is_empty(), "over the UI budget:\n{}", over.join("\n"));
     }
     // === end perf ===
 
