@@ -4,14 +4,14 @@ Measured 2026-10-24 on the dev laptop (Intel HD 520, 1280x720, `--profile profil
 
 | Scene | Before the perf pass | Now |
 |---|---|---|
-| Normal play | 6.6 | 5.8 |
+| Normal play | 6.6 | 4.3 |
 | Loadout (239 cards) | 9.2 | 6.9 |
 | Merge | 11.7 | 6.8 |
 | Game `update()` | 0.13 | 0.07 |
 | Dream generation (mean) | 18.5 | 3.4 (0.5 in the test profile) |
 | Test suite run | 8-9 min | ~46 s |
 
-Vsync caps play at 60 fps (16.7 ms), so play has about 60% headroom here. Where the time goes in play: egui draw ~2.7 (the vignette and grain overlays are ~1.5 of it), world passes ~1.3 (about 570 draw calls), post present ~1.4 (trail + composite), everything else < 0.5.
+Vsync caps play at 60 fps (16.7 ms), so play has about 75% headroom here. Where the time goes in play now: post present ~2.1 (trail + composite, which now also draws the vignette and film grain), world passes ~1.3 (about 20 instanced draws; the GPU time is the same as with 570 separate draws, so it is raster/clear cost, not call overhead), egui draw ~0.7, everything else < 0.4.
 
 ## Guards (tests that fail if a change regresses)
 - `every_screen_stays_inside_its_ui_budget`: max egui shapes/triangles per screen. A failure means a painter went back to one shape per pixel. Use the run-merged mesh helpers in `pixel_ui.rs`, or raise the number on purpose with a measurement.
@@ -33,7 +33,11 @@ Vsync caps play at 60 fps (16.7 ms), so play has about 60% headroom here. Where 
 - New blocks/enemies that add draw calls need a batching plan (about 570 draws today = ~1 ms).
 - Do not change the look for speed without asking the owner. Known approved look change: icon/fill seams removed (cleaner pixel art).
 
+## Done since the first pass
+- The vignette and film grain are drawn by the composite shader (`uOv*` uniforms, `ScreenOverlay`), not as two full-screen egui layers: play 5.8 -> 4.3 ms. The vignette ring table is exactly the old mesh's vertex alphas (a test proves it); the only difference is the old 48-sided polygon is now a true circle (0.2% of the radius).
+- World blocks are drawn instanced (`INSTANCED` shader variant, `engine::mesh::InstanceBuffer`, `renderstate::Batcher`): about 570 draws became about 20 and ~1,100 GL calls a frame disappeared. Pixels match the non-instanced renderer to within 2/255 on static scenes. The measured GPU time did not change on the HD 520, so this mostly helps CPU-bound machines.
+
 ## Not done yet
-- Fold vignette + grain into the post-process pass (~1.5 ms, vignette would be a smooth circle instead of a 48-gon).
-- Merge static blocks into one mesh per texture (~1 ms).
-- Test on weaker hardware (Steam Deck, older GPUs).
+- Test on weaker hardware (Steam Deck, older GPUs): nothing here can emulate it.
+- The composite pass now costs ~2.1 ms: the trail pass and the composite are two full-screen passes; the trail is skipped when off, so a cheaper composite (fewer texture reads) is the next lever.
+- Profiling note: `glFinish` has about 0.5-1 ms of its own latency on this GPU, so a section reading ~1 ms may be mostly that floor.

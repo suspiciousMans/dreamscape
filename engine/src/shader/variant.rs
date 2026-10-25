@@ -6,6 +6,9 @@ use super::link_program;
 /// instead of perspective-correct — a compile-time GLSL qualifier, so this
 /// swaps the active compiled program rather than a uniform.
 pub const AFFINE_UV_BIT: u32 = 1 << 0;
+/// The vertex shader reads each instance's model matrix from vertex
+/// attributes (`aModel`) instead of the `uModel` uniform.
+pub const INSTANCED_BIT: u32 = 1 << 1;
 
 /// Compiles and caches shader program variants keyed by a `#define` bitmask,
 /// so toggling a compile-time flag (like affine UV mapping) swaps a cached
@@ -50,7 +53,7 @@ impl ShaderVariantCache {
     /// the defined flags). Compile them all up front with [`Self::prewarm`]:
     /// a variant compiled on first use costs a visible hitch (about 55 ms on
     /// Intel Mesa with a cold shader cache) in the middle of play.
-    pub const ALL_FLAGS: [u32; 2] = [0, AFFINE_UV_BIT];
+    pub const ALL_FLAGS: [u32; 4] = [0, AFFINE_UV_BIT, INSTANCED_BIT, AFFINE_UV_BIT | INSTANCED_BIT];
 
     /// Compiles `flags` now (a no-op for ones already compiled). A failure
     /// is logged and left for the first real use to report.
@@ -67,6 +70,9 @@ impl ShaderVariantCache {
         if flags & AFFINE_UV_BIT != 0 {
             defines.push_str("#define AFFINE_UV\n");
         }
+        if flags & INSTANCED_BIT != 0 {
+            defines.push_str("#define INSTANCED\n");
+        }
         defines
     }
 }
@@ -78,7 +84,7 @@ mod tests {
     #[test]
     fn all_flags_covers_every_combination_of_the_defined_bits() {
         // One defined bit today: 2 variants. Adding a flag bit must extend ALL_FLAGS.
-        let defined = AFFINE_UV_BIT;
+        let defined = AFFINE_UV_BIT | INSTANCED_BIT;
         let combos: Vec<u32> = (0..=defined).filter(|f| f & !defined == 0).collect();
         let mut all = ShaderVariantCache::ALL_FLAGS.to_vec();
         all.sort_unstable();
@@ -89,5 +95,8 @@ mod tests {
     fn the_affine_variant_defines_its_macro_and_the_plain_one_does_not() {
         assert_eq!(ShaderVariantCache::defines_for(0), "");
         assert!(ShaderVariantCache::defines_for(AFFINE_UV_BIT).contains("AFFINE_UV"));
+        let both = ShaderVariantCache::defines_for(AFFINE_UV_BIT | INSTANCED_BIT);
+        assert!(both.contains("AFFINE_UV") && both.contains("INSTANCED"));
+        assert!(!ShaderVariantCache::defines_for(AFFINE_UV_BIT).contains("INSTANCED"));
     }
 }

@@ -5,7 +5,9 @@ mod skybox;
 
 pub use framebuffer::OffscreenFramebuffer;
 pub use particles::ParticlePass;
-pub use post::{CompositePass, PostParams, TrailPass, DEFAULT_FRAGMENT_SRC};
+pub use post::{
+    CompositePass, PostParams, ScreenOverlay, TrailPass, DEFAULT_FRAGMENT_SRC, VIGNETTE_RINGS,
+};
 pub use skybox::SkyboxPass;
 
 use glow::HasContext;
@@ -21,6 +23,8 @@ pub struct Renderer {
     skybox: SkyboxPass,
     particles: ParticlePass,
     resolution_scale: f32,
+    /// Vignette + grain applied by the composite pass (see `ScreenOverlay`).
+    overlay: Option<ScreenOverlay>,
     /// Tracers: 0 = off. See `set_trails`.
     trail_amount: f32,
     trail: Option<TrailPass>,
@@ -50,6 +54,7 @@ impl Renderer {
             skybox: SkyboxPass::new(gl)?,
             particles: ParticlePass::new(gl)?,
             resolution_scale,
+            overlay: None,
             trail_amount: 0.0,
             trail: None,
             trail_targets: Vec::new(),
@@ -99,7 +104,8 @@ impl Renderer {
         // `Drop`, so without this explicit `destroy` those objects would
         // leak in the driver on every shader-profile switch (unlike
         // `resize_if_needed`, which already destroys the old framebuffer).
-        let composite = CompositePass::new(gl, post_fragment_src)?;
+        let mut composite = CompositePass::new(gl, post_fragment_src)?;
+        composite.grain_tex = self.composite.grain_tex.take();
         unsafe {
             self.composite.destroy(gl);
         }
@@ -111,6 +117,17 @@ impl Renderer {
     /// that moves. Takes effect on the next `present`.
     pub fn set_trails(&mut self, amount: f32) {
         self.trail_amount = amount.clamp(0.0, 0.95);
+    }
+
+    /// The vignette + grain for the next `present` (`None` = none). Needs a
+    /// composite shader with the `uOv*` uniforms; others ignore it.
+    pub fn set_overlay(&mut self, overlay: Option<ScreenOverlay>) {
+        self.overlay = overlay;
+    }
+
+    /// Uploads the film-grain tile (premultiplied RGBA8, `size` x `size`).
+    pub fn set_grain_texture(&mut self, gl: &glow::Context, size: u32, rgba: &[u8]) {
+        self.composite.set_grain_texture(gl, size, rgba);
     }
 
     pub fn set_resolution_scale(&mut self, scale: f32) {
@@ -173,7 +190,13 @@ impl Renderer {
                 window_drawable_size.1 as i32,
             );
         }
-        self.composite.draw(gl, source, post_params);
+        self.composite.draw(
+            gl,
+            source,
+            post_params,
+            self.overlay.as_ref(),
+            window_drawable_size.1 as f32,
+        );
     }
 
     /// Blends the frame into the tracer ping-pong targets and returns the

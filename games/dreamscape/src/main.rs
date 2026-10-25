@@ -17,7 +17,7 @@ use engine::profile::{ProfileCycler, RenderParams};
 use engine::renderer::{PostParams, Renderer};
 use engine::sdl2::event::Event;
 use engine::sdl2::keyboard::Keycode;
-use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT};
+use engine::shader::{ShaderVariantCache, AFFINE_UV_BIT, INSTANCED_BIT};
 use engine::texture::{GpuTexture, TextureFilter};
 use engine::ui::EguiState;
 
@@ -513,6 +513,10 @@ pub struct DreamscapeGame {
     shader_cache: Option<ShaderVariantCache>,
     // === perf === world pass caches
     world_locs: Option<renderstate::WorldLocs>,
+    /// The same for the instanced variant of the world shader.
+    world_locs_inst: Option<renderstate::WorldLocs>,
+    instance_buf: Option<engine::mesh::InstanceBuffer>,
+    batcher: renderstate::Batcher<(Arc<engine::mesh::GpuMesh>, Option<Arc<engine::texture::GpuTexture>>)>,
     pass_lists: renderstate::PassLists,
     // === end perf ===
     profiles: Option<ProfileCycler>,
@@ -965,8 +969,6 @@ pub struct DreamscapeGame {
     run_seed: u64,
     restart_requested: bool,
     fonts_installed: bool,
-    /// Film grain, uploaded to egui on the first frame.
-    grain: Option<egui::TextureHandle>,
     /// F2 toggles tunnel vision + grain (for screenshots / accessibility).
     tunnel_on: bool,
     /// Chosen on the title screen for the next run.
@@ -1075,6 +1077,9 @@ impl DreamscapeGame {
             renderer: None,
             shader_cache: None,
             world_locs: None,
+            world_locs_inst: None,
+            instance_buf: None,
+            batcher: Default::default(),
             pass_lists: Default::default(),
             profiles: None,
             render_params: None,
@@ -1361,7 +1366,6 @@ impl DreamscapeGame {
             run_seed,
             restart_requested: false,
             fonts_installed: false,
-            grain: None,
             tunnel_on: crate::dev::var("DREAMSCAPE_NO_TUNNEL").is_err(),
             run_length: match crate::dev::var("DREAMSCAPE_RUN").as_deref() {
                 Ok("long") => RunLength::Long,
@@ -11182,6 +11186,15 @@ impl Game for DreamscapeGame {
             first.render.resolution_scale,
             &post_src,
         )?);
+        // === perf === the film grain tile the composite shader samples
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_grain_texture(
+                gl,
+                tunnel::GRAIN_SIZE as u32,
+                &tunnel::grain_premultiplied(7),
+            );
+        }
+        // === end perf ===
         self.profiles = Some(cycler);
         for shape in dream::ALL_SHAPES {
             self.meshes.insert(
@@ -13082,8 +13095,21 @@ impl Game for DreamscapeGame {
         let Some(locs) = self.world_locs.as_ref() else {
             return Ok(());
         };
+        // The instanced variant: the same shader, but each block's model
+        // matrix comes from a vertex attribute so one draw covers many blocks.
+        let program_i = shader_cache.get_or_compile(gl, flags | INSTANCED_BIT)?;
+        if self.world_locs_inst.as_ref().is_none_or(|w| w.program != program_i) {
+            self.world_locs_inst = Some(renderstate::WorldLocs::new(gl, program_i));
+        }
+        let Some(locs_i) = self.world_locs_inst.as_ref() else {
+            return Ok(());
+        };
+        if self.instance_buf.is_none() {
+            self.instance_buf = Some(engine::mesh::InstanceBuffer::new(gl)?);
+        }
         // === end perf ===
-        unsafe {
+        // Per-frame uniforms, set on both programs.
+        let set_frame = |program: engine::glow::Program, locs: &renderstate::WorldLocs| unsafe {
             gl.use_program(Some(program));
             let loc = |name: &str| locs.frame(name);
             if let Some(l) = loc("uView") {
@@ -13162,7 +13188,9 @@ impl Game for DreamscapeGame {
             if let Some(l) = loc("uDark") {
                 gl.uniform_3_f32(Some(l), dark[0], dark[1], dark[2]);
             }
-        }
+        };
+        set_frame(program_i, locs_i);
+        set_frame(program, locs);
 
         let (model_loc, uv_loc, melt_loc, lit_loc, hero_loc, ghost_loc, outline_loc) = (
             &locs.model,
@@ -13183,6 +13211,7 @@ impl Game for DreamscapeGame {
         let lists = &mut self.pass_lists;
         lists.clear();
         let mut visited = [0usize; 4];
+        let mut instanced_stats = (0usize, 0usize);
         // === end perf ===
         // 0: everything opaque. 1: a dark shell around the dreamer (inflated
         // back faces), so it reads on bright floors as well as dark ones.
@@ -13287,6 +13316,11 @@ impl Game for DreamscapeGame {
                 state.stats.draws += 1;
             };
             if pass == 0 {
+                // Everything that is not the dreamer or water is batched by
+                // (mesh, texture, uniforms) and drawn instanced: hundreds of
+                // identical blocks become a few draw calls.
+                let batcher = &mut self.batcher;
+                batcher.clear();
                 for (entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
                     self.world
                         .query::<(
@@ -13308,18 +13342,89 @@ impl Game for DreamscapeGame {
                         continue;
                     }
                     visited[0] += 1;
-                    if lists.route(entity, water.is_some(), hero.is_some()) {
-                        draw(
-                            &mut state,
-                            transform,
-                            mesh_renderer,
-                            uv,
-                            solid.is_some(),
-                            lit.is_some(),
-                            hero.is_some(),
-                            sil.is_some(),
-                        );
+                    if lists.route(entity, water.is_some(), hero.is_some()) && hero.is_none() {
+                        let key = renderstate::BatchKey {
+                            mesh: Arc::as_ptr(&mesh_renderer.mesh) as usize,
+                            texture: mesh_renderer.texture.as_ref().map(|t| t.handle),
+                            uv: uv.map_or(0.0, |u| u.0).to_bits(),
+                            lit: gameplay::lit_level(lit.is_some(), sil.is_some()).to_bits(),
+                            melt: (if solid.is_some() { 0.0 } else { melt }).to_bits(),
+                        };
+                        batcher.push(key, &transform.matrix().to_cols_array(), || {
+                            (mesh_renderer.mesh.clone(), mesh_renderer.texture.clone())
+                        });
                     }
+                }
+                if let Some(buf) = self.instance_buf.as_ref() {
+                    let mut istate = renderstate::DrawState::default();
+                    unsafe {
+                        gl.use_program(Some(program_i));
+                        if let Some(l) = &locs_i.hero {
+                            gl.uniform_1_f32(Some(l), 0.0);
+                        }
+                    }
+                    for g in batcher.groups() {
+                        let (mesh, texture) = &g.payload;
+                        unsafe {
+                            if let Some(l) = &locs_i.lit {
+                                let v = f32::from_bits(g.key.lit);
+                                if istate.float(renderstate::lit_of, v) {
+                                    gl.uniform_1_f32(Some(l), v);
+                                }
+                            }
+                            if let Some(l) = &locs_i.melt {
+                                let v = f32::from_bits(g.key.melt);
+                                if istate.float(renderstate::melt_of, v) {
+                                    gl.uniform_1_f32(Some(l), v);
+                                }
+                            }
+                            if let Some(l) = &locs_i.uv {
+                                let v = f32::from_bits(g.key.uv);
+                                if istate.float(renderstate::uv_of, v) {
+                                    gl.uniform_1_f32(Some(l), v);
+                                }
+                            }
+                        }
+                        if let Some(t) = texture {
+                            if istate.texture_needs_bind(t.handle) {
+                                t.bind(gl, 0);
+                            }
+                        }
+                        buf.draw(gl, mesh, &g.matrices);
+                        istate.stats.draws += 1;
+                    }
+                    instanced_stats = (istate.stats.draws, batcher.instances());
+                    unsafe {
+                        gl.bind_vertex_array(None);
+                        gl.use_program(Some(program));
+                    }
+                }
+                // The dreamer (and any other hero) draws on its own, after.
+                for &entity in &lists.heroes {
+                    let Ok(mut q) = self.world.query_one::<(
+                        &Transform,
+                        &MeshRenderer,
+                        Option<&SurfaceUv>,
+                        Option<&NoMelt>,
+                        Option<&Lit>,
+                        Option<&Hero>,
+                        Option<&Silhouette>,
+                    )>(entity) else {
+                        continue;
+                    };
+                    let Some((transform, mesh_renderer, uv, solid, lit, hero, sil)) = q.get() else {
+                        continue;
+                    };
+                    draw(
+                        &mut state,
+                        transform,
+                        mesh_renderer,
+                        uv,
+                        solid.is_some(),
+                        lit.is_some(),
+                        hero.is_some(),
+                        sil.is_some(),
+                    );
                 }
             } else {
                 let list = if pass == 2 { &lists.water } else { &lists.heroes };
@@ -13367,6 +13472,8 @@ impl Game for DreamscapeGame {
             engine::perf::count("world visited p2 (water)", visited[2]);
             engine::perf::count("world visited p3 (sil)", visited[3]);
             engine::perf::count("world queries", 1);
+            engine::perf::count("world instanced draws", instanced_stats.0);
+            engine::perf::count("world instanced instances", instanced_stats.1);
         }
         // === end perf ===
         if engine::perf::enabled() {
@@ -13382,6 +13489,38 @@ impl Game for DreamscapeGame {
             }
         }
 
+        // Where the player is on screen (NDC -> 0..1), for the vignette centre.
+        let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
+            * Mat4::look_at_rh(eye, target, up)
+            * player.extend(1.0);
+        let player_uv = if fp {
+            [0.5, 0.5]
+        } else if clip.w > 0.0 {
+            [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w]
+        } else {
+            [0.5, 0.5]
+        };
+        // === perf === the vignette and film grain ride along in the composite
+        // pass (one shader) instead of two full-screen blended egui layers.
+        let overlay_on = tunnel
+            && matches!(hud_view.mode, hud::Mode::Playing | hud::Mode::Paused);
+        renderer.set_overlay(overlay_on.then(|| {
+            let (inner, outer) = tunnel::vignette_radii(strangeness, time);
+            let (w, h) = (drawable_size.0 as f32, drawable_size.1 as f32);
+            let ui_scale = hud::ui_scale(hud_view.mode, w, h);
+            let (ox, oy) = tunnel::grain_offset(time);
+            engine::renderer::ScreenOverlay {
+                centre_px: [player_uv[0] * w, player_uv[1] * h],
+                half_diag_px: (w * w + h * h).sqrt() * 0.5,
+                inner,
+                outer,
+                ring_alpha: tunnel::vignette_rings(inner, outer, self.settings.vignette),
+                grain_offset: [ox, oy],
+                grain_tile_px: tunnel::GRAIN_SIZE as f32 * tunnel::GRAIN_TEXEL * ui_scale,
+                grain_strength: tunnel::grain_tint(self.settings.grain),
+            }
+        }));
+        // === end perf ===
         let present_scope = engine::perf::scope("rnd.present (post)");
         renderer.present(
             gl,
@@ -13398,7 +13537,6 @@ impl Game for DreamscapeGame {
         }
         drop(present_scope);
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
-        let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
         // === combat === hit-point pips over enemies, projected to the screen
         if hud_view.mode == hud::Mode::Playing && !fp && !self.coop_active() {
@@ -13411,56 +13549,12 @@ impl Game for DreamscapeGame {
         let pack = &self.pack;
         let pick = &self.pick;
         let packs_art = &mut self.packs_art;
-        let grain = &mut self.grain;
-        // Where the player is on screen (NDC -> 0..1), for the vignette centre.
-        let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
-            * Mat4::look_at_rh(eye, target, up)
-            * player.extend(1.0);
-        let player_uv = if fp {
-            [0.5, 0.5]
-        } else if clip.w > 0.0 {
-            [0.5 + 0.5 * clip.x / clip.w, 0.5 - 0.5 * clip.y / clip.w]
-        } else {
-            [0.5, 0.5]
-        };
-        let overlay = tunnel && hud_view.mode == hud::Mode::Playing
-            || tunnel && hud_view.mode == hud::Mode::Paused;
         if let Some(ui) = self.ui.as_mut() {
             ui.ui_scale = hud::ui_scale(hud_view.mode, drawable_size.0 as f32, drawable_size.1 as f32);
             let ui_run = engine::perf::scope("rnd.egui run (hud::draw)");
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
-                }
-                if overlay {
-                    let tex = grain
-                        .get_or_insert_with(|| {
-                            egui_ctx.load_texture(
-                                "film-grain",
-                                tunnel::grain_image(7),
-                                egui::TextureOptions::NEAREST_REPEAT,
-                            )
-                        })
-                        .id();
-                    let screen = egui_ctx.screen_rect();
-                    let p = egui_ctx.layer_painter(egui::LayerId::new(
-                        egui::Order::Background,
-                        egui::Id::new("tunnel_vision"),
-                    ));
-                    let at = egui::Pos2::new(
-                        screen.left() + player_uv[0] * screen.width(),
-                        screen.top() + player_uv[1] * screen.height(),
-                    );
-                    tunnel::draw_overlay(
-                        &p,
-                        screen,
-                        at,
-                        strangeness,
-                        time,
-                        Some(tex),
-                        grain_strength,
-                        vignette_strength,
-                    );
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack, pick, packs_art);
             });
