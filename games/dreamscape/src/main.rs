@@ -52,6 +52,7 @@ mod juice;
 mod fortune;
 mod lottery;
 mod lottery_ui;
+mod renderstate;
 mod retention;
 mod streaks;
 mod worth;
@@ -98,6 +99,8 @@ mod secrets;
 mod settings_ui;
 mod shop_ui;
 mod sorting;
+mod texprefetch; // === perf ===
+mod viewcache; // === perf ===
 mod sounds;
 mod specials;
 mod steam;
@@ -508,12 +511,18 @@ fn run_seed() -> u64 {
 pub struct DreamscapeGame {
     renderer: Option<Renderer>,
     shader_cache: Option<ShaderVariantCache>,
+    // === perf === world pass caches
+    world_locs: Option<renderstate::WorldLocs>,
+    pass_lists: renderstate::PassLists,
+    // === end perf ===
     profiles: Option<ProfileCycler>,
     render_params: Option<RenderParams>,
     meshes: HashMap<Shape, Arc<GpuMesh>>,
     textures: HashMap<[u8; 4], Arc<GpuTexture>>,
     /// Per-dream procedural textures; destroyed when the dream changes.
     dream_textures: Vec<Arc<GpuTexture>>,
+    /// === perf === textures made ahead (on threads) for the dream being loaded.
+    tex_prefetch: texprefetch::Prefetched,
     time: f32,
     audio: Option<AudioContext>,
 
@@ -926,6 +935,9 @@ pub struct DreamscapeGame {
     booklet_return: hud::Mode,
     journal_status: Option<String>,
     card_art: booklet_ui::CardArt,
+    /// === perf === sorted card lists for the menu views (rebuilt only on change).
+    view_cards: std::cell::RefCell<[viewcache::CardCache; 3]>,
+    view_attune: std::cell::RefCell<(u64, String)>,
     pack: reveal_ui::PackView,
     /// Every card the run's opened packs gave so far; pressed together at the end.
     haul: Vec<cards::Recalled>,
@@ -1062,11 +1074,14 @@ impl DreamscapeGame {
         Self {
             renderer: None,
             shader_cache: None,
+            world_locs: None,
+            pass_lists: Default::default(),
             profiles: None,
             render_params: None,
             meshes: HashMap::new(),
             textures: HashMap::new(),
             dream_textures: Vec::new(),
+            tex_prefetch: Default::default(), // === perf ===
             time: 0.0,
             audio: None,
             world: World::new(),
@@ -1302,6 +1317,8 @@ impl DreamscapeGame {
             booklet_return: hud::Mode::Journal,
             journal_status: None,
             card_art: booklet_ui::CardArt::default(),
+            view_cards: Default::default(), // === perf ===
+            view_attune: Default::default(),
             pack: reveal_ui::PackView::default(),
             haul: Vec::new(),
             pick: reveal_ui::PackPickView::default(),
@@ -1971,7 +1988,7 @@ impl DreamscapeGame {
     ) -> anyhow::Result<Arc<GpuTexture>> {
         let tex = Arc::new(GpuTexture::from_rgba8(
             gl,
-            &spec.rgba(),
+            &self.tex_prefetch.pixels(spec), // === perf === usually made ahead
             TEX_SIZE,
             TEX_SIZE,
             // Bilinear: nearest-filtered 64px patterns shimmer into static at range.
@@ -3763,7 +3780,7 @@ impl DreamscapeGame {
             },
             loadout: if self.mode == hud::Mode::Loadout {
                 loadout_ui::LoadoutView {
-                    cards: self.sorted_cards(self.settings.sort_loadout).into_iter().cloned().collect(),
+                    cards: self.view_cards(0, self.settings.sort_loadout, None),
                     sort: self.settings.sort_loadout.label(),
                     chosen: self.booklet.lore.deck.clone(), // === deck ===
                     slots: deck::DECK_MAX,
@@ -3790,7 +3807,7 @@ impl DreamscapeGame {
             },
             merge: if self.mode == hud::Mode::Merge {
                 merge_ui::MergeView {
-                    cards: self.sorted_cards(self.settings.sort_merge).into_iter().cloned().collect(),
+                    cards: self.view_cards(1, self.settings.sort_merge, None),
                     sort: self.settings.sort_merge.label(),
                     selected: self.merge_sel,
                     first: self.merge_first,
@@ -3892,20 +3909,25 @@ impl DreamscapeGame {
             },
             journal_status: self.journal_status.clone(),
             booklet_cards: if self.mode == hud::Mode::Booklet {
-                let all = self.sorted_cards(self.settings.sort_booklet);
-                all[cards::page_range(all.len(), self.booklet_page)]
-                    .iter()
-                    .map(|c| (*c).clone())
-                    .collect()
+                let range = cards::page_range(self.booklet.card_count(), self.booklet_page);
+                self.view_cards(2, self.settings.sort_booklet, Some(range))
             } else {
-                Vec::new()
+                std::sync::Arc::from(Vec::new())
             },
             booklet_sort: self.settings.sort_booklet.label(),
             booklet_page: self.booklet_page,
             booklet_pages: cards::page_count(self.booklet.card_count()),
             booklet_total: self.booklet.card_count(),
             booklet_attune: if self.mode == hud::Mode::Booklet {
-                attunement::line(&attunement::counts(self.booklet.cards()))
+{
+                    // === perf === rebuilt only when the cards change
+                    let print = viewcache::fingerprint(self.booklet.cards());
+                    let mut cache = self.view_attune.borrow_mut();
+                    if cache.1.is_empty() || cache.0 != print {
+                        *cache = (print, attunement::line(&attunement::counts(self.booklet.cards())));
+                    }
+                    cache.1.clone()
+                }
             } else {
                 String::new()
             },
@@ -3959,10 +3981,15 @@ impl DreamscapeGame {
             } else {
                 tickets_ui::TicketsView::default()
             },
+            // === perf === the screens look a card up and treat a missing one as level 0,
+            // so only cards that earned xp are listed (was: every card in the booklet).
             mastery_levels: self
                 .booklet
-                .cards()
-                .map(|c| (c.number, self.booklet.mastery.level_of(c.number)))
+                .mastery
+                .xp
+                .iter()
+                .map(|&(n, x)| (n, worth::level(x)))
+                .filter(|&(_, l)| l > 0)
                 .collect(),
             perks: if self.mode == hud::Mode::Title {
                 self.booklet
@@ -8642,9 +8669,15 @@ impl DreamscapeGame {
     /// The booklet's cards in the given order.
     fn sorted_cards(&self, sort: sorting::Sort) -> Vec<&cards::Card> {
         let all: Vec<&cards::Card> = self.booklet.cards().collect();
-        // `order` wants a slice of cards; sorting is by value so clone the (small) list.
-        let tmp: Vec<cards::Card> = all.iter().map(|c| (*c).clone()).collect();
-        sorting::order(&tmp, sort).into_iter().map(|i| all[i]).collect()
+        sorting::order(&all, sort).into_iter().map(|i| all[i]).collect()
+    }
+
+    /// === perf === `sorted_cards` for the per-frame view: cloned only when the
+    /// booklet, the sort or the slice changed. `slot`: 0 loadout, 1 merge, 2 booklet.
+    fn view_cards(&self, slot: usize, sort: sorting::Sort, range: Option<std::ops::Range<usize>>) -> std::sync::Arc<[cards::Card]> {
+        let print = viewcache::fingerprint(self.booklet.cards());
+        let range = range.unwrap_or(0..usize::MAX);
+        self.view_cards.borrow_mut()[slot].get(print, sort, range, || self.booklet.cards().cloned().collect())
     }
 
     /// `[t]` (cycle = true) or `[r]` on the booklet, merge or loadout screen: the cursor
@@ -9888,6 +9921,7 @@ impl DreamscapeGame {
     }
 
     fn load_dream(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
+        let _t_all = engine::perf::scope("load.total"); // === perf ===
         let theme = self.director.theme;
         let spec = theme.spec();
         self.twists = if self.director.nightmare || self.prologue.is_some() || self.enemy_free() {
@@ -9956,6 +9990,7 @@ impl DreamscapeGame {
         }
         self.air_jumps_used = 0;
         let goals = self.plan_goals();
+        let t_gen = engine::perf::scope("load.generate"); // === perf ===
         let mut dream = if self.director.nightmare {
             dream::generate_nightmare(theme, self.director.dream_seed(), self.director.depth)
         } else {
@@ -9969,6 +10004,7 @@ impl DreamscapeGame {
                 goals,
             )
         };
+        drop(t_gen); // === perf ===
         // === sanctuary === nothing here can hurt you
         if self.enemy_free() {
             dream.calm();
@@ -10101,6 +10137,7 @@ impl DreamscapeGame {
             dream.surfaces.prop.pattern,
         );
 
+        let t_clear = engine::perf::scope("load.clear"); // === perf ===
         self.world.clear();
         {
             let gl = ctx.gl();
@@ -10109,6 +10146,7 @@ impl DreamscapeGame {
                 unsafe { tex.destroy(gl) };
             }
         }
+        drop(t_clear); // === perf ===
         self.enemies.clear();
         self.specials.clear();
         self.newfoes.clear(); // enemies-a
@@ -10189,17 +10227,55 @@ impl DreamscapeGame {
         self.player = None;
         self.route_index = 0;
         self.apply_atmosphere(theme, &dream.atmosphere)?;
-        self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        {
+            let _t = engine::perf::scope("load.music_start"); // === perf ===
+            self.start_music(theme, dream.strangeness, self.director.dream_seed());
+        }
 
         let gl = ctx.gl();
         let player_mesh = self.mesh(Shape::Octahedron)?;
         let enemy_mesh = self.mesh(Shape::Orb)?;
+        // === perf === every spec this dream needs up front, so the pixels are made
+        // side by side instead of one upload after another.
+        let cb = self.settings.colorblind_markers;
+        let shard_spec = if cb {
+            access::shard(dream.surfaces.shard.seed)
+        } else {
+            dream.surfaces.shard.clone()
+        };
+        let preview = if theme == DreamTheme::Awakening {
+            DreamTheme::Awakening
+        } else {
+            self.director.next
+        };
+        let (portal_spec, wake_spec) = if cb {
+            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
+        } else {
+            (
+                dream::portal_surface(preview, dream.seed ^ 0x5EED),
+                dream::portal_surface(DreamTheme::Awakening, dream.seed),
+            )
+        };
+        {
+            let _t = engine::perf::scope("load.textures_gen");
+            self.tex_prefetch.fill(&[
+                &dream.surfaces.floor,
+                &dream.surfaces.wall,
+                &dream.surfaces.prop,
+                &shard_spec,
+                &portal_spec,
+                &wake_spec,
+                &dream.surfaces.enemy,
+            ]);
+        }
+        // === end perf ===
+        let t_up = engine::perf::scope("load.textures_upload"); // === perf ===
         let floor_tex = self.upload_surface(gl, &dream.surfaces.floor)?;
         let wall_tex = self.upload_surface(gl, &dream.surfaces.wall)?;
         let prop_tex = self.upload_surface(gl, &dream.surfaces.prop)?;
         // A cracked wall wears the wall pattern with a bright hairline split.
         let crack_tex = if dream.secret.is_some() {
-            let mut px = dream.surfaces.wall.rgba();
+            let mut px = self.tex_prefetch.pixels(&dream.surfaces.wall);
             secrets::draw_crack(&mut px, TEX_SIZE, dream.seed);
             let tex = Arc::new(GpuTexture::from_rgba8(
                 gl,
@@ -10214,28 +10290,10 @@ impl DreamscapeGame {
             None
         };
         let mut cracked: Option<(Entity, Vec3, f32)> = None;
-        let cb = self.settings.colorblind_markers;
-        let shard_spec = if cb {
-            access::shard(dream.surfaces.shard.seed)
-        } else {
-            dream.surfaces.shard.clone()
-        };
         self.shard_tex = Some(self.upload_surface(gl, &shard_spec)?);
-        let preview = if theme == DreamTheme::Awakening {
-            DreamTheme::Awakening
-        } else {
-            self.director.next
-        };
-        let (portal_spec, wake_spec) = if cb {
-            (access::portal(dream.seed ^ 0x5EED), access::portal(dream.seed))
-        } else {
-            (
-                dream::portal_surface(preview, dream.seed ^ 0x5EED),
-                dream::portal_surface(DreamTheme::Awakening, dream.seed),
-            )
-        };
         let portal_tex = self.upload_surface(gl, &portal_spec)?;
         self.wake_tex = Some(self.upload_surface(gl, &wake_spec)?);
+        drop(t_up); // === perf ===
         // One texture repeat per two cells: big, readable swirls instead of noise.
         let per_cell = 0.5 / gameplay::CELL;
         let mut dissolve_tiles: Vec<(Vec3, Entity, Vec3)> = Vec::new();
@@ -10282,6 +10340,7 @@ impl DreamscapeGame {
             }
         }
         // === end hazards ===
+        let t_tiles = engine::perf::scope("load.spawn_tiles"); // === perf ===
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
                 // Sealed until every sigil is gathered.
@@ -10485,6 +10544,7 @@ impl DreamscapeGame {
                 armed: true,
             });
         }
+        drop(t_tiles); // === perf ===
         self.spawn_wager_portal(gl, &dream)?; // === risk ===
         log::info!("Dream spawned {} entities", self.world.len());
         // world.clear() above already removed the old ones.
@@ -10736,6 +10796,7 @@ impl DreamscapeGame {
                 split: false,
             });
         }
+        let t_foes = engine::perf::scope("load.spawn_foes"); // === perf ===
         self.spawn_specials(gl, &dream, speed, player_speed, &enemy_texture)?;
         self.spawn_newfoes(gl, &dream, player_speed)?; // enemies-a
         // === shards ===
@@ -10746,6 +10807,7 @@ impl DreamscapeGame {
         }
         // === end shards ===
         self.spawn_enemies_b(gl, &dream)?; // === combat ===
+        drop(t_foes); // === perf ===
         // === sanctuary === a place to breathe: nerve refills
         if self.sanctuary() {
             self.nerve.heal(self.nerve.max());
@@ -10816,7 +10878,10 @@ impl DreamscapeGame {
             gone: 0,
         });
         // === end hazards ===
-        self.spawn_features(gl, &dream)?;
+        {
+            let _t = engine::perf::scope("load.spawn_features"); // === perf ===
+            self.spawn_features(gl, &dream)?;
+        }
         if !dream.dissolve.is_empty() {
             // Tiles in the same order as the dissolve state's cells.
             let tiles = dream
@@ -10967,6 +11032,7 @@ impl DreamscapeGame {
             .props
             .get((dream.seed % spec.props.len() as u64) as usize)
             .copied();
+        self.tex_prefetch = Default::default(); // === perf === free the spare pixels
         self.dream = Some(dream);
         if !self.autopilot && self.director.depth > self.best_depth {
             self.best_depth = self.director.depth;
@@ -11779,7 +11845,7 @@ impl Game for DreamscapeGame {
 
     fn update(&mut self, ctx: &mut Context, dt: f32) -> anyhow::Result<()> {
         steam::tick();
-        self.coop_tick(ctx, dt)?;
+        { let _t = engine::perf::scope("upd.coop_tick"); self.coop_tick(ctx, dt)?; }
         if let Some((seed, long, players)) = self.pending_coop_start.take() {
             self.start_coop_run(ctx, seed, long, players)?;
         }
@@ -11789,7 +11855,7 @@ impl Game for DreamscapeGame {
                 self.achievement_toast = None;
             }
         }
-        self.poll_music();
+        { let _t = engine::perf::scope("upd.poll_music"); self.poll_music(); }
         if self.time > 2.0 && crate::dev::var("DREAMSCAPE_CRASH").is_ok() {
             panic!("DREAMSCAPE_CRASH: test crash");
         }
@@ -12052,7 +12118,7 @@ impl Game for DreamscapeGame {
                 }
             }
         }
-        self.update_shrink();
+        { let _t = engine::perf::scope("upd.update_shrink"); self.update_shrink(); }
         // === end hazards ===
         // === ascension === 15: the eye's clock runs out once per dream
         if !self.asc_eye_failed
@@ -12069,9 +12135,9 @@ impl Game for DreamscapeGame {
         // === end ascension ===
         self.stats.time += dt;
         self.run.tick(dt);
-        self.update_deck(dt); // === deck ===
+        { let _t = engine::perf::scope("upd.update_deck"); self.update_deck(dt); } // === deck ===
         // === pressure ===
-        self.update_pressure(dt);
+        { let _t = engine::perf::scope("upd.update_pressure"); self.update_pressure(dt); }
         // === end pressure ===
 
         // 0b. Abilities
@@ -12115,18 +12181,18 @@ impl Game for DreamscapeGame {
         }
         // === end shop ===
         // === combat ===
-        self.update_combat(dt);
+        { let _t = engine::perf::scope("upd.update_combat"); self.update_combat(dt); }
         // === end combat ===
-        self.update_abilities2(dt); // === abilities2 ===
-        self.update_abilities3(dt); // === abilities3 ===
+        { let _t = engine::perf::scope("upd.update_abilities2"); self.update_abilities2(dt); } // === abilities2 ===
+        { let _t = engine::perf::scope("upd.update_abilities3"); self.update_abilities3(dt); } // === abilities3 ===
         if self.run.active(Ability::ShardCall) {
             self.pull_shard(dt);
         }
-        self.update_objective(ctx, dt);
-        self.update_skittish(dt);
-        self.update_caches();
-        self.update_secret();
-        self.update_wager(); // === risk ===
+        { let _t = engine::perf::scope("upd.update_objective"); self.update_objective(ctx, dt); }
+        { let _t = engine::perf::scope("upd.update_skittish"); self.update_skittish(dt); }
+        { let _t = engine::perf::scope("upd.update_caches"); self.update_caches(); }
+        { let _t = engine::perf::scope("upd.update_secret"); self.update_secret(); }
+        { let _t = engine::perf::scope("upd.update_wager"); self.update_wager(); } // === risk ===
         if !self.eye_queue.is_empty()
             && self
                 .eye_line
@@ -12450,9 +12516,9 @@ impl Game for DreamscapeGame {
                 self.anchor = None;
             }
         }
-        self.update_specials(dt, held)?;
-        self.update_newfoes(dt, held); // enemies-a
-        self.update_features();
+        { let _t = engine::perf::scope("upd.update_specials"); self.update_specials(dt, held)?; }
+        { let _t = engine::perf::scope("upd.update_newfoes"); self.update_newfoes(dt, held); } // enemies-a
+        { let _t = engine::perf::scope("upd.update_features"); self.update_features(); }
         let mut boss_events = Vec::new();
         if let Some((entity, b, _)) = self.hunter.as_mut() {
             if b.defeated {
@@ -12491,7 +12557,7 @@ impl Game for DreamscapeGame {
             }
             log::info!("Boss: {e:?}");
         }
-        self.sync_boss_fx();
+        { let _t = engine::perf::scope("upd.sync_boss_fx"); self.sync_boss_fx(); }
 
         // 3. Physics: gravity, collision, trigger overlaps
         let physics = PhysicsParams {
@@ -12505,8 +12571,8 @@ impl Game for DreamscapeGame {
             ..PhysicsParams::default()
         };
         let overlaps = engine::physics::step(&mut self.world, dt, &physics);
-        self.update_slam();
-        self.update_climb();
+        { let _t = engine::perf::scope("upd.update_slam"); self.update_slam(); }
+        { let _t = engine::perf::scope("upd.update_climb"); self.update_climb(); }
         if let Some(p) = self.player {
             if self.world.get::<&RigidBody>(p).is_ok_and(|b| b.grounded) {
                 self.rewind_trail.push(self.dream_age, self.player_position);
@@ -12525,12 +12591,12 @@ impl Game for DreamscapeGame {
                 dt,
                 self.twists.camera_zoom(),
             );
-        self.update_door_hum(dt);
-        self.update_echoes(player, dt)?;
-        self.update_echo_ghost()?;
-        self.update_bursts(ctx.gl())?;
-        self.update_ability_fx(ctx.gl(), player, dt)?;
-        self.update_adaptive_music(dt);
+        { let _t = engine::perf::scope("upd.update_door_hum"); self.update_door_hum(dt); }
+        { let _t = engine::perf::scope("upd.update_echoes"); self.update_echoes(player, dt)?; }
+        { let _t = engine::perf::scope("upd.update_echo_ghost"); self.update_echo_ghost()?; }
+        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; }
+        { let _t = engine::perf::scope("upd.update_ability_fx"); self.update_ability_fx(ctx.gl(), player, dt)?; }
+        { let _t = engine::perf::scope("upd.update_adaptive_music"); self.update_adaptive_music(dt); }
         if !self.autopilot {
             // White Dissolve: the way behind you goes while you move.
             let speed = self
@@ -12875,7 +12941,10 @@ impl Game for DreamscapeGame {
     }
 
     fn render(&mut self, ctx: &mut Context) -> anyhow::Result<()> {
-        let mut hud_view = self.hud_view();
+        let mut hud_view = {
+            let _t = engine::perf::scope("rnd.hud_view");
+            self.hud_view()
+        };
         let drawable_size = ctx.drawable_size();
         let time = self.time;
         let flash = self.flash;
@@ -12993,22 +13062,30 @@ impl Game for DreamscapeGame {
             0
         };
         let program = shader_cache.get_or_compile(gl, flags)?;
+        // === perf === uniform locations are looked up once per program
+        if self.world_locs.as_ref().is_none_or(|w| w.program != program) {
+            self.world_locs = Some(renderstate::WorldLocs::new(gl, program));
+        }
+        let Some(locs) = self.world_locs.as_ref() else {
+            return Ok(());
+        };
+        // === end perf ===
         unsafe {
             gl.use_program(Some(program));
-            let loc = |name: &str| gl.get_uniform_location(program, name);
+            let loc = |name: &str| locs.frame(name);
             if let Some(l) = loc("uView") {
-                gl.uniform_matrix_4_f32_slice(Some(&l), false, &view.to_cols_array());
+                gl.uniform_matrix_4_f32_slice(Some(l), false, &view.to_cols_array());
             }
             if let Some(l) = loc("uProj") {
-                gl.uniform_matrix_4_f32_slice(Some(&l), false, &proj.to_cols_array());
+                gl.uniform_matrix_4_f32_slice(Some(l), false, &proj.to_cols_array());
             }
             if let Some(l) = loc("uLightDir") {
                 let d = Vec3::from(params.light_dir).normalize_or_zero();
-                gl.uniform_3_f32(Some(&l), d.x, d.y, d.z);
+                gl.uniform_3_f32(Some(l), d.x, d.y, d.z);
             }
             if let Some(l) = loc("uAmbientColor") {
                 gl.uniform_3_f32(
-                    Some(&l),
+                    Some(l),
                     params.ambient_color[0],
                     params.ambient_color[1],
                     params.ambient_color[2],
@@ -13019,22 +13096,22 @@ impl Game for DreamscapeGame {
                     engine::profile::LightingMode::Unlit => 0,
                     engine::profile::LightingMode::VertexLit => 1,
                 };
-                gl.uniform_1_i32(Some(&l), mode);
+                gl.uniform_1_i32(Some(l), mode);
             }
             if let Some(l) = loc("uVertexSnapAmount") {
-                gl.uniform_1_f32(Some(&l), params.vertex_snap_amount);
+                gl.uniform_1_f32(Some(l), params.vertex_snap_amount);
             }
             if let Some(l) = loc("uFogStart") {
-                gl.uniform_1_f32(Some(&l), params.fog_start + fog_push);
+                gl.uniform_1_f32(Some(l), params.fog_start + fog_push);
             }
             if let Some(l) = loc("uFogEnd") {
-                gl.uniform_1_f32(Some(&l), params.fog_end + fog_push);
+                gl.uniform_1_f32(Some(l), params.fog_end + fog_push);
             }
             if let Some(l) = loc("uFogColor") {
-                gl.uniform_3_f32(Some(&l), fog[0], fog[1], fog[2]);
+                gl.uniform_3_f32(Some(l), fog[0], fog[1], fog[2]);
             }
             if let Some(l) = loc("uPointLightCount") {
-                gl.uniform_1_i32(Some(&l), 0);
+                gl.uniform_1_i32(Some(l), 0);
             }
             if params.backface_culling {
                 gl.enable(engine::glow::CULL_FACE);
@@ -13043,53 +13120,62 @@ impl Game for DreamscapeGame {
                 gl.disable(engine::glow::CULL_FACE);
             }
             if let Some(l) = loc("uTex") {
-                gl.uniform_1_i32(Some(&l), 0);
+                gl.uniform_1_i32(Some(l), 0);
             }
             if let Some(l) = loc("uTime") {
-                gl.uniform_1_f32(Some(&l), time);
+                gl.uniform_1_f32(Some(l), time);
             }
             if let Some(l) = loc("uStrangeness") {
-                gl.uniform_1_f32(Some(&l), strangeness);
+                gl.uniform_1_f32(Some(l), strangeness);
             }
             if let Some(l) = loc("uBreathe") {
-                gl.uniform_1_f32(Some(&l), mood.breathe * motion);
+                gl.uniform_1_f32(Some(l), mood.breathe * motion);
             }
             if let Some(l) = loc("uPulse") {
-                gl.uniform_1_f32(Some(&l), pulse);
+                gl.uniform_1_f32(Some(l), pulse);
             }
             if let Some(l) = loc("uGlow") {
-                gl.uniform_1_f32(Some(&l), mood.glow);
+                gl.uniform_1_f32(Some(l), mood.glow);
             }
             if let Some(l) = loc("uPlayer") {
-                gl.uniform_3_f32(Some(&l), player.x, player.y, player.z);
+                gl.uniform_3_f32(Some(l), player.x, player.y, player.z);
             }
             if let Some(l) = loc("uSight") {
-                gl.uniform_1_f32(Some(&l), sight);
+                gl.uniform_1_f32(Some(l), sight);
             }
             if let Some(l) = loc("uSightFade") {
-                gl.uniform_1_f32(Some(&l), tunnel::SIGHT_FADE);
+                gl.uniform_1_f32(Some(l), tunnel::SIGHT_FADE);
             }
             if let Some(l) = loc("uDark") {
-                gl.uniform_3_f32(Some(&l), dark[0], dark[1], dark[2]);
+                gl.uniform_3_f32(Some(l), dark[0], dark[1], dark[2]);
             }
         }
 
-        let model_loc = unsafe { gl.get_uniform_location(program, "uModel") };
-        let uv_loc = unsafe { gl.get_uniform_location(program, "uUVScale") };
-        let melt_loc = unsafe { gl.get_uniform_location(program, "uMelt") };
-        let lit_loc = unsafe { gl.get_uniform_location(program, "uLit") };
-        let hero_loc = unsafe { gl.get_uniform_location(program, "uHero") };
-        let ghost_loc = unsafe { gl.get_uniform_location(program, "uGhost") };
-        let outline_loc = unsafe { gl.get_uniform_location(program, "uOutline") };
+        let (model_loc, uv_loc, melt_loc, lit_loc, hero_loc, ghost_loc, outline_loc) = (
+            &locs.model,
+            &locs.uv,
+            &locs.melt,
+            &locs.lit,
+            &locs.hero,
+            &locs.ghost,
+            &locs.outline,
+        );
         unsafe {
             if let Some(l) = &ghost_loc {
                 gl.uniform_1_f32(Some(l), 0.0);
             }
         }
+        // === perf === one world query per frame; later passes walk short lists
+        let mut state = renderstate::DrawState::default();
+        let lists = &mut self.pass_lists;
+        lists.clear();
+        let mut visited = [0usize; 4];
+        // === end perf ===
         // 0: everything opaque. 1: a dark shell around the dreamer (inflated
         // back faces), so it reads on bright floors as well as dark ones.
         // 2 (translucent): water. 3: the dreamer's silhouette wherever
         // something stands in front of it.
+        let world_scope = engine::perf::scope("rnd.world passes");
         for pass in 0..4 {
             unsafe {
                 match pass {
@@ -13125,46 +13211,39 @@ impl Game for DreamscapeGame {
                     }
                 }
             }
-            for (_entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
-                self.world
-                    .query::<(
-                        &Transform,
-                        &MeshRenderer,
-                        Option<&SurfaceUv>,
-                        Option<&NoMelt>,
-                        Option<&Lit>,
-                        Option<&Hero>,
-                        Option<&Translucent>,
-                        Option<&PlayerBody>,
-                        Option<&Halo>,
-                        Option<&Silhouette>,
-                    )>()
-                    .iter()
-            {
-                // Through your own eyes you don't see your own body.
-                if fp && (body.is_some() || halo.is_some()) {
-                    continue;
-                }
-                let wanted = match pass {
-                    0 => water.is_none(),
-                    2 => water.is_some(),
-                    _ => hero.is_some(),
-                };
-                if !wanted {
-                    continue;
-                }
+            // One draw of one entity; shared by all four passes.
+            let draw = |state: &mut renderstate::DrawState,
+                            transform: &Transform,
+                            mesh_renderer: &MeshRenderer,
+                            uv: Option<&SurfaceUv>,
+                            solid: bool,
+                            lit: bool,
+                            hero: bool,
+                            sil: bool| {
                 unsafe {
                     if let Some(l) = &lit_loc {
-                        gl.uniform_1_f32(Some(l), gameplay::lit_level(lit.is_some(), sil.is_some()));
+                        let v = gameplay::lit_level(lit, sil);
+                        if state.float(renderstate::lit_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &hero_loc {
-                        gl.uniform_1_f32(Some(l), if hero.is_some() { 1.0 } else { 0.0 });
+                        let v = if hero { 1.0 } else { 0.0 };
+                        if state.float(renderstate::hero_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &melt_loc {
-                        gl.uniform_1_f32(Some(l), if solid.is_some() { 0.0 } else { melt });
+                        let v = if solid { 0.0 } else { melt };
+                        if state.float(renderstate::melt_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &uv_loc {
-                        gl.uniform_1_f32(Some(l), uv.map_or(0.0, |u| u.0));
+                        let v = uv.map_or(0.0, |u| u.0);
+                        if state.float(renderstate::uv_of, v) {
+                            gl.uniform_1_f32(Some(l), v);
+                        }
                     }
                     if let Some(l) = &model_loc {
                         gl.uniform_matrix_4_f32_slice(
@@ -13184,11 +13263,103 @@ impl Game for DreamscapeGame {
                     }
                 }
                 if let Some(texture) = &mesh_renderer.texture {
-                    texture.bind(gl, 0);
+                    if state.texture_needs_bind(texture.handle) {
+                        texture.bind(gl, 0);
+                    }
                 }
-                mesh_renderer.mesh.draw(gl);
+                if state.vao_needs_bind(mesh_renderer.mesh.vao) {
+                    unsafe { gl.bind_vertex_array(Some(mesh_renderer.mesh.vao)) };
+                }
+                mesh_renderer.mesh.draw_bound(gl);
+                state.stats.draws += 1;
+            };
+            if pass == 0 {
+                for (entity, (transform, mesh_renderer, uv, solid, lit, hero, water, body, halo, sil)) in
+                    self.world
+                        .query::<(
+                            &Transform,
+                            &MeshRenderer,
+                            Option<&SurfaceUv>,
+                            Option<&NoMelt>,
+                            Option<&Lit>,
+                            Option<&Hero>,
+                            Option<&Translucent>,
+                            Option<&PlayerBody>,
+                            Option<&Halo>,
+                            Option<&Silhouette>,
+                        )>()
+                        .iter()
+                {
+                    // Through your own eyes you don't see your own body.
+                    if fp && (body.is_some() || halo.is_some()) {
+                        continue;
+                    }
+                    visited[0] += 1;
+                    if lists.route(entity, water.is_some(), hero.is_some()) {
+                        draw(
+                            &mut state,
+                            transform,
+                            mesh_renderer,
+                            uv,
+                            solid.is_some(),
+                            lit.is_some(),
+                            hero.is_some(),
+                            sil.is_some(),
+                        );
+                    }
+                }
+            } else {
+                let list = if pass == 2 { &lists.water } else { &lists.heroes };
+                for &entity in list {
+                    let Ok(mut q) = self.world.query_one::<(
+                        &Transform,
+                        &MeshRenderer,
+                        Option<&SurfaceUv>,
+                        Option<&NoMelt>,
+                        Option<&Lit>,
+                        Option<&Hero>,
+                        Option<&Silhouette>,
+                    )>(entity) else {
+                        continue;
+                    };
+                    let Some((transform, mesh_renderer, uv, solid, lit, hero, sil)) = q.get() else {
+                        continue;
+                    };
+                    visited[pass] += 1;
+                    draw(
+                        &mut state,
+                        transform,
+                        mesh_renderer,
+                        uv,
+                        solid.is_some(),
+                        lit.is_some(),
+                        hero.is_some(),
+                        sil.is_some(),
+                    );
+                }
             }
         }
+        // === perf === counters (ENGINE_PROF=1 only)
+        if engine::perf::enabled() {
+            let s = state.stats;
+            engine::perf::count("world draws", s.draws);
+            engine::perf::count("world uniform sets", s.uniform_calls);
+            engine::perf::count("world uniform skipped", s.uniform_skipped);
+            engine::perf::count("world tex binds", s.texture_binds);
+            engine::perf::count("world tex skipped", s.texture_skipped);
+            engine::perf::count("world vao binds", s.vao_binds);
+            engine::perf::count("world vao skipped", s.vao_skipped);
+            engine::perf::count("world visited p0 (all)", visited[0]);
+            engine::perf::count("world visited p1 (hero)", visited[1]);
+            engine::perf::count("world visited p2 (water)", visited[2]);
+            engine::perf::count("world visited p3 (sil)", visited[3]);
+            engine::perf::count("world queries", 1);
+        }
+        // === end perf ===
+        if engine::perf::enabled() {
+            unsafe { gl.finish() }; // profiling only: charge the GPU's time to this scope
+        }
+        drop(world_scope);
         unsafe {
             gl.depth_func(engine::glow::LESS);
             gl.depth_mask(true);
@@ -13198,6 +13369,7 @@ impl Game for DreamscapeGame {
             }
         }
 
+        let present_scope = engine::perf::scope("rnd.present (post)");
         renderer.present(
             gl,
             drawable_size,
@@ -13208,6 +13380,10 @@ impl Game for DreamscapeGame {
                 tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
             },
         );
+        if engine::perf::enabled() {
+            unsafe { gl.finish() };
+        }
+        drop(present_scope);
         let install_fonts = !std::mem::replace(&mut self.fonts_installed, true);
         let (grain_strength, vignette_strength) = (self.settings.grain, self.settings.vignette);
         self.screen_size = (drawable_size.0 as f32, drawable_size.1 as f32);
@@ -13238,6 +13414,7 @@ impl Game for DreamscapeGame {
             || tunnel && hud_view.mode == hud::Mode::Paused;
         if let Some(ui) = self.ui.as_mut() {
             ui.ui_scale = hud::ui_scale(hud_view.mode, drawable_size.0 as f32, drawable_size.1 as f32);
+            let ui_run = engine::perf::scope("rnd.egui run (hud::draw)");
             let output = ui.run(drawable_size, |egui_ctx| {
                 if install_fonts {
                     hud::install_font(egui_ctx);
@@ -13274,7 +13451,12 @@ impl Game for DreamscapeGame {
                 }
                 hud::draw(egui_ctx, &hud_view, card_art, pack, pick, packs_art);
             });
+            drop(ui_run);
+            let _t = engine::perf::scope("rnd.egui paint");
             ui.paint(drawable_size, output);
+            if engine::perf::enabled() {
+                unsafe { ctx.gl().finish() };
+            }
         }
         if std::mem::take(&mut self.export_requested) && self.mode == hud::Mode::Booklet {
             self.export_cards(ctx);
@@ -16700,6 +16882,133 @@ mod screen_smoke {
     // === end toolcards ===
     // === end shop ===
 
+    // === perf === egui cost of every screen (shapes, vertices, triangles, tessellation time)
+    /// What one drawn frame of the current screen costs egui.
+    #[derive(Debug, Clone, Copy)]
+    struct UiCost {
+        shapes: usize,
+        vertices: usize,
+        triangles: usize,
+        tessellate_us: f64,
+    }
+
+    fn ui_cost(g: &DreamscapeGame, w: f32, h: f32) -> UiCost {
+        let v = g.hud_view();
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let k = hud::ui_scale(v.mode, w, h);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+            ..Default::default()
+        };
+        // Two runs: the first warms the font atlas and the art caches.
+        let _ = ctx.run(input.clone(), |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let ppp = out.pixels_per_point;
+        let shapes = out.shapes.len();
+        let meshes = ctx.tessellate(out.shapes.clone(), ppp);
+        let (mut vertices, mut triangles) = (0, 0);
+        for m in &meshes {
+            if let egui::epaint::Primitive::Mesh(m) = &m.primitive {
+                vertices += m.vertices.len();
+                triangles += m.indices.len() / 3;
+            }
+        }
+        let iters = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(ctx.tessellate(out.shapes.clone(), ppp));
+        }
+        let tessellate_us = t.elapsed().as_secs_f64() * 1e6 / iters as f64;
+        UiCost { shapes, vertices, triangles, tessellate_us }
+    }
+
+    /// A booklet of `n` cards across every theme.
+    fn big_booklet(g: &mut DreamscapeGame, n: usize) {
+        let mut i = 0usize;
+        while g.booklet.card_count() < n && i < n * 4 {
+            let recs: Vec<_> = (0..20)
+                .map(|j| {
+                    let t = dream::ALL_THEMES[(i + j) % dream::ALL_THEMES.len()];
+                    cards::tests::record(t, 1000 + (i + j) as u64, 1 + (i % 7) as u32, 0.3, (i + j) % 3 == 0)
+                })
+                .collect();
+            g.booklet.add_run(1 + i as u64, &recs);
+            i += 20;
+        }
+        g.booklet.stash.earn(5000);
+    }
+
+    /// Prints the table; `cargo test ui_cost_table -- --nocapture`.
+    #[test]
+    fn ui_cost_table() {
+        let mut g = game("uicost");
+        big_booklet(&mut g, 239);
+        eprintln!("cards in booklet: {}", g.booklet.card_count());
+        let mut rows: Vec<(String, UiCost)> = Vec::new();
+        let mut add = |g: &DreamscapeGame, label: &str| rows.push((label.to_string(), ui_cost(g, 1280.0, 720.0)));
+        for mode in [
+            hud::Mode::Warning,
+            hud::Mode::Title,
+            hud::Mode::Summary,
+            hud::Mode::Paused,
+            hud::Mode::Playing,
+        ] {
+            g.mode = mode;
+            add(&g, &format!("{mode:?}"));
+        }
+        g.open_settings();
+        add(&g, "Settings");
+        g.open_codex();
+        add(&g, "Codex");
+        g.open_booklet();
+        add(&g, "Booklet");
+        g.open_loadout();
+        add(&g, "Loadout");
+        g.open_merge(hud::Mode::Title);
+        add(&g, "Merge");
+        g.open_store();
+        add(&g, "Store");
+        g.store_tab = 1;
+        add(&g, "Lottery");
+        g.store_tab = 2;
+        add(&g, "Tickets");
+        if std::env::var("UI_HIST").is_ok() {
+            for (name, mode_tab) in [("Loadout", 0), ("Store", 1), ("Merge", 2), ("Title", 3)] {
+                match mode_tab { 0 => g.open_loadout(), 1 => { g.open_store(); g.store_tab = 0 } 2 => g.open_merge(hud::Mode::Title), _ => g.mode = hud::Mode::Title }
+                let mut h: std::collections::BTreeMap<String, usize> = Default::default();
+                fn walk(s: &egui::Shape, h: &mut std::collections::BTreeMap<String, usize>) {
+                    match s {
+                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, h)),
+                        egui::Shape::Rect(r) => {
+                            let k = format!("rect {}x{} {}", r.rect.width().round(), r.rect.height().round(), if r.stroke.is_empty() { "fill" } else { "stroke" });
+                            *h.entry(k).or_default() += 1;
+                        }
+                        egui::Shape::Text(_) => *h.entry("text".into()).or_default() += 1,
+                        other => *h.entry(format!("{:?}", other).chars().take(12).collect()).or_default() += 1,
+                    }
+                }
+                let v = g.hud_view();
+                let ctx = egui::Context::default();
+                hud::install_font(&ctx);
+                let (mut art, mut pa) = (booklet_ui::CardArt::default(), pack_art::PackArt::default());
+                let out = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))), ..Default::default() }, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut pa));
+                for cs in &out.shapes { walk(&cs.shape, &mut h); }
+                let mut hv: Vec<_> = h.into_iter().collect();
+                hv.sort_by_key(|x| std::cmp::Reverse(x.1));
+                eprintln!("HIST {name}: {:?}", &hv[..hv.len().min(14)]);
+            }
+        }
+        eprintln!("{:<10} {:>7} {:>9} {:>10} {:>10}", "screen", "shapes", "vertices", "triangles", "tess_us");
+        for (l, c) in &rows {
+            eprintln!("{l:<10} {:>7} {:>9} {:>10} {:>10.0}", c.shapes, c.vertices, c.triangles, c.tessellate_us);
+        }
+        assert!(rows.iter().all(|(_, c)| c.shapes > 0));
+    }
+    // === end perf ===
+
     #[test]
     fn audit_text_fits_every_screen() {
         use dream::DreamTheme;
@@ -17020,4 +17329,39 @@ mod screen_smoke {
         assert!(tagged > plain, "the tag is one more text");
     }
     // === end handscore ===
+
+    // === perf === `cargo test -p dreamscape --release hud_view_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hud_view_cost() {
+        let mut g = game("hud_cost");
+        let themes = dream::ALL_THEMES;
+        let recs: Vec<_> = (0..239u64)
+            .map(|i| cards::tests::record(themes[i as usize % themes.len()], i + 1, 1 + (i % 9) as u32, 0.3, false))
+            .collect();
+        g.booklet.add_run(1, &recs);
+        g.screen_size = (1280.0, 720.0);
+        // Best of 7 batches: other builds share this machine, so the minimum is the honest cost.
+        for mode in [hud::Mode::Playing, hud::Mode::Loadout, hud::Mode::Merge, hud::Mode::Booklet, hud::Mode::Title] {
+            g.mode = mode;
+            std::hint::black_box(g.hud_view());
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                // On-CPU ns of this thread (Linux), immune to other builds on the box.
+                let cpu = || {
+                    std::fs::read_to_string("/proc/thread-self/schedstat")
+                        .ok()
+                        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                };
+                let t = cpu();
+                for _ in 0..300 {
+                    std::hint::black_box(g.hud_view());
+                }
+                best = best.min((cpu() - t) / 1e3 / 300.0);
+            }
+            println!("hud_view {mode:?}: {best:.1} us/call");
+        }
+    }
+    // === end perf ===
 }

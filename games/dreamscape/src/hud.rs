@@ -118,7 +118,7 @@ pub struct HudView {
     pub journal: Vec<(String, crate::cards::Rarity)>,
     /// Shown on the journal after pressing [s].
     pub journal_status: Option<String>,
-    pub booklet_cards: Vec<crate::cards::Card>,
+    pub booklet_cards: std::sync::Arc<[crate::cards::Card]>, // === perf === shared, see viewcache
     pub booklet_page: usize,
     pub booklet_pages: usize,
     pub booklet_total: usize,
@@ -377,11 +377,11 @@ fn px_cells(
     cells: impl IntoIterator<Item = (i32, i32)>,
     color: Color32,
 ) {
+    // === perf === uipixels: run-merged cells, one mesh
     let o = Pos2::new(origin.x.round(), origin.y.round());
-    for (x, y) in cells {
-        let min = o + Vec2::new(x as f32 * px - px * 0.5, y as f32 * px - px * 0.5);
-        p.rect_filled(Rect::from_min_size(min, Vec2::splat(px)), 0.0, color);
-    }
+    let cells: Vec<(i32, i32, Color32)> = cells.into_iter().map(|(x, y)| (x, y, color)).collect();
+    crate::pixel_ui::cell_mesh(p, o - Vec2::splat(px * 0.5), px, &cells);
+    // === end perf ===
 }
 
 const EYE_PX: f32 = 6.0;

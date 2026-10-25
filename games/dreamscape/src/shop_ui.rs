@@ -84,10 +84,57 @@ fn icon_colors(item: Item, v: &HudView) -> ([u8; 3], [u8; 3]) {
     }
 }
 
+// === perf === uipixels: shadow + fill quads, run-merged, in one mesh
 fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha: f32) {
     let (main, accent) = icon_colors(item, v);
+    shadowed_icon(p, c, px, icon_for(item), main, accent, alpha);
+}
+
+fn shadowed_icon(
+    p: &egui::Painter,
+    c: Pos2,
+    px: f32,
+    rows: &[&str; icons::SIZE],
+    main: [u8; 3],
+    accent: [u8; 3],
+    alpha: f32,
+) {
     let o = Pos2::new(c.x.round(), c.y.round());
-    for (x, y, acc) in icons::cells(icon_for(item)) {
+    let cells = icons::cells(rows);
+    let mut q = crate::pixel_ui::Quads::new();
+    // Every shadow first: a shadow only ever reaches cells drawn after its own,
+    // so shadows-then-fills is the order the per-cell painter produced.
+    let silhouette: Vec<(i32, i32, ())> = cells.iter().map(|&(x, y, _)| (x, y, ())).collect();
+    for (x, y, w, h, ()) in crate::pixel_ui::merge_cells(&silhouette) {
+        let min = o + Vec2::new(x as f32 - 0.5 + 0.25, y as f32 - 0.5 + 0.25) * px;
+        q.rect(
+            Rect::from_min_size(min, Vec2::new(w as f32, h as f32) * px),
+            rgba([0, 0, 0], 0.4 * alpha),
+        );
+    }
+    for (x, y, w, h, acc) in crate::pixel_ui::merge_cells(&cells) {
+        let min = o + Vec2::new(x as f32 - 0.5, y as f32 - 0.5) * px;
+        q.rect(
+            Rect::from_min_size(min, Vec2::new(w as f32, h as f32) * px),
+            rgba(if acc { accent } else { main }, alpha),
+        );
+    }
+    q.paint(p);
+}
+
+/// The original painter (a shadow rect and a fill rect per cell): test reference.
+#[cfg(test)]
+fn shadowed_icon_rects(
+    p: &egui::Painter,
+    c: Pos2,
+    px: f32,
+    rows: &[&str; icons::SIZE],
+    main: [u8; 3],
+    accent: [u8; 3],
+    alpha: f32,
+) {
+    let o = Pos2::new(c.x.round(), c.y.round());
+    for (x, y, acc) in icons::cells(rows) {
         let at = o + Vec2::new(x as f32 * px, y as f32 * px);
         p.rect_filled(
             Rect::from_center_size(at + Vec2::splat(px * 0.25), Vec2::splat(px)),
@@ -101,6 +148,7 @@ fn draw_icon(p: &egui::Painter, c: Pos2, px: f32, item: Item, v: &HudView, alpha
         );
     }
 }
+// === end perf ===
 
 /// The moth's pixel sprite: 18x14 cells with `o` as its top-left corner, one
 /// huge sleepy eye whose pupil looks toward `look_x` (-1..1). Shared by the
@@ -130,6 +178,8 @@ pub(crate) fn paint_moth(
         "...############...",
         "..##############..",
     ];
+    // === perf === uipixels: the body as run-merged cells in one mesh
+    let mut body = Vec::new();
     for (y, row) in BODY.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             let col = match ch {
@@ -137,13 +187,11 @@ pub(crate) fn paint_moth(
                 '+' => wing,
                 _ => continue,
             };
-            p.rect_filled(
-                Rect::from_min_size(o + Vec2::new(x as f32 * px, y as f32 * px), Vec2::splat(px)),
-                0.0,
-                rgba(col, 0.95),
-            );
+            body.push((x as i32, y as i32, rgba(col, 0.95)));
         }
     }
+    crate::pixel_ui::cell_mesh(p, o, px, &body);
+    // === end perf ===
     // The eye: a 4x4 socket inside the head, with a pupil that follows.
     let eye_c = o + Vec2::new(9.0 * px, 5.5 * px);
     let open = if (time % 5.3) < 0.15 { 0.2 } else { 1.0 };
@@ -338,14 +386,18 @@ pub(crate) fn card_back_cell(b: CardBack, x: i32, y: i32, nx: i32, ny: i32) -> b
 pub(crate) fn card_back_pattern(p: &egui::Painter, r: Rect, b: CardBack, col: [u8; 3]) {
     let cell = 8.0;
     let (nx, ny) = ((r.width() / cell) as i32, (r.height() / cell) as i32);
+    // === perf === uipixels: one mesh of the lit cells
+    let mut q = crate::pixel_ui::Quads::new();
     for y in 0..ny {
         for x in 0..nx {
             if card_back_cell(b, x, y, nx, ny) {
                 let at = r.min + Vec2::new(x as f32 * cell, y as f32 * cell);
-                p.rect_filled(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), 0.0, rgba(col, 0.8));
+                q.rect(Rect::from_min_size(at, Vec2::splat(cell - 1.0)), rgba(col, 0.8));
             }
         }
     }
+    q.paint(p);
+    // === end perf ===
 }
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -583,6 +635,30 @@ fn _exhaustive(e: EyeStyle, h: HudPalette) -> (EyeStyle, HudPalette) {
 
 #[cfg(test)]
 mod tests {
+    // === perf ===
+    #[test]
+    fn the_shadowed_icon_mesh_matches_the_per_cell_rects() {
+        use crate::pixel_ui::tests::raster;
+        for (n, rows) in icons::ALL.iter().enumerate() {
+            for (px, alpha) in [(4.0, 1.0), (4.0, 0.5), (12.0, 1.0)] {
+                let at = Pos2::new(100.0 + n as f32 % 2.0, 90.0);
+                let shapes = |f: &dyn Fn(&egui::Painter)| {
+                    let ctx = egui::Context::default();
+                    let input = egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0))),
+                        ..Default::default()
+                    };
+                    ctx.run(input, |ctx| f(&ctx.layer_painter(egui::LayerId::background()))).shapes
+                };
+                let old = shapes(&|p| shadowed_icon_rects(p, at, px, rows, [200, 90, 40], [250, 230, 200], alpha));
+                let new = shapes(&|p| shadowed_icon(p, at, px, rows, [200, 90, 40], [250, 230, 200], alpha));
+                assert_eq!(new.len(), 1);
+                assert!(raster(&old, 300, 200) == raster(&new, 300, 200), "icon {n} px {px} alpha {alpha}");
+            }
+        }
+    }
+    // === end perf ===
+
     use super::*;
     use crate::store::CATALOG;
 

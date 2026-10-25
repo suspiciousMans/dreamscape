@@ -139,10 +139,19 @@ impl App {
             ctx.time.tick();
             let dt = ctx.time.delta;
 
-            game.update(&mut ctx, dt)?;
-            game.render(&mut ctx)?;
-
-            ctx.platform.swap_window();
+            {
+                let _t = crate::perf::scope("update");
+                game.update(&mut ctx, dt)?;
+            }
+            {
+                let _t = crate::perf::scope("render");
+                game.render(&mut ctx)?;
+            }
+            {
+                let _t = crate::perf::scope("swap (gpu + vsync)");
+                ctx.platform.swap_window();
+            }
+            crate::perf::frame_end();
         }
 
         Ok(())

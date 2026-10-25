@@ -158,12 +158,34 @@ impl EguiState {
             self.painter.set_texture(*id, delta);
         }
 
-        let clipped_primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
-        self.painter.paint_primitives(
-            [drawable_size.0, drawable_size.1],
-            output.pixels_per_point,
-            &clipped_primitives,
-        );
+        crate::perf::count("egui shapes #", output.shapes.len());
+        let clipped_primitives = {
+            let _t = crate::perf::scope("egui.tessellate");
+            self.ctx.tessellate(output.shapes, output.pixels_per_point)
+        };
+        if crate::perf::enabled() {
+            let (mut verts, mut tris) = (0, 0);
+            for p in &clipped_primitives {
+                if let egui::epaint::Primitive::Mesh(m) = &p.primitive {
+                    verts += m.vertices.len();
+                    tris += m.indices.len() / 3;
+                }
+            }
+            crate::perf::count("egui meshes #", clipped_primitives.len());
+            crate::perf::count("egui vertices #", verts);
+            crate::perf::count("egui triangles #", tris);
+        }
+        {
+            let _t = crate::perf::scope("egui.draw (upload+gpu)");
+            self.painter.paint_primitives(
+                [drawable_size.0, drawable_size.1],
+                output.pixels_per_point,
+                &clipped_primitives,
+            );
+            if crate::perf::enabled() {
+                unsafe { glow::HasContext::finish(self.painter.gl().as_ref()) };
+            }
+        }
 
         for id in &output.textures_delta.free {
             self.painter.free_texture(*id);

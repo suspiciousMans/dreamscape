@@ -854,19 +854,18 @@ fn paint_cells(
     tones: [Color32; 3],
     f: &dyn Fn(i32, i32) -> u8,
 ) {
+    // === perf === uipixels: run-merged cells, one mesh
+    let mut cells = Vec::new();
     for y in -half..=half {
         for x in -half..=half {
             let tone = f(x, y);
-            if tone == 0 {
-                continue;
+            if tone != 0 {
+                cells.push((x, y, tones[tone as usize - 1]));
             }
-            p.rect_filled(
-                Rect::from_center_size(c + Vec2::new(x as f32, y as f32) * px, Vec2::splat(px)),
-                0.0,
-                tones[tone as usize - 1],
-            );
         }
     }
+    crate::pixel_ui::cell_mesh(p, c - Vec2::splat(px * 0.5), px, &cells);
+    // === end perf ===
 }
 
 /// One emblem, centred on `c`, no larger than `reach` from the centre.

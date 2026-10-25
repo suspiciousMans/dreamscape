@@ -30,3 +30,23 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# `cargo build --profile profiling`: release speed (opt-level 3) with symbols
+# and a quicker link, for measuring with `ENGINE_PROF=1` / a sampling profiler.
+[profile.profiling]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
+strip = false
+debug = 1
+
+# === perf === dev/test speed (see plans/perf-briefs/NOTES-loadspikes.md)
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Line tables keep panic backtraces readable; full DWARF only slows linking.
+[profile.dev.package.dreamscape]
+debug = "line-tables-only"

@@ -15,6 +15,7 @@ pub mod material;
 pub mod mesh;
 pub mod net;
 pub mod particles;
+pub mod perf;
 pub mod pathfinding;
 pub mod physics;
 pub mod platform;

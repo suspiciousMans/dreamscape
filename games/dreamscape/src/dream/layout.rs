@@ -112,10 +112,11 @@ fn maze(side: i32, rng: &mut StdRng) -> Layout {
             g.set(p, Cell::Floor);
         }
     }
+    let lens = g.path_lens(start); // === perf === one BFS, not one per cell
     let portal = g
         .cells_of(Cell::Floor)
         .into_iter()
-        .max_by_key(|&p| g.path(start, p).map_or(0, |path| path.len()))
+        .max_by_key(|&p| g.path_len_in(&lens, p).unwrap_or(0))
         .unwrap_or(start);
     Layout {
         grid: g,
