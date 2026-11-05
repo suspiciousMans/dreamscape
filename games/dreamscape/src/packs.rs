@@ -32,7 +32,6 @@ pub fn picks_for(dreams: usize) -> usize {
 pub fn offer_count(dreams: usize) -> usize {
     (picks_for(dreams) + EXTRA_OFFERS).max(MAX_OFFERS)
 }
-pub const MAX_PACK_CARDS: usize = 5;
 
 /// Odds (percent weights) that an opened pack gives 1, 2 or 3 cards. One card
 /// is the most likely; three is rare.
@@ -78,7 +77,7 @@ pub struct PackOffer {
     pub emblem: Emblem,
     /// Seeds the wrapper art (stable across frames and replays).
     pub seed: u64,
-    /// The run's dreams of this theme (at most `MAX_PACK_CARDS`), already
+    /// Every dream of this theme from the run, already
     /// rolled remembered/faded. Never Fused/Resonant unless the source record
     /// had `blend`.
     pub cards: Vec<Recalled>,
@@ -131,13 +130,10 @@ pub fn offer_packs(log: &[DreamRecord], owned: &[Card], boost: MemoryBoost) -> V
     offers
 }
 
-/// The deepest `MAX_PACK_CARDS` records (later ones win depth ties), in run order.
+/// Every record of the theme, in run order. No cap: each dream the run
+/// visited is a candidate for its theme's pack.
 fn pack_records(recs: &[&DreamRecord]) -> Vec<DreamRecord> {
-    let mut idx: Vec<usize> = (0..recs.len()).collect();
-    idx.sort_by_key(|&i| std::cmp::Reverse((recs[i].depth, i)));
-    idx.truncate(MAX_PACK_CARDS);
-    idx.sort_unstable();
-    idx.into_iter().map(|i| recs[i].clone()).collect()
+    recs.iter().map(|r| (*r).clone()).collect()
 }
 
 /// First-run safety across the offer. With nothing owned the offer must hold
@@ -305,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_is_the_runs_dreams_of_that_theme_capped_at_five() {
+    fn a_pack_is_every_dream_of_that_theme_in_run_order() {
         let mut log = Vec::new();
         for i in 0..7u64 {
             log.push(record(Garden, 100 + i, i as u32, 0.2, i % 2 == 0));
@@ -314,13 +310,9 @@ mod tests {
         let owned = vec![card_from(&log[1])];
         let offers = offer_packs(&log, &owned, boost());
         let garden = offers.iter().find(|o| o.theme == Garden).unwrap();
-        // Deepest five (depth 2..=6), in run order.
-        let want: Vec<_> = log
-            .iter()
-            .filter(|r| r.theme == Garden && r.depth >= 2)
-            .cloned()
-            .collect();
-        assert_eq!(want.len(), MAX_PACK_CARDS);
+        // All seven Garden dreams, in run order (no cap).
+        let want: Vec<_> = log.iter().filter(|r| r.theme == Garden).cloned().collect();
+        assert_eq!(want.len(), 7);
         let got: Vec<_> = garden.cards.iter().map(|r| r.card.seed).collect();
         assert_eq!(got, want.iter().map(|r| r.seed).collect::<Vec<_>>());
         // Same card + roll as today's recall over that slice (then the same
