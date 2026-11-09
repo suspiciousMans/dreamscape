@@ -91,6 +91,8 @@ mod pixels;
 mod powers;
 mod progress;
 mod records;
+#[allow(dead_code)] // relic streams R1-R8 consume these as they land
+mod relic_types;
 mod reveal_ui;
 mod code_ui;
 mod seedcode;

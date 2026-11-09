@@ -37,3 +37,12 @@
 ## UI
 - `relic_ui.rs` is a new module under `// === relics ===` in `main.rs`.
 - The moth shop tab is added in R6; R1/R2 do not touch UI files.
+
+## Shared types (added at dispatch)
+- `src/relic_types.rs` already exists on `main` and holds `RelicRarity`, `RelicState`, `RelicEffect` (serialisable twin of `QuirkEffect`, with `to_quirk`), `Weapon { shape: u8, scale_pct: u8 }` and `Relic`. It is data only.
+- R1 does NOT redefine them: it wires `Stash.ash`, `Booklet.relics: Vec<Relic>` and `Booklet.relic_lottery: RelicState` using these types.
+- R2 does NOT redefine them: `relics.rs` imports them and adds logic only.
+- `worth::mix` and `worth::percent_roll` are now `pub(crate)`; use them, do not copy them.
+- `DreamTheme` and `TexSpec` come from `crate::dream::{DreamTheme, TexSpec}`.
+- Field/constant typos in the briefs (`SOFT_PRY_STEP`, `HARD_PRY_MYTHIC`, `SOFT_PITY_PR`) are typos: use `SOFT_PITY_START`, `SOFT_PITY_STEP`, `HARD_PITY_MYTHIC`.
+- If you must add a field to a shared type, add it with `#[serde(default)]` and say so in your summary. Do not touch `main.rs` beyond one `mod` line and one marker block.

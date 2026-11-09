@@ -23,7 +23,7 @@ const QUIRK_PICK_SALT: u64 = 0x2545_F491_4F6C_DD1D;
 const FOIL_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// One round of SplitMix64: a well-mixed u64 from `seed ^ salt`.
-fn mix(seed: u64, salt: u64) -> u64 {
+pub(crate) fn mix(seed: u64, salt: u64) -> u64 {
     let mut z = (seed ^ salt).wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -31,7 +31,7 @@ fn mix(seed: u64, salt: u64) -> u64 {
 }
 
 /// Uniform value in `0..100` from a hash.
-fn percent_roll(seed: u64, salt: u64) -> u32 {
+pub(crate) fn percent_roll(seed: u64, salt: u64) -> u32 {
     (mix(seed, salt) % 100) as u32
 }
 
