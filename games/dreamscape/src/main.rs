@@ -13167,12 +13167,12 @@ impl Game for DreamscapeGame {
             self.stats.twists.extend(self.twists.0.iter().copied());
             // === relics === Ash: a completed dream, or a beaten nightmare
             if self.run_active {
-                let ash = if self.director.nightmare {
+                // A nightmare is also a completed dream: it pays both.
+                let mut ash = store::ash_for_dream(self.director.depth);
+                if self.director.nightmare {
                     let seed = self.dream.as_ref().map_or(0, |d| d.seed);
-                    store::ash_for_nightmare(seed)
-                } else {
-                    store::ash_for_dream(self.director.depth)
-                };
+                    ash += store::ash_for_nightmare(seed);
+                }
                 self.booklet.stash.earn_ash(ash);
                 log::info!("Ash +{ash}");
             }

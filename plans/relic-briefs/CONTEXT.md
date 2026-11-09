@@ -46,3 +46,6 @@
 - `DreamTheme` and `TexSpec` come from `crate::dream::{DreamTheme, TexSpec}`.
 - Field/constant typos in the briefs (`SOFT_PRY_STEP`, `HARD_PRY_MYTHIC`, `SOFT_PITY_PR`) are typos: use `SOFT_PITY_START`, `SOFT_PITY_STEP`, `HARD_PITY_MYTHIC`.
 - If you must add a field to a shared type, add it with `#[serde(default)]` and say so in your summary. Do not touch `main.rs` beyond one `mod` line and one marker block.
+
+## Decision (2026-11-09)
+A beaten nightmare pays its own 3-5 Ash AND the completed-dream Ash (owner: yes).
