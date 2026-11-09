@@ -367,6 +367,14 @@ pub struct Booklet {
     #[serde(default)]
     pub best_hand: crate::handscore::HandRank,
     // === end handscore ===
+    // === relics ===
+    /// Relics pulled with Ash (old saves: none).
+    #[serde(default)]
+    pub relics: Vec<crate::relic_types::Relic>,
+    /// Relic pull counters (old saves: all zero).
+    #[serde(default)]
+    pub relic_lottery: crate::relic_types::RelicState,
+    // === end relics ===
 }
 
 impl Booklet {

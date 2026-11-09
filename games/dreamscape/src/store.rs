@@ -383,6 +383,9 @@ pub enum Outcome {
 pub struct Stash {
     #[serde(default)]
     pub dust: u32,
+    /// Ash: the relic currency (hard to earn; old saves start at 0).
+    #[serde(default)]
+    pub ash: u32,
     /// Bought cosmetics (defaults are implicitly owned).
     #[serde(default)]
     pub owned: Vec<Item>,
@@ -415,6 +418,19 @@ pub struct Stash {
     /// Scratches in a row that gave only the smallest prize (ticket pity).
     #[serde(default)]
     pub ticket_dry: u32,
+}
+
+/// Salt for the nightmare Ash roll.
+pub const ASH_NIGHTMARE_SALT: u64 = 0xA5B_0F_DEAD;
+
+/// Ash for a completed (non-nightmare) dream: 1, +1 per 3 depth, max +2 bonus.
+pub fn ash_for_dream(depth: u32) -> u32 {
+    1 + (depth / 3).min(2)
+}
+
+/// Ash for a beaten nightmare: 3..=5, a pure function of its seed.
+pub fn ash_for_nightmare(seed: u64) -> u32 {
+    3 + crate::worth::percent_roll(seed, ASH_NIGHTMARE_SALT) % 3
 }
 
 impl Stash {
@@ -468,6 +484,22 @@ impl Stash {
     pub fn earn(&mut self, dust: u32) {
         self.dust += dust;
         self.dust_earned += dust;
+    }
+
+    pub fn earn_ash(&mut self, n: u32) {
+        self.ash = self.ash.saturating_add(n);
+    }
+
+    /// Deducts `n` Ash and returns true, or changes nothing and returns false.
+    #[allow(dead_code)] // R2 (pull engine) / R6 (moth shop) spend Ash
+    pub fn spend_ash(&mut self, n: u32) -> bool {
+        match self.ash.checked_sub(n) {
+            Some(left) => {
+                self.ash = left;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn state(&self, item: Item) -> State {
@@ -817,5 +849,38 @@ mod tests {
             typical >= Item::Perk(Perk::FirstLight).info().price,
             "{typical}"
         );
+    }
+
+    #[test]
+    fn ash_defaults_to_zero_and_old_saves_load() {
+        assert_eq!(Stash::default().ash, 0);
+        let s: Stash = ron::from_str("(dust: 5)").unwrap();
+        assert_eq!((s.dust, s.ash), (5, 0));
+    }
+
+    #[test]
+    fn earn_ash_adds_and_spend_ash_refuses_when_poor() {
+        let mut s = Stash::default();
+        s.earn_ash(3);
+        s.earn_ash(2);
+        assert_eq!(s.ash, 5);
+        assert!(!s.spend_ash(6));
+        assert_eq!(s.ash, 5);
+        assert!(s.spend_ash(5));
+        assert_eq!(s.ash, 0);
+    }
+
+    #[test]
+    fn ash_earn_rules() {
+        let per: Vec<u32> = [1, 2, 3, 5, 6, 8, 9, 30].iter().map(|&d| ash_for_dream(d)).collect();
+        assert_eq!(per, [1, 1, 2, 2, 3, 3, 3, 3]);
+        let mut seen = [false; 3];
+        for seed in 0..500u64 {
+            let n = ash_for_nightmare(seed);
+            assert!((3..=5).contains(&n));
+            seen[(n - 3) as usize] = true;
+        }
+        assert!(seen.iter().all(|&b| b), "all of 3, 4, 5 occur");
+        assert_eq!(ash_for_nightmare(7), ash_for_nightmare(7));
     }
 }
