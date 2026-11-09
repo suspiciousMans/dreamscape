@@ -116,6 +116,7 @@ impl Satchel {
         self.counts.iter().find(|c| c.0 == kind).map_or(0, |c| c.1)
     }
 
+    #[cfg(test)]
     pub fn total(&self) -> u32 {
         self.counts.iter().map(|c| c.1).sum()
     }

@@ -399,6 +399,7 @@ impl Deck {
     }
 
     /// The scrap cards held anywhere in the deck, in id order.
+    #[cfg(test)]
     pub fn scrap_cards(&self) -> Vec<u32> {
         let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| is_scrap(c)).collect();
         v.sort_unstable();

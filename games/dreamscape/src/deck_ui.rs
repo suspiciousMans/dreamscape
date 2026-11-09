@@ -159,6 +159,32 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         p.text(Pos2::new(cx, bar.bottom() + 36.0 * u), Align2::CENTER_TOP, v.k(line), FontId::monospace(14.0 * u), rgba([200, 170, 230], 0.9));
     }
 
+    // === scraps === the satchel, left of the title: what is carried, and the scrap under the cursor
+    if !m.satchel.is_empty() {
+        let left = screen.left() + screen.width() * 0.05;
+        let room = (cx - 140.0 * u - left).max(80.0);
+        let carried: u32 = m.satchel.iter().map(|s| s.2).sum();
+        let head = format!(
+            "SATCHEL {carried}/{}  [g] next  [h] carry",
+            crate::scraps::SATCHEL_CARRY
+        );
+        let size = pixel_ui::fit(&head, 12.0 * u, room, 7.0);
+        p.text(Pos2::new(left, top), Align2::LEFT_TOP, head, FontId::monospace(size), rgba([210, 200, 240], 0.9));
+        if let Some(&(kind, held, picked)) = m.satchel.get(m.scrap_sel.min(m.satchel.len() - 1)) {
+            let mark = if picked > 0 { format!("carry x{picked}") } else { "left".to_string() };
+            let line = format!("{} x{held} ({mark}): {}", kind.name(), kind.desc());
+            let size = pixel_ui::fit(&line, 11.0 * u, room, 7.0);
+            let col = if picked > 0 { kind.color() } else { [160, 150, 190] };
+            p.text(
+                Pos2::new(left, top + size.max(8.0) * 1.9),
+                Align2::LEFT_TOP,
+                line,
+                FontId::monospace(size),
+                rgba(col, 0.95),
+            );
+        }
+    }
+    // === end scraps ===
     // === handscore === what the deck could reach, so players can build toward it
     if m.chosen.len() >= DECK_MIN {
         let faces: Vec<crate::handscore::HandFace> = m
