@@ -193,6 +193,19 @@ pub fn pack_area(screen: Vec2) -> Vec2 {
     Vec2::new(screen.x - 80.0, screen.y - 80.0 - 110.0)
 }
 
+// === scraps ===
+/// Extra height kept free under the cards for the scrap line.
+pub const SCRAP_LINE_H: f32 = 28.0;
+
+/// The pack reveal's line about the scrap it gave, fitted to `width`:
+/// (text, font size).
+pub fn scrap_line(kind: crate::scraps::ScrapKind, width: f32) -> (String, f32) {
+    let text = format!("+ scrap: {} - {}", kind.name(), kind.desc());
+    let fit = (width - 40.0) / (text.chars().count() as f32 * 0.6);
+    (text, fit.clamp(9.0, 18.0))
+}
+// === end scraps ===
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PackLayout {
     pub size: Vec2,
@@ -263,6 +276,10 @@ pub struct PackView {
     pub picks_left: usize,
     /// The wrapper being torn off while `age` is negative (full motion only).
     pub wrapper: Option<pack_art::Wrapper>,
+    // === scraps ===
+    /// The scrap this pack added to the satchel (shown once the cards are in).
+    pub scrap: Option<crate::scraps::ScrapKind>,
+    // === end scraps ===
 }
 
 /// The pick screen: up to `packs::MAX_OFFERS` sealed packs, one chosen.
@@ -602,7 +619,11 @@ fn draw_reveal_scene(
     );
     // As many dreams as the run had: full cards, smaller cards, or chips.
     let n = pk.pack.len();
-    let l = pack_layout(n, pack_area(screen.size()));
+    let mut area = pack_area(screen.size());
+    if pk.scrap.is_some() {
+        area.y -= SCRAP_LINE_H; // === scraps === room for the scrap line
+    }
+    let l = pack_layout(n, area);
     let scale = l.size.x / CARD_SIZE.x;
     let overflow = n.saturating_sub(l.shown);
     let order = reveal_order(&pk.pack);
@@ -734,10 +755,18 @@ fn draw_reveal_scene(
         FontId::monospace(24.0),
         rgba([255, 210, 80], 0.95),
     );
+    // === scraps === the pack's scrap, under the cards; the lines below move up for it
+    let lift = if pk.scrap.is_some() { SCRAP_LINE_H } else { 0.0 };
+    if let (true, Some(kind)) = (done, pk.scrap) {
+        let (text, size) = scrap_line(kind, screen.width());
+        let at = Pos2::new(cx, screen.bottom() - 120.0);
+        p.text(at, Align2::CENTER_TOP, text, FontId::monospace(size), rgba(kind.color(), 0.95));
+    }
+    // === end scraps ===
     if done && pk.pressed {
         if !v.report_line.is_empty() {
             p.text(
-                Pos2::new(cx, screen.bottom() - 148.0),
+                Pos2::new(cx, screen.bottom() - 148.0 - lift),
                 Align2::CENTER_TOP,
                 &v.report_line,
                 FontId::monospace(20.0),
@@ -746,7 +775,7 @@ fn draw_reveal_scene(
         }
         if !v.goal.is_empty() {
             p.text(
-                Pos2::new(cx, screen.bottom() - 120.0),
+                Pos2::new(cx, screen.bottom() - 120.0 - lift),
                 Align2::CENTER_TOP,
                 &v.goal,
                 FontId::monospace(20.0),

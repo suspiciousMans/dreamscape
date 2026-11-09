@@ -375,6 +375,11 @@ pub struct Booklet {
     #[serde(default)]
     pub relic_lottery: crate::relic_types::RelicState,
     // === end relics ===
+    // === scraps ===
+    /// Disposable cards from packs, kept until used (old saves: empty).
+    #[serde(default)]
+    pub satchel: crate::scraps::Satchel,
+    // === end scraps ===
 }
 
 impl Booklet {

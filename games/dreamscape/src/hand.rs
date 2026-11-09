@@ -61,7 +61,26 @@ pub struct HandCard {
     /// it, so no artwork, passive or edge. It wears [`TOOL_FRAME`] and a tag.
     pub tool: bool,
     // === end toolcards ===
+    // === scraps ===
+    /// A scrap (one-use card from a pack): its short label and colour. A
+    /// scrap has no artwork, passive or edge, and is drawn smaller than a card.
+    pub scrap: Option<(&'static str, [u8; 3])>,
+    // === end scraps ===
 }
+
+// === scraps ===
+/// How much smaller than a dream card a scrap is drawn.
+pub const SCRAP_SCALE: f32 = 0.86;
+
+/// `r` for a dream card; a scrap shrinks to rest on the same baseline.
+fn scrap_fit(c: &HandCard, r: Rect) -> Rect {
+    if c.scrap.is_none() {
+        return r;
+    }
+    let small = r.size() * SCRAP_SCALE;
+    Rect::from_center_size(r.center() + Vec2::new(0.0, (r.height() - small.y) * 0.5), small)
+}
+// === end scraps ===
 
 // === toolcards ===
 /// The frame of a tool card (no rarity colours it).
@@ -544,6 +563,7 @@ pub fn draw(
         if let Some(b) = face_down {
             paint_back(p, &Xf::new(r.center(), angle), Rect::from_center_size(Pos2::ZERO, r.size()), b, 1.0, u);
         } else {
+            let r = scrap_fit(c, r); // === scraps ===
             draw_card(ctx, p, r, angle, c, amount, time, u, art);
         }
         // === end smallfixes ===
@@ -593,7 +613,7 @@ pub fn draw(
                 );
             }
             let angle = tilt(l.slot, cards.len()) * (1.0 - (l.since / FLICK_SECS).min(1.0)) + pose.angle_off;
-            draw_card(ctx, p, pose.rect, angle, &l.card, 1.0, time, u, art);
+            draw_card(ctx, p, scrap_fit(&l.card, pose.rect), angle, &l.card, 1.0, time, u, art); // === scraps ===
         }
     }
     // === end deck ===
@@ -763,7 +783,9 @@ fn draw_card(
     let ready = c.charge >= 1.0;
     let lit = ready || c.active || amount > 0.0;
     // The frame is the card's own (rarity); the tint is for the ring and flash.
-    let frame = if c.tool {
+    let frame = if let Some((_, col)) = c.scrap {
+        col // === scraps ===
+    } else if c.tool {
         TOOL_FRAME // === toolcards ===
     } else {
         c.card
@@ -863,6 +885,19 @@ fn draw_card(
         x.text(p, tag.center().to_vec2(), TOOL_TAG, tag_size, rgba(TOOL_FRAME, 1.0), angle);
     }
     // === end toolcards ===
+    // === scraps === a plain tag with the scrap's label, like a tool card's
+    if let Some((label, rgb)) = c.scrap {
+        let tag_size = font(8.0);
+        let w = label.len() as f32 * tag_size * 0.62 + 6.0 * u * k;
+        let tag = Rect::from_min_size(
+            Pos2::new(art.left() + 2.0 * u, art.bottom() - tag_size - 6.0 * u * k),
+            Vec2::new(w, tag_size + 4.0 * u * k),
+        );
+        x.quad(p, tag, rgba([10, 4, 20], 0.92));
+        x.outline(p, tag, 1.0, rgba(rgb, 0.9));
+        x.text(p, tag.center().to_vec2(), label, tag_size, rgba(rgb, 1.0), angle);
+    }
+    // === end scraps ===
 
     // The passive: a small diamond on the art's bottom-left, flaring when it fires.
     if let Some((_, rgb)) = c.passive {

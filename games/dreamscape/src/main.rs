@@ -96,6 +96,7 @@ mod relic_types;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
 mod reveal_ui;
+mod scraps;
 mod code_ui;
 mod seedcode;
 mod settings;
@@ -698,6 +699,16 @@ pub struct DreamscapeGame {
     /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
     deck_leaving: Vec<(hand::HandCard, usize, f32)>,
     // === end deck ===
+    // === scraps ===
+    /// A SAFE STEP scrap is waiting to cancel the next hit (this run only).
+    safe_step: bool,
+    /// The satchel cursor on the loadout screen.
+    scrap_sel: usize,
+    /// Packs that have given a scrap this run (the roll's index).
+    scrap_rolls: u32,
+    /// LANTERN pillars: (entity, seconds left).
+    scrap_marks: Vec<(Entity, f32)>,
+    // === end scraps ===
     // === toolcards ===
     /// Tool card ids bought this run (kept for the save; the deck holds the live ones).
     tool_cards: Vec<u32>,
@@ -1186,6 +1197,10 @@ impl DreamscapeGame {
             deck_riffle_at: hand::NEVER,
             deck_leaving: Vec::new(),
             tool_cards: Vec::new(), // === toolcards ===
+            safe_step: false, // === scraps ===
+            scrap_rolls: 0, // === scraps ===
+            scrap_sel: 0, // === scraps ===
+            scrap_marks: Vec::new(), // === scraps ===
             score_rank: handscore::HandRank::None, // === handscore ===
             score_at: hand::NEVER,
             run_best_hand: handscore::HandRank::None,
@@ -2143,6 +2158,7 @@ impl DreamscapeGame {
 
     /// Deck runs: advances the deck, and turns its draws into hand slots.
     fn update_deck(&mut self, dt: f32) {
+        self.update_scrap_marks(dt); // === scraps ===
         let perks = self.run.deck_perks(); // === upgrades2 ===
         let Some(deck) = self.deck.as_mut() else {
             return;
@@ -2164,6 +2180,12 @@ impl DreamscapeGame {
                         self.run.deck_draw(slot, ability, cd);
                         self.deck_drawn_at[slot] = self.deck_clock;
                         // === end toolcards ===
+                    } else if deck::is_scrap(card) {
+                        // === scraps === a scrap is no ability: a spent placeholder holds the slot
+                        self.run.deck_draw(slot, Ability::Dash, 0.0);
+                        self.run.abilities[slot].spent = true;
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                        // === end scraps ===
                     }
                 }
                 deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
@@ -2368,6 +2390,7 @@ impl DreamscapeGame {
     fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
         self.deck = None;
         self.tool_cards.clear(); // === toolcards === bought per run, never carried over
+        self.safe_step = false; // === scraps ===
         self.score_rank = handscore::HandRank::None; // === handscore ===
         self.score_at = hand::NEVER;
         self.run_best_hand = handscore::HandRank::None;
@@ -2398,6 +2421,15 @@ impl DreamscapeGame {
             .map(|c| (crate::powers::power_of(c).active, c.clone()))
             .collect();
         self.deck_cards = nums.iter().filter_map(|&n| self.booklet.card(n).cloned()).collect(); // === decklife ===
+        // === scraps === the carried scraps are shuffled into the draw pile
+        let carried = self.scraps_to_carry();
+        for (copy, kind) in scrap_copies(&carried) {
+            d.insert_shuffled(deck::scrap_id(kind, copy), self.director.dream_seed() ^ deck::SCRAP_SEED_MIX);
+        }
+        if !carried.is_empty() {
+            log::info!("Scraps carried: {:?}", carried);
+        }
+        // === end scraps ===
         self.deck = Some(d);
         self.deck_opening = opening.clone();
         Some(opening)
@@ -2424,6 +2456,13 @@ impl DreamscapeGame {
                     .iter()
                     .find(|u| u.0 == a.ability)
                     .map_or(hand::NEVER, |u| self.dream_age - u.1);
+                // === scraps === a scrap in this slot: its own name, colour and tag
+                let scrap = self.scrap_in_slot(k);
+                let (tint, tint2) = match scrap {
+                    Some(s) => (s.color(), pixel_ui::lighter(s.color())),
+                    None => (tint, tint2),
+                };
+                // === end scraps ===
                 let slot_card = self.card_for_slot(k, a.ability);
                 let passive = slot_card.map(|n| crate::powers::power_of(&n.1).passive);
                 let edge = slot_card.and_then(|n| loadout_ui::edges_of(&n.1).into_iter().next());
@@ -2436,7 +2475,7 @@ impl DreamscapeGame {
                 // === end deck ===
                 hand::HandCard {
                     since_draw: if since_draw < 0.0 { 0.0 } else { since_draw },
-                    empty: a.spent || since_draw < 0.0,
+                    empty: (a.spent && scrap.is_none()) || since_draw < 0.0, // === scraps === a scrap holds a spent placeholder
                     edge: edge.map(|e| (e.name(), e.color())),
                     edge_since: edge
                         .and_then(|e| self.edge_fired.iter().find(|f| f.0 == e))
@@ -2450,7 +2489,8 @@ impl DreamscapeGame {
                         .taken
                         .iter()
                         .any(|u| matches!(u, Upgrade::Cursed(_))),
-                    ability: a.ability.name(),
+                    ability: scrap.map_or(a.ability.name(), |s| s.name()), // === scraps ===
+                    scrap: scrap.map(|s| (s.label(), s.color())), // === scraps ===
                     card: slot_card.map(|n| n.1.clone()),
                     // === toolcards === the card in this slot is a bought tool
                     tool: self
@@ -2462,6 +2502,7 @@ impl DreamscapeGame {
                     key: upgrades::SLOT_KEYS[k],
                     // === abilities3 === a charging OVERLOAD fills its card
                     charge: match (a.ability, self.overload) {
+                        _ if scrap.is_some() => 1.0, // === scraps === always ready
                         (Ability::Overload, Some(c)) if c.slot == k => c.fraction(),
                         _ => a.charge(self.run.cooldown_for(a.ability)),
                     },
@@ -3323,6 +3364,15 @@ impl DreamscapeGame {
     /// Something touched the dreamer. Costs nerve; returns the source only
     /// when that was the last point (the old *caught* flow then runs).
     fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
+        // === scraps === SAFE STEP: the next hit that would land does nothing
+        if self.safe_step && !self.nerve.invulnerable() && nerve::damage_from(by) > 0 {
+            self.safe_step = false;
+            self.flash.trigger([0.8, 0.85, 1.0], 0.25);
+            self.sfx(Sound::WardBreak);
+            log::info!("Safe step: {by} touched you and nothing happened");
+            return None;
+        }
+        // === end scraps ===
         let away = self.away_from_nearest_threat();
         let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
             + self.run.afterglow() // === upgrades2 ===
@@ -3793,6 +3843,14 @@ impl DreamscapeGame {
                     chosen: self.booklet.lore.deck.clone(), // === deck ===
                     slots: deck::DECK_MAX,
                     selected: self.loadout_sel,
+                    satchel: self // === scraps ===
+                        .booklet
+                        .satchel
+                        .counts
+                        .iter()
+                        .map(|&(k, n)| (k, n, self.booklet.satchel.chosen.iter().filter(|&&c| c == k).count() as u32))
+                        .collect(),
+                    scrap_sel: self.scrap_sel,
                     passives: self.deck_passives_line(), // === decklife ===
                     benched: self.deck_benched(),
                     companion: (!self.booklet.lore.dreamers.is_empty()).then(|| {
@@ -5781,6 +5839,9 @@ impl DreamscapeGame {
     }
 
     fn use_ability(&mut self, slot: usize) {
+        if self.use_scrap(slot) {
+            return; // === scraps === a scrap card, not an ability
+        }
         self.fire_ability(slot, false);
     }
 
@@ -6958,6 +7019,172 @@ impl DreamscapeGame {
         self.show_moth_shop(0);
     }
 
+    // === scraps ===
+    /// Does this game hand out and carry scraps? Not co-op, the autopilot or
+    /// the prologue.
+    fn scraps_enabled(&self) -> bool {
+        !(self.autopilot || self.coop_active() || self.prologue.is_some())
+    }
+
+    /// An opened pack gives one scrap, extra to its cards. The kind is a
+    /// seeded roll (run seed and pack index) and the satchel is saved at
+    /// once, so quitting cannot re-roll or lose it.
+    fn grant_scrap(&mut self) {
+        if !self.scraps_enabled() {
+            return;
+        }
+        let kind = scraps::roll_scrap(self.run_seed, self.scrap_rolls);
+        self.scrap_rolls += 1;
+        if self.booklet.satchel.add(kind) {
+            self.pack.scrap = Some(kind);
+            let _ = cards::save(&self.booklet_path, &self.booklet);
+            log::info!("Pack gave a scrap: {}", kind.name());
+        }
+    }
+
+    /// The scraps this run brings: the satchel's chosen ones, deck runs only
+    /// (co-op, autopilot and the prologue carry none).
+    fn scraps_to_carry(&self) -> Vec<scraps::ScrapKind> {
+        if !self.scraps_enabled() {
+            return Vec::new();
+        }
+        self.booklet.satchel.carry(scraps::SATCHEL_CARRY)
+    }
+
+    /// The scrap card in hand slot `slot`, if that is what it holds.
+    fn scrap_in_slot(&self, slot: usize) -> Option<scraps::ScrapKind> {
+        let id = self.deck.as_ref()?.hand().get(slot).copied().flatten()?;
+        deck::scrap_kind(id)
+    }
+
+    /// Plays the scrap in `slot` (false when the slot holds none): the card
+    /// is exhausted for the run, one is spent from the satchel and the
+    /// booklet is saved, so quitting cannot hand it back.
+    fn use_scrap(&mut self, slot: usize) -> bool {
+        let Some(kind) = self.scrap_in_slot(slot) else {
+            return false;
+        };
+        if self.mode != hud::Mode::Playing {
+            return true;
+        }
+        if !self.scrap_ready(kind) {
+            self.sfx(Sound::Denied); // nothing to act on: the scrap is kept
+            return true;
+        }
+        if let Some(snap) = self.hand_view().get(slot).cloned() {
+            self.deck_leaving.push((snap, slot, self.deck_clock));
+        }
+        if let Some(d) = self.deck.as_mut() {
+            d.exhaust(slot);
+        }
+        self.run.abilities[slot].spent = true;
+        self.booklet.satchel.spend(kind);
+        let _ = cards::save(&self.booklet_path, &self.booklet);
+        self.edges = self.deck_edges();
+        log::info!("Scrap used: {}", kind.name());
+        self.scrap_effect(kind);
+        true
+    }
+
+    /// Is there anything for the scrap to act on? (If not it is kept.)
+    fn scrap_ready(&self, kind: scraps::ScrapKind) -> bool {
+        match kind {
+            scraps::ScrapKind::Mend => self.nerve.cur() < self.nerve.max(),
+            scraps::ScrapKind::Lantern => self.nearest_shard().is_some(),
+            scraps::ScrapKind::SafeStep => !self.safe_step,
+            scraps::ScrapKind::Lull | scraps::ScrapKind::Windfall | scraps::ScrapKind::Redraw => true,
+        }
+    }
+
+    /// The shard (not its beacon) closest to the dreamer.
+    fn nearest_shard(&self) -> Option<Vec3> {
+        let me = self.player_position;
+        self.shard_entities
+            .iter()
+            .step_by(2) // each shard is stored with its beacon after it
+            .filter_map(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position))
+            .min_by(|a, b| a.distance(me).total_cmp(&b.distance(me)))
+    }
+
+    /// The effects, each from a lever the game already has.
+    fn scrap_effect(&mut self, kind: scraps::ScrapKind) {
+        use scraps::ScrapKind as K;
+        match kind {
+            K::Mend => {
+                self.nerve.heal(scraps::MEND_NERVE);
+                self.flash.trigger([0.5, 1.0, 0.7], 0.25);
+                self.sfx(Sound::LastStand);
+            }
+            K::Lull => {
+                self.rattle_enemies(scraps::LULL_REACH, 0.0, scraps::LULL_SECS);
+                self.sfx(Sound::VeilOn);
+            }
+            K::Lantern => {
+                self.light_nearest_shard();
+                self.sfx(Sound::PulsePing);
+            }
+            K::Windfall => {
+                // Plain dust (the hand's score does not scale it); paid with the run's.
+                self.bonus_dust += scraps::WINDFALL_DUST;
+                self.sfx(Sound::Shard);
+            }
+            K::SafeStep => {
+                self.safe_step = true;
+                self.sfx(Sound::WardUp);
+            }
+            K::Redraw => {
+                // Same as MULLIGAN: the hand goes back, the pile is shuffled, every slot draws.
+                let snaps = self.hand_view();
+                let thrown = self.deck.as_mut().map(|d| d.mulligan()).unwrap_or_default();
+                for (slot, _) in thrown {
+                    if let Some(snap) = snaps.get(slot).cloned() {
+                        self.deck_leaving.push((snap, slot, self.deck_clock));
+                    }
+                }
+                for s in self.run.abilities.iter_mut().take(self.run.deck_slots) {
+                    s.spent = true;
+                }
+                self.deck_riffle_at = self.deck_clock;
+                self.sfx(Sound::MulliganShuffle);
+            }
+        }
+    }
+
+    /// LANTERN: a tall pale pillar over the nearest shard for a few seconds.
+    fn light_nearest_shard(&mut self) {
+        let (Some(at), Some(tex), Ok(mesh)) =
+            (self.nearest_shard(), self.player_tex.clone(), self.mesh(Shape::Cube))
+        else {
+            return;
+        };
+        let e = self.world.spawn((
+            Transform {
+                position: at + Vec3::Y * abilities2::PULSE_PILLAR_HEIGHT * 0.5,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.3, abilities2::PULSE_PILLAR_HEIGHT, 0.3),
+            },
+            MeshRenderer { mesh, texture: Some(tex) },
+            Translucent,
+            Lit,
+        ));
+        self.scrap_marks.push((e, scraps::LANTERN_SECS));
+    }
+
+    fn update_scrap_marks(&mut self, dt: f32) {
+        for m in &mut self.scrap_marks {
+            m.1 -= dt;
+        }
+        let world = &mut self.world;
+        self.scrap_marks.retain(|m| {
+            let keep = m.1 > 0.0;
+            if !keep {
+                let _ = world.despawn(m.0);
+            }
+            keep
+        });
+    }
+    // === end scraps ===
+
     // === toolcards ===
     /// The tool card ids held this run: the live deck's, else the saved list.
     fn tool_cards_held(&self) -> Vec<u32> {
@@ -8050,6 +8277,7 @@ impl DreamscapeGame {
             self.pick = view;
         }
         self.reveal_pack(cards);
+        self.grant_scrap(); // === scraps ===
         // Full motion: the pack tears open first (a negative age counts it down).
         // Dev: DREAMSCAPE_TEAR_FREEZE=0.5 holds the tear half way (for screenshots).
         let freeze = crate::dev::var("DREAMSCAPE_TEAR_FREEZE")
@@ -8829,6 +9057,23 @@ impl DreamscapeGame {
                     self.sfx(Sound::Denied); // the slots are full
                 }
             }
+            // === scraps === [g] browses the satchel, [h] carries or leaves the one under the cursor
+            Keycode::G if !self.booklet.satchel.counts.is_empty() => {
+                self.scrap_sel = (self.scrap_sel + 1) % self.booklet.satchel.counts.len();
+            }
+            Keycode::H if !self.booklet.satchel.counts.is_empty() => {
+                let at = self.scrap_sel.min(self.booklet.satchel.counts.len() - 1);
+                let kind = self.booklet.satchel.counts[at].0;
+                let carried = self.booklet.satchel.chosen.contains(&kind);
+                if self.booklet.satchel.toggle_carry(kind, scraps::SATCHEL_CARRY) {
+                    let now = self.booklet.satchel.chosen.contains(&kind);
+                    self.sfx(if now && !carried { Sound::Equip } else { Sound::Unequip });
+                    self.persist_booklet();
+                } else {
+                    self.sfx(Sound::Denied); // both places are taken
+                }
+            }
+            // === end scraps ===
             Keycode::T => self.sort_press(true),
             Keycode::R => self.sort_press(false),
             Keycode::C if !self.booklet.lore.dreamers.is_empty() => {
@@ -8976,6 +9221,7 @@ impl DreamscapeGame {
         self.entrance.reset();
         self.objective_clock = 0.0;
         self.shards_this_run = 0;
+        self.scrap_rolls = 0; // === scraps ===
 
         // The eye says FirstDream at the start of every run, during the entrance animation
         let text = self.opening_line();
@@ -10186,6 +10432,7 @@ impl DreamscapeGame {
         // === abilities2 === (the world was cleared: the entities are gone)
         self.haste = None;
         self.pulse_marks.clear();
+        self.scrap_marks.clear(); // === scraps === the world was cleared
         self.surge.clear();
         self.dash_boost = 1.0;
         // === end abilities2 ===
@@ -13708,6 +13955,17 @@ fn main() -> anyhow::Result<()> {
 
 /// Headless smoke tests for the screens: build the real HUD snapshot, paint it
 /// into an egui context, and make sure nothing panics and something is drawn.
+// === scraps ===
+/// Each carried scrap with its copy number (the second of a kind is copy 1).
+fn scrap_copies(kinds: &[scraps::ScrapKind]) -> Vec<(usize, scraps::ScrapKind)> {
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (kinds[..i].iter().filter(|&&o| o == k).count(), k))
+        .collect()
+}
+// === end scraps ===
+
 #[cfg(test)]
 mod screen_smoke {
     use super::*;
@@ -13941,6 +14199,7 @@ mod screen_smoke {
             since_draw: hand::NEVER,
             empty: false,
             tool: false,
+            scrap: None, // === scraps ===
         }
     }
 
@@ -17003,6 +17262,258 @@ mod screen_smoke {
     }
     // === end decklife ===
     // === end toolcards ===
+    // === scraps ===
+    /// A deck game (cards 1-4 plus `kinds` as scraps, also held in the satchel)
+    /// with the whole pile dealt: the five-slot hand is full.
+    fn scrap_game(name: &str, kinds: &[scraps::ScrapKind]) -> DreamscapeGame {
+        let nums = [1u32, 2, 3, 4];
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g.deck_cards = nums.iter().map(|&n| themed(dream::ALL_THEMES[n as usize % 20], n as u64)).collect();
+        for (c, &n) in g.deck_cards.iter_mut().zip(&nums) {
+            c.number = n;
+        }
+        g.hand_cards = g.deck_cards.iter().map(|c| (powers::power_of(c).active, c.clone())).collect();
+        let mut d = deck::Deck::new(&nums, 11);
+        for (copy, kind) in scrap_copies(kinds) {
+            d.insert_shuffled(deck::scrap_id(kind, copy), 11);
+            g.booklet.satchel.add(kind);
+        }
+        d.draw_to_fill(5);
+        g.run.deck_slots = 5;
+        g.deck = Some(d);
+        g.save_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_run.ron"));
+        g.mode = hud::Mode::Playing;
+        g.update_deck(0.0);
+        g
+    }
+
+    /// The hand slot holding `kind`'s scrap (the one-scrap games have exactly one).
+    fn scrap_slot(g: &DreamscapeGame, kind: scraps::ScrapKind) -> Option<usize> {
+        let id = deck::scrap_id(kind, 0);
+        g.deck.as_ref()?.hand().iter().position(|&h| h == Some(id))
+    }
+
+    #[test]
+    fn a_drawn_scrap_holds_its_slot_as_a_spent_placeholder() {
+        let g = scrap_game("scrap_draw", &[scraps::ScrapKind::SafeStep]);
+        // Four cards and one scrap are dealt into five slots; the scrap is one of them.
+        let slot = scrap_slot(&g, scraps::ScrapKind::SafeStep).expect("dealt: five cards, five slots");
+        assert_eq!(g.scrap_in_slot(slot), Some(scraps::ScrapKind::SafeStep));
+        assert!(g.run.abilities[slot].spent, "no ability behind it");
+    }
+
+    #[test]
+    fn playing_a_scrap_exhausts_it_and_spends_it_from_the_satchel() {
+        let k = scraps::ScrapKind::SafeStep;
+        let mut g = scrap_game("scrap_play", &[k, scraps::ScrapKind::Lull]);
+        let slot = scrap_slot(&g, k).unwrap();
+        assert!(g.use_scrap(slot));
+        assert_eq!(g.booklet.satchel.count(k), 0);
+        assert_eq!(g.booklet.satchel.count(scraps::ScrapKind::Lull), 1, "the other stays");
+        let d = g.deck.as_ref().unwrap();
+        assert_eq!(d.scrap_cards(), vec![deck::scrap_id(scraps::ScrapKind::Lull, 0)]);
+        assert!(!g.use_scrap(slot), "the emptied slot plays nothing");
+        g.update_deck(deck::SHUFFLE_DELAY + deck::DRAW_DELAY + 0.1);
+        assert!(!g.deck.as_ref().unwrap().all_cards().contains(&deck::scrap_id(k, 0)), "never back");
+        // The spend is on disk: quitting now cannot refund it.
+        assert_eq!(cards::load(&g.booklet_path).satchel.count(k), 0);
+    }
+
+    #[test]
+    fn unplayed_scraps_stay_in_the_satchel_and_a_scrap_is_never_a_booklet_card() {
+        let g = scrap_game("scrap_return", &[scraps::ScrapKind::Mend, scraps::ScrapKind::Redraw]);
+        assert_eq!(g.booklet.satchel.total(), 2);
+        assert!(g.booklet.lore.deck.iter().all(|&n| !deck::is_scrap(n)));
+        assert!(g.booklet.card(deck::scrap_id(scraps::ScrapKind::Mend, 0)).is_none());
+        assert_eq!(g.deck.as_ref().unwrap().booklet_cards(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn only_deck_runs_carry_scraps_and_the_chosen_ones_are_capped() {
+        let mut g = game("scrap_carry");
+        for k in [scraps::ScrapKind::Mend, scraps::ScrapKind::Lull, scraps::ScrapKind::Redraw] {
+            g.booklet.satchel.add(k);
+            g.booklet.satchel.chosen.push(k);
+        }
+        assert_eq!(g.scraps_to_carry().len(), scraps::SATCHEL_CARRY);
+        g.autopilot = true;
+        assert!(g.scraps_to_carry().is_empty());
+        g.autopilot = false;
+        g.prologue = Some(Default::default());
+        assert!(g.scraps_to_carry().is_empty());
+    }
+
+    #[test]
+    fn a_resumed_run_keeps_its_scraps_and_an_exhausted_one_stays_gone() {
+        let (a, b) = (scraps::ScrapKind::Windfall, scraps::ScrapKind::Redraw);
+        let mut g = scrap_game("scrap_resume", &[a, b]);
+        let slot = scrap_slot(&g, a).unwrap();
+        g.use_scrap(slot);
+        let save = g.deck.as_ref().unwrap().snapshot();
+        let mut r = scrap_game("scrap_resume2", &[]);
+        r.resume_deck(&save);
+        let d = r.deck.as_ref().unwrap();
+        assert_eq!(d.scrap_cards(), vec![deck::scrap_id(b, 0)]);
+        if let Some(s) = scrap_slot(&r, b) {
+            assert!(r.run.abilities[s].spent);
+        }
+    }
+
+    fn play_scrap(g: &mut DreamscapeGame, kind: scraps::ScrapKind) -> bool {
+        let slot = scrap_slot(g, kind).expect("the scrap is in the hand");
+        let before = g.booklet.satchel.count(kind);
+        assert!(g.use_scrap(slot));
+        g.booklet.satchel.count(kind) < before
+    }
+
+    #[test]
+    fn scrap_mend_refills_nerve_and_is_kept_when_nerve_is_full() {
+        let k = scraps::ScrapKind::Mend;
+        let mut g = scrap_game("scrap_mend", &[k]);
+        assert!(!play_scrap(&mut g, k), "full nerve: nothing to mend, the scrap is kept");
+        assert_eq!(g.deck.as_ref().unwrap().scrap_cards().len(), 1);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert!(g.nerve.cur() < g.nerve.max());
+        assert!(play_scrap(&mut g, k));
+        assert_eq!(g.nerve.cur(), g.nerve.max());
+    }
+
+    #[test]
+    fn scrap_lull_calms_every_pacer_for_a_few_seconds() {
+        let k = scraps::ScrapKind::Lull;
+        let mut g = scrap_game("scrap_lull", &[k]);
+        let near = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), true);
+        let far = put_pacer(&mut g, Vec3::new(300.0, 1.0, 0.0), true);
+        assert!(play_scrap(&mut g, k));
+        for e in [near, far] {
+            let left = g.stunned.get(&e).copied().expect("calmed");
+            assert!((left - scraps::LULL_SECS).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn scrap_lantern_needs_a_shard_and_picks_the_nearest() {
+        let k = scraps::ScrapKind::Lantern;
+        let mut g = scrap_game("scrap_lantern", &[k]);
+        assert!(!play_scrap(&mut g, k), "no shard to light");
+        let mut pairs = Vec::new();
+        for x in [20.0f32, 5.0] {
+            let shard = g.world.spawn((Transform { position: Vec3::new(x, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+            let beacon = g.world.spawn((Transform { position: Vec3::new(x, 9.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+            pairs.extend([shard, beacon]);
+        }
+        g.shard_entities = pairs;
+        assert_eq!(g.nearest_shard().map(|p| p.x), Some(5.0), "a beacon is never the answer");
+        assert!(play_scrap(&mut g, k));
+    }
+
+    #[test]
+    fn scrap_windfall_adds_plain_dust_to_the_run_bonus() {
+        let k = scraps::ScrapKind::Windfall;
+        let mut g = scrap_game("scrap_windfall", &[k]);
+        g.bonus_dust = 10;
+        assert!(play_scrap(&mut g, k));
+        assert_eq!(g.bonus_dust, 10 + scraps::WINDFALL_DUST);
+    }
+
+    #[test]
+    fn scrap_safe_step_cancels_exactly_the_next_hit() {
+        let k = scraps::ScrapKind::SafeStep;
+        let mut g = scrap_game("scrap_safe", &[k]);
+        let full = g.nerve.cur();
+        assert!(play_scrap(&mut g, k));
+        assert!(g.safe_step);
+        assert_eq!(g.take_nerve_hit("tooth"), None);
+        assert_eq!(g.nerve.cur(), full, "no nerve lost");
+        assert!(!g.safe_step);
+        assert_eq!(g.take_nerve_hit("tooth"), None);
+        assert_eq!(g.nerve.cur(), full - 1, "the next one lands");
+    }
+
+    #[test]
+    fn scrap_redraw_throws_back_the_hand_and_loses_no_card() {
+        let k = scraps::ScrapKind::Redraw;
+        let mut g = scrap_game("scrap_redraw", &[k]);
+        assert!(play_scrap(&mut g, k));
+        g.update_deck(deck::DRAW_DELAY + 0.1);
+        let d = g.deck.as_ref().unwrap();
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4], "the scrap is gone, every card stays");
+        assert_eq!(d.hand().iter().flatten().count(), 4, "all four are in hand again");
+    }
+
+    #[test]
+    fn scrap_hand_cards_draw_inside_the_screen_and_are_marked() {
+        let mut g = scrap_game("scrap_hand", &[scraps::ScrapKind::Redraw, scraps::ScrapKind::SafeStep]);
+        let v = g.hud_view();
+        let marked: Vec<_> = v.hand.iter().filter_map(|c| c.scrap).collect();
+        assert_eq!(marked.len(), 2, "two scraps in a five-card hand");
+        assert!(v.hand.iter().filter(|c| c.scrap.is_some()).all(|c| !c.empty && !c.tool && c.card.is_none()));
+        let bad = overflows(&g, "Hand-scraps");
+        assert!(bad.is_empty(), "{bad:?}");
+        // After play the card is gone from the hand view.
+        let slot = scrap_slot(&g, scraps::ScrapKind::SafeStep).unwrap();
+        g.use_scrap(slot);
+        assert_eq!(g.hud_view().hand.iter().filter(|c| c.scrap.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn opening_a_pack_adds_one_seeded_scrap_and_saves_it() {
+        let mut g = game("scrap_pack");
+        g.begin_pick(offers(1));
+        g.pick.age = 1.0;
+        g.pick_open();
+        let kind = scraps::roll_scrap(g.run_seed, 0);
+        assert_eq!(g.pack.scrap, Some(kind), "the reveal shows it");
+        assert_eq!(g.booklet.satchel.total(), 1);
+        assert_eq!(g.booklet.satchel.count(kind), 1);
+        assert_eq!(cards::load(&g.booklet_path).satchel.count(kind), 1, "saved when opened");
+        assert_eq!(g.pack.pack.len(), packs::open(&offers(1)[0]).len(), "extra to the pack's cards");
+        // The next pack of the run rolls with the next index.
+        g.begin_pick(offers(1));
+        g.pick.age = 1.0;
+        g.pick_open();
+        assert_eq!(g.booklet.satchel.total(), 2);
+        assert_eq!(g.pack.scrap, Some(scraps::roll_scrap(g.run_seed, 1)));
+        // The autopilot and co-op get none.
+        let mut a = game("scrap_pack_auto");
+        a.autopilot = true;
+        a.begin_pick(offers(1));
+        a.pick.age = 1.0;
+        a.pick_open();
+        assert_eq!((a.pack.scrap, a.booklet.satchel.total()), (None, 0));
+    }
+
+    #[test]
+    fn the_loadout_keys_browse_and_carry_scraps_up_to_the_limit() {
+        let mut g = game("scrap_keys");
+        for k in [scraps::ScrapKind::Mend, scraps::ScrapKind::Lull, scraps::ScrapKind::Redraw] {
+            g.booklet.satchel.add(k);
+        }
+        g.loadout_key(Keycode::H);
+        assert_eq!(g.booklet.satchel.carry(9), vec![scraps::ScrapKind::Mend]);
+        g.loadout_key(Keycode::G);
+        g.loadout_key(Keycode::H);
+        g.loadout_key(Keycode::G);
+        g.loadout_key(Keycode::H);
+        assert_eq!(g.booklet.satchel.carry(9).len(), scraps::SATCHEL_CARRY, "the third is refused");
+        assert_eq!(g.scrap_sel, 2);
+        g.loadout_key(Keycode::G);
+        assert_eq!(g.scrap_sel, 0, "the cursor wraps");
+        g.loadout_key(Keycode::H);
+        assert_eq!(g.booklet.satchel.carry(9), vec![scraps::ScrapKind::Lull], "the first toggles off");
+        let saved = cards::load(&g.booklet_path).satchel;
+        assert_eq!(saved.carry(9), vec![scraps::ScrapKind::Lull], "choices are saved");
+        g.mode = hud::Mode::Loadout;
+        let rows = g.hud_view().loadout.satchel;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.iter().map(|r| r.2).sum::<u32>(), 1, "one picked");
+    }
+    // === end scraps ===
     // === end shop ===
 
     // === perf === egui cost of every screen (shapes, vertices, triangles, tessellation time)
@@ -17068,6 +17579,10 @@ mod screen_smoke {
     fn all_screen_costs() -> Vec<(String, UiCost)> {
         let mut g = game("uicost");
         big_booklet(&mut g, 239);
+        for k in scraps::ALL_SCRAPS {
+            g.booklet.satchel.add(k); // === scraps === the loadout shows the satchel too
+        }
+        g.booklet.satchel.chosen = vec![scraps::ScrapKind::Mend, scraps::ScrapKind::Redraw];
         let mut rows: Vec<(String, UiCost)> = Vec::new();
         let mut add = |g: &DreamscapeGame, label: &str| rows.push((label.to_string(), ui_cost(g, 1280.0, 720.0)));
         for mode in [
@@ -17216,7 +17731,18 @@ mod screen_smoke {
         bad.extend(overflows(&g, "Booklet"));
         let picks: Vec<u32> = g.booklet.cards().take(4).map(|c| c.number).collect(); // === handscore ===
         g.booklet.lore.deck = picks;
+        // === scraps === the satchel strip, with the longest line selected
+        for k in scraps::ALL_SCRAPS {
+            g.booklet.satchel.add(k);
+        }
+        g.booklet.satchel.chosen = vec![scraps::ScrapKind::Redraw];
         g.open_loadout();
+        for i in 0..scraps::ALL_SCRAPS.len() {
+            g.scrap_sel = i;
+            bad.extend(overflows(&g, &format!("Loadout-satchel {i}")));
+        }
+        g.scrap_sel = 0;
+        // === end scraps ===
         assert!(g.hud_view().loadout.chosen.len() >= deck::DECK_MIN, "the deck builder shows its best-hand line"); // === handscore ===
         bad.extend(overflows(&g, "Loadout"));
         g.open_merge(hud::Mode::Title);
@@ -17299,6 +17825,18 @@ mod screen_smoke {
         g.open_pack();
         g.pack.age = f32::MAX;
         bad.extend(overflows(&g, "Reveal"));
+        // === scraps === every scrap's line under the cards, pressed and not
+        for pressed in [false, true] {
+            g.pack.pressed = pressed;
+            g.pack.cards_added = 3;
+            for k in scraps::ALL_SCRAPS {
+                g.pack.scrap = Some(k);
+                bad.extend(overflows(&g, &format!("Reveal-scrap {k:?} pressed {pressed}")));
+            }
+        }
+        g.pack.scrap = None;
+        g.pack.pressed = false;
+        // === end scraps ===
         g.begin_run();
         g.mode = hud::Mode::Playing;
         bad.extend(overflows(&g, "Run"));

@@ -33,6 +33,12 @@ pub struct LoadoutView {
     /// booklet numbers whose passives the cap benched (empty = none/auto deck).
     pub passives: String,
     pub benched: Vec<u32>,
+    // === scraps ===
+    /// The satchel: (kind, held, picked to carry). Empty = nothing shown.
+    pub satchel: Vec<(crate::scraps::ScrapKind, u32, u32)>,
+    /// The scrap under the satchel cursor.
+    pub scrap_sel: usize,
+    // === end scraps ===
 }
 
 /// Adds the card, or takes it out if it's already in. A full loadout
