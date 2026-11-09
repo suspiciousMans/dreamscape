@@ -93,6 +93,8 @@ mod progress;
 mod records;
 #[allow(dead_code)] // relic streams R1-R8 consume these as they land
 mod relic_types;
+#[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
+mod relics;
 mod reveal_ui;
 mod code_ui;
 mod seedcode;
