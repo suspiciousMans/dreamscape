@@ -12916,6 +12916,18 @@ impl Game for DreamscapeGame {
             self.tutorial(tutorial::Event::Portal);
             self.dream_bonus();
             self.stats.twists.extend(self.twists.0.iter().copied());
+            // === relics === Ash: a completed dream, or a beaten nightmare
+            if self.run_active {
+                let ash = if self.director.nightmare {
+                    let seed = self.dream.as_ref().map_or(0, |d| d.seed);
+                    store::ash_for_nightmare(seed)
+                } else {
+                    store::ash_for_dream(self.director.depth)
+                };
+                self.booklet.stash.earn_ash(ash);
+                log::info!("Ash +{ash}");
+            }
+            // === end relics ===
             if self.director.nightmare {
                 self.stats.nightmares += 1;
                 let paid = 10

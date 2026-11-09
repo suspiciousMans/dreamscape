@@ -159,6 +159,16 @@ pub(crate) fn press_pull(b: &mut Booklet, pull: Pull, seed: u64) -> Pulled {
     }
 }
 
+/// Appends `relic` to the pouch with the next id (max id + 1, so ids are
+/// never reused; the first is 1) and returns the stored relic. The caller's
+/// `id` is ignored; the pull engine (R2) decides everything else.
+#[allow(dead_code)] // R2: the pull engine calls this
+pub fn press_relic(b: &mut Booklet, mut relic: crate::relic_types::Relic) -> crate::relic_types::Relic {
+    relic.id = b.relics.iter().map(|r| r.id).max().map_or(1, |m| m + 1);
+    b.relics.push(relic.clone());
+    relic
+}
+
 /// The numbers the goal gradient is made of, read off the booklet.
 pub fn progress_inputs(b: &Booklet, loadout: &[u32], best_depth: u32) -> ProgressInputs {
     let cheapest = crate::store::CATALOG
@@ -344,5 +354,42 @@ mod tests {
         assert_eq!(i.sparks, 4);
         assert!(i.store_cheapest_unowned.is_some());
         assert!(!streaks::teaser(&i).is_empty());
+    }
+
+    fn sample_relic(seed: u64) -> crate::relic_types::Relic {
+        use crate::relic_types::*;
+        Relic {
+            id: 0,
+            theme: DreamTheme::Awakening,
+            seed,
+            rarity: RelicRarity::Cracked,
+            foil: false,
+            name: String::new(),
+            flavour: String::new(),
+            effect: RelicEffect::default(),
+            art: portal_surface(DreamTheme::Awakening, seed),
+            weapon: None,
+        }
+    }
+
+    #[test]
+    fn press_relic_appends_with_the_next_id() {
+        let mut b = Booklet::default();
+        assert!(b.relics.is_empty());
+        let a = press_relic(&mut b, sample_relic(1));
+        let c = press_relic(&mut b, sample_relic(2));
+        assert_eq!((a.id, c.id), (1, 2));
+        assert_eq!(b.relics.len(), 2);
+        assert_eq!(b.relics[1], c);
+        b.relics.remove(0);
+        assert_eq!(press_relic(&mut b, sample_relic(3)).id, 3, "ids are not reused");
+    }
+
+    #[test]
+    fn old_booklet_saves_load_with_an_empty_relic_pouch() {
+        let b: Booklet = ron::from_str("(runs: [])").unwrap();
+        assert!(b.relics.is_empty());
+        assert_eq!(b.relic_lottery, crate::relic_types::RelicState::default());
+        assert_eq!(b.stash.ash, 0);
     }
 }
