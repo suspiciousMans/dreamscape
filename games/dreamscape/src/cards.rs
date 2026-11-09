@@ -367,6 +367,11 @@ pub struct Booklet {
     #[serde(default)]
     pub best_hand: crate::handscore::HandRank,
     // === end handscore ===
+    // === scraps ===
+    /// Disposable cards from packs, kept until used (old saves: empty).
+    #[serde(default)]
+    pub satchel: crate::scraps::Satchel,
+    // === end scraps ===
 }
 
 impl Booklet {

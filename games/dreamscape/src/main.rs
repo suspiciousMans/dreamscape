@@ -94,6 +94,8 @@ mod records;
 #[allow(dead_code)] // relic streams R1-R8 consume these as they land
 mod relic_types;
 mod reveal_ui;
+#[allow(dead_code)] // scraps S2-S4 consume the rest as they land
+mod scraps;
 mod code_ui;
 mod seedcode;
 mod settings;
