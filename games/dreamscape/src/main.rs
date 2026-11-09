@@ -698,6 +698,12 @@ pub struct DreamscapeGame {
     /// Cards flicking out: (snapshot, slot, `deck_clock` when used).
     deck_leaving: Vec<(hand::HandCard, usize, f32)>,
     // === end deck ===
+    // === scraps ===
+    /// A SAFE STEP scrap is waiting to cancel the next hit (this run only).
+    safe_step: bool,
+    /// LANTERN pillars: (entity, seconds left).
+    scrap_marks: Vec<(Entity, f32)>,
+    // === end scraps ===
     // === toolcards ===
     /// Tool card ids bought this run (kept for the save; the deck holds the live ones).
     tool_cards: Vec<u32>,
@@ -1186,6 +1192,8 @@ impl DreamscapeGame {
             deck_riffle_at: hand::NEVER,
             deck_leaving: Vec::new(),
             tool_cards: Vec::new(), // === toolcards ===
+            safe_step: false, // === scraps ===
+            scrap_marks: Vec::new(), // === scraps ===
             score_rank: handscore::HandRank::None, // === handscore ===
             score_at: hand::NEVER,
             run_best_hand: handscore::HandRank::None,
@@ -2143,6 +2151,7 @@ impl DreamscapeGame {
 
     /// Deck runs: advances the deck, and turns its draws into hand slots.
     fn update_deck(&mut self, dt: f32) {
+        self.update_scrap_marks(dt); // === scraps ===
         let perks = self.run.deck_perks(); // === upgrades2 ===
         let Some(deck) = self.deck.as_mut() else {
             return;
@@ -2374,6 +2383,7 @@ impl DreamscapeGame {
     fn start_deck(&mut self) -> Option<Vec<cards::Card>> {
         self.deck = None;
         self.tool_cards.clear(); // === toolcards === bought per run, never carried over
+        self.safe_step = false; // === scraps ===
         self.score_rank = handscore::HandRank::None; // === handscore ===
         self.score_at = hand::NEVER;
         self.run_best_hand = handscore::HandRank::None;
@@ -3338,6 +3348,15 @@ impl DreamscapeGame {
     /// Something touched the dreamer. Costs nerve; returns the source only
     /// when that was the last point (the old *caught* flow then runs).
     fn take_nerve_hit(&mut self, by: &'static str) -> Option<&'static str> {
+        // === scraps === SAFE STEP: the next hit that would land does nothing
+        if self.safe_step && !self.nerve.invulnerable() && nerve::damage_from(by) > 0 {
+            self.safe_step = false;
+            self.flash.trigger([0.8, 0.85, 1.0], 0.25);
+            self.sfx(Sound::WardBreak);
+            log::info!("Safe step: {by} touched you and nothing happened");
+            return None;
+        }
+        // === end scraps ===
         let away = self.away_from_nearest_threat();
         let extra = nerve::IFRAMES_PER_BREATH * self.run.count(Upgrade::LongBreath) as f32
             + self.run.afterglow() // === upgrades2 ===
@@ -7002,6 +7021,10 @@ impl DreamscapeGame {
         if self.mode != hud::Mode::Playing {
             return true;
         }
+        if !self.scrap_ready(kind) {
+            self.sfx(Sound::Denied); // nothing to act on: the scrap is kept
+            return true;
+        }
         if let Some(snap) = self.hand_view().get(slot).cloned() {
             self.deck_leaving.push((snap, slot, self.deck_clock));
         }
@@ -7013,7 +7036,106 @@ impl DreamscapeGame {
         let _ = cards::save(&self.booklet_path, &self.booklet);
         self.edges = self.deck_edges();
         log::info!("Scrap used: {}", kind.name());
+        self.scrap_effect(kind);
         true
+    }
+
+    /// Is there anything for the scrap to act on? (If not it is kept.)
+    fn scrap_ready(&self, kind: scraps::ScrapKind) -> bool {
+        match kind {
+            scraps::ScrapKind::Mend => self.nerve.cur() < self.nerve.max(),
+            scraps::ScrapKind::Lantern => self.nearest_shard().is_some(),
+            scraps::ScrapKind::SafeStep => !self.safe_step,
+            scraps::ScrapKind::Lull | scraps::ScrapKind::Windfall | scraps::ScrapKind::Redraw => true,
+        }
+    }
+
+    /// The shard (not its beacon) closest to the dreamer.
+    fn nearest_shard(&self) -> Option<Vec3> {
+        let me = self.player_position;
+        self.shard_entities
+            .iter()
+            .step_by(2) // each shard is stored with its beacon after it
+            .filter_map(|&e| self.world.get::<&Transform>(e).ok().map(|t| t.position))
+            .min_by(|a, b| a.distance(me).total_cmp(&b.distance(me)))
+    }
+
+    /// The effects, each from a lever the game already has.
+    fn scrap_effect(&mut self, kind: scraps::ScrapKind) {
+        use scraps::ScrapKind as K;
+        match kind {
+            K::Mend => {
+                self.nerve.heal(scraps::MEND_NERVE);
+                self.flash.trigger([0.5, 1.0, 0.7], 0.25);
+                self.sfx(Sound::LastStand);
+            }
+            K::Lull => {
+                self.rattle_enemies(scraps::LULL_REACH, 0.0, scraps::LULL_SECS);
+                self.sfx(Sound::VeilOn);
+            }
+            K::Lantern => {
+                self.light_nearest_shard();
+                self.sfx(Sound::PulsePing);
+            }
+            K::Windfall => {
+                // Plain dust (the hand's score does not scale it); paid with the run's.
+                self.bonus_dust += scraps::WINDFALL_DUST;
+                self.sfx(Sound::Shard);
+            }
+            K::SafeStep => {
+                self.safe_step = true;
+                self.sfx(Sound::WardUp);
+            }
+            K::Redraw => {
+                // Same as MULLIGAN: the hand goes back, the pile is shuffled, every slot draws.
+                let snaps = self.hand_view();
+                let thrown = self.deck.as_mut().map(|d| d.mulligan()).unwrap_or_default();
+                for (slot, _) in thrown {
+                    if let Some(snap) = snaps.get(slot).cloned() {
+                        self.deck_leaving.push((snap, slot, self.deck_clock));
+                    }
+                }
+                for s in self.run.abilities.iter_mut().take(self.run.deck_slots) {
+                    s.spent = true;
+                }
+                self.deck_riffle_at = self.deck_clock;
+                self.sfx(Sound::MulliganShuffle);
+            }
+        }
+    }
+
+    /// LANTERN: a tall pale pillar over the nearest shard for a few seconds.
+    fn light_nearest_shard(&mut self) {
+        let (Some(at), Some(tex), Ok(mesh)) =
+            (self.nearest_shard(), self.player_tex.clone(), self.mesh(Shape::Cube))
+        else {
+            return;
+        };
+        let e = self.world.spawn((
+            Transform {
+                position: at + Vec3::Y * abilities2::PULSE_PILLAR_HEIGHT * 0.5,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(0.3, abilities2::PULSE_PILLAR_HEIGHT, 0.3),
+            },
+            MeshRenderer { mesh, texture: Some(tex) },
+            Translucent,
+            Lit,
+        ));
+        self.scrap_marks.push((e, scraps::LANTERN_SECS));
+    }
+
+    fn update_scrap_marks(&mut self, dt: f32) {
+        for m in &mut self.scrap_marks {
+            m.1 -= dt;
+        }
+        let world = &mut self.world;
+        self.scrap_marks.retain(|m| {
+            let keep = m.1 > 0.0;
+            if !keep {
+                let _ = world.despawn(m.0);
+            }
+            keep
+        });
     }
     // === end scraps ===
 
@@ -10245,6 +10367,7 @@ impl DreamscapeGame {
         // === abilities2 === (the world was cleared: the entities are gone)
         self.haste = None;
         self.pulse_marks.clear();
+        self.scrap_marks.clear(); // === scraps === the world was cleared
         self.surge.clear();
         self.dash_boost = 1.0;
         // === end abilities2 ===
@@ -17147,7 +17270,7 @@ mod screen_smoke {
 
     #[test]
     fn a_resumed_run_keeps_its_scraps_and_an_exhausted_one_stays_gone() {
-        let (a, b) = (scraps::ScrapKind::Mend, scraps::ScrapKind::Redraw);
+        let (a, b) = (scraps::ScrapKind::Windfall, scraps::ScrapKind::Redraw);
         let mut g = scrap_game("scrap_resume", &[a, b]);
         let slot = scrap_slot(&g, a).unwrap();
         g.use_scrap(slot);
@@ -17159,6 +17282,90 @@ mod screen_smoke {
         if let Some(s) = scrap_slot(&r, b) {
             assert!(r.run.abilities[s].spent);
         }
+    }
+
+    fn play_scrap(g: &mut DreamscapeGame, kind: scraps::ScrapKind) -> bool {
+        let slot = scrap_slot(g, kind).expect("the scrap is in the hand");
+        let before = g.booklet.satchel.count(kind);
+        assert!(g.use_scrap(slot));
+        g.booklet.satchel.count(kind) < before
+    }
+
+    #[test]
+    fn scrap_mend_refills_nerve_and_is_kept_when_nerve_is_full() {
+        let k = scraps::ScrapKind::Mend;
+        let mut g = scrap_game("scrap_mend", &[k]);
+        assert!(!play_scrap(&mut g, k), "full nerve: nothing to mend, the scrap is kept");
+        assert_eq!(g.deck.as_ref().unwrap().scrap_cards().len(), 1);
+        g.nerve.hit(1, (0.0, 0.0), 0.0);
+        assert!(g.nerve.cur() < g.nerve.max());
+        assert!(play_scrap(&mut g, k));
+        assert_eq!(g.nerve.cur(), g.nerve.max());
+    }
+
+    #[test]
+    fn scrap_lull_calms_every_pacer_for_a_few_seconds() {
+        let k = scraps::ScrapKind::Lull;
+        let mut g = scrap_game("scrap_lull", &[k]);
+        let near = put_pacer(&mut g, Vec3::new(3.0, 1.0, 0.0), true);
+        let far = put_pacer(&mut g, Vec3::new(300.0, 1.0, 0.0), true);
+        assert!(play_scrap(&mut g, k));
+        for e in [near, far] {
+            let left = g.stunned.get(&e).copied().expect("calmed");
+            assert!((left - scraps::LULL_SECS).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn scrap_lantern_needs_a_shard_and_picks_the_nearest() {
+        let k = scraps::ScrapKind::Lantern;
+        let mut g = scrap_game("scrap_lantern", &[k]);
+        assert!(!play_scrap(&mut g, k), "no shard to light");
+        let mut pairs = Vec::new();
+        for x in [20.0f32, 5.0] {
+            let shard = g.world.spawn((Transform { position: Vec3::new(x, 1.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+            let beacon = g.world.spawn((Transform { position: Vec3::new(x, 9.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }, Spin(1.0)));
+            pairs.extend([shard, beacon]);
+        }
+        g.shard_entities = pairs;
+        assert_eq!(g.nearest_shard().map(|p| p.x), Some(5.0), "a beacon is never the answer");
+        assert!(play_scrap(&mut g, k));
+    }
+
+    #[test]
+    fn scrap_windfall_adds_plain_dust_to_the_run_bonus() {
+        let k = scraps::ScrapKind::Windfall;
+        let mut g = scrap_game("scrap_windfall", &[k]);
+        g.bonus_dust = 10;
+        assert!(play_scrap(&mut g, k));
+        assert_eq!(g.bonus_dust, 10 + scraps::WINDFALL_DUST);
+    }
+
+    #[test]
+    fn scrap_safe_step_cancels_exactly_the_next_hit() {
+        let k = scraps::ScrapKind::SafeStep;
+        let mut g = scrap_game("scrap_safe", &[k]);
+        let full = g.nerve.cur();
+        assert!(play_scrap(&mut g, k));
+        assert!(g.safe_step);
+        assert_eq!(g.take_nerve_hit("tooth"), None);
+        assert_eq!(g.nerve.cur(), full, "no nerve lost");
+        assert!(!g.safe_step);
+        assert_eq!(g.take_nerve_hit("tooth"), None);
+        assert_eq!(g.nerve.cur(), full - 1, "the next one lands");
+    }
+
+    #[test]
+    fn scrap_redraw_throws_back_the_hand_and_loses_no_card() {
+        let k = scraps::ScrapKind::Redraw;
+        let mut g = scrap_game("scrap_redraw", &[k]);
+        assert!(play_scrap(&mut g, k));
+        g.update_deck(deck::DRAW_DELAY + 0.1);
+        let d = g.deck.as_ref().unwrap();
+        let mut all = d.all_cards();
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3, 4], "the scrap is gone, every card stays");
+        assert_eq!(d.hand().iter().flatten().count(), 4, "all four are in hand again");
     }
     // === end scraps ===
     // === end shop ===
