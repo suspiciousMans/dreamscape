@@ -2164,6 +2164,12 @@ impl DreamscapeGame {
                         self.run.deck_draw(slot, ability, cd);
                         self.deck_drawn_at[slot] = self.deck_clock;
                         // === end toolcards ===
+                    } else if deck::is_scrap(card) {
+                        // === scraps === a scrap is no ability: a spent placeholder holds the slot
+                        self.run.deck_draw(slot, Ability::Dash, 0.0);
+                        self.run.abilities[slot].spent = true;
+                        self.deck_drawn_at[slot] = self.deck_clock;
+                        // === end scraps ===
                     }
                 }
                 deck::DeckEvent::Shuffled { .. } => self.deck_riffle_at = self.deck_clock,
@@ -2398,6 +2404,15 @@ impl DreamscapeGame {
             .map(|c| (crate::powers::power_of(c).active, c.clone()))
             .collect();
         self.deck_cards = nums.iter().filter_map(|&n| self.booklet.card(n).cloned()).collect(); // === decklife ===
+        // === scraps === the carried scraps are shuffled into the draw pile
+        let carried = self.scraps_to_carry();
+        for (copy, kind) in scrap_copies(&carried) {
+            d.insert_shuffled(deck::scrap_id(kind, copy), self.director.dream_seed() ^ deck::SCRAP_SEED_MIX);
+        }
+        if !carried.is_empty() {
+            log::info!("Scraps carried: {:?}", carried);
+        }
+        // === end scraps ===
         self.deck = Some(d);
         self.deck_opening = opening.clone();
         Some(opening)
@@ -5781,6 +5796,9 @@ impl DreamscapeGame {
     }
 
     fn use_ability(&mut self, slot: usize) {
+        if self.use_scrap(slot) {
+            return; // === scraps === a scrap card, not an ability
+        }
         self.fire_ability(slot, false);
     }
 
@@ -6957,6 +6975,47 @@ impl DreamscapeGame {
         self.ensure_moth_stock();
         self.show_moth_shop(0);
     }
+
+    // === scraps ===
+    /// The scraps this run brings: the satchel's chosen ones, deck runs only
+    /// (co-op, autopilot and the prologue carry none).
+    fn scraps_to_carry(&self) -> Vec<scraps::ScrapKind> {
+        if self.autopilot || self.coop_active() || self.prologue.is_some() {
+            return Vec::new();
+        }
+        self.booklet.satchel.carry(scraps::SATCHEL_CARRY)
+    }
+
+    /// The scrap card in hand slot `slot`, if that is what it holds.
+    fn scrap_in_slot(&self, slot: usize) -> Option<scraps::ScrapKind> {
+        let id = self.deck.as_ref()?.hand().get(slot).copied().flatten()?;
+        deck::scrap_kind(id)
+    }
+
+    /// Plays the scrap in `slot` (false when the slot holds none): the card
+    /// is exhausted for the run, one is spent from the satchel and the
+    /// booklet is saved, so quitting cannot hand it back.
+    fn use_scrap(&mut self, slot: usize) -> bool {
+        let Some(kind) = self.scrap_in_slot(slot) else {
+            return false;
+        };
+        if self.mode != hud::Mode::Playing {
+            return true;
+        }
+        if let Some(snap) = self.hand_view().get(slot).cloned() {
+            self.deck_leaving.push((snap, slot, self.deck_clock));
+        }
+        if let Some(d) = self.deck.as_mut() {
+            d.exhaust(slot);
+        }
+        self.run.abilities[slot].spent = true;
+        self.booklet.satchel.spend(kind);
+        let _ = cards::save(&self.booklet_path, &self.booklet);
+        self.edges = self.deck_edges();
+        log::info!("Scrap used: {}", kind.name());
+        true
+    }
+    // === end scraps ===
 
     // === toolcards ===
     /// The tool card ids held this run: the live deck's, else the saved list.
@@ -13696,6 +13755,17 @@ fn main() -> anyhow::Result<()> {
 
 /// Headless smoke tests for the screens: build the real HUD snapshot, paint it
 /// into an egui context, and make sure nothing panics and something is drawn.
+// === scraps ===
+/// Each carried scrap with its copy number (the second of a kind is copy 1).
+fn scrap_copies(kinds: &[scraps::ScrapKind]) -> Vec<(usize, scraps::ScrapKind)> {
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| (kinds[..i].iter().filter(|&&o| o == k).count(), k))
+        .collect()
+}
+// === end scraps ===
+
 #[cfg(test)]
 mod screen_smoke {
     use super::*;
@@ -16991,6 +17061,106 @@ mod screen_smoke {
     }
     // === end decklife ===
     // === end toolcards ===
+    // === scraps ===
+    /// A deck game (cards 1-4 plus `kinds` as scraps, also held in the satchel)
+    /// with the whole pile dealt: the five-slot hand is full.
+    fn scrap_game(name: &str, kinds: &[scraps::ScrapKind]) -> DreamscapeGame {
+        let nums = [1u32, 2, 3, 4];
+        let mut g = game(name);
+        g.player_position = Vec3::new(0.0, 1.0, 0.0);
+        g.player_grounded = true;
+        g.dream_age = 5.0;
+        g.deck_cards = nums.iter().map(|&n| themed(dream::ALL_THEMES[n as usize % 20], n as u64)).collect();
+        for (c, &n) in g.deck_cards.iter_mut().zip(&nums) {
+            c.number = n;
+        }
+        g.hand_cards = g.deck_cards.iter().map(|c| (powers::power_of(c).active, c.clone())).collect();
+        let mut d = deck::Deck::new(&nums, 11);
+        for (copy, kind) in scrap_copies(kinds) {
+            d.insert_shuffled(deck::scrap_id(kind, copy), 11);
+            g.booklet.satchel.add(kind);
+        }
+        d.draw_to_fill(5);
+        g.run.deck_slots = 5;
+        g.deck = Some(d);
+        g.save_path = std::env::temp_dir().join(format!("dreamscape_smoke_{name}_run.ron"));
+        g.mode = hud::Mode::Playing;
+        g.update_deck(0.0);
+        g
+    }
+
+    /// The hand slot holding `kind`'s scrap (the one-scrap games have exactly one).
+    fn scrap_slot(g: &DreamscapeGame, kind: scraps::ScrapKind) -> Option<usize> {
+        let id = deck::scrap_id(kind, 0);
+        g.deck.as_ref()?.hand().iter().position(|&h| h == Some(id))
+    }
+
+    #[test]
+    fn a_drawn_scrap_holds_its_slot_as_a_spent_placeholder() {
+        let g = scrap_game("scrap_draw", &[scraps::ScrapKind::SafeStep]);
+        // Four cards and one scrap are dealt into five slots; the scrap is one of them.
+        let slot = scrap_slot(&g, scraps::ScrapKind::SafeStep).expect("dealt: five cards, five slots");
+        assert_eq!(g.scrap_in_slot(slot), Some(scraps::ScrapKind::SafeStep));
+        assert!(g.run.abilities[slot].spent, "no ability behind it");
+    }
+
+    #[test]
+    fn playing_a_scrap_exhausts_it_and_spends_it_from_the_satchel() {
+        let k = scraps::ScrapKind::SafeStep;
+        let mut g = scrap_game("scrap_play", &[k, scraps::ScrapKind::Lull]);
+        let slot = scrap_slot(&g, k).unwrap();
+        assert!(g.use_scrap(slot));
+        assert_eq!(g.booklet.satchel.count(k), 0);
+        assert_eq!(g.booklet.satchel.count(scraps::ScrapKind::Lull), 1, "the other stays");
+        let d = g.deck.as_ref().unwrap();
+        assert_eq!(d.scrap_cards(), vec![deck::scrap_id(scraps::ScrapKind::Lull, 0)]);
+        assert!(!g.use_scrap(slot), "the emptied slot plays nothing");
+        g.update_deck(deck::SHUFFLE_DELAY + deck::DRAW_DELAY + 0.1);
+        assert!(!g.deck.as_ref().unwrap().all_cards().contains(&deck::scrap_id(k, 0)), "never back");
+        // The spend is on disk: quitting now cannot refund it.
+        assert_eq!(cards::load(&g.booklet_path).satchel.count(k), 0);
+    }
+
+    #[test]
+    fn unplayed_scraps_stay_in_the_satchel_and_a_scrap_is_never_a_booklet_card() {
+        let g = scrap_game("scrap_return", &[scraps::ScrapKind::Mend, scraps::ScrapKind::Redraw]);
+        assert_eq!(g.booklet.satchel.total(), 2);
+        assert!(g.booklet.lore.deck.iter().all(|&n| !deck::is_scrap(n)));
+        assert!(g.booklet.card(deck::scrap_id(scraps::ScrapKind::Mend, 0)).is_none());
+        assert_eq!(g.deck.as_ref().unwrap().booklet_cards(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn only_deck_runs_carry_scraps_and_the_chosen_ones_are_capped() {
+        let mut g = game("scrap_carry");
+        for k in [scraps::ScrapKind::Mend, scraps::ScrapKind::Lull, scraps::ScrapKind::Redraw] {
+            g.booklet.satchel.add(k);
+            g.booklet.satchel.chosen.push(k);
+        }
+        assert_eq!(g.scraps_to_carry().len(), scraps::SATCHEL_CARRY);
+        g.autopilot = true;
+        assert!(g.scraps_to_carry().is_empty());
+        g.autopilot = false;
+        g.prologue = Some(Default::default());
+        assert!(g.scraps_to_carry().is_empty());
+    }
+
+    #[test]
+    fn a_resumed_run_keeps_its_scraps_and_an_exhausted_one_stays_gone() {
+        let (a, b) = (scraps::ScrapKind::Mend, scraps::ScrapKind::Redraw);
+        let mut g = scrap_game("scrap_resume", &[a, b]);
+        let slot = scrap_slot(&g, a).unwrap();
+        g.use_scrap(slot);
+        let save = g.deck.as_ref().unwrap().snapshot();
+        let mut r = scrap_game("scrap_resume2", &[]);
+        r.resume_deck(&save);
+        let d = r.deck.as_ref().unwrap();
+        assert_eq!(d.scrap_cards(), vec![deck::scrap_id(b, 0)]);
+        if let Some(s) = scrap_slot(&r, b) {
+            assert!(r.run.abilities[s].spent);
+        }
+    }
+    // === end scraps ===
     // === end shop ===
 
     // === perf === egui cost of every screen (shapes, vertices, triangles, tessellation time)

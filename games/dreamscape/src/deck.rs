@@ -54,6 +54,37 @@ pub fn is_tool(id: u32) -> bool {
 }
 // === end toolcards ===
 
+// === scraps ===
+/// Scraps are run-only cards (see `scraps.rs`) in their own reserved id range
+/// just below the tool cards: `SCRAP_BASE + copy * 6 + kind`. A copy number
+/// lets a run carry two of one kind. Never a booklet number, never in
+/// `lore.deck`; saved only in the run's deck.
+pub const SCRAP_BASE: u32 = TOOL_BASE - 16;
+/// Mixed into the dream seed for a scrap's shuffle position.
+pub const SCRAP_SEED_MIX: u64 = 0x5C4A_9D3C_A4D5_0001;
+
+/// The reserved id of `kind`'s scrap, copy `copy` (0 or 1).
+pub fn scrap_id(kind: crate::scraps::ScrapKind, copy: usize) -> u32 {
+    let n = crate::scraps::ALL_SCRAPS.len();
+    let i = crate::scraps::ALL_SCRAPS.iter().position(|&k| k == kind).unwrap_or(0);
+    SCRAP_BASE + (copy.min(crate::scraps::SATCHEL_CARRY - 1) * n + i) as u32
+}
+
+/// The kind a scrap id stands for; `None` for any other number.
+pub fn scrap_kind(id: u32) -> Option<crate::scraps::ScrapKind> {
+    if !is_scrap(id) {
+        return None;
+    }
+    let n = crate::scraps::ALL_SCRAPS.len();
+    crate::scraps::ALL_SCRAPS.get((id - SCRAP_BASE) as usize % n).copied()
+}
+
+/// Is `id` in the reserved scrap range (below the tools, above any booklet number)?
+pub fn is_scrap(id: u32) -> bool {
+    (SCRAP_BASE..TOOL_BASE).contains(&id)
+}
+// === end scraps ===
+
 // === abilities3 ===
 /// How many played cards RECALL can look back through.
 pub const RECALL_MEMORY: usize = 8;
@@ -217,7 +248,7 @@ impl Deck {
 
     /// Every booklet card (no tool cards) in the deck, in id order.
     pub fn booklet_cards(&self) -> Vec<u32> {
-        let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| !is_tool(c)).collect();
+        let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| !is_tool(c) && !is_scrap(c)).collect();
         v.sort_unstable();
         v
     }
@@ -352,6 +383,28 @@ impl Deck {
         v
     }
     // === end toolcards ===
+
+    // === scraps ===
+    /// Plays the scrap in `slot`: it LEAVES the deck for the run (no discard,
+    /// no shuffle back, not remembered by RECALL) and the slot draws again
+    /// after [`DRAW_DELAY`]. `None` (nothing changes) for an empty slot or a
+    /// card that is not a scrap.
+    pub fn exhaust(&mut self, slot: usize) -> Option<u32> {
+        let card = (*self.hand.get(slot)?).filter(|&c| is_scrap(c))?;
+        self.hand[slot] = None;
+        self.cooldowns.retain(|c| c.0 != card);
+        self.waiting.push((slot, DRAW_DELAY * self.perks.draw_mult));
+        self.events.push(DeckEvent::Played { slot, card });
+        Some(card)
+    }
+
+    /// The scrap cards held anywhere in the deck, in id order.
+    pub fn scrap_cards(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.cooldowns.iter().map(|c| c.0).filter(|&c| is_scrap(c)).collect();
+        v.sort_unstable();
+        v
+    }
+    // === end scraps ===
 
     /// Advances every timer: cooldowns (all cards, wherever they are), the
     /// discard's shuffle-back, and the empty slots' draws.
@@ -868,4 +921,66 @@ mod tests {
         assert_eq!(d.discard_len(), 1);
     }
     // === end upgrades2 ===
+    // === scraps ===
+    #[test]
+    fn scrap_ids_map_both_ways_and_never_collide() {
+        use crate::scraps::{ALL_SCRAPS, SATCHEL_CARRY};
+        let mut ids = Vec::new();
+        for &k in &ALL_SCRAPS {
+            for copy in 0..SATCHEL_CARRY {
+                let id = scrap_id(k, copy);
+                assert!(is_scrap(id) && !is_tool(id));
+                assert_eq!(scrap_kind(id), Some(k));
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), ALL_SCRAPS.len() * SATCHEL_CARRY, "every copy has its own id");
+        assert!(SCRAP_BASE + ids.len() as u32 <= TOOL_BASE && ids.iter().all(|&i| i < TOOL_BASE));
+        assert!(!is_scrap(TOOL_BASE) && !is_scrap(SCRAP_BASE - 1) && !is_scrap(1_000_000));
+        assert_eq!(scrap_kind(5), None);
+        for &a in &crate::upgrades::ALL_ABILITIES {
+            assert!(!is_scrap(tool_id(a)), "no tool id is a scrap id");
+        }
+    }
+
+    #[test]
+    fn exhaust_removes_the_scrap_from_the_deck_for_good() {
+        let s = scrap_id(crate::scraps::ScrapKind::Mend, 0);
+        let mut d = Deck::new(&[1, 2, 3, 4], 5);
+        assert!(d.insert_shuffled(s, 5));
+        d.draw_to_fill(5);
+        let slot = d.hand().iter().position(|&h| h == Some(s)).expect("drawn: the hand holds all five");
+        assert_eq!(d.scrap_cards(), vec![s]);
+        assert_eq!(d.booklet_cards(), vec![1, 2, 3, 4], "a scrap is no booklet card");
+        assert_eq!(d.exhaust(slot), Some(s));
+        assert!(d.hand()[slot].is_none());
+        assert_eq!(d.discard_len(), 0, "not discarded");
+        assert!(d.scrap_cards().is_empty());
+        assert!(d.recall_candidate(None).is_none(), "RECALL cannot bring it back");
+        d.tick(DRAW_DELAY + SHUFFLE_DELAY + 1.0);
+        assert!(!d.all_cards().contains(&s), "gone from every pile");
+        // A booklet card is not exhausted, and an empty slot gives nothing.
+        let other = d.hand().iter().position(|h| h.is_some()).unwrap();
+        assert_eq!(d.exhaust(other), None);
+        assert_eq!(d.exhaust(slot), None);
+    }
+
+    #[test]
+    fn scraps_survive_a_resume_and_an_exhausted_one_stays_gone() {
+        let a = scrap_id(crate::scraps::ScrapKind::Lull, 0);
+        let b = scrap_id(crate::scraps::ScrapKind::Redraw, 0);
+        let mut d = Deck::new(&[1, 2, 3], 9);
+        d.insert_shuffled(a, 9);
+        d.insert_shuffled(b, 9);
+        d.draw_to_fill(5);
+        let slot = d.hand().iter().position(|&h| h == Some(a)).unwrap();
+        d.exhaust(slot);
+        let text = ron::to_string(&d.snapshot()).unwrap();
+        let back = Deck::restore(&ron::from_str(&text).unwrap());
+        assert_eq!(back.scrap_cards(), vec![b]);
+        assert!(!back.all_cards().contains(&a));
+    }
+    // === end scraps ===
 }
