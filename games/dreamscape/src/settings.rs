@@ -107,6 +107,8 @@ pub struct Settings {
     pub sort_booklet: crate::sorting::Sort,
     pub sort_merge: crate::sorting::Sort,
     pub sort_loadout: crate::sorting::Sort,
+    /// How much the menus and cards move: off / soft / full (`ui_motion`).
+    pub ui_juice: crate::ui_motion::UiJuice,
 }
 
 impl Default for Settings {
@@ -131,6 +133,7 @@ impl Default for Settings {
             sort_booklet: Default::default(),
             sort_merge: Default::default(),
             sort_loadout: Default::default(),
+            ui_juice: Default::default(),
         }
     }
 }
@@ -212,6 +215,7 @@ pub enum Row {
     Vignette,
     ReducedMotion,
     ReduceFlashing,
+    UiJuice,
     GentleNerve,
     ColorblindMarkers,
     Fullscreen,
@@ -229,6 +233,7 @@ pub fn rows() -> Vec<Row> {
         Row::Vignette,
         Row::ReducedMotion,
         Row::ReduceFlashing,
+        Row::UiJuice,
         Row::GentleNerve,
         Row::ColorblindMarkers,
         Row::Fullscreen,
@@ -249,6 +254,7 @@ impl Row {
             Row::Vignette => "vignette".into(),
             Row::ReducedMotion => "reduced motion".into(),
             Row::ReduceFlashing => "reduce flashing".into(),
+            Row::UiJuice => "menu motion".into(),
             Row::GentleNerve => "gentle nerve".into(),
             Row::ColorblindMarkers => "colour-blind markers".into(),
             Row::Fullscreen => "fullscreen".into(),
@@ -270,6 +276,7 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::Vignette => step(&mut s.vignette),
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
         Row::ReduceFlashing => s.reduce_flashing = !s.reduce_flashing,
+        Row::UiJuice => s.ui_juice = s.ui_juice.step(dir),
         Row::GentleNerve => s.gentle_nerve = !s.gentle_nerve,
         Row::ColorblindMarkers => s.colorblind_markers = !s.colorblind_markers,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
@@ -290,6 +297,7 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::Vignette => pct(s.vignette),
         Row::ReducedMotion => onoff(s.reduced_motion),
         Row::ReduceFlashing => onoff(s.reduce_flashing),
+        Row::UiJuice => s.ui_juice.label().to_string(),
         Row::GentleNerve => onoff(s.gentle_nerve),
         Row::ColorblindMarkers => onoff(s.colorblind_markers),
         Row::Fullscreen => onoff(s.fullscreen),
@@ -359,7 +367,7 @@ mod tests {
         adjust(&mut s, Row::ColorblindMarkers, 1);
         assert!(s.colorblind_markers);
         assert_eq!(value(&s, Row::ColorblindMarkers), "on");
-        assert_eq!(rows().len(), 11 + ALL_ACTIONS.len() + 1);
+        assert_eq!(rows().len(), 12 + ALL_ACTIONS.len() + 1);
         adjust(&mut s, Row::GentleNerve, 1);
         assert!(s.gentle_nerve);
         assert_eq!(value(&s, Row::GentleNerve), "on");
@@ -406,6 +414,20 @@ mod tests {
         assert!(s.reduce_flashing);
         let old: Settings = ron::from_str("(music: 0.5)").unwrap();
         assert!(!old.reduce_flashing);
+    }
+
+    #[test]
+    fn menu_motion_row_cycles_and_old_files_load_soft() {
+        use crate::ui_motion::UiJuice;
+        let mut s = Settings::default();
+        assert_eq!(s.ui_juice, UiJuice::Soft);
+        adjust(&mut s, Row::UiJuice, 1);
+        assert_eq!(value(&s, Row::UiJuice), "full");
+        adjust(&mut s, Row::UiJuice, -1);
+        adjust(&mut s, Row::UiJuice, -1);
+        assert_eq!(value(&s, Row::UiJuice), "off");
+        let old: Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert_eq!(old.ui_juice, UiJuice::Soft);
     }
 
     #[test]

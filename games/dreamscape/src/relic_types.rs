@@ -49,6 +49,9 @@ pub struct RelicEffect {
     pub free_rerolls: u32,
     #[serde(default)]
     pub start_shards: u32,
+    /// Extra nerve cap (R4 wires it into `nerve.rs`).
+    #[serde(default)]
+    pub max_nerve: u32,
 }
 
 impl RelicEffect {
@@ -71,6 +74,15 @@ impl RelicEffect {
 pub struct Weapon {
     pub shape: u8,
     pub scale_pct: u8,
+    /// Held-mesh colour (R5 sets it from the theme accent).
+    #[serde(default)]
+    pub tint: [u8; 3],
+    /// Trail style index (R5).
+    #[serde(default)]
+    pub trail: u8,
+    /// Clash style index (R5).
+    #[serde(default)]
+    pub clash: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -93,6 +93,8 @@ mod progress;
 mod records;
 #[allow(dead_code)] // relic streams R1-R8 consume these as they land
 mod relic_types;
+#[allow(dead_code)] // UI revamp streams M1-M4, R3-R6 consume ui_motion as they land
+mod ui_motion;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
 mod reveal_ui;
