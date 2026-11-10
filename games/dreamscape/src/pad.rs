@@ -197,7 +197,7 @@ fn same(a: Keycode, b: Keycode) -> bool {
 }
 
 /// The button that does what `key` does on this screen.
-fn button_for(key: Keycode, mode: Mode, s: &Settings) -> Option<Button> {
+pub fn button_for(key: Keycode, mode: Mode, s: &Settings) -> Option<Button> {
     // Exact first (so [s] = save beats [s] = down), then the menu aliases.
     let exact = ALL_BUTTONS
         .iter()

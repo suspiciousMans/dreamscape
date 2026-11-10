@@ -93,6 +93,11 @@ pub struct Strike {
 }
 
 impl Strike {
+    /// Idle and off cooldown: `try_start` would swing. // === prompts ===
+    pub fn ready(&self) -> bool {
+        self.cooldown <= 0.0 && self.age.is_none()
+    }
+
     /// Begins a swing if idle and off cooldown. `cooldown_mult` < 1 is faster.
     pub fn try_start(&mut self, cooldown_mult: f32) -> bool {
         if self.cooldown > 0.0 || self.age.is_some() {
