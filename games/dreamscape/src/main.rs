@@ -89,6 +89,7 @@ mod objective;
 mod pack_art;
 mod packs;
 mod pad;
+mod prompts; // === prompts ===
 mod paths;
 mod pixel_ui;
 mod pixels;
@@ -3824,6 +3825,57 @@ impl DreamscapeGame {
             .collect()
     }
 
+    // === prompts ===
+    /// The input chips for this frame: only what can be done right now.
+    fn prompt_list(&self) -> Vec<prompts::Prompt> {
+        let mut ctx = prompts::Ctx::new(self.mode);
+        let flat = |p: Vec3| Vec3::new(p.x - self.player_position.x, 0.0, p.z - self.player_position.z).length();
+        match self.mode {
+            hud::Mode::Playing if !self.coop_active() => {
+                let targets = self.combat_targets();
+                let facing = self.flat_facing();
+                let me = self.player_position;
+                ctx.strike_ready = self.strike.ready()
+                    && targets.iter().any(|t| {
+                        combat::in_arc(me, facing, t.pos, self.strike_reach(), self.strike_arc_cos())
+                    });
+                // Cards: charged, and a foe close enough to be worth it.
+                let foe_near = targets.iter().any(|t| flat(t.pos) <= 12.0);
+                if foe_near {
+                    for (k, c) in self.hand_view().iter().take(5).enumerate() {
+                        ctx.cards_ready[k] = c.charge >= 1.0 && !c.active && !c.empty;
+                    }
+                }
+                for (i, &e) in self.shard_entities.iter().enumerate() {
+                    let Ok(t) = self.world.get::<&Transform>(e) else { continue };
+                    if i % 2 == 1 || flat(t.position) > prompts::REACH {
+                        continue; // every second entity is the beacon
+                    }
+                    if self.world.get::<&WakeMarker>(e).is_ok() {
+                        ctx.door_in_reach = true;
+                    } else {
+                        ctx.shard_in_reach = true;
+                    }
+                }
+            }
+            hud::Mode::PackPick => {
+                ctx.pack_unopened = !self.pick.offers.is_empty() && self.pick.picks_left > 0;
+            }
+            hud::Mode::Choice => {
+                ctx.choice = self.choice.as_ref().map(|k| match k {
+                    ChoiceKind::WakeDoor => prompts::Choice::WakeDoor {
+                        deeper: self.choice_view.selected == 1,
+                    },
+                    ChoiceKind::Event(_) => prompts::Choice::Event,
+                    _ => prompts::Choice::Upgrade,
+                });
+            }
+            _ => {}
+        }
+        prompts::compute(&ctx)
+    }
+    // === end prompts ===
+
     fn hud_view(&self) -> hud::HudView {
         let target = self.objective_target();
         hud::HudView {
@@ -4236,6 +4288,7 @@ impl DreamscapeGame {
             } else {
                 upgrade_ui::ChoiceView::default()
             },
+            prompts: self.prompt_list(), // === prompts ===
         }
     }
 
@@ -16268,6 +16321,69 @@ mod screen_smoke {
         n_shapes(false, shown(5, hand::NEVER, vec![]), 0.1); // a card mid-draw paints
     }
     // === end deck ===
+
+    // === prompts ===
+    #[test]
+    fn three_prompt_chips_draw_cheaply_at_both_sizes_and_every_juice_level() {
+        use prompts::{ActionId, Prompt, State};
+        let mut g = game("chips");
+        g.mode = hud::Mode::Playing;
+        let chips = |tweak_state: State| {
+            vec![
+                Prompt { action: ActionId::Strike, state: tweak_state, target: None },
+                Prompt { action: ActionId::UseCard(0), state: tweak_state, target: None },
+                Prompt { action: ActionId::UseCard(1), state: tweak_state, target: Some([0.5, 0.4]) },
+            ]
+        };
+        let cost = |g: &DreamscapeGame, w, h, p: Vec<Prompt>| {
+            let mut n = 0;
+            let mut s = 0;
+            let f = frame_with(g, w, h, &|v| v.prompts = p.clone());
+            n += f.len();
+            let ctx = egui::Context::default();
+            for c in &f {
+                if let egui::epaint::Shape::Mesh(m) = &c.shape {
+                    s += m.indices.len() / 3;
+                }
+            }
+            let _ = ctx;
+            (n, s)
+        };
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let base = cost(&g, w, h, Vec::new());
+            for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+                g.settings.ui_juice = juice;
+                for st in [State::Available, State::Required] {
+                    let with = cost(&g, w, h, chips(st));
+                    assert!(with.0 > base.0, "chips draw something");
+                    assert!(with.0 - base.0 <= 24, "{w}x{h} {juice:?}: +{} shapes", with.0 - base.0);
+                    assert!(with.1 - base.1 <= 200, "{w}x{h} {juice:?}: +{} tris", with.1 - base.1);
+                }
+            }
+        }
+        // The Playing screen with them still fits its UI budget (160 shapes, 800 triangles).
+        let (n, tris) = cost(&g, 1280.0, 720.0, chips(State::Available));
+        assert!(n <= 160 && tris <= 800, "{n} shapes, {tris} triangles");
+    }
+
+    #[test]
+    fn the_wake_door_asks_for_wake_or_go_deeper_and_open_play_asks_nothing() {
+        let mut g = game("wakechip");
+        g.mode = hud::Mode::Playing;
+        assert!(g.hud_view().prompts.iter().all(|p| p.state == prompts::State::Available));
+        g.choice = Some(ChoiceKind::WakeDoor);
+        g.mode = hud::Mode::Choice;
+        g.choice_view.selected = 0;
+        let p = g.hud_view().prompts;
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].action, p[0].state), (prompts::ActionId::Wake, prompts::State::Required));
+        g.choice_view.selected = 1;
+        assert_eq!(g.hud_view().prompts[0].action, prompts::ActionId::GoDeeper);
+        g.mode = hud::Mode::Title;
+        assert!(g.hud_view().prompts.is_empty());
+        g.choice = None;
+    }
+    // === end prompts ===
 
     #[test]
     fn the_pickup_ring_and_door_glow_draw_only_when_active() {

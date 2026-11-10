@@ -218,6 +218,10 @@ pub struct HudView {
     pub lid: f32,
     /// Nightmares: (boss title, sigils taken, sigils total, attack warning).
     pub boss: Option<(String, usize, usize, Option<&'static str>)>,
+    // === prompts ===
+    /// Context-only key/button chips for this frame (see `prompts::compute`).
+    pub prompts: Vec<crate::prompts::Prompt>,
+    // === end prompts ===
 }
 
 impl HudView {
@@ -589,6 +593,7 @@ pub fn draw(
     }
     // === end pressure ===
     boss_bar(&p, screen, v);
+    prompt_chips(&p, screen, v); // === prompts ===
     controls_legend(&p, screen, v);
     if v.first_person {
         // A tiny pixel cross: where you're looking.
@@ -1657,3 +1662,91 @@ mod tests {
         }
     }
 }
+
+// === prompts ===
+/// One key/button chip centred at `at`: a rounded plate with the key text
+/// (and an optional caption), bobbing and glowing with `prompts::bob`.
+/// Off or reduced motion: static, with a steady outline. `reduce_flashing`
+/// halves the glow swing. Empty `key` draws nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn prompt_chip(
+    p: &egui::Painter,
+    at: Pos2,
+    key: &str,
+    caption: &str,
+    state: crate::prompts::State,
+    time: f32,
+    s: &crate::settings::Settings,
+) {
+    use crate::prompts::{bob, soften, State};
+    if key.is_empty() {
+        return;
+    }
+    let (dy, glow) = bob(time, state, s.ui_juice, s.reduced_motion);
+    let glow = soften(glow, s.reduce_flashing);
+    let still = s.reduced_motion || s.ui_juice == crate::ui_motion::UiJuice::Off;
+    let hue = match state {
+        State::Available => [190, 230, 255],
+        State::Required => [255, 215, 140],
+    };
+    let key_g = p.layout_no_wrap(key.to_string(), FontId::monospace(20.0), rgba([255, 255, 255], 1.0));
+    let cap_g = (!caption.is_empty())
+        .then(|| p.layout_no_wrap(caption.to_string(), FontId::monospace(16.0), rgba(hue, 0.95)));
+    let gap = 8.0;
+    let w = key_g.size().x + 16.0 + cap_g.as_ref().map_or(0.0, |c| c.size().x + gap);
+    let h = key_g.size().y + 6.0;
+    let rect = Rect::from_center_size(Pos2::new(at.x, at.y + dy), Vec2::new(w, h));
+    let round = h * 0.4;
+    if !still {
+        p.rect_filled(rect.expand(3.0 + 3.0 * glow), round + 3.0, rgba(hue, 0.10 + 0.18 * glow));
+    }
+    p.rect_filled(rect, round, rgba([20, 14, 40], 0.82));
+    let (stroke_w, stroke_a) = if still { (2.0_f32, 0.95_f32) } else { (1.5_f32, 0.5 + 0.5 * glow) };
+    p.rect_stroke(rect, round, egui::Stroke::new(stroke_w, rgba(hue, stroke_a)));
+    let key_pos = Pos2::new(
+        rect.left() + 8.0,
+        rect.center().y - key_g.size().y * 0.5,
+    );
+    p.galley(key_pos, key_g.clone(), rgba([255, 255, 255], 1.0));
+    if let Some(c) = cap_g {
+        p.galley(
+            Pos2::new(key_pos.x + key_g.size().x + gap, rect.center().y - c.size().y * 0.5),
+            c,
+            rgba(hue, 0.95),
+        );
+    }
+}
+
+/// Darkens the screen behind a Required prompt (nothing for Available ones).
+#[allow(dead_code)] // M4: the choice screens call this before their own drawing
+pub fn prompt_dim(p: &egui::Painter, screen: Rect, prompts: &[crate::prompts::Prompt], s: &crate::settings::Settings) {
+    if crate::prompts::dims_rest(prompts) && s.ui_juice != crate::ui_motion::UiJuice::Off {
+        p.rect_filled(screen, 0.0, rgba([0, 0, 0], 0.35));
+    }
+}
+
+/// The frame's chips in their default places: anchored ones at their target,
+/// the rest in a row above the hand.
+fn prompt_chips(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let s = &v.settings_snapshot;
+    let mut row: Vec<(String, &'static str, crate::prompts::State)> = Vec::new();
+    for pr in &v.prompts {
+        let key = crate::prompts::label(pr.action, v.mode, s, v.pad);
+        let cap = crate::prompts::caption(pr.action);
+        match pr.target {
+            Some([x, y]) => {
+                let at = Pos2::new(screen.left() + x * screen.width(), screen.top() + y * screen.height());
+                prompt_chip(p, at, &key, cap, pr.state, v.time, s);
+            }
+            None if !key.is_empty() => row.push((key, cap, pr.state)),
+            None => {}
+        }
+    }
+    let step = 64.0;
+    let x0 = screen.center().x - step * (row.len() as f32 - 1.0) * 0.5;
+    let y = screen.bottom() - screen.height() * 0.30;
+    for (i, (key, cap, state)) in row.iter().enumerate() {
+        prompt_chip(p, Pos2::new(x0 + step * i as f32, y), key, cap, *state, v.time, s);
+    }
+}
+// === end prompts ===
