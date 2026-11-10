@@ -582,7 +582,7 @@ pub fn draw(
     // === combat ===
     foe_pips(&p, screen, v);
     // === end combat ===
-    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, art);
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, v.settings_snapshot.ui_juice, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);

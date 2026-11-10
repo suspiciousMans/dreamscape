@@ -314,7 +314,15 @@ pub fn card(
         Vec2::new(inner.width(), ART_H * s),
     );
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, ART_H * s / inner.width()));
-    p.image(art.texture(ctx, c), art_rect, uv, Color32::WHITE);
+    let warp = crate::card_warp::WarpParams {
+        theme: c.theme,
+        seed: c.seed,
+        t: v.time,
+        hover: 0.0,
+        juice: v.settings_snapshot.ui_juice,
+        reduced_motion: v.settings_snapshot.reduced_motion,
+    };
+    p.add(egui::Shape::mesh(crate::card_warp::art_mesh(art.texture(ctx, c), art_rect, uv, Color32::WHITE, &warp, |q| q)));
     p.rect_stroke(art_rect, 0.0, Stroke::new(2.0_f32, rgba(frame, 0.8)));
     if c.rarity >= Rarity::Lucid {
         foil(p, art_rect, v.time);

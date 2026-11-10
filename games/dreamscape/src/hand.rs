@@ -6,7 +6,7 @@
 //! Layout, tilt and timing are pure and unit-tested; `draw` only paints them.
 
 use engine::ui::egui::{
-    self, epaint::TextShape, Color32, FontId, Mesh, Pos2, Rect, Shape, Stroke, Vec2,
+    self, epaint::TextShape, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2,
 };
 
 /// Seconds a card takes to leap out, hold, and settle back.
@@ -461,22 +461,18 @@ impl Xf {
         p.add(Shape::closed_line(self.rect_points(r), Stroke::new(width, color)));
     }
 
-    fn image(&self, p: &egui::Painter, id: egui::TextureId, r: Rect, uv: Rect, tint: Color32) {
-        let mut mesh = Mesh::with_texture(id);
-        let corners = [
-            (r.left_top(), uv.left_top()),
-            (r.right_top(), uv.right_top()),
-            (r.right_bottom(), uv.right_bottom()),
-            (r.left_bottom(), uv.left_bottom()),
-        ];
-        for (pos, uv) in corners {
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: self.at(pos.to_vec2()),
-                uv,
-                color: tint,
-            });
-        }
-        mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    /// The card art, wobbling (see `card_warp`). The warp
+    /// is built in local space and turned with the card by `at()`.
+    fn warped_image(
+        &self,
+        p: &egui::Painter,
+        id: egui::TextureId,
+        r: Rect,
+        uv: Rect,
+        tint: Color32,
+        warp: &crate::card_warp::WarpParams,
+    ) {
+        let mesh = crate::card_warp::art_mesh(id, r, uv, tint, warp, |pt| self.at(pt.to_vec2()));
         p.add(Shape::mesh(mesh));
     }
 
@@ -502,6 +498,7 @@ pub fn draw(
     pile: &HandPile,
     time: f32,
     reduced: bool,
+    juice: crate::ui_motion::UiJuice,
     art: &mut crate::booklet_ui::CardArt,
 ) {
     let rests = layout(screen, cards.len());
@@ -564,7 +561,7 @@ pub fn draw(
             paint_back(p, &Xf::new(r.center(), angle), Rect::from_center_size(Pos2::ZERO, r.size()), b, 1.0, u);
         } else {
             let r = scrap_fit(c, r); // === scraps ===
-            draw_card(ctx, p, r, angle, c, amount, time, u, art);
+            draw_card(ctx, p, r, angle, c, amount, time, u, (juice, reduced), art);
         }
         // === end smallfixes ===
         // The edge's name floats up too, higher than the passive's.
@@ -613,7 +610,7 @@ pub fn draw(
                 );
             }
             let angle = tilt(l.slot, cards.len()) * (1.0 - (l.since / FLICK_SECS).min(1.0)) + pose.angle_off;
-            draw_card(ctx, p, scrap_fit(&l.card, pose.rect), angle, &l.card, 1.0, time, u, art); // === scraps ===
+            draw_card(ctx, p, scrap_fit(&l.card, pose.rect), angle, &l.card, 1.0, time, u, (juice, reduced), art); // === scraps ===
         }
     }
     // === end deck ===
@@ -777,6 +774,7 @@ fn draw_card(
     amount: f32,
     time: f32,
     u: f32,
+    motion: (crate::ui_motion::UiJuice, bool),
     art_cache: &mut crate::booklet_ui::CardArt,
 ) {
     let x = Xf::new(r.center(), angle);
@@ -844,7 +842,15 @@ fn draw_card(
         Some(card) => {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, art.height() / art.width()));
             let d = if lit { 255 } else { 150 };
-            x.image(p, art_cache.texture(ctx, card), art, uv, Color32::from_rgb(d, d, d));
+            let warp = crate::card_warp::WarpParams {
+                theme: card.theme,
+                seed: card.seed,
+                t: time,
+                hover: amount.clamp(0.0, 1.0),
+                juice: motion.0,
+                reduced_motion: motion.1,
+            };
+            x.warped_image(p, art_cache.texture(ctx, card), art, uv, Color32::from_rgb(d, d, d), &warp);
         }
         None => {
             let bands = 6;

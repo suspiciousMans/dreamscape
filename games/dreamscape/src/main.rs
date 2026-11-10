@@ -30,6 +30,9 @@ mod attunement;
 mod achievements;
 mod balance;
 mod booklet_ui;
+// === card_warp ===
+mod card_warp;
+// === end card_warp ===
 mod boss;
 mod cards;
 mod codex_ui;
