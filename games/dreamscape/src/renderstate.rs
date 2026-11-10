@@ -141,6 +141,8 @@ pub struct WorldLocs {
     pub hero: Option<glow::UniformLocation>,
     pub ghost: Option<glow::UniformLocation>,
     pub outline: Option<glow::UniformLocation>,
+    pub dissolve: Option<glow::UniformLocation>,
+    pub dissolve_color: Option<glow::UniformLocation>,
 }
 
 /// Names set once per frame (see `render`).
@@ -164,6 +166,8 @@ impl WorldLocs {
             hero: get("uHero"),
             ghost: get("uGhost"),
             outline: get("uOutline"),
+            dissolve: get("uDissolve"),
+            dissolve_color: get("uDissolveColor"),
         }
     }
 

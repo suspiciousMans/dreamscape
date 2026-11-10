@@ -41,6 +41,7 @@ mod deck;
 mod deck_ui;
 mod dev;
 mod dissolve;
+mod death_fx; // === deathfx ===
 mod dream;
 mod ending;
 mod events;
@@ -817,6 +818,15 @@ pub struct DreamscapeGame {
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
     dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
+    // === deathfx ===
+    /// The dying dreamer: dissolve timing, embers and the view fade.
+    death: Option<death_fx::Death>,
+    death_embers: Vec<Entity>,
+    death_origin: Vec3,
+    death_spawn: bool,
+    /// The dissolve that ends the run (holds input, then the Summary).
+    death_ends_run: bool,
+    // === end deathfx ===
     /// Special kinds met so far this run (each gets a hint the first time).
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
@@ -1243,6 +1253,13 @@ impl DreamscapeGame {
             player_tex: None,
             watchers: Vec::new(),
             dissolve: None,
+            // === deathfx ===
+            death: None,
+            death_embers: Vec::new(),
+            death_origin: Vec3::ZERO,
+            death_spawn: false,
+            death_ends_run: false,
+            // === end deathfx ===
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
             theme_rule: None,
@@ -9531,11 +9548,127 @@ impl DreamscapeGame {
                 }
                 _ => {}
             }
+        } else if self.mode == hud::Mode::Playing && self.death.is_none() {
+            self.start_death(death_fx::Kind::Full); // === deathfx === Summary comes when it ends
         } else {
-            self.mode = hud::Mode::Summary;
-            log::info!("Summary: {:?}", self.summary_view());
+            self.enter_summary();
         }
     }
+
+    // === deathfx ===
+    fn enter_summary(&mut self) {
+        self.mode = hud::Mode::Summary;
+        log::info!("Summary: {:?}", self.summary_view());
+    }
+
+    /// Starts the dissolve. Full holds the world still until it ends (then
+    /// the Summary); Short is the mid-run catch and never delays the respawn.
+    fn start_death(&mut self, kind: death_fx::Kind) {
+        let theme = self.dream.as_ref().map(|d| d.theme);
+        let color = theme
+            .and_then(|t| t.spec().accents.first().copied())
+            .map_or([1.0, 0.6, 0.4], |c| c.map(|v| v as f32 / 255.0));
+        self.death_ends_run = kind == death_fx::Kind::Full;
+        let kind = if self.death_ends_run
+            && death_fx::short_for(self.settings.reduced_motion, self.settings.ui_juice)
+        {
+            death_fx::Kind::Short
+        } else {
+            kind
+        };
+        let seed = self.dream_age.to_bits() as u64 ^ self.stats.caught as u64;
+        self.death = Some(
+            death_fx::Death::new(kind, self.first_person_active(), color)
+                .seeded(seed)
+                .accessible(self.settings.reduced_motion, self.settings.ui_juice),
+        );
+        self.death_origin = self.player_position - Vec3::Y * 0.6;
+        self.death_spawn = true;
+    }
+
+    /// Advances the dissolve; true while a Full death holds the game still.
+    fn tick_death(&mut self, dt: f32) -> bool {
+        let Some(mut d) = self.death.take() else {
+            return false;
+        };
+        d.update(dt);
+        let full = self.death_ends_run;
+        if d.finished() {
+            for e in self.death_embers.drain(..) {
+                let _ = self.world.despawn(e);
+            }
+            self.death_spawn = false;
+            if full && death_fx::should_enter_summary(&d) {
+                self.enter_summary();
+            }
+            return false;
+        }
+        let parts = d.particles(self.death_embers.len());
+        for (e, p) in self.death_embers.iter().zip(parts.iter().chain(std::iter::repeat(&death_fx::Ember { offset: [0.0; 3], size: 0.0, alpha: 0.0 }))) {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                t.position = self.death_origin + Vec3::from(p.offset);
+                t.scale = Vec3::splat(p.size * p.alpha);
+            }
+        }
+        if full && d.first_person() {
+            self.flash.trigger(d.color(), d.overlay(self.settings.reduce_flashing));
+        }
+        self.death = Some(d);
+        full
+    }
+
+    /// A Full death swallows input; any press skips to the Summary.
+    fn death_swallows(&mut self, event: &Event) -> bool {
+        if self.death.is_none() || !self.death_ends_run {
+            return false;
+        }
+        match event {
+            Event::KeyDown { .. } | Event::ControllerButtonDown { .. } | Event::MouseButtonDown { .. } => {
+                if let Some(d) = &mut self.death {
+                    d.skip();
+                }
+                true
+            }
+            Event::KeyUp { .. }
+            | Event::ControllerButtonUp { .. }
+            | Event::MouseButtonUp { .. }
+            | Event::MouseMotion { .. }
+            | Event::MouseWheel { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The ember pool (spawned where there is a GL context).
+    fn spawn_death_embers(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
+        if !std::mem::take(&mut self.death_spawn) {
+            return Ok(());
+        }
+        let Some(d) = &self.death else {
+            return Ok(());
+        };
+        let c = d.color().map(|v| (v * 255.0) as u8);
+        let mesh = self.mesh(Shape::Octahedron)?;
+        let tex = self.texture(gl, [c[0], c[1], c[2], 255]);
+        for _ in 0..24 {
+            let e = self.world.spawn((
+                Transform {
+                    position: self.death_origin,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ZERO,
+                },
+                MeshRenderer {
+                    mesh: mesh.clone(),
+                    texture: Some(tex.clone()),
+                },
+                Spin(4.0),
+                Lit,
+                Translucent,
+            ));
+            self.death_embers.push(e);
+        }
+        Ok(())
+    }
+    // === end deathfx ===
 
     /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
     fn dust_multiplier(&self) -> f32 {
@@ -11571,6 +11704,11 @@ impl Game for DreamscapeGame {
     }
 
     fn handle_event(&mut self, ctx: &mut Context, event: &Event) {
+        // === deathfx ===
+        if self.death_swallows(event) {
+            return;
+        }
+        // === end deathfx ===
         let (key, down, repeat) = match event {
             Event::KeyDown {
                 keycode: Some(k),
@@ -12194,6 +12332,12 @@ impl Game for DreamscapeGame {
         }
         self.time += dt;
         self.flash.tick(dt);
+        // === deathfx ===
+        if self.tick_death(dt) {
+            self.spawn_death_embers(ctx.gl())?;
+            return Ok(());
+        }
+        // === end deathfx ===
         self.grace = (self.grace - dt).max(0.0);
         self.nerve.tick(dt);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
@@ -12864,7 +13008,7 @@ impl Game for DreamscapeGame {
         { let _t = engine::perf::scope("upd.update_door_hum"); self.update_door_hum(dt); }
         { let _t = engine::perf::scope("upd.update_echoes"); self.update_echoes(player, dt)?; }
         { let _t = engine::perf::scope("upd.update_echo_ghost"); self.update_echo_ghost()?; }
-        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; }
+        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; self.spawn_death_embers(ctx.gl())?; /* deathfx */ }
         { let _t = engine::perf::scope("upd.update_ability_fx"); self.update_ability_fx(ctx.gl(), player, dt)?; }
         { let _t = engine::perf::scope("upd.update_adaptive_music"); self.update_adaptive_music(dt); }
         if !self.autopilot {
@@ -12965,6 +13109,11 @@ impl Game for DreamscapeGame {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
             self.sfx(Sound::Caught);
+            // === deathfx === a short ember burst where you fell; respawn is not delayed
+            if self.death.is_none() {
+                self.start_death(death_fx::Kind::Short);
+            }
+            // === end deathfx ===
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
                 && self.director.shard_this_dream;
@@ -13457,6 +13606,14 @@ impl Game for DreamscapeGame {
         set_frame(program_i, locs_i);
         set_frame(program, locs);
 
+        // === deathfx === only the dreamer dissolves (Full death)
+        let (dissolve_amount, dissolve_color) = self
+            .death
+            .as_ref()
+            .filter(|_| self.death_ends_run)
+            .map_or((0.0, [0.0; 3]), |d| (d.body_dissolve(), d.color()));
+        let (dissolve_loc, dissolve_color_loc) = (&locs.dissolve, &locs.dissolve_color);
+        // === end deathfx ===
         let (model_loc, uv_loc, melt_loc, lit_loc, hero_loc, ghost_loc, outline_loc) = (
             &locs.model,
             &locs.uv,
@@ -13540,6 +13697,14 @@ impl Game for DreamscapeGame {
                             gl.uniform_1_f32(Some(l), v);
                         }
                     }
+                    // === deathfx ===
+                    if let Some(l) = dissolve_loc {
+                        gl.uniform_1_f32(Some(l), if hero { dissolve_amount } else { 0.0 });
+                    }
+                    if let Some(l) = dissolve_color_loc {
+                        gl.uniform_3_f32(Some(l), dissolve_color[0], dissolve_color[1], dissolve_color[2]);
+                    }
+                    // === end deathfx ===
                     if let Some(l) = &melt_loc {
                         let v = if solid { 0.0 } else { melt };
                         if state.float(renderstate::melt_of, v) {
@@ -18046,4 +18211,40 @@ mod screen_smoke {
         }
     }
     // === end perf ===
+
+    // === deathfx ===
+    #[test]
+    fn a_dying_run_keeps_its_mode_until_the_dissolve_ends() {
+        let mut g = game("death_fx");
+        g.mode = hud::Mode::Playing;
+        g.start_death(death_fx::Kind::Full);
+        assert!(g.tick_death(0.5), "the world holds still");
+        assert_eq!(g.mode, hud::Mode::Playing);
+        let key = Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(engine::sdl2::keyboard::Keycode::Space),
+            scancode: None,
+            keymod: engine::sdl2::keyboard::Mod::NOMOD,
+            repeat: false,
+        };
+        assert!(g.death_swallows(&key), "input is locked and the press skips");
+        assert_eq!(g.mode, hud::Mode::Playing);
+        assert!(!g.tick_death(0.016));
+        assert_eq!(g.mode, hud::Mode::Summary);
+        assert!(g.death.is_none());
+    }
+
+    #[test]
+    fn a_catch_does_not_hold_the_game() {
+        let mut g = game("death_fx_short");
+        g.mode = hud::Mode::Playing;
+        g.start_death(death_fx::Kind::Short);
+        assert!(!g.tick_death(0.1), "respawn logic keeps running");
+        assert!(g.death.is_some());
+        assert!(!g.tick_death(0.5));
+        assert!(g.death.is_none());
+        assert_eq!(g.mode, hud::Mode::Playing);
+    }
+    // === end deathfx ===
 }
