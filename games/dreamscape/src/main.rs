@@ -102,6 +102,7 @@ mod relic_types;
 mod ui_motion;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
+mod relic_weapon; // === relics-weapon ===
 mod reveal_ui;
 mod scraps;
 mod code_ui;
@@ -262,7 +263,19 @@ struct Slash {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
+
+// === relics-weapon ===
+/// The relic in hand: its rarity and weapon. R6's equip flow sets it; until
+/// then `DREAMSCAPE_GIVE_RELIC=<cracked|worn|pristine|mythic>[:seed]` does.
+#[derive(Clone, Copy)]
+struct HeldRelic {
+    rarity: relic_types::RelicRarity,
+    weapon: relic_types::Weapon,
+    theme: dream::DreamTheme,
+}
+// === end relics-weapon ===
 
 /// What a swing asks for, until the next frame spawns it.
 struct SlashStart {
@@ -270,6 +283,7 @@ struct SlashStart {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
 
 // === abilities3 ===
@@ -822,6 +836,12 @@ pub struct DreamscapeGame {
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
     dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
+    // === relics-weapon ===
+    held_relic: Option<HeldRelic>,
+    held_sway: relic_weapon::HeldSway,
+    held_yaw_prev: f32,
+    held_lag: f32,
+    // === end relics-weapon ===
     // === deathfx ===
     /// The dying dreamer: dissolve timing, embers and the view fade.
     death: Option<death_fx::Death>,
@@ -1257,6 +1277,18 @@ impl DreamscapeGame {
             player_tex: None,
             watchers: Vec::new(),
             dissolve: None,
+            // === relics-weapon ===
+            held_relic: crate::dev::var("DREAMSCAPE_GIVE_RELIC")
+                .ok()
+                .and_then(|s| relic_weapon::parse_give(&s))
+                .map(|(rarity, seed)| {
+                    let theme = dream::DreamTheme::Lobby;
+                    HeldRelic { rarity, weapon: relic_weapon::weapon_for(rarity, theme, seed), theme }
+                }),
+            held_sway: relic_weapon::HeldSway::new(),
+            held_yaw_prev: 0.0,
+            held_lag: 0.0,
+            // === end relics-weapon ===
             // === deathfx ===
             death: None,
             death_embers: Vec::new(),
@@ -2654,6 +2686,7 @@ impl DreamscapeGame {
                     reach: self.strike_reach(),
                     half_arc: arc.acos(),
                     flip: self.strike_count % 2 == 1, // every other swing comes back
+                    trail: self.held_relic.map(|h| combat::trail_style(h.weapon.trail)), // === relics-weapon ===
                 });
             }
         }
@@ -2746,7 +2779,7 @@ impl DreamscapeGame {
             };
             let n = s.rays.len();
             for (i, pieces) in s.rays.iter().enumerate() {
-                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced);
+                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced, s.trail);
                 for (j, e) in pieces.iter().enumerate() {
                     let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                         continue;
@@ -2767,7 +2800,7 @@ impl DreamscapeGame {
                 let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                     continue;
                 };
-                match combat::slash_spark(k2, s.age, s.half_arc, s.flip).filter(|_| !reduced) {
+                match combat::slash_spark(k2, s.age, s.half_arc, s.flip, s.trail).filter(|_| !reduced) {
                     Some((angle, dist, size)) => {
                         t.position = me + heading(angle) * (s.reach * dist) + Vec3::Y * 0.4;
                         t.scale = Vec3::splat(0.34 * size);
@@ -2892,13 +2925,21 @@ impl DreamscapeGame {
         }
     }
 
+    // === relics-weapon ===
+    /// What the held relic adds to a strike (identity with none).
+    fn relic_mods(&self) -> relic_weapon::StrikeMods {
+        self.held_relic
+            .map_or(relic_weapon::StrikeMods::IDENTITY, |h| relic_weapon::strike_mods(&h.weapon, h.rarity))
+    }
+    // === end relics-weapon ===
+
     // === edges2 ===
-    /// The strike's reach: LONG REACH cards, then LONGARM.
+    /// The strike's reach: LONG REACH cards, then LONGARM, then the relic.
     fn strike_reach(&self) -> f32 {
         edges::reach(
             combat::reach_with(self.run.count(Upgrade::LongReach)),
             self.has_edge(edges::Edge::Longarm),
-        )
+        ) * self.relic_mods().reach_mult // === relics-weapon ===
     }
 
     /// The strike's half-arc cosine: WIDE EYES, then CLEAVE.
@@ -2908,7 +2949,8 @@ impl DreamscapeGame {
         } else {
             combat::ARC_COS
         };
-        edges::arc_cos(base, self.has_edge(edges::Edge::Cleave))
+        let arc = edges::arc_cos(base, self.has_edge(edges::Edge::Cleave));
+        (arc - self.relic_mods().arc_relax).max(0.1) // === relics-weapon === a wider fan
     }
 
     /// Is this foe still untouched?
@@ -2954,6 +2996,7 @@ impl DreamscapeGame {
         // === edges2 === AMBUSH, OPENER, PUNISHER
         dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
         // === end edges2 ===
+        dmg += self.relic_mods().damage_bonus as f32; // === relics-weapon ===
         dmg * self.bargain.mult() // === abilities3 === BARGAIN cuts deeper
     }
 
@@ -3080,7 +3123,8 @@ impl DreamscapeGame {
         let reach = self.strike_reach();
         let arc = self.strike_arc_cos();
         let mut knock = combat::KNOCKBACK
-            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32)
+            + self.relic_mods().knock_add; // === relics-weapon ===
         // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
         let mut stagger = combat::STAGGER_SECS;
         if self.has_edge(edges::Edge::Haymaker) {
@@ -3159,7 +3203,13 @@ impl DreamscapeGame {
         // === end combat ===
         if struck {
             self.sfx(Sound::StrikeHit);
-            self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            // === relics-weapon === the relic rings, and its clash sets the dip
+            let stop = Some(self.relic_mods().hit_stop_secs).filter(|&s| s > 0.0);
+            if let Some(h) = self.held_relic {
+                self.sfx(relic_weapon::strike_sound(h.rarity));
+            }
+            self.juice.hit_with(juice::Hit::Strike, self.settings.reduced_motion, stop);
+            // === end relics-weapon ===
         }
     }
 
@@ -4356,6 +4406,7 @@ impl DreamscapeGame {
                 reach: start.reach,
                 half_arc: start.half_arc,
                 flip: start.flip,
+                trail: start.trail, // === relics-weapon ===
             });
         }
         for at in std::mem::take(&mut self.pending_motes) {
