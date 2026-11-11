@@ -24,6 +24,8 @@ pub enum Hit {
 
 /// Slowest the world ever runs during a dip (it never fully freezes).
 pub const DIP_FLOOR: f32 = 0.2;
+/// Longest a relic may make the strike's time dip (soft ceiling).
+pub const STRIKE_STOP_MAX: f32 = 0.05;
 /// Seconds a pickup must follow the last one to keep the chain going.
 pub const CHAIN_WINDOW: f32 = 6.0;
 /// Seconds the pickup ring takes to ripple out and fade.
@@ -84,6 +86,12 @@ impl Juice {
 
     /// Something happened: dip time, shake, and (for pickups) ripple.
     pub fn hit(&mut self, what: Hit, reduced: bool) {
+        self.hit_with(what, reduced, None);
+    }
+
+    /// `hit`, with a relic's `Weapon.clash` choosing the strike's dip length
+    /// (seconds, never above [`STRIKE_STOP_MAX`]). Other hits ignore it.
+    pub fn hit_with(&mut self, what: Hit, reduced: bool, strike_stop: Option<f32>) {
         if reduced {
             return;
         }
@@ -94,7 +102,11 @@ impl Juice {
             Hit::Caught => (0.12, DIP_FLOOR, 0.10),
             Hit::Shard => (0.10, 0.45, 0.04),
             Hit::Pickup => (0.0, 1.0, 0.015),
-            Hit::Strike => (0.06, 0.3, 0.05),
+            Hit::Strike => (
+                strike_stop.map_or(0.06, |s| s.clamp(0.0, STRIKE_STOP_MAX)),
+                0.3,
+                0.05,
+            ),
         };
         if secs > 0.0 && secs >= self.dip_left {
             self.dip_left = secs;
@@ -296,4 +308,24 @@ mod tests {
         let near = j.door_glow();
         assert!(near > far && near <= 1.0);
     }
+
+    #[test]
+    fn a_relic_clash_sets_the_strike_dip_and_never_past_the_ceiling() {
+        let dip = |stop: Option<f32>| {
+            let mut j = Juice::new();
+            j.hit_with(Hit::Strike, false, stop);
+            j.dip_total
+        };
+        assert_eq!(dip(None), 0.06, "no relic: unchanged");
+        assert_eq!(dip(Some(0.03)), 0.03);
+        assert_eq!(dip(Some(5.0)), STRIKE_STOP_MAX);
+        // Other hits ignore the override; reduced motion still removes the dip.
+        let mut j = Juice::new();
+        j.hit_with(Hit::Caught, false, Some(0.01));
+        assert_eq!(j.dip_total, 0.12);
+        let mut r = Juice::new();
+        r.hit_with(Hit::Strike, true, Some(0.04));
+        assert_eq!(r.time_scale(), 1.0);
+    }
 }
+

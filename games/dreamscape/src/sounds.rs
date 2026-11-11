@@ -147,9 +147,15 @@ pub enum Sound {
     Triumph,
     /// A calm mote appears.
     Mote,
+    // === relics-weapon === a relic's strike, one voice per tier
+    RelicStrikeCracked,
+    RelicStrikeWorn,
+    RelicStrikePristine,
+    RelicStrikeMythic,
+    // === end relics-weapon ===
 }
 
-pub const ALL_SOUNDS: [Sound; 91] = [
+pub const ALL_SOUNDS: [Sound; 95] = [
     Sound::Jump,
     Sound::AirJump,
     Sound::Shard,
@@ -243,6 +249,10 @@ pub const ALL_SOUNDS: [Sound; 91] = [
     Sound::Coin,
     Sound::Triumph,
     Sound::Mote,
+    Sound::RelicStrikeCracked,
+    Sound::RelicStrikeWorn,
+    Sound::RelicStrikePristine,
+    Sound::RelicStrikeMythic,
 ];
 
 /// A tiny deterministic noise source (xorshift).
@@ -606,6 +616,22 @@ pub fn synth(sound: Sound) -> Vec<f32> {
             v(1760.0, 880.0, 0.16).gain(0.26),
             v(880.0, 1760.0, 0.2).gain(0.24).at(0.1),
         ],
+        // === relics-weapon === low thuds with grit; rarer tiers ring on top
+        RelicStrikeCracked => vec![v(120.0, 70.0, 0.16).noise(1.0).gain(0.26).curve(1.4)],
+        RelicStrikeWorn => vec![
+            v(150.0, 80.0, 0.18).noise(1.0).gain(0.26).curve(1.4),
+            v(420.0, 300.0, 0.10).gain(0.10).at(0.02),
+        ],
+        RelicStrikePristine => vec![
+            v(170.0, 90.0, 0.2).noise(1.0).gain(0.26).curve(1.4),
+            v(520.0, 390.0, 0.22).wave(2).gain(0.12).at(0.02),
+        ],
+        RelicStrikeMythic => vec![
+            v(190.0, 95.0, 0.24).noise(1.0).gain(0.26).curve(1.4),
+            v(660.0, 495.0, 0.3).wave(2).gain(0.12).at(0.02),
+            v(990.0, 742.0, 0.34).gain(0.08).at(0.05),
+        ],
+        // === end relics-weapon ===
         Strike => vec![v(900.0, 260.0, 0.12).noise(0.7).gain(0.28).curve(1.6)],
         StrikeHit => vec![
             v(180.0, 70.0, 0.14).gain(0.45),

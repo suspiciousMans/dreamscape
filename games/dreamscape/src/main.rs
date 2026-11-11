@@ -106,6 +106,7 @@ mod relic_art;
 mod ui_motion;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
+mod relic_weapon; // === relics-weapon ===
 mod reveal_ui;
 mod scraps;
 mod code_ui;
@@ -266,7 +267,18 @@ struct Slash {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
+
+// === relics-weapon ===
+/// The relic in hand: its rarity and weapon. R6's equip flow sets it; until
+/// then `DREAMSCAPE_GIVE_RELIC=<cracked|worn|pristine|mythic>[:seed]` does.
+#[derive(Clone, Copy)]
+struct HeldRelic {
+    rarity: relic_types::RelicRarity,
+    weapon: relic_types::Weapon,
+}
+// === end relics-weapon ===
 
 /// What a swing asks for, until the next frame spawns it.
 struct SlashStart {
@@ -274,6 +286,7 @@ struct SlashStart {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
 
 // === abilities3 ===
@@ -826,6 +839,12 @@ pub struct DreamscapeGame {
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
     dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
+    // === relics-weapon ===
+    held_relic: Option<HeldRelic>,
+    held_sway: relic_weapon::HeldSway,
+    held_yaw_prev: f32,
+    held_lag: f32,
+    // === end relics-weapon ===
     // === deathfx ===
     /// The dying dreamer: dissolve timing, embers and the view fade.
     death: Option<death_fx::Death>,
@@ -1261,6 +1280,18 @@ impl DreamscapeGame {
             player_tex: None,
             watchers: Vec::new(),
             dissolve: None,
+            // === relics-weapon ===
+            held_relic: crate::dev::var("DREAMSCAPE_GIVE_RELIC")
+                .ok()
+                .and_then(|s| relic_weapon::parse_give(&s))
+                .map(|(rarity, seed)| HeldRelic {
+                    rarity,
+                    weapon: relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, seed),
+                }),
+            held_sway: relic_weapon::HeldSway::new(),
+            held_yaw_prev: 0.0,
+            held_lag: 0.0,
+            // === end relics-weapon ===
             // === deathfx ===
             death: None,
             death_embers: Vec::new(),
@@ -2551,6 +2582,14 @@ impl DreamscapeGame {
     // === combat ===
     /// Strike, stagger timers, unravelling enemies, calm motes, the flash.
     fn update_combat(&mut self, dt: f32) {
+        // === relics-weapon === the held weapon lags behind a camera turn
+        if self.held_relic.is_some() && dt > 0.0 {
+            let turn = (self.yaw - self.held_yaw_prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.held_lag = self.held_sway.step(dt, turn / dt, self.settings.ui_juice, self.settings.reduced_motion);
+        }
+        self.held_yaw_prev = self.yaw;
+        // === end relics-weapon ===
         // Dev: DREAMSCAPE_STRIKE=<secs> lets the autopilot swing, over and
         // over, from that many seconds in (for screenshots).
         let dev_from = if self.autopilot {
@@ -2658,6 +2697,7 @@ impl DreamscapeGame {
                     reach: self.strike_reach(),
                     half_arc: arc.acos(),
                     flip: self.strike_count % 2 == 1, // every other swing comes back
+                    trail: self.held_relic.map(|h| combat::trail_style(h.weapon.trail)), // === relics-weapon ===
                 });
             }
         }
@@ -2750,7 +2790,7 @@ impl DreamscapeGame {
             };
             let n = s.rays.len();
             for (i, pieces) in s.rays.iter().enumerate() {
-                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced);
+                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced, s.trail);
                 for (j, e) in pieces.iter().enumerate() {
                     let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                         continue;
@@ -2771,7 +2811,7 @@ impl DreamscapeGame {
                 let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                     continue;
                 };
-                match combat::slash_spark(k2, s.age, s.half_arc, s.flip).filter(|_| !reduced) {
+                match combat::slash_spark(k2, s.age, s.half_arc, s.flip, s.trail).filter(|_| !reduced) {
                     Some((angle, dist, size)) => {
                         t.position = me + heading(angle) * (s.reach * dist) + Vec3::Y * 0.4;
                         t.scale = Vec3::splat(0.34 * size);
@@ -2896,13 +2936,21 @@ impl DreamscapeGame {
         }
     }
 
+    // === relics-weapon ===
+    /// What the held relic adds to a strike (identity with none).
+    fn relic_mods(&self) -> relic_weapon::StrikeMods {
+        self.held_relic
+            .map_or(relic_weapon::StrikeMods::IDENTITY, |h| relic_weapon::strike_mods(&h.weapon, h.rarity))
+    }
+    // === end relics-weapon ===
+
     // === edges2 ===
-    /// The strike's reach: LONG REACH cards, then LONGARM.
+    /// The strike's reach: LONG REACH cards, then LONGARM, then the relic.
     fn strike_reach(&self) -> f32 {
         edges::reach(
             combat::reach_with(self.run.count(Upgrade::LongReach)),
             self.has_edge(edges::Edge::Longarm),
-        )
+        ) * self.relic_mods().reach_mult // === relics-weapon ===
     }
 
     /// The strike's half-arc cosine: WIDE EYES, then CLEAVE.
@@ -2912,7 +2960,8 @@ impl DreamscapeGame {
         } else {
             combat::ARC_COS
         };
-        edges::arc_cos(base, self.has_edge(edges::Edge::Cleave))
+        let arc = edges::arc_cos(base, self.has_edge(edges::Edge::Cleave));
+        (arc - self.relic_mods().arc_relax).max(0.1) // === relics-weapon === a wider fan
     }
 
     /// Is this foe still untouched?
@@ -2958,6 +3007,7 @@ impl DreamscapeGame {
         // === edges2 === AMBUSH, OPENER, PUNISHER
         dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
         // === end edges2 ===
+        dmg += self.relic_mods().damage_bonus as f32; // === relics-weapon ===
         dmg * self.bargain.mult() // === abilities3 === BARGAIN cuts deeper
     }
 
@@ -3084,7 +3134,8 @@ impl DreamscapeGame {
         let reach = self.strike_reach();
         let arc = self.strike_arc_cos();
         let mut knock = combat::KNOCKBACK
-            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32)
+            + self.relic_mods().knock_add; // === relics-weapon ===
         // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
         let mut stagger = combat::STAGGER_SECS;
         if self.has_edge(edges::Edge::Haymaker) {
@@ -3163,7 +3214,13 @@ impl DreamscapeGame {
         // === end combat ===
         if struck {
             self.sfx(Sound::StrikeHit);
-            self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            // === relics-weapon === the relic rings, and its clash sets the dip
+            let stop = Some(self.relic_mods().hit_stop_secs).filter(|&s| s > 0.0);
+            if let Some(h) = self.held_relic {
+                self.sfx(relic_weapon::strike_sound(h.rarity));
+            }
+            self.juice.hit_with(juice::Hit::Strike, self.settings.reduced_motion, stop);
+            // === end relics-weapon ===
         }
     }
 
@@ -4360,6 +4417,7 @@ impl DreamscapeGame {
                 reach: start.reach,
                 half_arc: start.half_arc,
                 flip: start.flip,
+                trail: start.trail, // === relics-weapon ===
             });
         }
         for at in std::mem::take(&mut self.pending_motes) {
@@ -13666,6 +13724,45 @@ impl Game for DreamscapeGame {
         set_frame(program_i, locs_i);
         set_frame(program, locs);
 
+        // === relics-weapon === the held weapon: mesh, tint, model matrix
+        let mut held_draw: Option<(Arc<GpuMesh>, Arc<GpuTexture>, Mat4, Option<(Arc<GpuMesh>, Mat4)>)> = None;
+        if let Some(h) = self.held_relic {
+            let (juice, reduced) = (self.settings.ui_juice, self.settings.reduced_motion);
+            let size = f32::from(h.weapon.scale_pct) / 100.0;
+            let pose = relic_weapon::held_pose(time, self.held_lag, juice, reduced);
+            let world = if fp {
+                let q = Quat::from_euler(engine::glam::EulerRot::YXZ, pose.rot.y, pose.rot.x, pose.rot.z);
+                view.inverse() * (Mat4::from_translation(pose.offset) * Mat4::from_quat(q))
+            } else {
+                // Third person: in the right hand, level with the waist.
+                let f = Vec3::new(self.facing.x, 0.0, self.facing.z).normalize_or_zero();
+                let f = if f == Vec3::ZERO { Vec3::Z } else { f };
+                let right = f.cross(Vec3::Y).normalize_or_zero();
+                let q = Quat::from_rotation_arc(Vec3::Z, f) * Quat::from_rotation_z(-relic_weapon::TILT);
+                Mat4::from_translation(self.player_position + right * 0.45 + f * 0.25 + Vec3::new(0.0, 0.8 + pose.bob, 0.0))
+                    * Mat4::from_quat(q)
+            };
+            let mesh = self.meshes.get(&relic_weapon::shape_of(&h.weapon)).cloned();
+            let orbiter = (h.rarity == relic_types::RelicRarity::Mythic)
+                .then(|| self.meshes.get(&relic_weapon::orbiter_shape(&h.weapon)).cloned())
+                .flatten();
+            let color = [h.weapon.tint[0], h.weapon.tint[1], h.weapon.tint[2], 255];
+            let tex = self
+                .textures
+                .entry(color)
+                .or_insert_with(|| {
+                    Arc::new(GpuTexture::from_rgba8(gl, &color, 1, 1, TextureFilter::Nearest).expect("1x1 texture upload"))
+                })
+                .clone();
+            if let Some(mesh) = mesh {
+                let orbit = orbiter.map(|m2| {
+                    let off = relic_weapon::orbiter_offset(time, juice, reduced);
+                    (m2, world * Mat4::from_translation(off) * Mat4::from_scale(Vec3::splat(0.07)))
+                });
+                held_draw = Some((mesh, tex, world * Mat4::from_scale(Vec3::splat(size)), orbit));
+            }
+        }
+        // === end relics-weapon ===
         // === deathfx === only the dreamer dissolves (Full death)
         let (dissolve_amount, dissolve_color) = self
             .death
@@ -13978,6 +14075,52 @@ impl Game for DreamscapeGame {
                 gl.uniform_1_f32(Some(l), 0.0);
             }
         }
+        // === relics-weapon === drawn after the world, through the same
+        // uDissolve as the dreamer; first person clears depth so it never
+        // clips into a wall. Not a Hero: no dark shell, no silhouette.
+        if let Some((mesh, tex, model, orbit)) = &held_draw {
+            unsafe {
+                gl.use_program(Some(program));
+                if fp {
+                    gl.clear(engine::glow::DEPTH_BUFFER_BIT);
+                }
+                if params.backface_culling {
+                    gl.enable(engine::glow::CULL_FACE);
+                    gl.cull_face(engine::glow::BACK);
+                }
+                if let Some(l) = &lit_loc {
+                    gl.uniform_1_f32(Some(l), gameplay::lit_level(true, false));
+                }
+                if let Some(l) = &hero_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &melt_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &uv_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), dissolve_amount);
+                }
+                if let Some(l) = dissolve_color_loc {
+                    gl.uniform_3_f32(Some(l), dissolve_color[0], dissolve_color[1], dissolve_color[2]);
+                }
+                tex.bind(gl, 0);
+                for (mesh, model) in std::iter::once((mesh, model)).chain(orbit.as_ref().map(|(m, x)| (m, x))) {
+                    if let Some(l) = &model_loc {
+                        gl.uniform_matrix_4_f32_slice(Some(l), false, &model.to_cols_array());
+                    }
+                    gl.bind_vertex_array(Some(mesh.vao));
+                    mesh.draw_bound(gl);
+                }
+                gl.bind_vertex_array(None);
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+            }
+        }
+        // === end relics-weapon ===
 
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
         let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
@@ -18370,4 +18513,39 @@ mod screen_smoke {
         assert_eq!(g.mode, hud::Mode::Playing);
     }
     // === end deathfx ===
+
+    // === relics-weapon ===
+    #[test]
+    fn no_relic_leaves_strikes_exactly_as_they_were() {
+        let mut g = game("relic_none");
+        assert!(g.held_relic.is_none() || crate::dev::var_os("DREAMSCAPE_GIVE_RELIC").is_some());
+        g.held_relic = None;
+        assert_eq!(g.relic_mods(), relic_weapon::StrikeMods::IDENTITY);
+        assert_eq!(g.strike_reach(), combat::REACH);
+        assert_eq!(g.strike_arc_cos(), combat::ARC_COS);
+    }
+
+    #[test]
+    fn a_mythic_relic_reaches_further_and_a_cracked_one_less_but_both_stay_capped() {
+        let mut g = game("relic_mods");
+        g.held_relic = None;
+        let base = (g.strike_reach(), g.strike_arc_cos());
+        let mut last = base.0;
+        for rarity in [
+            relic_types::RelicRarity::Cracked,
+            relic_types::RelicRarity::Worn,
+            relic_types::RelicRarity::Pristine,
+            relic_types::RelicRarity::Mythic,
+        ] {
+            let weapon = relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, 9);
+            g.held_relic = Some(HeldRelic { rarity, weapon });
+            let (reach, arc) = (g.strike_reach(), g.strike_arc_cos());
+            assert!(reach >= last - 0.3 && reach <= base.0 * relic_weapon::MAX_REACH_MULT + 1e-4);
+            assert!(arc <= base.1 && arc >= base.1 - relic_weapon::MAX_ARC_RELAX - 1e-4);
+            last = reach;
+        }
+        assert_eq!(g.relic_mods().damage_bonus, 1, "Mythic adds one damage");
+    }
+    // === end relics-weapon ===
 }
+
