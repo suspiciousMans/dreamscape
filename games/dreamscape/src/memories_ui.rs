@@ -158,11 +158,19 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, m: &MemoriesView) {
         c,
         16.0 * u.max(0.8),
     );
+    // === m4a === dreamers ease in, the focused one springs up, its notes fade in again per dreamer
+    let mo = crate::screen_anim::list_motion(p, "m4a_memories", v.time, Some(m.selected), &v.settings_snapshot);
+    let notes_e = |k: usize| {
+        let a = crate::screen_anim::advance(p.ctx(), "m4a_memories_notes", v.time, m.selected as u32, None, false, 0.0, mo.amount);
+        crate::screen_anim::enter(k, a.epoch_age(v.time), mo.amount)
+    };
+    // === end m4a ===
     let row_h =
         ((left_panel.height() - c * 6.0) / m.rows.len().max(1) as f32).min(48.0 * u.max(0.8));
     for (i, row) in m.rows.iter().enumerate() {
-        let y = left_panel.top() + c * 4.0 + i as f32 * row_h;
         let sel = i == m.selected;
+        let e = crate::screen_anim::enter(i, mo.age, mo.amount); // === m4a ===
+        let y = left_panel.top() + c * 4.0 + i as f32 * row_h + (1.0 - e) * 5.0 * u;
         let tone = if sel { [255, 220, 140] } else { ink(v) };
         if sel {
             pixel_ui::selected_row(
@@ -175,8 +183,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, m: &MemoriesView) {
                 c,
             );
         }
-        let a = if row.found > 0 { 0.95 } else { 0.5 };
-        let font = (row_h * 0.42).clamp(11.0, 21.0);
+        let a = (if row.found > 0 { 0.95 } else { 0.5 }) * e;
+        let font = (row_h * 0.42).clamp(11.0, 21.0) * mo.scale_of(i as u32);
         p.text(
             Pos2::new(left_panel.left() + c * 9.0, y + 3.0 * u),
             Align2::LEFT_TOP,
@@ -213,9 +221,10 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, m: &MemoriesView) {
     let mut y = right_panel.top() + c * 4.0;
     let width = right_panel.width() - c * 8.0;
     for (k, n) in m.notes.iter().enumerate() {
+        let ne = notes_e(k); // === m4a ===
         let (text, a) = match n {
-            Some(t) => (format!("{}. {t}", k + 1), 0.92),
-            None => (format!("{}. …", k + 1), 0.4),
+            Some(t) => (format!("{}. {t}", k + 1), 0.92 * ne),
+            None => (format!("{}. …", k + 1), 0.4 * ne),
         };
         let g = p.layout(
             text,
@@ -225,7 +234,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, m: &MemoriesView) {
         );
         let h = g.size().y;
         p.galley(
-            Pos2::new(right_panel.left() + c * 4.0, y),
+            Pos2::new(right_panel.left() + c * 4.0, y + (1.0 - ne) * 4.0 * u),
             g,
             rgba(ink(v), a),
         );

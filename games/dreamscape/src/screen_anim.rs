@@ -232,9 +232,40 @@ pub fn advance(
     a
 }
 
+// === m4a === helpers for the list screens (title, settings, memories, codex)
+/// Where a chip showing `key` sits beside a panel whose right edge is `right`,
+/// level with `y`; `None` when it would not fit inside `screen_right`.
+pub fn chip_beside(right: f32, y: f32, key: &str, screen_right: f32) -> Option<engine::ui::egui::Pos2> {
+    // `hud::prompt_chip` draws 20 px monospace (0.6 em per glyph) plus 16 px of padding.
+    let w = key.chars().count() as f32 * 12.0 + 16.0;
+    let x = right + 10.0 + w * 0.5;
+    (!key.is_empty() && x + w * 0.5 + 4.0 <= screen_right).then(|| engine::ui::egui::Pos2::new(x, y))
+}
+
+/// The screen's motion for a list whose focus is row `sel` (`None`: nothing focused).
+pub fn list_motion(
+    p: &engine::ui::egui::Painter,
+    id: &'static str,
+    time: f32,
+    sel: Option<usize>,
+    s: &crate::settings::Settings,
+) -> GridMotion {
+    let amount = crate::ui_motion::effective(s.ui_juice, s.reduced_motion);
+    advance(p.ctx(), id, time, 0, sel.map(|i| i as u32), false, 0.0, amount).grid(time, amount)
+}
+// === end m4a ===
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chip_beside_a_panel_only_when_it_fits() {
+        let p = chip_beside(500.0, 100.0, "ENTER", 640.0).unwrap();
+        assert!(p.x > 500.0 && p.x + 38.0 <= 640.0 && p.y == 100.0);
+        assert!(chip_beside(600.0, 100.0, "ENTER", 640.0).is_none());
+        assert!(chip_beside(100.0, 100.0, "", 640.0).is_none());
+    }
 
     #[test]
     fn off_is_the_final_state_at_once() {

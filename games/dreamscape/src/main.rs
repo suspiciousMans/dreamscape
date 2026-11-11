@@ -18722,5 +18722,118 @@ mod screen_smoke {
     }
     // === end m4b ===
 
+    // === m4a === title + settings + codex/memories/code motion
+    fn m4a_game(name: &str) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn(5000);
+        g
+    }
+
+    fn m4a_show(g: &mut DreamscapeGame, screen: &str) {
+        match screen {
+            "Title" => g.mode = hud::Mode::Title,
+            "Settings" => g.open_settings(),
+            "Codex" => g.open_codex(),
+            "Memories" => g.mode = hud::Mode::Memories,
+            _ => g.open_code_entry(),
+        }
+    }
+
+    const M4A_SCREENS: [&str; 5] = ["Title", "Settings", "Codex", "Memories", "Code"];
+    const JUICES: [ui_motion::UiJuice; 3] = [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full];
+
+    #[test]
+    fn m4a_screens_fit_at_two_sizes_entering_and_settled_at_every_juice() {
+        let mut g = m4a_game("m4a_fit");
+        for juice in JUICES {
+            g.settings.ui_juice = juice;
+            for screen in M4A_SCREENS {
+                m4a_show(&mut g, screen);
+                let last = settings::rows().len().saturating_sub(1);
+                for sel in [0usize, 2, last] {
+                    g.settings_sel = sel;
+                    g.shop_col = sel; // the title's cursor
+                    let bad = m4b_overflows(&g, &format!("{screen} {juice:?} sel {sel}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    /// Frames close enough together that the screen does not count as reopened.
+    const M4A_RAMP: [f32; 9] = [0.0, 0.1, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8];
+
+    fn all_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        texts(shapes).into_iter().map(|t| t.0).collect()
+    }
+
+    #[test]
+    fn m4a_title_numbers_tick_up_and_off_shows_them_at_once() {
+        let mut g = m4a_game("m4a_tick");
+        g.mode = hud::Mode::Title;
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let first = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        let settled = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+        let has = |t: &[String], s: &str| t.iter().any(|x| x.contains(s));
+        assert!(has(&first, "0 dust") && !has(&first, "5000 dust"), "{first:?}");
+        assert!(has(&settled, "5000 dust"), "{settled:?}");
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        assert!(has(&all_text(&frames_at(&g, 1280.0, 720.0, &[0.0])), "5000 dust"));
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        g.settings.reduced_motion = true;
+        assert!(has(&all_text(&frames_at(&g, 1280.0, 720.0, &[0.0])), "5000 dust"));
+    }
+
+    #[test]
+    fn m4a_entrances_move_then_settle_and_off_is_final_on_frame_one() {
+        let mut g = m4a_game("m4a_enter");
+        for screen in M4A_SCREENS {
+            m4a_show(&mut g, screen);
+            g.settings.ui_juice = ui_motion::UiJuice::Soft;
+            let start = frames_at(&g, 1280.0, 720.0, &[0.0]);
+            let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+            assert!(start != mid, "{screen}: items come in over time");
+            // Off: nothing is staged, so the first frame matches a long-settled one in layout.
+            g.settings.ui_juice = ui_motion::UiJuice::Off;
+            let a = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+            let b = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            assert_eq!(a.len(), b.len(), "{screen} Off");
+            g.settings.reduced_motion = true;
+            g.settings.ui_juice = ui_motion::UiJuice::Full;
+            let a = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+            let b = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            // (The code box's existing cursor blink is not part of this motion.)
+            let flat = |t: Vec<String>| t.into_iter().map(|x| x.replace('_', "·")).collect::<Vec<_>>();
+            assert_eq!(flat(a), flat(b), "{screen} reduced motion is static");
+            g.settings.reduced_motion = false;
+        }
+    }
+
+    #[test]
+    fn m4a_title_and_settings_show_the_confirm_chip_when_there_is_room() {
+        let mut g = m4a_game("m4a_chip");
+        let key = prompts::label(prompts::ActionId::Confirm, hud::Mode::Title, &g.settings, false);
+        assert!(!key.is_empty());
+        for screen in ["Title", "Settings"] {
+            m4a_show(&mut g, screen);
+            let t = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            assert!(t.iter().any(|x| *x == key), "{screen}: chip {key:?} in {t:?}");
+        }
+    }
+
+    #[test]
+    fn m4a_screens_stay_cheap_at_full_juice() {
+        let mut g = m4a_game("m4a_cost");
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for (screen, shapes, tris) in [("Title", 550, 3_900), ("Settings", 120, 1_700), ("Codex", 130, 1_400), ("Memories", 140, 2_200), ("Code", 40, 600)] {
+            m4a_show(&mut g, screen);
+            for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+                let c = ui_cost(&g, w, h);
+                assert!(c.shapes <= shapes && c.triangles <= tris, "{screen} {w}x{h}: {c:?}");
+            }
+        }
+    }
+    // === end m4a ===
+
 }
 

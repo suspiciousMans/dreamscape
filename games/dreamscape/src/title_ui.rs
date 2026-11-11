@@ -207,9 +207,15 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     crate::hud::draw_eye_preview(p, Pos2::new(cx, top + 190.0 * k), v.eye, v);
     pixel_ui::panel(p, panel, [120, 100, 180], rgba([8, 4, 20], 0.82), c, 0.7);
     let selected = v.shop_col.min(v.menu.len().saturating_sub(1));
+    // === m4a === rows rise in, the focused one springs up, numbers tick up
+    let s = &v.settings_snapshot;
+    let mo = crate::screen_anim::list_motion(p, "m4a_title", v.time, Some(selected), s);
+    let (age, amount) = (mo.age, mo.amount);
+    // === end m4a ===
     for (i, ((_, _, _), row)) in v.menu.iter().zip(&rows).enumerate() {
         let sel = i == selected;
-        let y = menu_top + i as f32 * step;
+        let e = crate::screen_anim::enter(i, age, amount); // === m4a ===
+        let y = menu_top + i as f32 * step + (1.0 - e) * 6.0 * u - mo.lift_of(i as u32, c) * 0.5;
         let col = if sel { hue(v.time * 0.2) } else { ink(v) };
         if sel {
             pixel_ui::selected_row(
@@ -223,15 +229,24 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             );
         }
         // Never wider than the panel's inside, whatever the label says.
-        let size = pixel_ui::fit(row, font, width - c * 12.0, 8.0);
+        let size = pixel_ui::fit(row, font, width - c * 12.0, 8.0) * mo.scale_of(i as u32); // === m4a ===
         p.text(
             Pos2::new(cx, y + step * 0.5 - 2.0),
             Align2::CENTER_CENTER,
             row,
             FontId::monospace(size),
-            rgba(col, if sel { 1.0 } else { 0.7 }),
+            rgba(col, (if sel { 1.0 } else { 0.7 }) * e),
         );
     }
+    // === m4a === the chip on the focused action only
+    if !v.menu.is_empty() {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, s, v.pad);
+        let y = menu_top + selected as f32 * step + step * 0.5 - 2.0;
+        if let Some(at) = crate::screen_anim::chip_beside(panel.right(), y, &key, screen.right()) {
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, s);
+        }
+    }
+    // === end m4a ===
     // What the highlighted choice does, one centred line under the panel.
     if let Some((_, _, note)) = v.menu.get(selected) {
         if !note.is_empty() {
@@ -244,17 +259,18 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             );
         }
     }
-    let stats = if v.streak > 1 {
-        format!(
-            "{} dust   ·   {} cards   ·   deepest {}   ·   {} day streak",
-            v.dust, v.cards_owned, v.best_depth, v.streak
-        )
-    } else {
-        format!(
-            "{} dust   ·   {} cards   ·   deepest {}",
-            v.dust, v.cards_owned, v.best_depth
-        )
+    let stats_line = |dust: i64, cards: i64, deepest: i64| {
+        if v.streak > 1 {
+            format!("{dust} dust   ·   {cards} cards   ·   deepest {deepest}   ·   {} day streak", v.streak)
+        } else {
+            format!("{dust} dust   ·   {cards} cards   ·   deepest {deepest}")
+        }
     };
+    let stats = stats_line(v.dust as i64, v.cards_owned as i64, v.best_depth as i64);
+    // === m4a === the strip is sized by the final numbers; the shown ones tick up
+    let tick = |n: i64| crate::screen_anim::tick(n, age, 0.15, amount);
+    let shown_stats = stats_line(tick(v.dust as i64), tick(v.cards_owned as i64), tick(v.best_depth as i64));
+    // === end m4a ===
     let size = pixel_ui::fit(&stats, 20.0 * u, screen.width() - 80.0, 11.0);
     let strip = Rect::from_center_size(
         Pos2::new(cx, screen.bottom() - 62.0 * u),
@@ -267,7 +283,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         strip.center(),
         Align2::CENTER_CENTER,
-        stats,
+        shown_stats,
         FontId::monospace(size),
         rgba([255, 210, 80], 0.95),
     );
