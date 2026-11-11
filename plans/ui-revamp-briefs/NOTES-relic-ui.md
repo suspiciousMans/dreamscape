@@ -21,3 +21,4 @@ Buffs: "+{n}% DUST", "+{x.xx} MEMORY", "+{n}% SPEED", "+{n}% CALM", "+{n} GRACE"
 Status: "you need {n} more ash", "equipped", "the case couldn't be written down (see log)", "the pouch couldn't be written down (see log)"
 Hint bars: "[enter] open   [p] pouch   [tab] next tab   [esc] leave"; "[w][s] choose   [enter] equip   [p] the case   [tab] next tab   [esc] leave"
 Existing store hint "[tab] the moth's lottery" etc. unchanged.
+- tickets hint now "[tab] the relic case" (tab order changed: Tickets -> Relics -> Perks).

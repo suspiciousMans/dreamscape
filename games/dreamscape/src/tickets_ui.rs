@@ -219,9 +219,9 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     let hint = if t.confirming {
-        "[enter] yes, scratch it   [any other key] not now   [tab] the store"
+        "[enter] yes, scratch it   [any other key] not now   [tab] the relic case"
     } else {
-        "[enter] scratch a ticket   [tab] the store   [esc] leave"
+        "[enter] scratch a ticket   [tab] the relic case   [esc] leave"
     };
     crate::loadout_ui::hint_bar(p, screen, v, hint);
     pixel_ui::scanlines(p, screen, c, 8);
