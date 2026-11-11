@@ -2,11 +2,11 @@
 //! the second (its colours and mood). The altar shows the two cards going in
 //! and the one that comes out, live, before you commit.
 
-use crate::booklet_ui::{card, card_frame, CardArt, CARD_SIZE};
+use crate::booklet_ui::{card_frame, card_hover, CardArt, CARD_SIZE};
 use crate::cards::{Card, Rarity};
 use crate::fusion;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
-use crate::loadout_ui::{draw_grid, hint_bar, power_lines, GridMarks};
+use crate::loadout_ui::{draw_grid_motion, hint_bar, power_lines, GridMarks};
 use crate::pixel_ui;
 use engine::ui::egui::{self, Align2, Color32, FontId, Pos2, Rect, Vec2};
 
@@ -119,6 +119,36 @@ pub fn step(m: &MergeView) -> Step {
     }
 }
 
+// === m4d ===
+/// Which result the altar shows, as one number: it changes when the preview
+/// does, and the result card then eases up to full size.
+fn result_key(m: &MergeView) -> Option<u32> {
+    preview(m)?;
+    let b = m.cards.get(m.selected)?.number;
+    Some(m.first.unwrap_or(0).wrapping_mul(65_537) ^ b)
+}
+
+/// The result card's size while it settles in: 0.92 -> 1.0, with the spring's
+/// own tiny overshoot. Exactly 1.0 when nothing moves.
+pub fn result_scale(settle: f32, amount: f32) -> f32 {
+    if amount <= 0.0 {
+        return 1.0;
+    }
+    (0.92 + 0.08 * settle.clamp(0.0, 1.05)).clamp(0.92, 1.004)
+}
+
+/// Altar item `i` easing in: (painter with its fade, rect risen into place).
+fn altar_item(p: &egui::Painter, r: Rect, i: usize, age: f32, amount: f32, u: f32) -> (egui::Painter, Rect) {
+    let e = crate::screen_anim::enter(i + 2, age, amount);
+    if e >= 1.0 {
+        return (p.clone(), r);
+    }
+    let mut q = p.clone();
+    q.set_opacity(e);
+    (q, r.translate(Vec2::new(0.0, (1.0 - e) * 10.0 * u)))
+}
+// === end m4d ===
+
 /// A card slot with its label above.
 #[allow(clippy::too_many_arguments)]
 fn slot(
@@ -133,6 +163,7 @@ fn slot(
     art: &mut CardArt,
     u: f32,
     scale: f32,
+    hover: f32,
 ) {
     let c = pixel_ui::cell(u);
     p.text(
@@ -151,7 +182,7 @@ fn slot(
     );
     match shown {
         Some(card_ref) => {
-            card(ctx, p, r, card_ref, v, art, scale);
+            card_hover(ctx, p, r, card_ref, v, art, scale, hover);
             if dimmed {
                 p.rect_filled(r, 0.0, rgba([8, 4, 20], 0.55));
                 pixel_ui::hatch(p, r.shrink(c), c, Color32::from_black_alpha(60));
@@ -192,7 +223,7 @@ fn slot(
 
 /// How many of the ten resonant pairs you've merged, as a row of pixel tokens:
 /// a found pair shows both dreams' colours, an unfound one a question mark.
-fn resonant_strip(p: &egui::Painter, screen: Rect, v: &HudView, y: f32, width: f32) {
+fn resonant_strip(p: &egui::Painter, screen: Rect, v: &HudView, y: f32, width: f32, age: f32, amount: f32) {
     let m = &v.merge;
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
@@ -201,7 +232,11 @@ fn resonant_strip(p: &egui::Painter, screen: Rect, v: &HudView, y: f32, width: f
     p.text(
         Pos2::new(left, y),
         Align2::LEFT_TOP,
-        format!("RESONANT PAIRS  {found} / {}", fusion::RESONANT.len()),
+        format!(
+            "RESONANT PAIRS  {} / {}",
+            crate::screen_anim::tick(found as i64, age, 0.1, amount), // === m4d ===
+            fusion::RESONANT.len()
+        ),
         FontId::monospace(14.0 * u),
         rgba([255, 230, 160], 0.9),
     );
@@ -261,6 +296,27 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     let cx = screen.center().x;
     let top = screen.top() + 20.0 * u;
     let state = step(m);
+    // === m4d === motion: the grid follows the cursor by card number, the altar eases in
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let sel_card = m.cards.get(m.selected); // `cards` is already `sorting::order`ed
+    let anim = crate::screen_anim::advance(
+        ctx,
+        "m4d_merge",
+        v.time,
+        0,
+        sel_card.map(|c| c.number),
+        false,
+        0.0,
+        amount,
+    );
+    let mo = anim.grid(v.time, amount);
+    let age = mo.age;
+    let result_key = result_key(m);
+    let pop = crate::screen_anim::advance(ctx, "m4d_merge_result", v.time, 0, result_key, false, 0.0, amount)
+        .grid(v.time, amount);
+    let result_pop = result_scale(if result_key.is_some() { pop.focus } else { 1.0 }, amount);
+    // === end m4d ===
 
     // Title, with the moth that does the work.
     glitch_text(
@@ -320,7 +376,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         badge: m.first.map(|n| (n, "A")),
         dim_theme: first_card.map(|c| c.theme),
     };
-    let grid_bottom = draw_grid(
+    let grid_bottom = draw_grid_motion(
         p,
         screen,
         v,
@@ -329,8 +385,20 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         &marks,
         lay.grid_top,
         lay.grid_w,
+        &mo,
     );
-    resonant_strip(p, screen, v, grid_bottom + 34.0 * u, lay.grid_w);
+    resonant_strip(p, screen, v, grid_bottom + 34.0 * u, lay.grid_w, age, amount); // === m4d ===
+    // === m4d === the focused action's chip, beside the ribbon that names it (not when it can't merge)
+    if sel_card.is_some() && state != Step::Blocked {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, st, v.pad);
+        let half = key.chars().count() as f32 * 6.0 + 14.0; // chip: ~12 px per glyph + padding, halved
+        let right = ribbon.right() + 8.0 + half;
+        let x = if right + half <= screen.right() - 4.0 { Some(right) } else { None };
+        if let Some(x) = x {
+            crate::hud::prompt_chip(p, Pos2::new(x, ribbon.center().y), &key, "", crate::prompts::State::Available, v.time, st);
+        }
+    }
+    // === end m4d ===
 
     // The altar.
     pixel_ui::panel(
@@ -351,10 +419,11 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         Some(_) => (hovered, state == Step::Blocked),
         None => (None, false),
     };
+    let (p0, r0) = altar_item(p, lay.slots[0], 0, age, amount, u);
     slot(
         ctx,
-        p,
-        lay.slots[0],
+        &p0,
+        r0,
         "KEEPS SHAPE + ABILITY",
         a_card,
         a_dim,
@@ -363,11 +432,13 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         art,
         u,
         lay.scale,
+        if m.first.is_none() { mo.hover() } else { 0.0 },
     );
+    let (p1, r1) = altar_item(p, lay.slots[1], 1, age, amount, u);
     slot(
         ctx,
-        p,
-        lay.slots[1],
+        &p1,
+        r1,
         "GIVES COLOUR + MOOD",
         b_card,
         b_dim,
@@ -376,6 +447,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         art,
         u,
         lay.scale,
+        mo.hover(),
     );
     // The result: a glow of its own colour, and sparkles orbiting when it's real.
     if let Some(res) = &result {
@@ -412,10 +484,12 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             pixel_ui::sparkle(p, snapped, c, rgba(col, 0.9));
         }
     }
+    let (p2, r2) = altar_item(p, lay.slots[2], 2, age, amount, u);
+    let r2 = Rect::from_center_size(r2.center(), r2.size() * result_pop);
     slot(
         ctx,
-        p,
-        lay.slots[2],
+        &p2,
+        r2,
         "BECOMES",
         result.as_ref(),
         false,
@@ -423,7 +497,8 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         v,
         art,
         u,
-        lay.scale,
+        lay.scale * result_pop,
+        1.0,
     );
     // The signs between: they light up once there's something to make.
     let ready = result.is_some();
@@ -556,6 +631,26 @@ mod tests {
         assert_eq!(step(&m), Step::Blocked, "same dream");
         m.selected = 0;
         assert_eq!(step(&m), Step::Blocked, "itself");
+    }
+
+    #[test]
+    fn m4d_the_result_settles_in_without_overshooting() {
+        assert_eq!(result_scale(0.0, 0.0), 1.0, "Off: final size at once");
+        assert_eq!(result_scale(1.0, 1.4), 1.0);
+        let mut last = 0.0;
+        for k in 0..=105 {
+            let s = result_scale(k as f32 * 0.01, 1.0);
+            assert!((0.92..=1.004).contains(&s) && s >= last - 1e-6, "k{k} {s}");
+            last = s;
+        }
+        let mut m = MergeView { cards: cards(&[Garden, MyceliumGrove, Garden]).into(), ..Default::default() };
+        assert_eq!(result_key(&m), None);
+        m.first = Some(1);
+        m.selected = 1;
+        let k1 = result_key(&m);
+        assert!(k1.is_some());
+        m.selected = 2;
+        assert_eq!(result_key(&m), None, "same dream: no result");
     }
 
     #[test]
