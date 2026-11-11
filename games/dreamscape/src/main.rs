@@ -97,6 +97,8 @@ mod relic_types;
 mod ui_motion;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
+#[allow(dead_code)] // R6
+mod relic_names;
 mod reveal_ui;
 mod scraps;
 mod code_ui;

@@ -10,7 +10,7 @@ mod secret;
 mod texture;
 mod theme;
 mod variant;
-mod vocab;
+pub(crate) mod vocab;
 
 pub use grid::{Terrain, LEVEL_H};
 pub use build::{
