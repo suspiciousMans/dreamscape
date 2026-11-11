@@ -93,6 +93,11 @@ pub struct Strike {
 }
 
 impl Strike {
+    /// Idle and off cooldown: `try_start` would swing. // === prompts ===
+    pub fn ready(&self) -> bool {
+        self.cooldown <= 0.0 && self.age.is_none()
+    }
+
     /// Begins a swing if idle and off cooldown. `cooldown_mult` < 1 is faster.
     pub fn try_start(&mut self, cooldown_mult: f32) -> bool {
         if self.cooldown > 0.0 || self.age.is_some() {
@@ -143,6 +148,25 @@ pub const SLASH_SWEEP: f32 = 0.14;
 pub const SLASH_FADE: f32 = 0.16;
 pub const SLASH_LIFE: f32 = SLASH_SWEEP + SLASH_FADE;
 
+/// A relic's trail style for the swing's flash: ray width and reach of the
+/// tip/sparks as multiples. `None` (no relic) is the plain slash.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Trail {
+    pub width: f32,
+    pub tip: f32,
+}
+
+/// `Weapon.trail` index -> style (wraps).
+pub fn trail_style(index: u8) -> Trail {
+    const STYLES: [Trail; 4] = [
+        Trail { width: 1.0, tip: 1.0 },
+        Trail { width: 1.4, tip: 1.0 },
+        Trail { width: 0.7, tip: 1.08 },
+        Trail { width: 1.2, tip: 1.15 },
+    ];
+    STYLES[index as usize % STYLES.len()]
+}
+
 /// Each ray is three pieces end to end, dim at the dreamer and white at the
 /// tip: (from, to) as fractions of its length, and its width against the ray's.
 pub const SLASH_SEGMENTS: [(f32, f32, f32); 3] = [(0.0, 0.42, 0.55), (0.42, 0.80, 0.9), (0.80, 1.0, 1.5)];
@@ -153,7 +177,7 @@ pub const SPARK_LIFE: f32 = 0.22;
 /// Spark `k` at `age`: (angle round from the facing, distance as a multiple of
 /// the reach, size 0..1). It leaves the tip as the sweep passes its angle,
 /// then flies on outward and shrinks. `None` before it leaves or after.
-pub fn slash_spark(k: usize, age: f32, half_arc: f32, flip: bool) -> Option<(f32, f32, f32)> {
+pub fn slash_spark(k: usize, age: f32, half_arc: f32, flip: bool, trail: Option<Trail>) -> Option<(f32, f32, f32)> {
     let frac = if SLASH_SPARKS > 1 { k as f32 / (SLASH_SPARKS - 1) as f32 } else { 0.5 };
     let since = age - SLASH_SWEEP * frac;
     if !(0.0..SPARK_LIFE).contains(&since) {
@@ -161,7 +185,8 @@ pub fn slash_spark(k: usize, age: f32, half_arc: f32, flip: bool) -> Option<(f32
     }
     let t = since / SPARK_LIFE;
     let side = if flip { -1.0 } else { 1.0 };
-    Some((side * (-half_arc + 2.0 * half_arc * frac), 1.0 + 0.5 * t, 1.0 - t))
+    let (_, tip) = trail.map_or((1.0, 1.0), |tr| (tr.width, tr.tip));
+    Some((side * (-half_arc + 2.0 * half_arc * frac), (1.0 + 0.5 * t) * tip, 1.0 - t))
 }
 
 /// One ray of the fan at some moment: how far round from the facing (radians,
@@ -176,7 +201,15 @@ pub struct Ray {
 /// Ray `i` of `n` at `age` seconds into a swing whose arc is `half_arc` each
 /// way. `flip` sweeps right to left. Reduced motion lights the whole fan at
 /// once. `None` while it is dark (not reached yet, or faded).
-pub fn slash_ray(i: usize, n: usize, age: f32, half_arc: f32, flip: bool, reduced: bool) -> Option<Ray> {
+pub fn slash_ray(
+    i: usize,
+    n: usize,
+    age: f32,
+    half_arc: f32,
+    flip: bool,
+    reduced: bool,
+    trail: Option<Trail>,
+) -> Option<Ray> {
     let frac = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.5 };
     let lit_at = if reduced { 0.0 } else { SLASH_SWEEP * frac };
     let since = age - lit_at;
@@ -185,10 +218,11 @@ pub fn slash_ray(i: usize, n: usize, age: f32, half_arc: f32, flip: bool, reduce
     }
     let side = if flip { -1.0 } else { 1.0 };
     let width = (1.0 - since / SLASH_FADE).powf(1.5);
+    let (wide, tip) = trail.map_or((1.0, 1.0), |tr| (tr.width, tr.tip));
     Some(Ray {
         angle: side * (-half_arc + 2.0 * half_arc * frac),
-        width,
-        length: 0.85 + 0.15 * width,
+        width: width * wide,
+        length: (0.85 + 0.15 * width) * tip,
     })
 }
 
@@ -457,18 +491,18 @@ mod tests {
         let half = ARC_COS.acos();
         let n = SLASH_RAYS;
         // Nothing before the swing; the first ray is lit at once, the last at the end of the sweep.
-        assert!(slash_ray(n - 1, n, 0.0, half, false, false).is_none());
-        let first = slash_ray(0, n, 0.0, half, false, false).unwrap();
+        assert!(slash_ray(n - 1, n, 0.0, half, false, false, None).is_none());
+        let first = slash_ray(0, n, 0.0, half, false, false, None).unwrap();
         assert!((first.angle + half).abs() < 1e-4, "starts at the left edge");
         assert_eq!(first.width, 1.0);
-        let last = slash_ray(n - 1, n, SLASH_SWEEP, half, false, false).unwrap();
+        let last = slash_ray(n - 1, n, SLASH_SWEEP, half, false, false, None).unwrap();
         assert!((last.angle - half).abs() < 1e-4, "ends at the right edge");
         // Lit in order.
         let mut prev = -1.0;
         for i in 0..n {
             let lit = (0..400)
                 .map(|k| k as f32 * 0.001)
-                .find(|&t| slash_ray(i, n, t, half, false, false).is_some())
+                .find(|&t| slash_ray(i, n, t, half, false, false, None).is_some())
                 .unwrap();
             assert!(lit >= prev, "ray {i} lights after ray {}", i.saturating_sub(1));
             prev = lit;
@@ -492,42 +526,42 @@ mod tests {
     #[test]
     fn sparks_leave_the_tip_as_the_sweep_passes_and_fly_out_shrinking() {
         let half = 1.0;
-        assert!(slash_spark(0, -0.01, half, false).is_none());
-        let (a0, d0, s0) = slash_spark(0, 0.0, half, false).unwrap();
+        assert!(slash_spark(0, -0.01, half, false, None).is_none());
+        let (a0, d0, s0) = slash_spark(0, 0.0, half, false, None).unwrap();
         assert_eq!((a0, d0, s0), (-half, 1.0, 1.0), "first spark at the first edge");
-        let (a1, d1, s1) = slash_spark(0, SPARK_LIFE * 0.9, half, false).unwrap();
+        let (a1, d1, s1) = slash_spark(0, SPARK_LIFE * 0.9, half, false, None).unwrap();
         assert!(d1 > d0 && s1 < s0 && a1 == a0, "flew out, shrank, same bearing");
-        assert!(slash_spark(0, SPARK_LIFE + 0.001, half, false).is_none());
-        let last = slash_spark(SLASH_SPARKS - 1, SLASH_SWEEP, half, false).unwrap();
+        assert!(slash_spark(0, SPARK_LIFE + 0.001, half, false, None).is_none());
+        let last = slash_spark(SLASH_SPARKS - 1, SLASH_SWEEP, half, false, None).unwrap();
         assert!((last.0 - half).abs() < 1e-5, "the last leaves at the far edge");
-        assert_eq!(slash_spark(0, 0.0, half, true).unwrap().0, half, "flipped swing");
+        assert_eq!(slash_spark(0, 0.0, half, true, None).unwrap().0, half, "flipped swing");
     }
 
     #[test]
     fn the_trail_narrows_and_goes_dark_and_the_lead_is_the_widest() {
         let half = ARC_COS.acos();
-        let early = slash_ray(0, SLASH_RAYS, 0.0, half, false, false).unwrap();
-        let later = slash_ray(0, SLASH_RAYS, 0.1, half, false, false).unwrap();
+        let early = slash_ray(0, SLASH_RAYS, 0.0, half, false, false, None).unwrap();
+        let later = slash_ray(0, SLASH_RAYS, 0.1, half, false, false, None).unwrap();
         assert!(later.width < early.width && later.length < early.length);
-        assert!(slash_ray(0, SLASH_RAYS, SLASH_FADE + 0.001, half, false, false).is_none());
+        assert!(slash_ray(0, SLASH_RAYS, SLASH_FADE + 0.001, half, false, false, None).is_none());
         // Whole fan dark by the end of the life.
         for i in 0..SLASH_RAYS {
-            assert!(slash_ray(i, SLASH_RAYS, SLASH_LIFE + 0.01, half, false, false).is_none());
+            assert!(slash_ray(i, SLASH_RAYS, SLASH_LIFE + 0.01, half, false, false, None).is_none());
         }
     }
 
     #[test]
     fn the_next_swing_goes_the_other_way_and_reduced_motion_lights_it_all_at_once() {
         let half = 1.0;
-        let a = slash_ray(0, SLASH_RAYS, 0.0, half, false, false).unwrap();
-        let b = slash_ray(0, SLASH_RAYS, 0.0, half, true, false).unwrap();
+        let a = slash_ray(0, SLASH_RAYS, 0.0, half, false, false, None).unwrap();
+        let b = slash_ray(0, SLASH_RAYS, 0.0, half, true, false, None).unwrap();
         assert_eq!(a.angle, -b.angle, "flipped");
         let lit = (0..SLASH_RAYS)
-            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, true).is_some())
+            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, true, None).is_some())
             .count();
         assert_eq!(lit, SLASH_RAYS);
         let lit_normal = (0..SLASH_RAYS)
-            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, false).is_some())
+            .filter(|&i| slash_ray(i, SLASH_RAYS, 0.0, half, false, false, None).is_some())
             .count();
         assert!(lit_normal < SLASH_RAYS);
     }
@@ -607,4 +641,23 @@ mod tests {
         assert_eq!(unravel_scale(UNRAVEL_SECS), 0.0);
         assert_eq!(unravel_scale(9.0), 0.0);
     }
+
+    #[test]
+    fn a_trail_only_reshapes_the_flash_and_none_is_the_plain_slash() {
+        let half = ARC_COS.acos();
+        let plain = slash_ray(3, SLASH_RAYS, 0.05, half, false, false, None).unwrap();
+        assert_eq!(trail_style(0), Trail { width: 1.0, tip: 1.0 });
+        assert_eq!(slash_ray(3, SLASH_RAYS, 0.05, half, false, false, Some(trail_style(0))), Some(plain));
+        for i in 0..8u8 {
+            let tr = trail_style(i);
+            let r = slash_ray(3, SLASH_RAYS, 0.05, half, false, false, Some(tr)).unwrap();
+            assert_eq!(r.angle, plain.angle);
+            assert!((r.width - plain.width * tr.width).abs() < 1e-6);
+            assert!(tr.width > 0.0 && tr.width <= 1.5 && tr.tip >= 1.0 && tr.tip <= 1.2);
+            // Same lit window: a trail never lengthens or shortens the flash.
+            assert_eq!(slash_ray(0, SLASH_RAYS, SLASH_FADE + 0.001, half, false, false, Some(tr)), None);
+            assert!(slash_spark(2, 0.1, half, false, Some(tr)).is_some());
+        }
+    }
 }
+

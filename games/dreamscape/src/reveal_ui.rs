@@ -1,7 +1,7 @@
 //! Pack opening and the Lucid Store: the two screens between waking up and
 //! dreaming again. Same pixel + VT323 language as the rest of the HUD.
 
-use crate::booklet_ui::{card, CardArt, CARD_SIZE};
+use crate::booklet_ui::{card_hover, CardArt, CARD_SIZE};
 use crate::cards::Recalled;
 use crate::hud::{glitch_text, hue, ink, rgba, HudView};
 use crate::pack_art::{self, PackArt, PACK_SIZE};
@@ -193,6 +193,66 @@ pub fn pack_area(screen: Vec2) -> Vec2 {
     Vec2::new(screen.x - 80.0, screen.y - 80.0 - 110.0)
 }
 
+// === m4d ===
+/// How long a landed card takes to settle (pop + warp fade).
+pub const LAND_TIME: f32 = 0.35;
+
+/// Entrance of face-down card `slot` once the tear is over (1 = in place).
+/// Slots past the tenth share a delay, so a long pack is never still
+/// arriving when its first flips start. A skipped reveal (`age` = MAX) is done.
+pub fn card_enter(slot: usize, age: f32, amount: f32) -> f32 {
+    if age == f32::MAX {
+        return 1.0;
+    }
+    crate::screen_anim::enter(slot.min(10), age, amount)
+}
+
+/// Size factor of a card `since` seconds after it landed: a small settle
+/// from slightly big, scaled by the rarity beat (`tier` 0..=7; faded dreams
+/// don't pop). 1.0 outside the window, and always when nothing moves.
+pub fn land_pop(since: f32, tier: u8, amount: f32) -> f32 {
+    if amount <= 0.0 || tier == 0 || !(0.0..LAND_TIME).contains(&since) {
+        return 1.0;
+    }
+    let amp = (0.01 + 0.006 * tier as f32) * amount;
+    1.0 + amp * (1.0 - crate::ui_motion::ease_out_cubic(since / LAND_TIME))
+}
+
+/// The art's warp hover right after landing: 1 -> 0 over ~1 s.
+pub fn land_hover(since: f32, amount: f32) -> f32 {
+    if amount <= 0.0 || since < 0.0 {
+        return 0.0;
+    }
+    (1.0 - since).clamp(0.0, 1.0)
+}
+
+/// Seconds since the last card finished flipping (large once skipped).
+pub fn settled_for(times: &[f32], age: f32) -> f32 {
+    if age == f32::MAX {
+        return 10.0;
+    }
+    times.last().map_or(0.0, |t| (age - t - FLIP_TIME).max(0.0))
+}
+
+/// A shown count: `to` when nothing moves, else easing up from `from`.
+pub fn count_up(from: i64, to: i64, since: f32, amount: f32) -> i64 {
+    if amount <= 0.0 {
+        return to;
+    }
+    crate::ui_motion::tick_up(from, to, since / crate::screen_anim::TICK_DUR)
+}
+
+/// How far pack `i` of the pick screen still has to slide at `age` (1 = all
+/// of it, 0 = in place): ease-out, 80 ms later for each pack to its right.
+pub fn pick_slide(i: usize, age: f32, amount: f32) -> f32 {
+    if amount <= 0.0 {
+        return 0.0;
+    }
+    let e = ((age - i as f32 * 0.08) / PICK_SLIDE).clamp(0.0, 1.0);
+    (1.0 - e) * (1.0 - e)
+}
+// === end m4d ===
+
 // === scraps ===
 /// Extra height kept free under the cards for the scrap line.
 pub const SCRAP_LINE_H: f32 = 28.0;
@@ -295,7 +355,7 @@ pub struct PackPickView {
 
 /// Seconds before a key can open a pack (a held Return from the summary).
 pub const PICK_LOCKOUT: f32 = 0.4;
-/// Seconds the packs take to slide in (full motion only).
+/// Seconds one pack takes to slide in.
 const PICK_SLIDE: f32 = 0.5;
 /// Selected pack: how much bigger, and how far it lifts (at scale 1).
 const PICK_GROW: f32 = 1.06;
@@ -446,12 +506,10 @@ pub fn draw_pick(
     let n = view.offers.len();
     let sel = view.selected.min(n.saturating_sub(1));
     let rects = pick_rects(screen, n);
-    let slide = if full {
-        let e = (view.age / PICK_SLIDE).clamp(0.0, 1.0);
-        (1.0 - e) * (1.0 - e) * 40.0 * u
-    } else {
-        0.0
-    };
+    // === m4d === each pack slides and fades in on its own beat; Off / reduced motion: in place
+    let amount = crate::ui_motion::effective(v.settings_snapshot.ui_juice, v.settings_snapshot.reduced_motion);
+    let slide_of = |i: usize| pick_slide(i, view.age, amount) * 40.0 * u;
+    // === end m4d ===
     let pointer = ctx.pointer_hover_pos();
     let (art_time, art_motion) = if full { (v.time, 1.0) } else { (0.0, 0.0) };
     for (i, (offer, base)) in view.offers.iter().zip(&rects).enumerate() {
@@ -461,7 +519,12 @@ pub fn draw_pick(
             let grown = Rect::from_center_size(r.center(), r.size() * PICK_GROW);
             r = grown.translate(Vec2::new(0.0, -PICK_LIFT * u));
         }
+        let slide = slide_of(i);
         r = r.translate(Vec2::new(0.0, slide));
+        let enter = crate::screen_anim::enter(i, view.age, amount); // === m4d ===
+        let mut fade = p.clone();
+        fade.set_opacity(0.25 + 0.75 * enter);
+        let p = &fade;
         let tilt = if !full {
             Vec2::ZERO
         } else if chosen {
@@ -500,6 +563,11 @@ pub fn draw_pick(
         );
         if chosen {
             p.rect_stroke(r.expand(3.0), 0.0, Stroke::new(2.0_f32, rgba(ink(v), 0.9)));
+            // === m4d === the focused action's chip, above the chosen pack (the text sits below)
+            let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, &v.settings_snapshot, v.pad);
+            let at = Pos2::new(r.center().x, (r.top() - 16.0).max(screen.top() + 62.0 * u + 12.0));
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, &v.settings_snapshot);
+            // === end m4d ===
         }
         // Honest facts under the pack: theme, size, how likely each card is kept.
         let dim = if chosen { 1.0 } else { 0.6 };
@@ -623,13 +691,26 @@ fn draw_reveal_scene(
     if pk.scrap.is_some() {
         area.y -= SCRAP_LINE_H; // === scraps === room for the scrap line
     }
+    // === m4d === once pressed, the report / goal lines sit above the old card floor: keep the cards off them
+    if pk.pressed {
+        area.y -= if !v.report_line.is_empty() { 42.0 } else if !v.goal.is_empty() { 14.0 } else { 0.0 };
+    }
+    // === end m4d ===
     let l = pack_layout(n, area);
     let scale = l.size.x / CARD_SIZE.x;
     let overflow = n.saturating_sub(l.shown);
     let order = reveal_order(&pk.pack);
     let times = reveal_times(&pk.pack);
-    let motion = v.settings_snapshot.motion();
-    let fx = effects(&pk.pack, &order, &times, pk.age, motion);
+    // === m4d === Off: no motion at all; the beats keep their size otherwise
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let motion = if amount > 0.0 { st.motion() } else { 0.0 };
+    let mut fx = effects(&pk.pack, &order, &times, pk.age, motion);
+    if st.reduce_flashing {
+        fx.flash = 0.0;
+    }
+    let settled = settled_for(&times, pk.age);
+    // === end m4d ===
     for (slot, &pi) in order.iter().enumerate().take(l.shown) {
         let r = &pk.pack[pi];
         let b = beat(r);
@@ -641,6 +722,13 @@ fn draw_reveal_scene(
             cx - row_w * 0.5 + col as f32 * (l.size.x + l.gap),
             screen.top() + 80.0 + row as f32 * (l.size.y + l.gap),
         ) + fx.shake;
+        // === m4d === cards come in staggered when there was no tear to bring them
+        let enter = if pk.wrapper.is_some() { 1.0 } else { card_enter(slot, pk.age, amount) };
+        let min = min + Vec2::new(0.0, (1.0 - enter) * 10.0);
+        let mut fade = p.clone();
+        fade.set_opacity(enter);
+        let p = if enter < 1.0 { &fade } else { p };
+        // === end m4d ===
         let rect = Rect::from_min_size(min, l.size);
         // The last chip stands for everything that didn't fit.
         if l.compact && overflow > 0 && slot + 1 == l.shown {
@@ -693,18 +781,22 @@ fn draw_reveal_scene(
             _ if l.compact => chip(p, rect, r, v),
             _ => {
                 if r.remembered {
-                    let clip = p.with_clip_rect(rect);
-                    card(
+                    // === m4d === a rarity-sized settle, and the art's warp fading from its landing
+                    let pop = land_pop(since, b.tier, amount);
+                    let face = Rect::from_center_size(rect.center(), rect.size() * pop);
+                    card_hover(
                         ctx,
-                        &clip.with_clip_rect(rect),
-                        rect,
+                        &p.with_clip_rect(face.expand(1.0)),
+                        face,
                         &r.card,
                         v,
                         art,
-                        scale,
+                        scale * pop,
+                        land_hover(since, amount),
                     );
+                    // === end m4d ===
                 } else if near_miss(r) && since < NEAR_MISS_TIME {
-                    near_miss_flicker(p, rect, r, v, since.max(0.0));
+                    near_miss_flicker(p, rect, r, v, since.max(0.0), st.reduce_flashing);
                 } else {
                     faded(p, rect, r, v);
                 }
@@ -732,21 +824,25 @@ fn draw_reveal_scene(
     }
     let done = reveal_done_pack(&pk.pack, pk.age);
     let kept = pk.pack.iter().filter(|r| r.remembered).count();
+    // === m4d === the numbers settle up once the last card is in
+    let shown_kept = count_up(0, kept as i64, settled, amount);
     let msg = if !done {
         v.k("remembering...    [space] skip")
     } else if pk.picks_left > 0 {
         format!(
-            "{kept} of {} dreams stayed with you   [enter] next pack ({} left)",
+            "{shown_kept} of {} dreams stayed with you   [enter] next pack ({} left)",
             pk.pack.len(),
             pk.picks_left
         )
     } else if pk.pressed {
         format!(
             "pressed {} cards · +{} dust · you hold {} dust",
-            pk.cards_added, pk.dust_earned, v.dust
+            count_up(0, pk.cards_added as i64, settled, amount),
+            count_up(0, pk.dust_earned as i64, settled, amount),
+            count_up((v.dust as i64 - pk.dust_earned as i64).max(0), v.dust as i64, settled, amount)
         )
     } else {
-        format!("{kept} of {} dreams stayed with you", pk.pack.len())
+        format!("{shown_kept} of {} dreams stayed with you", pk.pack.len())
     };
     p.text(
         Pos2::new(cx, screen.bottom() - 92.0),
@@ -801,12 +897,13 @@ fn draw_reveal_scene(
 }
 
 /// "SO CLOSE...": the card face stutters on, then dissolves to dust.
-fn near_miss_flicker(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView, e: f32) {
+fn near_miss_flicker(p: &egui::Painter, r: Rect, rec: &Recalled, v: &HudView, e: f32, steady: bool) {
     let frac = (e / NEAR_MISS_TIME).clamp(0.0, 1.0);
     let frame = crate::booklet_ui::card_frame(&rec.card, v.time);
     // Face on more often early, sputtering out as it dissolves.
     let tick = (e * 18.0) as u32;
-    let on = crate::hud::hash01(tick, rec.card.seed as u32) > frac * 0.9;
+    // `steady` (reduce flashing): no stutter, the face just fades with the dust.
+    let on = steady || crate::hud::hash01(tick, rec.card.seed as u32) > frac * 0.9;
     if on {
         p.rect_filled(r, 0.0, rgba(frame, 0.85 * (1.0 - frac * 0.5)));
         p.rect_stroke(
@@ -1133,6 +1230,67 @@ mod tests {
             assert!(!near_miss(&rec(r, true, 1)), "remembered is never a miss");
             assert_eq!(near_miss(&rec(r, false, 1)), r >= Vivid, "{r:?}");
         }
+    }
+
+    #[test]
+    fn m4d_pure_timings_are_bounded_and_off_is_final() {
+        // Entrances: monotone, bounded, a skipped reveal and Off are already in place.
+        for slot in [0usize, 3, 9, 40, 299] {
+            let mut last = 0.0;
+            for k in 0..=100 {
+                let e = card_enter(slot, k as f32 * 0.01, 1.0);
+                assert!((0.0..=1.0).contains(&e) && e >= last, "slot {slot} t{k}");
+                last = e;
+            }
+            assert_eq!(last, 1.0, "slot {slot} is in by 1 s");
+            assert_eq!(card_enter(slot, 0.0, 0.0), 1.0);
+            assert_eq!(card_enter(slot, f32::MAX, 1.0), 1.0);
+        }
+        // The landing pop: bounded, settles to exactly 1, grows with the tier, never for faded or Off.
+        for tier in 0..=7u8 {
+            for amount in [1.0, 1.4] {
+                let mut last = f32::MAX;
+                for k in 0..=40 {
+                    let f = land_pop(k as f32 * 0.01, tier, amount);
+                    assert!((1.0..=1.1).contains(&f) && f <= last + 1e-6, "tier {tier} k{k}");
+                    last = f;
+                }
+                assert_eq!(land_pop(LAND_TIME, tier, amount), 1.0);
+                assert_eq!(land_pop(-0.1, tier, amount), 1.0);
+            }
+            assert_eq!(land_pop(0.0, tier, 0.0), 1.0);
+        }
+        assert_eq!(land_pop(0.0, 0, 1.0), 1.0, "faded dreams don't pop");
+        assert!(land_pop(0.0, 7, 1.0) > land_pop(0.0, 2, 1.0));
+        assert!(land_pop(0.0, 7, 1.4) > land_pop(0.0, 7, 1.0));
+        assert_eq!((land_hover(0.0, 1.0), land_hover(2.0, 1.0), land_hover(0.0, 0.0)), (1.0, 0.0, 0.0));
+        // Counters: exact ends, no overshoot, and the settle clock starts after the last flip.
+        let pack = mixed(5);
+        let t = reveal_times(&pack);
+        assert_eq!(settled_for(&t, 0.0), 0.0);
+        assert_eq!(settled_for(&t, f32::MAX), 10.0);
+        assert!((settled_for(&t, t[4] + FLIP_TIME + 0.2) - 0.2).abs() < 1e-4);
+        let mut last = 0;
+        for k in 0..=100 {
+            let c = count_up(0, 37, k as f32 * 0.01, 1.0);
+            assert!((0..=37).contains(&c) && c >= last);
+            last = c;
+        }
+        assert_eq!((count_up(0, 37, 0.0, 1.0), count_up(0, 37, 10.0, 1.0), count_up(0, 37, 0.0, 0.0)), (0, 37, 37));
+        // The pick screen's slide: further packs start later, all end in place, Off is in place.
+        for i in 0..4 {
+            assert!(pick_slide(i, 0.0, 1.0) == 1.0 && pick_slide(i, 1.0, 1.0) == 0.0 && pick_slide(i, 0.0, 0.0) == 0.0);
+        }
+        assert!(pick_slide(0, 0.2, 1.0) < pick_slide(2, 0.2, 1.0));
+    }
+
+    #[test]
+    fn m4d_the_rarity_beats_are_untouched() {
+        // Same table as before the screen pass: the beats scale up with rarity and the tiers match.
+        let tiers: Vec<u8> = ALL.iter().map(|&r| beat(&rec(r, true, 1)).tier).collect();
+        assert_eq!(tiers, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(beat(&rec(Resonant, true, 1)).shake, 10.0);
+        assert_eq!(beat(&rec(Hazy, true, 1)).hold, 0.05);
     }
 
     #[test]

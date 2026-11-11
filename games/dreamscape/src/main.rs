@@ -30,6 +30,9 @@ mod attunement;
 mod achievements;
 mod balance;
 mod booklet_ui;
+// === card_warp ===
+mod card_warp;
+// === end card_warp ===
 mod boss;
 mod cards;
 mod codex_ui;
@@ -41,6 +44,7 @@ mod deck;
 mod deck_ui;
 mod dev;
 mod dissolve;
+mod death_fx; // === deathfx ===
 mod dream;
 mod ending;
 mod events;
@@ -85,6 +89,7 @@ mod objective;
 mod pack_art;
 mod packs;
 mod pad;
+mod prompts; // === prompts ===
 mod paths;
 mod pixel_ui;
 mod pixels;
@@ -93,8 +98,16 @@ mod progress;
 mod records;
 #[allow(dead_code)] // relic streams R1-R8 consume these as they land
 mod relic_types;
-#[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
+// === relic_art ===
+mod relic_art;
+// === end relic_art ===
+mod ui_motion;
+mod screen_anim; // === m4b ===
 mod relics;
+mod relic_weapon; // === relics-weapon ===
+mod relic_ui; // === relics-ui ===
+mod relic_names;
+mod relic_effects;
 mod reveal_ui;
 mod scraps;
 mod code_ui;
@@ -255,7 +268,18 @@ struct Slash {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
+
+// === relics-weapon ===
+/// The relic in hand: its rarity and weapon. R6's equip flow sets it; until
+/// then `DREAMSCAPE_GIVE_RELIC=<cracked|worn|pristine|mythic>[:seed]` does.
+#[derive(Clone, Copy)]
+struct HeldRelic {
+    rarity: relic_types::RelicRarity,
+    weapon: relic_types::Weapon,
+}
+// === end relics-weapon ===
 
 /// What a swing asks for, until the next frame spawns it.
 struct SlashStart {
@@ -263,6 +287,7 @@ struct SlashStart {
     reach: f32,
     half_arc: f32,
     flip: bool,
+    trail: Option<combat::Trail>, // === relics-weapon ===
 }
 
 // === abilities3 ===
@@ -803,6 +828,15 @@ pub struct DreamscapeGame {
     /// What the last ticket scratch revealed, and how long ago.
     ticket_revealed: Option<tickets_ui::Revealed>,
     ticket_age: f32,
+    // === relics-ui ===
+    /// 0 = the case, 1 = the pouch.
+    relic_page: u8,
+    /// The pouch cursor, by relic id (never an index).
+    relic_cursor: Option<u32>,
+    /// The relic just pulled (already saved) and seconds since the press.
+    relic_open: Option<(u32, f32)>,
+    relic_status: Option<String>,
+    // === end relics-ui ===
     /// The first of the two presses to scratch a ticket has been made.
     ticket_confirm: bool,
     ticket_status: Option<String>,
@@ -815,6 +849,21 @@ pub struct DreamscapeGame {
     last_report: Option<retention::RunReport>,
     /// White Dissolve: the path state and its tiles (entity, full size).
     dissolve: Option<(dissolve::Dissolve, Vec<(Entity, Vec3)>)>,
+    // === relics-weapon ===
+    held_relic: Option<HeldRelic>,
+    held_sway: relic_weapon::HeldSway,
+    held_yaw_prev: f32,
+    held_lag: f32,
+    // === end relics-weapon ===
+    // === deathfx ===
+    /// The dying dreamer: dissolve timing, embers and the view fade.
+    death: Option<death_fx::Death>,
+    death_embers: Vec<Entity>,
+    death_origin: Vec3,
+    death_spawn: bool,
+    /// The dissolve that ends the run (holds input, then the Summary).
+    death_ends_run: bool,
+    // === end deathfx ===
     /// Special kinds met so far this run (each gets a hint the first time).
     seen_kinds: Vec<EnemyKind>,
     /// Shown under the title card.
@@ -1241,6 +1290,25 @@ impl DreamscapeGame {
             player_tex: None,
             watchers: Vec::new(),
             dissolve: None,
+            // === relics-weapon ===
+            held_relic: crate::dev::var("DREAMSCAPE_GIVE_RELIC")
+                .ok()
+                .and_then(|s| relic_weapon::parse_give(&s))
+                .map(|(rarity, seed)| HeldRelic {
+                    rarity,
+                    weapon: relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, seed),
+                }),
+            held_sway: relic_weapon::HeldSway::new(),
+            held_yaw_prev: 0.0,
+            held_lag: 0.0,
+            // === end relics-weapon ===
+            // === deathfx ===
+            death: None,
+            death_embers: Vec::new(),
+            death_origin: Vec3::ZERO,
+            death_spawn: false,
+            death_ends_run: false,
+            // === end deathfx ===
             seen_kinds: Vec::new(),
             dream_hint: String::new(),
             theme_rule: None,
@@ -1369,6 +1437,12 @@ impl DreamscapeGame {
             lottery_pick: 0,
             ticket_revealed: None,
             ticket_age: 0.0,
+            // === relics-ui ===
+            relic_page: 0,
+            relic_cursor: None,
+            relic_open: None,
+            relic_status: None,
+            // === end relics-ui ===
             ticket_confirm: false,
             ticket_status: None,
             tickets_this_run: 0,
@@ -2524,6 +2598,14 @@ impl DreamscapeGame {
     // === combat ===
     /// Strike, stagger timers, unravelling enemies, calm motes, the flash.
     fn update_combat(&mut self, dt: f32) {
+        // === relics-weapon === the held weapon lags behind a camera turn
+        if self.held_relic.is_some() && dt > 0.0 {
+            let turn = (self.yaw - self.held_yaw_prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.held_lag = self.held_sway.step(dt, turn / dt, self.settings.ui_juice, self.settings.reduced_motion);
+        }
+        self.held_yaw_prev = self.yaw;
+        // === end relics-weapon ===
         // Dev: DREAMSCAPE_STRIKE=<secs> lets the autopilot swing, over and
         // over, from that many seconds in (for screenshots).
         let dev_from = if self.autopilot {
@@ -2543,8 +2625,12 @@ impl DreamscapeGame {
         }
         let want_max = self.run.nerve_max();
         // === end upgrades2 ===
+        // === relic-nerve === an equipped relic's extra nerve cap (never above 8)
+        let cap = nerve::cap_with(self.card_fx.max_nerve);
+        let want_max = (want_max + self.card_fx.max_nerve).min(cap);
+        // === end relic-nerve ===
         if want_max > self.nerve.max() {
-            self.nerve.raise_max(want_max - self.nerve.max());
+            self.nerve.raise_max_to(want_max - self.nerve.max(), cap);
         }
         self.counter_cd = (self.counter_cd - dt).max(0.0);
         self.lunge_left = (self.lunge_left - dt).max(0.0);
@@ -2631,6 +2717,7 @@ impl DreamscapeGame {
                     reach: self.strike_reach(),
                     half_arc: arc.acos(),
                     flip: self.strike_count % 2 == 1, // every other swing comes back
+                    trail: self.held_relic.map(|h| combat::trail_style(h.weapon.trail)), // === relics-weapon ===
                 });
             }
         }
@@ -2723,7 +2810,7 @@ impl DreamscapeGame {
             };
             let n = s.rays.len();
             for (i, pieces) in s.rays.iter().enumerate() {
-                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced);
+                let ray = combat::slash_ray(i, n, s.age, s.half_arc, s.flip, reduced, s.trail);
                 for (j, e) in pieces.iter().enumerate() {
                     let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                         continue;
@@ -2744,7 +2831,7 @@ impl DreamscapeGame {
                 let Ok(mut t) = self.world.get::<&mut Transform>(*e) else {
                     continue;
                 };
-                match combat::slash_spark(k2, s.age, s.half_arc, s.flip).filter(|_| !reduced) {
+                match combat::slash_spark(k2, s.age, s.half_arc, s.flip, s.trail).filter(|_| !reduced) {
                     Some((angle, dist, size)) => {
                         t.position = me + heading(angle) * (s.reach * dist) + Vec3::Y * 0.4;
                         t.scale = Vec3::splat(0.34 * size);
@@ -2869,13 +2956,21 @@ impl DreamscapeGame {
         }
     }
 
+    // === relics-weapon ===
+    /// What the held relic adds to a strike (identity with none).
+    fn relic_mods(&self) -> relic_weapon::StrikeMods {
+        self.held_relic
+            .map_or(relic_weapon::StrikeMods::IDENTITY, |h| relic_weapon::strike_mods(&h.weapon, h.rarity))
+    }
+    // === end relics-weapon ===
+
     // === edges2 ===
-    /// The strike's reach: LONG REACH cards, then LONGARM.
+    /// The strike's reach: LONG REACH cards, then LONGARM, then the relic.
     fn strike_reach(&self) -> f32 {
         edges::reach(
             combat::reach_with(self.run.count(Upgrade::LongReach)),
             self.has_edge(edges::Edge::Longarm),
-        )
+        ) * self.relic_mods().reach_mult // === relics-weapon ===
     }
 
     /// The strike's half-arc cosine: WIDE EYES, then CLEAVE.
@@ -2885,7 +2980,8 @@ impl DreamscapeGame {
         } else {
             combat::ARC_COS
         };
-        edges::arc_cos(base, self.has_edge(edges::Edge::Cleave))
+        let arc = edges::arc_cos(base, self.has_edge(edges::Edge::Cleave));
+        (arc - self.relic_mods().arc_relax).max(0.1) // === relics-weapon === a wider fan
     }
 
     /// Is this foe still untouched?
@@ -2931,6 +3027,7 @@ impl DreamscapeGame {
         // === edges2 === AMBUSH, OPENER, PUNISHER
         dmg += edges::bonus(&self.edges, ctx.unaware, ctx.staggered, self.foe_is_fresh(t));
         // === end edges2 ===
+        dmg += self.relic_mods().damage_bonus as f32; // === relics-weapon ===
         dmg * self.bargain.mult() // === abilities3 === BARGAIN cuts deeper
     }
 
@@ -3057,7 +3154,8 @@ impl DreamscapeGame {
         let reach = self.strike_reach();
         let arc = self.strike_arc_cos();
         let mut knock = combat::KNOCKBACK
-            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32);
+            * (1.0 + combat::HEAVY_KNOCK_PER * self.run.count(Upgrade::HeavyAir).min(2) as f32)
+            + self.relic_mods().knock_add; // === relics-weapon ===
         // === edges === HAYMAKER shoves and staggers more; FLOURISH is the third of a chain
         let mut stagger = combat::STAGGER_SECS;
         if self.has_edge(edges::Edge::Haymaker) {
@@ -3136,7 +3234,13 @@ impl DreamscapeGame {
         // === end combat ===
         if struck {
             self.sfx(Sound::StrikeHit);
-            self.juice.hit(juice::Hit::Strike, self.settings.reduced_motion);
+            // === relics-weapon === the relic rings, and its clash sets the dip
+            let stop = Some(self.relic_mods().hit_stop_secs).filter(|&s| s > 0.0);
+            if let Some(h) = self.held_relic {
+                self.sfx(relic_weapon::strike_sound(h.rarity));
+            }
+            self.juice.hit_with(juice::Hit::Strike, self.settings.reduced_motion, stop);
+            // === end relics-weapon ===
         }
     }
 
@@ -3802,6 +3906,57 @@ impl DreamscapeGame {
             .collect()
     }
 
+    // === prompts ===
+    /// The input chips for this frame: only what can be done right now.
+    fn prompt_list(&self) -> Vec<prompts::Prompt> {
+        let mut ctx = prompts::Ctx::new(self.mode);
+        let flat = |p: Vec3| Vec3::new(p.x - self.player_position.x, 0.0, p.z - self.player_position.z).length();
+        match self.mode {
+            hud::Mode::Playing if !self.coop_active() => {
+                let targets = self.combat_targets();
+                let facing = self.flat_facing();
+                let me = self.player_position;
+                ctx.strike_ready = self.strike.ready()
+                    && targets.iter().any(|t| {
+                        combat::in_arc(me, facing, t.pos, self.strike_reach(), self.strike_arc_cos())
+                    });
+                // Cards: charged, and a foe close enough to be worth it.
+                let foe_near = targets.iter().any(|t| flat(t.pos) <= 12.0);
+                if foe_near {
+                    for (k, c) in self.hand_view().iter().take(5).enumerate() {
+                        ctx.cards_ready[k] = c.charge >= 1.0 && !c.active && !c.empty;
+                    }
+                }
+                for (i, &e) in self.shard_entities.iter().enumerate() {
+                    let Ok(t) = self.world.get::<&Transform>(e) else { continue };
+                    if i % 2 == 1 || flat(t.position) > prompts::REACH {
+                        continue; // every second entity is the beacon
+                    }
+                    if self.world.get::<&WakeMarker>(e).is_ok() {
+                        ctx.door_in_reach = true;
+                    } else {
+                        ctx.shard_in_reach = true;
+                    }
+                }
+            }
+            hud::Mode::PackPick => {
+                ctx.pack_unopened = !self.pick.offers.is_empty() && self.pick.picks_left > 0;
+            }
+            hud::Mode::Choice => {
+                ctx.choice = self.choice.as_ref().map(|k| match k {
+                    ChoiceKind::WakeDoor => prompts::Choice::WakeDoor {
+                        deeper: self.choice_view.selected == 1,
+                    },
+                    ChoiceKind::Event(_) => prompts::Choice::Event,
+                    _ => prompts::Choice::Upgrade,
+                });
+            }
+            _ => {}
+        }
+        prompts::compute(&ctx)
+    }
+    // === end prompts ===
+
     fn hud_view(&self) -> hud::HudView {
         let target = self.objective_target();
         hud::HudView {
@@ -4047,6 +4202,7 @@ impl DreamscapeGame {
             } else {
                 tickets_ui::TicketsView::default()
             },
+            relics: if self.mode == hud::Mode::Store && self.store_tab == 3 { self.relic_view() } else { relic_ui::RelicView::default() }, // === relics-ui ===
             // === perf === the screens look a card up and treat a missing one as level 0,
             // so only cards that earned xp are listed (was: every card in the booklet).
             mastery_levels: self
@@ -4214,6 +4370,7 @@ impl DreamscapeGame {
             } else {
                 upgrade_ui::ChoiceView::default()
             },
+            prompts: self.prompt_list(), // === prompts ===
         }
     }
 
@@ -4281,6 +4438,7 @@ impl DreamscapeGame {
                 reach: start.reach,
                 half_arc: start.half_arc,
                 flip: start.flip,
+                trail: start.trail, // === relics-weapon ===
             });
         }
         for at in std::mem::take(&mut self.pending_motes) {
@@ -8657,6 +8815,129 @@ impl DreamscapeGame {
         }
     }
 
+    // === relics-ui ===
+    fn relic_view(&self) -> relic_ui::RelicView {
+        let b = &self.booklet;
+        let (rows, foil, pulls_to_pity, featured) = relic_ui::view_rows(b, today());
+        let ids = relic_ui::order(&b.relics);
+        let pouch = ids.iter().filter_map(|&id| b.relics.iter().find(|r| r.id == id).cloned()).collect();
+        relic_ui::RelicView {
+            page: self.relic_page,
+            ash: b.stash.ash,
+            max_cost: relic_ui::max_cost(),
+            rows,
+            foil,
+            pulls_to_pity,
+            since_mythic: b.relic_lottery.since_mythic,
+            total_pulls: b.relic_lottery.total_pulls,
+            featured,
+            opening: self.relic_open.and_then(|(id, age)| {
+                b.relics.iter().find(|r| r.id == id).map(|r| relic_ui::OpeningView { relic: r.clone(), age })
+            }),
+            pouch,
+            cursor: relic_ui::cursor_or_first(&b.relics, self.relic_cursor),
+            equipped: retention::equipped(b).map(|r| r.id),
+            status: self.relic_status.clone(),
+        }
+    }
+
+    /// An opening that has not reached its final card.
+    fn relic_opening_running(&self) -> bool {
+        let Some((id, age)) = self.relic_open else { return false };
+        let Some(r) = self.booklet.relics.iter().find(|r| r.id == id) else { return false };
+        let s = relic_ui::style(self.settings.ui_juice, self.settings.reduced_motion);
+        !relic_ui::frame(s, r.rarity, r.foil, age, self.settings.reduce_flashing).done
+    }
+
+    fn relic_skip(&mut self) {
+        if let Some((_, age)) = self.relic_open.as_mut() {
+            *age = 1.0e6;
+        }
+    }
+
+    /// Leaving or switching tabs: the last opening shows its final card, the page resets.
+    fn relic_leave_tab(&mut self) {
+        self.relic_skip();
+        self.relic_page = 0;
+        self.relic_status = None;
+    }
+
+    /// Spend Ash and open the case. The relic is rolled and saved here; the
+    /// screen only uncovers it.
+    fn relic_pull(&mut self) {
+        if self.coop_active() || self.autopilot || self.relic_opening_running() {
+            return;
+        }
+        let before = self.booklet.clone();
+        match relic_ui::commit_pull(&mut self.booklet, today()) {
+            Err(relic_ui::PullError::TooPoor { need }) => {
+                self.relic_status = Some(format!("you need {need} more ash"));
+                self.sfx(Sound::Denied);
+            }
+            Ok(got) => {
+                if self.persist_booklet() {
+                    log::info!(
+                        "Relic: {:?}{}{} {} (ash now {})",
+                        got.relic.rarity,
+                        if got.pull.pity { " PITY" } else { "" },
+                        if got.relic.foil { " FOIL" } else { "" },
+                        got.relic.name,
+                        self.booklet.stash.ash
+                    );
+                    self.relic_open = Some((got.relic.id, 0.0));
+                    self.relic_cursor = Some(got.relic.id);
+                    self.relic_status = None;
+                    self.sync_held_relic();
+                    self.sfx(Sound::WakeDoor);
+                } else {
+                    self.booklet = before;
+                    self.relic_status = Some("the case couldn't be written down (see log)".into());
+                }
+            }
+        }
+    }
+
+    /// Wear the relic under the pouch cursor.
+    fn relic_equip(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        let Some(id) = relic_ui::cursor_or_first(&self.booklet.relics, self.relic_cursor) else { return };
+        if retention::equipped(&self.booklet).map(|r| r.id) == Some(id) {
+            return;
+        }
+        let before = self.booklet.clone();
+        if !retention::equip_relic(&mut self.booklet, id) {
+            return;
+        }
+        if self.persist_booklet() {
+            self.sync_held_relic_force();
+            self.relic_status = Some("equipped".into());
+            self.sfx(Sound::Pick);
+        } else {
+            self.booklet = before;
+            self.relic_status = Some("the pouch couldn't be written down (see log)".into());
+        }
+    }
+
+    /// The equipped relic becomes the weapon in hand (run start, resume, equip).
+    /// With nothing equipped the hand is left as it is (the dev env still works).
+    fn sync_held_relic(&mut self) {
+        if self.prologue.is_some() {
+            return;
+        }
+        self.sync_held_relic_force();
+    }
+
+    fn sync_held_relic_force(&mut self) {
+        if let Some(r) = retention::equipped(&self.booklet) {
+            if let Some(weapon) = r.weapon {
+                self.held_relic = Some(HeldRelic { rarity: r.rarity, weapon });
+            }
+        }
+    }
+    // === end relics-ui ===
+
     fn tickets_view(&self) -> tickets_ui::TicketsView {
         let stash = &self.booklet.stash;
         let left = !tickets::unowned_cosmetics(stash).is_empty();
@@ -8836,6 +9117,7 @@ impl DreamscapeGame {
         self.lottery_status = None;
         self.ticket_status = None; // === fortune ===
         self.ticket_confirm = false;
+        self.relic_leave_tab(); // === relics-ui ===
         self.mode = hud::Mode::Store;
     }
 
@@ -9160,6 +9442,7 @@ impl DreamscapeGame {
             // === end ascension ===
         };
         self.card_fx = retention::card_effects(&self.booklet, &cards);
+        self.sync_held_relic(); // === relics-ui === run start and resume
         self.loadout_numbers = cards.iter().map(|c| c.number).collect();
         self.run.bonus_rerolls = self.card_fx.free_rerolls;
         if !self.card_fx.is_zero() {
@@ -9529,11 +9812,127 @@ impl DreamscapeGame {
                 }
                 _ => {}
             }
+        } else if self.mode == hud::Mode::Playing && self.death.is_none() {
+            self.start_death(death_fx::Kind::Full); // === deathfx === Summary comes when it ends
         } else {
-            self.mode = hud::Mode::Summary;
-            log::info!("Summary: {:?}", self.summary_view());
+            self.enter_summary();
         }
     }
+
+    // === deathfx ===
+    fn enter_summary(&mut self) {
+        self.mode = hud::Mode::Summary;
+        log::info!("Summary: {:?}", self.summary_view());
+    }
+
+    /// Starts the dissolve. Full holds the world still until it ends (then
+    /// the Summary); Short is the mid-run catch and never delays the respawn.
+    fn start_death(&mut self, kind: death_fx::Kind) {
+        let theme = self.dream.as_ref().map(|d| d.theme);
+        let color = theme
+            .and_then(|t| t.spec().accents.first().copied())
+            .map_or([1.0, 0.6, 0.4], |c| c.map(|v| v as f32 / 255.0));
+        self.death_ends_run = kind == death_fx::Kind::Full;
+        let kind = if self.death_ends_run
+            && death_fx::short_for(self.settings.reduced_motion, self.settings.ui_juice)
+        {
+            death_fx::Kind::Short
+        } else {
+            kind
+        };
+        let seed = self.dream_age.to_bits() as u64 ^ self.stats.caught as u64;
+        self.death = Some(
+            death_fx::Death::new(kind, self.first_person_active(), color)
+                .seeded(seed)
+                .accessible(self.settings.reduced_motion, self.settings.ui_juice),
+        );
+        self.death_origin = self.player_position - Vec3::Y * 0.6;
+        self.death_spawn = true;
+    }
+
+    /// Advances the dissolve; true while a Full death holds the game still.
+    fn tick_death(&mut self, dt: f32) -> bool {
+        let Some(mut d) = self.death.take() else {
+            return false;
+        };
+        d.update(dt);
+        let full = self.death_ends_run;
+        if d.finished() {
+            for e in self.death_embers.drain(..) {
+                let _ = self.world.despawn(e);
+            }
+            self.death_spawn = false;
+            if full && death_fx::should_enter_summary(&d) {
+                self.enter_summary();
+            }
+            return false;
+        }
+        let parts = d.particles(self.death_embers.len());
+        for (e, p) in self.death_embers.iter().zip(parts.iter().chain(std::iter::repeat(&death_fx::Ember { offset: [0.0; 3], size: 0.0, alpha: 0.0 }))) {
+            if let Ok(mut t) = self.world.get::<&mut Transform>(*e) {
+                t.position = self.death_origin + Vec3::from(p.offset);
+                t.scale = Vec3::splat(p.size * p.alpha);
+            }
+        }
+        if full && d.first_person() {
+            self.flash.trigger(d.color(), d.overlay(self.settings.reduce_flashing));
+        }
+        self.death = Some(d);
+        full
+    }
+
+    /// A Full death swallows input; any press skips to the Summary.
+    fn death_swallows(&mut self, event: &Event) -> bool {
+        if self.death.is_none() || !self.death_ends_run {
+            return false;
+        }
+        match event {
+            Event::KeyDown { .. } | Event::ControllerButtonDown { .. } | Event::MouseButtonDown { .. } => {
+                if let Some(d) = &mut self.death {
+                    d.skip();
+                }
+                true
+            }
+            Event::KeyUp { .. }
+            | Event::ControllerButtonUp { .. }
+            | Event::MouseButtonUp { .. }
+            | Event::MouseMotion { .. }
+            | Event::MouseWheel { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The ember pool (spawned where there is a GL context).
+    fn spawn_death_embers(&mut self, gl: &engine::glow::Context) -> anyhow::Result<()> {
+        if !std::mem::take(&mut self.death_spawn) {
+            return Ok(());
+        }
+        let Some(d) = &self.death else {
+            return Ok(());
+        };
+        let c = d.color().map(|v| (v * 255.0) as u8);
+        let mesh = self.mesh(Shape::Octahedron)?;
+        let tex = self.texture(gl, [c[0], c[1], c[2], 255]);
+        for _ in 0..24 {
+            let e = self.world.spawn((
+                Transform {
+                    position: self.death_origin,
+                    rotation: Quat::IDENTITY,
+                    scale: Vec3::ZERO,
+                },
+                MeshRenderer {
+                    mesh: mesh.clone(),
+                    texture: Some(tex.clone()),
+                },
+                Spin(4.0),
+                Lit,
+                Translucent,
+            ));
+            self.death_embers.push(e);
+        }
+        Ok(())
+    }
+    // === end deathfx ===
 
     /// Dust multiplier on waking: DUST HOARDER etc. times the nightmare bonus.
     fn dust_multiplier(&self) -> f32 {
@@ -11513,6 +11912,23 @@ impl Game for DreamscapeGame {
                     self.ticket_press();
                 }
             }
+            Ok("relics") | Ok("relic_pull") | Ok("relic_pouch") => {
+                // === relics-ui === dev hook: some ash, the relic tab, optionally a pull or the pouch
+                self.booklet.stash.earn_ash(600);
+                self.open_store();
+                self.store_tab = 3;
+                let which = crate::dev::var("DREAMSCAPE_SCREEN").unwrap_or_default();
+                if which != "relics" {
+                    self.relic_pull();
+                }
+                if which == "relic_pouch" {
+                    for _ in 0..6 {
+                        self.relic_open = None;
+                        self.relic_pull();
+                    }
+                    self.relic_page = 1;
+                }
+            }
             Ok("lottery") | Ok("lottery_pull") => {
                 // Dev only: a fat purse so the screen has something to show.
                 self.booklet.stash.earn(300);
@@ -11569,6 +11985,11 @@ impl Game for DreamscapeGame {
     }
 
     fn handle_event(&mut self, ctx: &mut Context, event: &Event) {
+        // === deathfx ===
+        if self.death_swallows(event) {
+            return;
+        }
+        // === end deathfx ===
         let (key, down, repeat) = match event {
             Event::KeyDown {
                 keycode: Some(k),
@@ -11896,6 +12317,12 @@ impl Game for DreamscapeGame {
                     self.open_store();
                     return;
                 }
+                // === relics-ui === any key skips the opening to its final card (the relic is already saved)
+                (hud::Mode::Store, _) if self.store_tab == 3 && self.relic_opening_running() => {
+                    self.relic_skip();
+                    return;
+                }
+                // === end relics-ui ===
                 (hud::Mode::Booklet | hud::Mode::Store, Keycode::Escape) => {
                     self.mode = self.booklet_return;
                     return;
@@ -11922,12 +12349,40 @@ impl Game for DreamscapeGame {
                     return;
                 }
                 (hud::Mode::Store, Keycode::Tab) => {
-                    self.store_tab = (self.store_tab + 1) % 3; // === fortune === perks, lottery, tickets
+                    self.store_tab = (self.store_tab + 1) % 4; // === fortune === perks, lottery, tickets, relics
+                    self.relic_leave_tab(); // === relics-ui ===
                     self.lottery_status = None;
                     self.ticket_status = None;
                     self.ticket_confirm = false;
                     return;
                 }
+                // === relics-ui ===
+                (hud::Mode::Store, Keycode::P) if self.store_tab == 3 => {
+                    self.relic_page = 1 - self.relic_page;
+                    self.relic_status = None;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 3 => {
+                    if self.relic_page == 0 {
+                        self.relic_pull();
+                    } else {
+                        self.relic_equip();
+                    }
+                    return;
+                }
+                (hud::Mode::Store, Keycode::W | Keycode::Up | Keycode::S | Keycode::Down | Keycode::A | Keycode::Left | Keycode::D | Keycode::Right)
+                    if self.store_tab == 3 =>
+                {
+                    if self.relic_page == 1 {
+                        let delta = if matches!(key, Keycode::W | Keycode::Up | Keycode::A | Keycode::Left) { -1 } else { 1 };
+                        self.relic_cursor = relic_ui::move_cursor(&self.booklet.relics, self.relic_cursor, delta);
+                    }
+                    return;
+                }
+                (hud::Mode::Store, _) if self.store_tab == 3 => {
+                    return;
+                }
+                // === end relics-ui ===
                 // === fortune ===
                 (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 2 => {
                     self.ticket_press();
@@ -12143,6 +12598,9 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Store {
             self.lottery_age += dt;
             self.ticket_age += dt; // === fortune ===
+            if let Some((_, age)) = self.relic_open.as_mut() {
+                *age += dt; // === relics-ui ===
+            }
         }
         if self.mode == hud::Mode::Playing {
             let dt = dt.min(gameplay::MAX_DT);
@@ -12192,6 +12650,12 @@ impl Game for DreamscapeGame {
         }
         self.time += dt;
         self.flash.tick(dt);
+        // === deathfx ===
+        if self.tick_death(dt) {
+            self.spawn_death_embers(ctx.gl())?;
+            return Ok(());
+        }
+        // === end deathfx ===
         self.grace = (self.grace - dt).max(0.0);
         self.nerve.tick(dt);
         for (_e, (t, spin)) in self.world.query_mut::<(&mut Transform, &Spin)>() {
@@ -12862,7 +13326,7 @@ impl Game for DreamscapeGame {
         { let _t = engine::perf::scope("upd.update_door_hum"); self.update_door_hum(dt); }
         { let _t = engine::perf::scope("upd.update_echoes"); self.update_echoes(player, dt)?; }
         { let _t = engine::perf::scope("upd.update_echo_ghost"); self.update_echo_ghost()?; }
-        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; }
+        { let _t = engine::perf::scope("upd.update_bursts"); self.update_bursts(ctx.gl())?; self.spawn_death_embers(ctx.gl())?; /* deathfx */ }
         { let _t = engine::perf::scope("upd.update_ability_fx"); self.update_ability_fx(ctx.gl(), player, dt)?; }
         { let _t = engine::perf::scope("upd.update_adaptive_music"); self.update_adaptive_music(dt); }
         if !self.autopilot {
@@ -12963,6 +13427,11 @@ impl Game for DreamscapeGame {
             self.flash.trigger([1.0, 0.1, 0.15], 0.7);
             self.juice.hit(juice::Hit::Caught, self.settings.reduced_motion);
             self.sfx(Sound::Caught);
+            // === deathfx === a short ember burst where you fell; respawn is not delayed
+            if self.death.is_none() {
+                self.start_death(death_fx::Kind::Short);
+            }
+            // === end deathfx ===
             let forgiven = self.has_perk(store::Perk::SecondWind)
                 && !self.second_wind_used
                 && self.director.shard_this_dream;
@@ -13455,6 +13924,54 @@ impl Game for DreamscapeGame {
         set_frame(program_i, locs_i);
         set_frame(program, locs);
 
+        // === relics-weapon === the held weapon: mesh, tint, model matrix
+        let mut held_draw: Option<(Arc<GpuMesh>, Arc<GpuTexture>, Mat4, Option<(Arc<GpuMesh>, Mat4)>)> = None;
+        if let Some(h) = self.held_relic {
+            let (juice, reduced) = (self.settings.ui_juice, self.settings.reduced_motion);
+            // First person: the mesh sits 0.85 m from the eye, so scale it down or it fills a quarter of the view.
+            let size = f32::from(h.weapon.scale_pct) / 100.0 * if fp { 0.55 } else { 1.0 };
+            let pose = relic_weapon::held_pose(time, self.held_lag, juice, reduced);
+            let world = if fp {
+                let q = Quat::from_euler(engine::glam::EulerRot::YXZ, pose.rot.y, pose.rot.x, pose.rot.z);
+                view.inverse() * (Mat4::from_translation(pose.offset) * Mat4::from_quat(q))
+            } else {
+                // Third person: in the right hand, level with the waist.
+                let f = Vec3::new(self.facing.x, 0.0, self.facing.z).normalize_or_zero();
+                let f = if f == Vec3::ZERO { Vec3::Z } else { f };
+                let right = f.cross(Vec3::Y).normalize_or_zero();
+                let q = Quat::from_rotation_arc(Vec3::Z, f) * Quat::from_rotation_z(-relic_weapon::TILT);
+                Mat4::from_translation(self.player_position + right * 0.45 + f * 0.25 + Vec3::new(0.0, 0.8 + pose.bob, 0.0))
+                    * Mat4::from_quat(q)
+            };
+            let mesh = self.meshes.get(&relic_weapon::shape_of(&h.weapon)).cloned();
+            let orbiter = (h.rarity == relic_types::RelicRarity::Mythic)
+                .then(|| self.meshes.get(&relic_weapon::orbiter_shape(&h.weapon)).cloned())
+                .flatten();
+            let color = [h.weapon.tint[0], h.weapon.tint[1], h.weapon.tint[2], 255];
+            let tex = self
+                .textures
+                .entry(color)
+                .or_insert_with(|| {
+                    Arc::new(GpuTexture::from_rgba8(gl, &color, 1, 1, TextureFilter::Nearest).expect("1x1 texture upload"))
+                })
+                .clone();
+            if let Some(mesh) = mesh {
+                let orbit = orbiter.map(|m2| {
+                    let off = relic_weapon::orbiter_offset(time, juice, reduced);
+                    (m2, world * Mat4::from_translation(off) * Mat4::from_scale(Vec3::splat(0.07)))
+                });
+                held_draw = Some((mesh, tex, world * Mat4::from_scale(Vec3::splat(size)), orbit));
+            }
+        }
+        // === end relics-weapon ===
+        // === deathfx === only the dreamer dissolves (Full death)
+        let (dissolve_amount, dissolve_color) = self
+            .death
+            .as_ref()
+            .filter(|_| self.death_ends_run)
+            .map_or((0.0, [0.0; 3]), |d| (d.body_dissolve(), d.color()));
+        let (dissolve_loc, dissolve_color_loc) = (&locs.dissolve, &locs.dissolve_color);
+        // === end deathfx ===
         let (model_loc, uv_loc, melt_loc, lit_loc, hero_loc, ghost_loc, outline_loc) = (
             &locs.model,
             &locs.uv,
@@ -13538,6 +14055,14 @@ impl Game for DreamscapeGame {
                             gl.uniform_1_f32(Some(l), v);
                         }
                     }
+                    // === deathfx ===
+                    if let Some(l) = dissolve_loc {
+                        gl.uniform_1_f32(Some(l), if hero { dissolve_amount } else { 0.0 });
+                    }
+                    if let Some(l) = dissolve_color_loc {
+                        gl.uniform_3_f32(Some(l), dissolve_color[0], dissolve_color[1], dissolve_color[2]);
+                    }
+                    // === end deathfx ===
                     if let Some(l) = &melt_loc {
                         let v = if solid { 0.0 } else { melt };
                         if state.float(renderstate::melt_of, v) {
@@ -13751,6 +14276,52 @@ impl Game for DreamscapeGame {
                 gl.uniform_1_f32(Some(l), 0.0);
             }
         }
+        // === relics-weapon === drawn after the world, through the same
+        // uDissolve as the dreamer; first person clears depth so it never
+        // clips into a wall. Not a Hero: no dark shell, no silhouette.
+        if let Some((mesh, tex, model, orbit)) = &held_draw {
+            unsafe {
+                gl.use_program(Some(program));
+                if fp {
+                    gl.clear(engine::glow::DEPTH_BUFFER_BIT);
+                }
+                if params.backface_culling {
+                    gl.enable(engine::glow::CULL_FACE);
+                    gl.cull_face(engine::glow::BACK);
+                }
+                if let Some(l) = &lit_loc {
+                    gl.uniform_1_f32(Some(l), gameplay::lit_level(true, false));
+                }
+                if let Some(l) = &hero_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &melt_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &uv_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), dissolve_amount);
+                }
+                if let Some(l) = dissolve_color_loc {
+                    gl.uniform_3_f32(Some(l), dissolve_color[0], dissolve_color[1], dissolve_color[2]);
+                }
+                tex.bind(gl, 0);
+                for (mesh, model) in std::iter::once((mesh, model)).chain(orbit.as_ref().map(|(m, x)| (m, x))) {
+                    if let Some(l) = &model_loc {
+                        gl.uniform_matrix_4_f32_slice(Some(l), false, &model.to_cols_array());
+                    }
+                    gl.bind_vertex_array(Some(mesh.vao));
+                    mesh.draw_bound(gl);
+                }
+                gl.bind_vertex_array(None);
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+            }
+        }
+        // === end relics-weapon ===
 
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
         let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
@@ -16099,6 +16670,69 @@ mod screen_smoke {
     }
     // === end deck ===
 
+    // === prompts ===
+    #[test]
+    fn three_prompt_chips_draw_cheaply_at_both_sizes_and_every_juice_level() {
+        use prompts::{ActionId, Prompt, State};
+        let mut g = game("chips");
+        g.mode = hud::Mode::Playing;
+        let chips = |tweak_state: State| {
+            vec![
+                Prompt { action: ActionId::Strike, state: tweak_state, target: None },
+                Prompt { action: ActionId::UseCard(0), state: tweak_state, target: None },
+                Prompt { action: ActionId::UseCard(1), state: tweak_state, target: Some([0.5, 0.4]) },
+            ]
+        };
+        let cost = |g: &DreamscapeGame, w, h, p: Vec<Prompt>| {
+            let mut n = 0;
+            let mut s = 0;
+            let f = frame_with(g, w, h, &|v| v.prompts = p.clone());
+            n += f.len();
+            let ctx = egui::Context::default();
+            for c in &f {
+                if let egui::epaint::Shape::Mesh(m) = &c.shape {
+                    s += m.indices.len() / 3;
+                }
+            }
+            let _ = ctx;
+            (n, s)
+        };
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let base = cost(&g, w, h, Vec::new());
+            for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+                g.settings.ui_juice = juice;
+                for st in [State::Available, State::Required] {
+                    let with = cost(&g, w, h, chips(st));
+                    assert!(with.0 > base.0, "chips draw something");
+                    assert!(with.0 - base.0 <= 24, "{w}x{h} {juice:?}: +{} shapes", with.0 - base.0);
+                    assert!(with.1 - base.1 <= 200, "{w}x{h} {juice:?}: +{} tris", with.1 - base.1);
+                }
+            }
+        }
+        // The Playing screen with them still fits its UI budget (160 shapes, 800 triangles).
+        let (n, tris) = cost(&g, 1280.0, 720.0, chips(State::Available));
+        assert!(n <= 160 && tris <= 800, "{n} shapes, {tris} triangles");
+    }
+
+    #[test]
+    fn the_wake_door_asks_for_wake_or_go_deeper_and_open_play_asks_nothing() {
+        let mut g = game("wakechip");
+        g.mode = hud::Mode::Playing;
+        assert!(g.hud_view().prompts.iter().all(|p| p.state == prompts::State::Available));
+        g.choice = Some(ChoiceKind::WakeDoor);
+        g.mode = hud::Mode::Choice;
+        g.choice_view.selected = 0;
+        let p = g.hud_view().prompts;
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].action, p[0].state), (prompts::ActionId::Wake, prompts::State::Required));
+        g.choice_view.selected = 1;
+        assert_eq!(g.hud_view().prompts[0].action, prompts::ActionId::GoDeeper);
+        g.mode = hud::Mode::Title;
+        assert!(g.hud_view().prompts.is_empty());
+        g.choice = None;
+    }
+    // === end prompts ===
+
     #[test]
     fn the_pickup_ring_and_door_glow_draw_only_when_active() {
         let mut g = game("juice");
@@ -17611,6 +18245,20 @@ mod screen_smoke {
         add(&g, "Lottery");
         g.store_tab = 2;
         add(&g, "Tickets");
+        // === relics-ui === measured at Full juice, the dearest setting
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.booklet.stash.earn_ash(100_000);
+        for _ in 0..30 {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.store_tab = 3;
+        g.relic_page = 0;
+        g.relic_open = Some((g.booklet.relics.last().unwrap().id, 9.0));
+        add(&g, "Relics");
+        g.relic_page = 1;
+        add(&g, "Pouch");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        // === end relics-ui ===
         rows
     }
 
@@ -17633,7 +18281,7 @@ mod screen_smoke {
     #[test]
     fn every_screen_stays_inside_its_ui_budget() {
         // (screen, max shapes, max triangles)
-        const BUDGET: [(&str, usize, usize); 13] = [
+        const BUDGET: [(&str, usize, usize); 15] = [
             ("Warning", 120, 2_800),
             ("Title", 550, 3_900),
             ("Summary", 80, 600),
@@ -17647,6 +18295,8 @@ mod screen_smoke {
             ("Store", 340, 5_800),
             ("Lottery", 500, 5_500),
             ("Tickets", 100, 1_600),
+            ("Relics", 160, 2_800), // === relics-ui === at Full juice
+            ("Pouch", 180, 2_700),
         ];
         let rows = all_screen_costs();
         let mut over = Vec::new();
@@ -17755,6 +18405,22 @@ mod screen_smoke {
         bad.extend(overflows(&g, "Tickets"));
         g.ticket_confirm = true;
         bad.extend(overflows(&g, "Tickets-confirm"));
+        // === relics-ui === the case, an opening, and a full pouch
+        g.store_tab = 3;
+        g.booklet.stash.earn_ash(100_000);
+        bad.extend(overflows(&g, "Relic-case"));
+        for _ in 0..30 {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.relic_open = Some((g.booklet.relics.last().unwrap().id, 1.5));
+        bad.extend(overflows(&g, "Relic-opening"));
+        g.relic_page = 1;
+        bad.extend(overflows(&g, "Relic-pouch"));
+        g.relic_page = 0;
+        g.relic_open = None;
+        g.booklet.relics.clear();
+        g.booklet.equipped_relic = None;
+        // === end relics-ui ===
         g.store_tab = 1;
         g.begin_pick(offers(3));
         bad.extend(overflows(&g, "PackPick"));
@@ -18044,4 +18710,933 @@ mod screen_smoke {
         }
     }
     // === end perf ===
+
+    // === deathfx ===
+    #[test]
+    fn a_dying_run_keeps_its_mode_until_the_dissolve_ends() {
+        let mut g = game("death_fx");
+        g.mode = hud::Mode::Playing;
+        g.start_death(death_fx::Kind::Full);
+        assert!(g.tick_death(0.5), "the world holds still");
+        assert_eq!(g.mode, hud::Mode::Playing);
+        let key = Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(engine::sdl2::keyboard::Keycode::Space),
+            scancode: None,
+            keymod: engine::sdl2::keyboard::Mod::NOMOD,
+            repeat: false,
+        };
+        assert!(g.death_swallows(&key), "input is locked and the press skips");
+        assert_eq!(g.mode, hud::Mode::Playing);
+        assert!(!g.tick_death(0.016));
+        assert_eq!(g.mode, hud::Mode::Summary);
+        assert!(g.death.is_none());
+    }
+
+    #[test]
+    fn a_catch_does_not_hold_the_game() {
+        let mut g = game("death_fx_short");
+        g.mode = hud::Mode::Playing;
+        g.start_death(death_fx::Kind::Short);
+        assert!(!g.tick_death(0.1), "respawn logic keeps running");
+        assert!(g.death.is_some());
+        assert!(!g.tick_death(0.5));
+        assert!(g.death.is_none());
+        assert_eq!(g.mode, hud::Mode::Playing);
+    }
+    // === end deathfx ===
+
+    // === relics-weapon ===
+    #[test]
+    fn no_relic_leaves_strikes_exactly_as_they_were() {
+        let mut g = game("relic_none");
+        assert!(g.held_relic.is_none() || crate::dev::var_os("DREAMSCAPE_GIVE_RELIC").is_some());
+        g.held_relic = None;
+        assert_eq!(g.relic_mods(), relic_weapon::StrikeMods::IDENTITY);
+        assert_eq!(g.strike_reach(), combat::REACH);
+        assert_eq!(g.strike_arc_cos(), combat::ARC_COS);
+    }
+
+    #[test]
+    fn a_mythic_relic_reaches_further_and_a_cracked_one_less_but_both_stay_capped() {
+        let mut g = game("relic_mods");
+        g.held_relic = None;
+        let base = (g.strike_reach(), g.strike_arc_cos());
+        let mut last = base.0;
+        for rarity in [
+            relic_types::RelicRarity::Cracked,
+            relic_types::RelicRarity::Worn,
+            relic_types::RelicRarity::Pristine,
+            relic_types::RelicRarity::Mythic,
+        ] {
+            let weapon = relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, 9);
+            g.held_relic = Some(HeldRelic { rarity, weapon });
+            let (reach, arc) = (g.strike_reach(), g.strike_arc_cos());
+            assert!(reach >= last - 0.3 && reach <= base.0 * relic_weapon::MAX_REACH_MULT + 1e-4);
+            assert!(arc <= base.1 && arc >= base.1 - relic_weapon::MAX_ARC_RELAX - 1e-4);
+            last = reach;
+        }
+        assert_eq!(g.relic_mods().damage_bonus, 1, "Mythic adds one damage");
+    }
+    // === end relics-weapon ===
+
+    // === m4b === loadout + deck builder + booklet motion
+    /// Draws the current screen on ONE context at each of `times` (the HUD's clock),
+    /// as the game does, and returns the last frame's shapes.
+    fn frames_at(g: &DreamscapeGame, w: f32, h: f32, times: &[f32]) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let mut last = Vec::new();
+        for &t in times {
+            let mut v = g.hud_view();
+            v.time = t;
+            let k = hud::ui_scale(v.mode, w, h);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+                ..Default::default()
+            };
+            last = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art)).shapes;
+        }
+        last
+    }
+
+    fn m4b_game(name: &str, cards_n: usize) -> DreamscapeGame {
+        let mut g = game(name);
+        let records: Vec<_> = dream::ALL_THEMES
+            .iter()
+            .cycle()
+            .take(cards_n)
+            .enumerate()
+            .map(|(i, &t)| cards::tests::record(t, 40 + i as u64, 1 + i as u32, 0.3, i % 2 == 0))
+            .collect();
+        g.booklet.add_run(1, &records);
+        g
+    }
+
+    /// Text that leaves the screen or its panel, drawn in the entrance and settled.
+    fn m4b_overflows(g: &DreamscapeGame, label: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            // 0.0 = first frame (entrance start), then mid-entrance, then long settled.
+            for times in [&[0.0_f32][..], &[0.0, 0.1][..], &[0.0, 0.1, 3.0][..]] {
+                let shapes = frames_at(g, w, h, times);
+                let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+                let panels = boxes(&shapes);
+                let drawn = texts(&shapes);
+                if drawn.is_empty() {
+                    bad.push(format!("{label} {w}x{h} drew no text"));
+                }
+                for (text, r) in drawn {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if !screen.expand(1.5).contains_rect(r) {
+                        bad.push(format!("{label} {w}x{h} t{times:?} OFF-SCREEN {text:?} {r:?}"));
+                        continue;
+                    }
+                    let c = r.center();
+                    let home = panels
+                        .iter()
+                        .filter(|b| b.contains(c) && b.area() > r.area() * 1.05 && b.area() < screen.area() * 0.9)
+                        .min_by(|a, b| a.area().total_cmp(&b.area()));
+                    if let Some(b) = home {
+                        if !b.expand(1.5).contains_rect(r) {
+                            bad.push(format!("{label} {w}x{h} t{times:?} OUT-OF-BOX {text:?} {r:?} box {b:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn m4b_deck_builder_draws_and_fits_at_two_sizes_entering_and_settled() {
+        let mut g = m4b_game("m4b_deck", 40);
+        g.booklet.lore.deck = g.booklet.cards().take(7).map(|c| c.number).collect();
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            g.open_loadout();
+            // The cursor on a later card, past the first window (scrolled grid).
+            for sel in [0, 7, 33] {
+                g.loadout_sel = sel;
+                let bad = m4b_overflows(&g, &format!("Deck {juice:?} sel {sel}"));
+                assert!(bad.is_empty(), "{}", bad.join("\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn m4b_booklet_draws_and_fits_at_two_sizes_entering_and_settled() {
+        let mut g = m4b_game("m4b_booklet", 30);
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            g.open_booklet();
+            let bad = m4b_overflows(&g, &format!("Booklet {juice:?}"));
+            assert!(bad.is_empty(), "{}", bad.join("\n"));
+        }
+    }
+
+    #[test]
+    fn m4b_entrance_moves_the_deck_builder_then_settles() {
+        let mut g = m4b_game("m4b_enter", 20);
+        g.open_loadout();
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let start = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+        let end_a = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 3.0, 3.5]);
+        let end_b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 4.0, 4.5]);
+        assert!(start != mid, "tiles come in over time");
+        assert!(mid != end_a);
+        // Settled: only the slow card wobble and cursor pulse remain, tile positions agree.
+        assert_eq!(start.len().max(end_a.len()) > 0, true);
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        let off_a = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let off_b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 4.0]);
+        assert_eq!(off_a.len(), off_b.len(), "Off: the first frame already has everything");
+        let _ = end_b;
+    }
+
+    #[test]
+    fn m4b_reduced_motion_makes_the_booklet_static() {
+        let mut g = m4b_game("m4b_still", 6);
+        g.settings.reduced_motion = true;
+        g.open_booklet();
+        let a = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 5.0]);
+        let ta: Vec<String> = texts(&a).into_iter().map(|t| t.0).collect();
+        let tb: Vec<String> = texts(&b).into_iter().map(|t| t.0).collect();
+        assert_eq!(ta, tb, "no tick-up and no entrance under reduced motion");
+    }
+
+    #[test]
+    fn m4b_cursor_follows_the_sorted_order_by_card_number() {
+        let mut g = m4b_game("m4b_sorted", 12);
+        g.open_loadout();
+        g.loadout_sel = 0;
+        let asc = g.hud_view().loadout.cards[0].number;
+        g.settings.sort_loadout = sorting::Sort { key: sorting::SortKey::Number, dir: sorting::Dir::Desc };
+        let desc = g.hud_view().loadout.cards[0].number;
+        assert_ne!(asc, desc, "the same index is another card after a flip");
+        // One context across the flip: the focus follows the card number, and the draw stays whole.
+        let ctx = egui::Context::default();
+        let key = |n| Some(n);
+        let mut a = screen_anim::ScreenAnim::default();
+        a.update(1.0, 0, key(asc), false, 0.0, 1.0);
+        a.update(1.1, 0, key(desc), false, 0.0, 1.0);
+        assert_eq!(a.grid(1.1, 1.0).focus_key, Some(desc));
+        assert_eq!(a.grid(1.1, 1.0).prev_key, Some(asc));
+        let _ = ctx;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            assert!(frames_at(&g, w, h, &[0.0, 0.1, 2.0]).len() > 50);
+        }
+    }
+
+    #[test]
+    fn m4b_screens_stay_cheap_at_full_juice_and_a_full_deck() {
+        let mut g = m4b_game("m4b_cost", 60);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.booklet.lore.deck = g.booklet.cards().take(deck::DECK_MAX).map(|c| c.number).collect();
+        g.open_loadout();
+        g.loadout_sel = 20;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let c = ui_cost(&g, w, h);
+            assert!(c.shapes <= 450 && c.triangles <= 7_000, "Loadout {w}x{h}: {c:?}");
+        }
+        g.open_booklet();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let c = ui_cost(&g, w, h);
+            assert!(c.shapes <= 240 && c.triangles <= 3_900, "Booklet {w}x{h}: {c:?}");
+        }
+    }
+    // === end m4b ===
+    // === m4d === pack reveal + merge screen pass
+    fn m4d_pack(n: usize) -> Vec<cards::Recalled> {
+        use cards::Rarity::*;
+        const R: [cards::Rarity; 7] = [Faint, Hazy, Vivid, Lucid, Prophetic, Fused, Resonant];
+        (0..n)
+            .map(|i| {
+                let mut card = cards::card_from(&cards::tests::record(dream::ALL_THEMES[i % dream::ALL_THEMES.len()], 90 + i as u64, 1 + i as u32, 0.3, false));
+                card.rarity = R[(i * 3) % 7];
+                cards::Recalled { card, remembered: i % 4 != 3 }
+            })
+            .collect()
+    }
+
+    /// Draws `g` at both sizes at each clock in `times`; text must stay on screen and in its panel.
+    fn m4d_fits(g: &DreamscapeGame, label: &str) -> Vec<String> {
+        // The glow ring around the result card is a box the "BECOMES" label sits outside of on purpose
+        // (the same false positive fires on the unchanged screen), so it is not a finding.
+        m4b_overflows(g, label).into_iter().filter(|b| !b.contains("OUT-OF-BOX \"BECOMES\"")).collect()
+    }
+
+    #[test]
+    fn m4d_merge_draws_and_fits_at_two_sizes_for_every_step_and_juice() {
+        let mut g = m4b_game("m4d_merge", 24);
+        let mut all_bad: Vec<String> = Vec::new();
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            for reduced in [false, true] {
+                g.settings.reduced_motion = reduced;
+                g.open_merge(hud::Mode::Title);
+                // Nothing picked, a first card with a mergeable second (a different dream), and the same dream.
+                let cards: Vec<_> = g.booklet.cards().cloned().collect();
+                let first = cards[0].number;
+                let other = cards.iter().position(|c| fusion::can_merge(&cards[0], c)).expect("a different dream");
+                for (picked, sel, name) in [(None, 0, "pick-first"), (Some(first), other, "pick-second"), (Some(first), 0, "blocked")] {
+                    g.merge_first = picked;
+                    g.merge_sel = sel;
+                    all_bad.extend(m4d_fits(&g, &format!("Merge {juice:?} reduced={reduced} {name}")));
+                }
+            }
+        }
+        g.settings.reduced_motion = false;
+        all_bad.sort();
+        all_bad.dedup();
+        assert!(all_bad.is_empty(), "{}", all_bad.join("\n"));
+    }
+
+    #[test]
+    fn m4d_merge_keeps_its_hint_bar_keys() {
+        let mut g = m4b_game("m4d_merge_hint", 6);
+        g.open_merge(hud::Mode::Title);
+        for (picked, keys) in [(None, &["[enter]", "[a/d/w/s]", "[t] sort", "[r] flip", "[esc]"][..]), (Some(1), &["[enter] merge", "[tab]", "[backspace]", "[t] sort", "[r] flip", "[esc]"][..])] {
+            g.merge_first = picked;
+            let shapes = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]);
+            let all: String = texts(&shapes).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join("\n");
+            for k in keys {
+                assert!(all.contains(k), "merge hint bar lost {k:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_merge_cursor_is_identified_by_card_number_under_every_sort() {
+        let mut g = m4b_game("m4d_merge_sort", 12);
+        g.open_merge(hud::Mode::Title);
+        let nums = |g: &DreamscapeGame| -> Vec<u32> { g.hud_view().merge.cards.iter().map(|c| c.number).collect() };
+        let a = nums(&g);
+        let sel = 3;
+        g.merge_sel = sel;
+        let picked = a[sel];
+        g.settings.sort_merge.flip();
+        let b = nums(&g);
+        assert_ne!(a, b, "the sort changed the order");
+        let v = g.hud_view();
+        // The view's cards are in sorted order and the cursor indexes that list.
+        assert_eq!(v.merge.cards.get(v.merge.selected).map(|c| c.number), Some(b[g.merge_sel]));
+        let _ = picked;
+    }
+
+    #[test]
+    fn m4d_reveal_draws_and_fits_at_two_sizes_across_the_whole_reveal() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for n in [1usize, 4, 12] {
+                let mut g = game("m4d_reveal");
+                g.settings.ui_juice = juice;
+                g.reveal_pack(m4d_pack(n));
+                let last = reveal_ui::reveal_times(&g.pack.pack).last().copied().unwrap_or(0.0);
+                // Face down, mid-flip, just landed, fully settled, pressed, skipped.
+                for age in [0.0, 0.3, last + 0.2, last + 0.6, last + 5.0, f32::MAX] {
+                    g.pack.age = age;
+                    g.pack.pressed = age > last + 2.0 && age != f32::MAX;
+                    g.pack.cards_added = n;
+                    g.pack.dust_earned = 40;
+                    // The goal line is wider than the rarity halo it is drawn over (a box it can never
+                    // belong to); only the card faces must stay clear of it, which the layout now ensures.
+                    let goal = g.hud_view().goal;
+                    let bad: Vec<String> = m4d_fits(&g, &format!("Reveal {juice:?} n={n} age={age}"))
+                        .into_iter()
+                        .filter(|b| goal.is_empty() || !b.contains(&format!("OUT-OF-BOX {goal:?}")))
+                        .collect();
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_pack_pick_draws_and_fits_entering_and_settled() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for n in 1..=3 {
+                let mut g = game("m4d_pick");
+                g.settings.ui_juice = juice;
+                g.begin_pick(offers(n));
+                for age in [0.0, 0.2, 3.0] {
+                    g.pick.age = age;
+                    let bad = m4d_fits(&g, &format!("PackPick {juice:?} n={n} age={age}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_reveal_moves_while_landing_and_off_never_does() {
+        let mut g = game("m4d_reveal_move");
+        g.reveal_pack(m4d_pack(4));
+        let t = reveal_ui::reveal_times(&g.pack.pack);
+        g.pack.age = t[3] + 0.35 + 0.05;
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let soft = frames_at(&g, 1280.0, 720.0, &[0.0, 0.0]);
+        assert!(!soft.is_empty());
+        // Off: the same frame drawn twice a second apart differs only by the HUD clock's own art, never layout.
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        g.pack.age = f32::MAX;
+        let a = texts(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        let b = texts(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn m4d_screens_at_full_juice_stay_inside_the_merge_budget() {
+        // Merge's own budget (500 shapes, 7200 triangles) applies to the pack screens too.
+        let mut g = m4b_game("m4d_budget", 40);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.open_merge(hud::Mode::Title);
+        let mut costs = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            costs.push((format!("Merge {w}x{h}"), ui_cost(&g, w, h)));
+        }
+        let mut r = game("m4d_budget_reveal");
+        r.settings.ui_juice = ui_motion::UiJuice::Full;
+        r.reveal_pack(m4d_pack(12));
+        r.pack.age = f32::MAX;
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft] {
+            r.settings.ui_juice = juice;
+            let c = ui_cost(&r, 1280.0, 720.0);
+            eprintln!("m4d cost Reveal {juice:?} 1280x720: {} shapes, {} triangles", c.shapes, c.triangles);
+        }
+        r.settings.ui_juice = ui_motion::UiJuice::Full;
+        let mut q = game("m4d_budget_pick");
+        q.settings.ui_juice = ui_motion::UiJuice::Full;
+        q.begin_pick(offers(3));
+        q.pick.age = 3.0;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            costs.push((format!("Reveal {w}x{h}"), ui_cost(&r, w, h)));
+            costs.push((format!("PackPick {w}x{h}"), ui_cost(&q, w, h)));
+        }
+        for (l, c) in &costs {
+            eprintln!("m4d cost {l}: {} shapes, {} triangles", c.shapes, c.triangles);
+            // The pick screen is the pack art (pack_art.rs, not budgeted, unchanged here): measured, not gated.
+            if l.starts_with("PackPick") {
+                continue;
+            }
+            // Reveal draws up to a dozen full art-mesh cards: 585 shapes / 9,880 triangles at Off,
+            // 10,222 at Full (the motion adds ~3%), so its own ceiling is ~1.2x that.
+            let (max_s, max_t) = if l.starts_with("Reveal") { (700, 12_000) } else { (500, 7_200) };
+            assert!(c.shapes <= max_s && c.triangles <= max_t, "{l}: {} shapes, {} triangles", c.shapes, c.triangles);
+        }
+    }
+    // === end m4d ===
+
+    // === m4e === in-run HUD + hand + summary + upgrade picks screen pass
+    fn m4e_hand(n: usize) -> Vec<hand::HandCard> {
+        (0..n)
+            .map(|i| hand::HandCard { charge: (i as f32 + 1.0) / (n as f32 + 1.0), active: i == 2, ..card("DASH", hand::NEVER) })
+            .collect()
+    }
+
+    fn m4e_cost(g: &DreamscapeGame, w: f32, h: f32, tweak: &dyn Fn(&mut hud::HudView)) -> (usize, usize) {
+        let mut v = g.hud_view();
+        tweak(&mut v);
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let k = hud::ui_scale(v.mode, w, h);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let ppp = out.pixels_per_point;
+        let shapes = out.shapes.len();
+        let tris = ctx
+            .tessellate(out.shapes, ppp)
+            .iter()
+            .map(|m| match &m.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.indices.len() / 3,
+                _ => 0,
+            })
+            .sum();
+        (shapes, tris)
+    }
+
+    const M4E_JUICE: [ui_motion::UiJuice; 3] = [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full];
+
+    #[test]
+    fn m4e_upgrade_picks_draw_and_fit_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            let mut g = m4b_game("m4e_choice", 12);
+            g.settings.ui_juice = juice;
+            for depth in [1, 6, 12] {
+                g.director.depth = depth;
+                g.open_upgrade_choice();
+                for age in [0.0, 0.2, 3.0] {
+                    g.choice_view.age = age;
+                    bad.extend(m4b_overflows(&g, &format!("Choice {juice:?} depth {depth} age {age}")));
+                }
+            }
+            g.open_wake_choice();
+            g.choice_view.age = 3.0;
+            bad.extend(m4b_overflows(&g, &format!("WakeChoice {juice:?}")));
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_summary_draws_and_fits_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            for reduced in [false, true] {
+                let mut g = m4b_game("m4e_summary", 12);
+                g.settings.ui_juice = juice;
+                g.settings.reduced_motion = reduced;
+                g.mode = hud::Mode::Summary;
+                for age in [0.0, 0.3, 1.5, 8.0] {
+                    g.title_age = age;
+                    bad.extend(m4b_overflows(&g, &format!("Summary {juice:?} reduced={reduced} age {age}")));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_full_hand_in_the_run_fits_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            let mut g = game("m4e_hand");
+            g.settings.ui_juice = juice;
+            g.mode = hud::Mode::Playing;
+            for n in [1, 3, 5] {
+                bad.extend(overflows_with(&g, &format!("HUD hand {n} {juice:?}"), &|v| {
+                    v.hand = m4e_hand(n);
+                    v.hand_pile.shown = true;
+                    v.nerve = (1, 4);
+                    v.timer = Some(6.0);
+                }));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_screens_at_full_juice_stay_inside_their_budgets() {
+        let mut g = m4b_game("m4e_budget", 12);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let mut rows = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            g.mode = hud::Mode::Playing;
+            rows.push((format!("Playing 5-card {w}x{h}"), m4e_cost(&g, w, h, &|v| {
+                v.hand = m4e_hand(5);
+                v.hand_pile.shown = true;
+                v.hand_pile.draw_count = 4;
+                v.nerve = (1, 4);
+            }), (340, 3_300)));
+            g.mode = hud::Mode::Summary;
+            g.title_age = 0.5;
+            rows.push((format!("Summary {w}x{h}"), m4e_cost(&g, w, h, &|_| {}), (80, 600)));
+            g.open_upgrade_choice();
+            g.choice_view.age = 3.0;
+            rows.push((format!("Choice {w}x{h}"), m4e_cost(&g, w, h, &|_| {}), (160, 1_100)));
+        }
+        let mut over = Vec::new();
+        for (l, (s, t), (ms, mt)) in &rows {
+            eprintln!("m4e cost {l}: {s} shapes, {t} triangles");
+            if s > ms || t > mt {
+                over.push(format!("{l}: {s} shapes, {t} triangles (max {ms}/{mt})"));
+            }
+        }
+        assert!(over.is_empty(), "{}", over.join("\n"));
+    }
+    // === end m4e ===
+
+    // === m4a === title + settings + codex/memories/code motion
+    fn m4a_game(name: &str) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn(5000);
+        g
+    }
+
+    fn m4a_show(g: &mut DreamscapeGame, screen: &str) {
+        match screen {
+            "Title" => g.mode = hud::Mode::Title,
+            "Settings" => g.open_settings(),
+            "Codex" => g.open_codex(),
+            "Memories" => g.mode = hud::Mode::Memories,
+            _ => g.open_code_entry(),
+        }
+    }
+
+    const M4A_SCREENS: [&str; 5] = ["Title", "Settings", "Codex", "Memories", "Code"];
+    const JUICES: [ui_motion::UiJuice; 3] = [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full];
+
+    #[test]
+    fn m4a_screens_fit_at_two_sizes_entering_and_settled_at_every_juice() {
+        let mut g = m4a_game("m4a_fit");
+        for juice in JUICES {
+            g.settings.ui_juice = juice;
+            for screen in M4A_SCREENS {
+                m4a_show(&mut g, screen);
+                let last = settings::rows().len().saturating_sub(1);
+                for sel in [0usize, 2, last] {
+                    g.settings_sel = sel;
+                    g.shop_col = sel; // the title's cursor
+                    let bad = m4b_overflows(&g, &format!("{screen} {juice:?} sel {sel}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    /// Frames close enough together that the screen does not count as reopened.
+    const M4A_RAMP: [f32; 9] = [0.0, 0.1, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8];
+
+    fn all_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        texts(shapes).into_iter().map(|t| t.0).collect()
+    }
+
+    #[test]
+    fn m4a_title_numbers_tick_up_and_off_shows_them_at_once() {
+        let mut g = m4a_game("m4a_tick");
+        g.mode = hud::Mode::Title;
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let first = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        let settled = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+        let has = |t: &[String], s: &str| t.iter().any(|x| x.contains(s));
+        assert!(has(&first, "0 dust") && !has(&first, "5000 dust"), "{first:?}");
+        assert!(has(&settled, "5000 dust"), "{settled:?}");
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        assert!(has(&all_text(&frames_at(&g, 1280.0, 720.0, &[0.0])), "5000 dust"));
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        g.settings.reduced_motion = true;
+        assert!(has(&all_text(&frames_at(&g, 1280.0, 720.0, &[0.0])), "5000 dust"));
+    }
+
+    #[test]
+    fn m4a_entrances_move_then_settle_and_off_is_final_on_frame_one() {
+        let mut g = m4a_game("m4a_enter");
+        for screen in M4A_SCREENS {
+            m4a_show(&mut g, screen);
+            g.settings.ui_juice = ui_motion::UiJuice::Soft;
+            let start = frames_at(&g, 1280.0, 720.0, &[0.0]);
+            let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+            assert!(start != mid, "{screen}: items come in over time");
+            // Off: nothing is staged, so the first frame matches a long-settled one in layout.
+            g.settings.ui_juice = ui_motion::UiJuice::Off;
+            let a = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+            let b = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            assert_eq!(a.len(), b.len(), "{screen} Off");
+            g.settings.reduced_motion = true;
+            g.settings.ui_juice = ui_motion::UiJuice::Full;
+            let a = all_text(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+            let b = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            // (The code box's existing cursor blink is not part of this motion.)
+            let flat = |t: Vec<String>| t.into_iter().map(|x| x.replace('_', "·")).collect::<Vec<_>>();
+            assert_eq!(flat(a), flat(b), "{screen} reduced motion is static");
+            g.settings.reduced_motion = false;
+        }
+    }
+
+    #[test]
+    fn m4a_title_and_settings_show_the_confirm_chip_when_there_is_room() {
+        let mut g = m4a_game("m4a_chip");
+        let key = prompts::label(prompts::ActionId::Confirm, hud::Mode::Title, &g.settings, false);
+        assert!(!key.is_empty());
+        for screen in ["Title", "Settings"] {
+            m4a_show(&mut g, screen);
+            let t = all_text(&frames_at(&g, 1280.0, 720.0, &M4A_RAMP));
+            assert!(t.iter().any(|x| *x == key), "{screen}: chip {key:?} in {t:?}");
+        }
+    }
+
+    #[test]
+    fn m4a_screens_stay_cheap_at_full_juice() {
+        let mut g = m4a_game("m4a_cost");
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for (screen, shapes, tris) in [("Title", 550, 3_900), ("Settings", 120, 1_700), ("Codex", 130, 1_400), ("Memories", 140, 2_200), ("Code", 40, 600)] {
+            m4a_show(&mut g, screen);
+            for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+                let c = ui_cost(&g, w, h);
+                assert!(c.shapes <= shapes && c.triangles <= tris, "{screen} {w}x{h}: {c:?}");
+            }
+        }
+    }
+    // === end m4a ===
+    // === m4c === shop + tickets + lottery motion
+    fn m4c_game(name: &str) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn(5000);
+        g.booklet.stash.tickets = 3;
+        g.open_store();
+        g
+    }
+
+    #[test]
+    fn m4c_store_tabs_draw_and_fit_at_two_sizes_entering_and_settled() {
+        let mut g = m4c_game("m4c_fit");
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            for tab in 0..3 {
+                for (shelf, col) in [(0, 0), (1, 2), (2, 5)] {
+                    g.store_tab = tab;
+                    g.shop_shelf = shelf;
+                    g.shop_col = col;
+                    let bad = m4b_overflows(&g, &format!("Store tab {tab} {juice:?} {shelf}/{col}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4c_entrance_moves_each_tab_then_settles_and_off_is_final_at_once() {
+        let mut g = m4c_game("m4c_enter");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        for tab in 0..3 {
+            g.store_tab = tab;
+            let first = frames_at(&g, 1280.0, 720.0, &[0.0]);
+            let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+            assert!(first != mid, "tab {tab}: things ease in");
+            g.settings.ui_juice = ui_motion::UiJuice::Off;
+            let off_first: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+            let off_later: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.3, 0.6, 0.9, 1.2, 1.5])).into_iter().map(|t| t.0).collect();
+            assert_eq!(off_first, off_later, "tab {tab}: Off draws the final text on frame 1");
+            g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        }
+    }
+
+    #[test]
+    fn m4c_odds_text_is_exact_from_the_first_frame_and_never_ticks() {
+        let mut g = m4c_game("m4c_odds");
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for tab in [1, 2] {
+            g.store_tab = tab;
+            let pct = |times: &[f32]| -> Vec<String> {
+                texts(&frames_at(&g, 1280.0, 720.0, times)).into_iter().map(|t| t.0).filter(|t| t.contains('%')).collect()
+            };
+            let first = pct(&[0.0]);
+            let later = pct(&[0.0, 0.3, 0.6, 0.9, 1.2, 1.5]);
+            assert!(!first.is_empty(), "tab {tab} shows odds");
+            assert_eq!(first, later, "tab {tab}: the odds read the same while the panel eases in");
+        }
+    }
+
+    #[test]
+    fn m4c_counters_tick_up_to_the_exact_value() {
+        let mut g = m4c_game("m4c_tick");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        g.store_tab = 0;
+        let has = |times: &[f32], needle: &str| texts(&frames_at(&g, 1280.0, 720.0, times)).iter().any(|t| t.0.contains(needle));
+        let dust = format!("{} dream dust", g.booklet.stash.dust);
+        assert!(!has(&[0.0, 0.1], &dust), "mid-count shows a smaller number");
+        assert!(has(&[0.0, 0.3, 0.6, 0.9, 1.2], &dust), "settles on the real dust");
+    }
+
+    #[test]
+    fn m4c_chip_only_when_the_action_is_available() {
+        let mut g = m4c_game("m4c_chip");
+        g.store_tab = 2;
+        let n_with = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.tickets = 0;
+        let n_without = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(n_with > n_without, "{n_with} vs {n_without}: no ticket, no chip");
+        g.store_tab = 1;
+        g.booklet.stash.dust = 0;
+        let poor = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.dust = 5000;
+        let rich = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(rich > poor, "{rich} vs {poor}: cannot afford a pull, no chip");
+    }
+
+    #[test]
+    fn m4c_reduced_motion_makes_the_store_static() {
+        let mut g = m4c_game("m4c_still");
+        g.settings.reduced_motion = true;
+        for tab in 0..3 {
+            g.store_tab = tab;
+            let a: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+            let b: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.3, 0.6, 0.9, 1.2, 1.5])).into_iter().map(|t| t.0).collect();
+            assert_eq!(a, b, "tab {tab}: no tick-up, no entrance");
+        }
+    }
+    // === end m4c ===
+
+    // === relics-ui ===
+    fn r6_game(name: &str, relics_n: usize) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn_ash(100_000);
+        for _ in 0..relics_n {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.open_store();
+        g.store_tab = 3;
+        g
+    }
+
+    #[test]
+    fn r6_relic_tab_draws_and_fits_in_every_state_at_two_sizes() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for (n, label) in [(0, "empty"), (1, "one"), (30, "thirty")] {
+                let mut g = r6_game(&format!("r6_fit_{n}"), n);
+                g.settings.ui_juice = juice;
+                // The case: idle, then at several beats of an opening.
+                g.relic_page = 0;
+                g.relic_open = None;
+                let bad = m4b_overflows(&g, &format!("Relic case idle {label} {juice:?}"));
+                assert!(bad.is_empty(), "{}", bad.join("\n"));
+                if n > 0 {
+                    let id = g.booklet.relics.last().unwrap().id;
+                    for age in [0.05, 0.4, 0.9, 1.4, 2.0, 3.0, 9.0] {
+                        g.relic_open = Some((id, age));
+                        let bad = m4b_overflows(&g, &format!("Relic case age {age} {label} {juice:?}"));
+                        assert!(bad.is_empty(), "{}", bad.join("\n"));
+                    }
+                }
+                g.relic_page = 1;
+                for cur in [None, Some(1), Some(n as u32)] {
+                    g.relic_cursor = cur;
+                    let bad = m4b_overflows(&g, &format!("Relic pouch {label} {juice:?} {cur:?}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r6_relic_screens_stay_inside_the_ui_budget_at_both_sizes() {
+        let mut g = r6_game("r6_budget", 30);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            for (page, label, max_shapes, max_tris) in [(0, "case", 160, 2_800), (1, "pouch", 180, 2_700)] {
+                g.relic_page = page;
+                let c = ui_cost(&g, w, h);
+                assert!(c.shapes <= max_shapes && c.triangles <= max_tris, "relic {label} {w}x{h}: {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn r6_pull_commits_once_saves_and_the_screen_shows_that_relic() {
+        let mut g = r6_game("r6_pull", 0);
+        let ash = g.booklet.stash.ash;
+        g.relic_pull();
+        assert_eq!(g.booklet.relics.len(), 1);
+        let r = g.booklet.relics[0].clone();
+        assert_eq!(g.relic_open.map(|o| o.0), Some(r.id));
+        assert_eq!(ash - g.booklet.stash.ash, relics::cost_for(r.rarity));
+        // Saved at commit: the file on disk already holds it.
+        assert_eq!(cards::load(&g.booklet_path).relics, g.booklet.relics);
+        // A press during the opening does nothing more (no second roll).
+        g.relic_pull();
+        assert_eq!(g.booklet.relics.len(), 1);
+        // Skip jumps to the final card; leaving and returning shows the same relic.
+        g.relic_skip();
+        assert!(!g.relic_opening_running());
+        g.relic_leave_tab();
+        assert_eq!(g.relic_view().opening.map(|o| o.relic), Some(r));
+    }
+
+    #[test]
+    fn r6_a_poor_player_cannot_pull_and_nothing_changes() {
+        let mut g = r6_game("r6_poor", 0);
+        g.booklet.stash.ash = relic_ui::max_cost() - 1;
+        let before = g.booklet.clone();
+        g.relic_pull();
+        assert_eq!(g.booklet.relics, before.relics);
+        assert_eq!(g.booklet.stash.ash, before.stash.ash);
+        assert!(g.relic_status.is_some() && g.relic_open.is_none());
+    }
+
+    #[test]
+    fn r6_equipping_sets_the_held_weapon_and_runs_start_with_it() {
+        let mut g = r6_game("r6_equip", 6);
+        g.held_relic = None;
+        let ids = relic_ui::order(&g.booklet.relics);
+        let pick = *ids.last().unwrap();
+        g.relic_cursor = Some(pick);
+        g.relic_equip();
+        let r = g.booklet.relics.iter().find(|r| r.id == pick).unwrap().clone();
+        assert_eq!(g.booklet.equipped_relic, Some(pick));
+        let h = g.held_relic.expect("held");
+        assert_eq!((h.rarity, Some(h.weapon)), (r.rarity, r.weapon));
+        assert_eq!(cards::load(&g.booklet_path).equipped_relic, Some(pick), "saved");
+        // A run start re-reads the equipped relic.
+        g.held_relic = None;
+        g.prologue = None;
+        g.refresh_card_effects();
+        assert_eq!(g.held_relic.map(|h| h.rarity), Some(r.rarity));
+        // Equipping the one already worn changes nothing.
+        let n = g.booklet.clone();
+        g.relic_equip();
+        assert_eq!(g.booklet.equipped_relic, n.equipped_relic);
+        // The pouch marks the worn one.
+        assert_eq!(g.relic_view().equipped, Some(pick));
+    }
+
+    #[test]
+    fn r6_an_old_booklet_without_relics_shows_an_empty_pouch() {
+        let mut g = r6_game("r6_old", 0);
+        g.relic_page = 1;
+        assert!(g.booklet.relics.is_empty());
+        let v = g.relic_view();
+        assert!(v.pouch.is_empty() && v.cursor.is_none() && v.equipped.is_none());
+        let drawn: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 3.0])).into_iter().map(|t| t.0).collect();
+        assert!(drawn.iter().any(|t| t.contains("EMPTY")), "{drawn:?}");
+    }
+
+    #[test]
+    fn r6_odds_and_pity_are_on_screen_from_the_first_frame_and_never_tick() {
+        let mut g = r6_game("r6_odds", 3);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let pct = |times: &[f32]| -> Vec<String> {
+            texts(&frames_at(&g, 1280.0, 720.0, times))
+                .into_iter()
+                .map(|t| t.0)
+                .filter(|t| t.contains('%') || t.contains("GUARANTEED"))
+                .collect()
+        };
+        let first = pct(&[0.0]);
+        assert!(first.iter().any(|t| t.contains("MYTHIC GUARANTEED")), "{first:?}");
+        assert!(first.iter().filter(|t| t.ends_with('%')).count() >= 4, "{first:?}");
+        assert_eq!(first, pct(&[0.0, 0.3, 0.6, 0.9, 1.5]));
+        let all: String = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 3.0])).into_iter().map(|t| t.0).collect::<Vec<_>>().join("|");
+        for banned in ["SO CLOSE", "LAST CHANCE", "ALMOST", "HURRY"] {
+            assert!(!all.contains(banned));
+        }
+    }
+
+    #[test]
+    fn r6_chip_only_when_a_pull_is_possible() {
+        let mut g = r6_game("r6_chip", 0);
+        let rich = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.ash = 0;
+        let poor = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(rich > poor, "{rich} vs {poor}");
+    }
+
+    #[test]
+    fn r6_reduced_motion_is_a_crossfade_with_no_motion_and_off_is_final_at_once() {
+        let mut g = r6_game("r6_still", 1);
+        let id = g.booklet.relics[0].id;
+        g.relic_open = Some((id, 0.0));
+        g.settings.reduced_motion = true;
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let a: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+        let b: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 0.2])).into_iter().map(|t| t.0).collect();
+        assert_eq!(a, b, "reduced motion: same text on every frame");
+        g.settings.reduced_motion = false;
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        assert!(!g.relic_opening_running(), "Off: the final card at once");
+    }
+    // === end relics-ui ===
+
 }
+

@@ -42,6 +42,10 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
         1.0,
         v,
     );
+    // === m4a === cells ease in; the best depths tick up
+    let mo = crate::screen_anim::list_motion(p, "m4a_codex", v.time, None, &v.settings_snapshot);
+    let (age, amount) = (mo.age, mo.amount);
+    // === end m4a ===
     let margin = screen.width() * 0.06;
     let gap = 24.0 * u;
     let col_w = (screen.width() - 2.0 * margin - gap) * 0.5;
@@ -94,6 +98,8 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
             left_panel.left() + cell * 3.0 + col as f32 * cw,
             left_panel.top() + cell * 4.0 + r as f32 * row,
         );
+        let e = crate::screen_anim::enter(i, age, amount); // === m4a ===
+        let at = at + Vec2::new(0.0, (1.0 - e) * 5.0 * u);
         let cell_rect = Rect::from_min_size(at, Vec2::new(cw - cell * 2.0, row - 2.0));
         match best {
             Some(d) => {
@@ -102,24 +108,24 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
                     Align2::LEFT_TOP,
                     pixel_ui_clip(name, cw - cell * 2.0 - font * 3.5, font),
                     FontId::monospace(font),
-                    rgba(ink(v), 0.95),
+                    rgba(ink(v), 0.95 * e),
                 );
                 p.text(
                     cell_rect.right_top() + Vec2::new(-cell, (row - font) * 0.4),
                     Align2::RIGHT_TOP,
-                    format!("{d}"),
+                    format!("{}", crate::screen_anim::tick(*d as i64, age, 0.1, amount)),
                     FontId::monospace(font),
-                    rgba([255, 210, 80], 0.95),
+                    rgba([255, 210, 80], 0.95 * e),
                 );
             }
             None => {
-                pixel_ui::hatch(p, cell_rect.shrink(1.0), cell, Color32::from_white_alpha(8));
+                pixel_ui::hatch(p, cell_rect.shrink(1.0), cell, Color32::from_white_alpha((8.0 * e) as u8));
                 p.text(
                     cell_rect.center(),
                     Align2::CENTER_CENTER,
                     "???",
                     FontId::monospace(font),
-                    rgba([120, 110, 150], 0.7),
+                    rgba([120, 110, 150], 0.7 * e),
                 );
             }
         }
@@ -128,34 +134,35 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
     let n = c.enemies.len().max(1);
     let slot_h = ((right_panel.height() - cell * 6.0) / n as f32).min(70.0 * u.max(0.8));
     for (i, (name, hint)) in c.enemies.iter().enumerate() {
+        let e = crate::screen_anim::enter(i + 4, age, amount); // === m4a ===
         let r = Rect::from_min_size(
             Pos2::new(
                 right_panel.left() + cell * 3.0,
-                right_panel.top() + cell * 4.0 + i as f32 * slot_h,
+                right_panel.top() + cell * 4.0 + i as f32 * slot_h + (1.0 - e) * 5.0 * u,
             ),
             Vec2::new(right_panel.width() - cell * 6.0, slot_h - cell),
         );
         match hint {
             Some(h) => {
                 let tone = hue(v.time * 0.1 + i as f32 * 0.2);
-                pixel_ui::panel(p, r, tone, rgba([14, 8, 28], 0.8), cell.min(3.0), 0.8);
+                pixel_ui::panel(p, r, tone, rgba([14, 8, 28], 0.8 * e), cell.min(3.0), 0.8 * e);
                 p.text(
                     r.left_top() + Vec2::new(cell * 3.0, cell * 2.0),
                     Align2::LEFT_TOP,
                     name,
                     FontId::monospace(18.0 * u.max(0.8)),
-                    rgba(tone, 1.0),
+                    rgba(tone, e),
                 );
                 let g = p.layout(
                     h.clone(),
                     FontId::proportional(15.0 * u.max(0.8)),
-                    rgba([200, 190, 230], 0.9),
+                    rgba([200, 190, 230], 0.9 * e),
                     r.width() - cell * 6.0,
                 );
                 p.galley(
                     r.left_top() + Vec2::new(cell * 3.0, cell * 2.0 + 22.0 * u.max(0.8)),
                     g,
-                    rgba([200, 190, 230], 0.9),
+                    rgba([200, 190, 230], 0.9 * e),
                 );
             }
             None => {
@@ -163,17 +170,17 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
                     p,
                     r,
                     [70, 62, 95],
-                    rgba([10, 6, 20], 0.7),
+                    rgba([10, 6, 20], 0.7 * e),
                     cell.min(3.0),
-                    0.7,
+                    0.7 * e,
                 );
-                pixel_ui::hatch(p, r.shrink(cell * 2.0), cell, Color32::from_white_alpha(7));
+                pixel_ui::hatch(p, r.shrink(cell * 2.0), cell, Color32::from_white_alpha((7.0 * e) as u8));
                 p.text(
                     r.center(),
                     Align2::CENTER_CENTER,
                     "???",
                     FontId::monospace(18.0 * u.max(0.8)),
-                    rgba([120, 110, 150], 0.7),
+                    rgba([120, 110, 150], 0.7 * e),
                 );
             }
         }

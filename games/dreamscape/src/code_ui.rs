@@ -29,6 +29,13 @@ pub fn shown(digits: &str) -> String {
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodeView) {
     p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
     let cx = screen.center().x;
+    // === m4a === the lines drift in one after another
+    let mo = crate::screen_anim::list_motion(p, "m4a_code", v.time, None, &v.settings_snapshot);
+    let rise = |i: usize| {
+        let e = crate::screen_anim::enter(i, mo.age, mo.amount);
+        (e, (1.0 - e) * 6.0)
+    };
+    // === end m4a ===
     let top = screen.top() + screen.height() * 0.2;
     glitch_text(
         p,
@@ -41,11 +48,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodeView) {
         v,
     );
     p.text(
-        Pos2::new(cx, top + 84.0),
+        Pos2::new(cx, top + 84.0 + rise(1).1),
         Align2::CENTER_TOP,
         v.k("a friend's code opens the very same dream"),
         FontId::proportional(22.0),
-        rgba([200, 190, 230], 0.85),
+        rgba([200, 190, 230], 0.85 * rise(1).0),
     );
     let mut line = shown(&c.digits);
     if (v.time * 2.0) as i32 % 2 == 0 && c.digits.len() < crate::seedcode::DIGITS {
@@ -59,11 +66,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodeView) {
         }
     }
     p.text(
-        Pos2::new(cx, top + 170.0),
+        Pos2::new(cx, top + 170.0 + rise(2).1),
         Align2::CENTER_TOP,
         line,
         FontId::monospace(46.0),
-        rgba(hue(v.time * 0.1), 1.0),
+        rgba(hue(v.time * 0.1), rise(2).0),
     );
     if !c.error.is_empty() {
         p.text(
@@ -75,11 +82,11 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodeView) {
         );
     }
     p.text(
-        Pos2::new(cx, screen.bottom() - 80.0),
+        Pos2::new(cx, screen.bottom() - 80.0 + rise(3).1),
         Align2::CENTER_TOP,
         v.k("[type or ctrl+v]   [enter] dream it   [backspace]   [esc] back"),
         FontId::monospace(20.0),
-        rgba(ink(v), 0.7),
+        rgba(ink(v), 0.7 * rise(3).0),
     );
 }
 

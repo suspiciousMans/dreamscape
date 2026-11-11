@@ -25,6 +25,25 @@ uniform float uGhost;   // > 0: translucent pass with this alpha
 uniform float uOutline; // 1 = the dark shell drawn around the dreamer
 uniform float uPulse;   // 0..1, the dream's beat
 uniform float uGlow;    // bright parts of the texture glow in the dark
+uniform float uDissolve;      // 0 = solid, 1 = gone (death dissolve; 0 for every other draw)
+uniform vec3 uDissolveColor;  // glowing burn edge
+
+float dHash(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+// Smooth 3D value noise, 0..1.
+float dNoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(dHash(i), dHash(i + vec3(1, 0, 0)), f.x),
+                   mix(dHash(i + vec3(0, 1, 0)), dHash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(dHash(i + vec3(0, 0, 1)), dHash(i + vec3(1, 0, 1)), f.x),
+                   mix(dHash(i + vec3(0, 1, 1)), dHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
 
 // Rotate a colour around the grey axis (hue shift that keeps brightness).
 vec3 hueShift(vec3 c, float a) {
@@ -34,6 +53,13 @@ vec3 hueShift(vec3 c, float a) {
 }
 
 void main() {
+    float burn = 0.0;
+    if (uDissolve > 0.0) {
+        // Noise threshold from world position: spread over 0..0.94 so 1.0 is fully gone.
+        float n = smoothstep(0.2, 0.8, dNoise(vWorld * 4.0)) * 0.94;
+        if (n < uDissolve) discard;
+        burn = 1.0 - smoothstep(uDissolve, uDissolve + 0.06, n);
+    }
     if (uOutline > 0.5) {
         FragColor = vec4(0.03, 0.01, 0.08, 1.0);
         return;
@@ -77,6 +103,7 @@ void main() {
     }
     // The beat: everything flares a little on each pulse.
     withFog *= 1.0 + 0.25 * uPulse;
+    withFog = mix(withFog, uDissolveColor * 1.6, burn);
     if (uHero > 0.5) {
         // Self-lit crystal: a slow pulse keeps it the brightest thing on screen.
         float pulse = 0.5 + 0.5 * sin(uTime * 3.0);

@@ -11,10 +11,41 @@ use crate::worth::{self, QuirkEffect};
 /// A card's bonuses summed over a set of cards (the run's loadout), with each
 /// card's mastery level folded in.
 pub fn card_effects(b: &Booklet, cards: &[Card]) -> QuirkEffect {
-    cards.iter().fold(QuirkEffect::default(), |sum, c| {
+    let cards_fx = cards.iter().fold(QuirkEffect::default(), |sum, c| {
         sum.plus(worth::card_effect(c, b.mastery.level_of(c.number)))
-    })
+    });
+    // === relic-equip ===
+    match equipped(b) {
+        Some(r) => cards_fx.plus(r.effect.to_quirk()),
+        None => cards_fx,
+    }
+    // === end relic-equip ===
 }
+
+// === relic-equip ===
+/// Wears the owned relic `id` into runs. False (nothing changes) if not owned.
+pub fn equip_relic(b: &mut Booklet, id: u32) -> bool {
+    if b.relics.iter().any(|r| r.id == id) {
+        b.equipped_relic = Some(id);
+        true
+    } else {
+        false
+    }
+}
+
+/// The relic worn into runs: the chosen one if still owned, else the highest
+/// rarity owned (earliest pulled on a tie), else none.
+pub fn equipped(b: &Booklet) -> Option<&crate::relic_types::Relic> {
+    if let Some(r) = b.equipped_relic.and_then(|id| b.relics.iter().find(|r| r.id == id)) {
+        return Some(r);
+    }
+    let rank = |r: &crate::relic_types::Relic| r.rarity as u8;
+    b.relics
+        .iter()
+        .rev()
+        .max_by_key(|r| rank(r))
+}
+// === end relic-equip ===
 
 /// What opening the app today earned.
 #[derive(Clone, Debug, PartialEq)]
@@ -162,7 +193,6 @@ pub(crate) fn press_pull(b: &mut Booklet, pull: Pull, seed: u64) -> Pulled {
 /// Appends `relic` to the pouch with the next id (max id + 1, so ids are
 /// never reused; the first is 1) and returns the stored relic. The caller's
 /// `id` is ignored; the pull engine (R2) decides everything else.
-#[allow(dead_code)] // R2: the pull engine calls this
 pub fn press_relic(b: &mut Booklet, mut relic: crate::relic_types::Relic) -> crate::relic_types::Relic {
     relic.id = b.relics.iter().map(|r| r.id).max().map_or(1, |m| m + 1);
     b.relics.push(relic.clone());
@@ -391,5 +421,63 @@ mod tests {
         assert!(b.relics.is_empty());
         assert_eq!(b.relic_lottery, crate::relic_types::RelicState::default());
         assert_eq!(b.stash.ash, 0);
+    }
+
+    #[test]
+    fn equipped_relic_feeds_card_effects_and_equip_checks_ownership() {
+        use crate::relic_types::*;
+        let mut b = Booklet::default();
+        let base = card_effects(&b, &[]);
+        assert_eq!(equipped(&b), None);
+        let mut r = sample_relic(1);
+        r.effect = RelicEffect { speed_pct: 4, max_nerve: 1, ..Default::default() };
+        let r = press_relic(&mut b, r);
+        let mut hi = sample_relic(2);
+        hi.rarity = RelicRarity::Mythic;
+        hi.effect = RelicEffect { dust_bonus_pct: 9, ..Default::default() };
+        let hi = press_relic(&mut b, hi);
+        // fallback: highest rarity
+        assert_eq!(equipped(&b).map(|x| x.id), Some(hi.id));
+        assert!(!equip_relic(&mut b, 99));
+        assert_eq!(b.equipped_relic, None);
+        assert!(equip_relic(&mut b, r.id));
+        let fx = card_effects(&b, &[]);
+        assert_eq!(fx.speed_pct, base.speed_pct + 4);
+        assert_eq!(fx.max_nerve, 1);
+        assert_eq!(fx.dust_bonus_pct, base.dust_bonus_pct);
+    }
+
+    #[test]
+    fn every_relic_lever_reaches_card_effects() {
+        use crate::relic_types::*;
+        let mut b = Booklet::default();
+        let mut r = sample_relic(1);
+        r.effect = RelicEffect {
+            dust_bonus_pct: 1,
+            memory_bonus: 0.01,
+            speed_pct: 2,
+            grace_bonus: 3,
+            calm_pct: 4,
+            free_rerolls: 5,
+            start_shards: 6,
+            max_nerve: 1,
+        };
+        let r = press_relic(&mut b, r);
+        assert!(equip_relic(&mut b, r.id));
+        let with = card_effects(&b, &[]);
+        assert_eq!(with, r.effect.to_quirk());
+        assert_eq!(with.free_rerolls, 5);
+        assert_eq!(with.start_shards, 6);
+        assert_eq!(with.grace_bonus, 3);
+        assert_eq!(with.calm_pct, 4);
+        assert!((with.memory_bonus - 0.01).abs() < 1e-6);
+        b.relics.clear();
+        assert_eq!(card_effects(&b, &[]), QuirkEffect::default());
+    }
+
+    #[test]
+    fn old_booklet_loads_with_no_equipped_relic() {
+        let b: Booklet = ron::from_str("(runs: [])").expect("old save");
+        assert_eq!(b.equipped_relic, None);
     }
 }

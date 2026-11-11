@@ -12,3 +12,6 @@ Any NEW story text still needs approval first.
 
 ## Wave 3 (owner, 2026-10-24)
 Approved as written: deck builder "N of 10 passives active" / "this card's is benched"; moth shop "EMPTY" row, tag "nothing for sale"; hand scoring rank names (PAIR, TWO PAIR, TRIO, FULL HOUSE, QUAD, FIVE OF A KIND, FLUSH, RAINBOW, RESONANT PAIR), HUD tag "<RANK>  x1.30", deck builder "best hand with this deck: <RANK>", summary "best hand" row, achievement "Full House" (45th).
+
+## UI revamp (owner, 2026-11-10)
+Approved as written, already in the game: everything under "for approval" in plans/ui-revamp-briefs/NOTES-N.md (relic name word lists), NOTES-relic-ui.md (relic case, pouch and store-tab copy), NOTES-prompts.md, and the chip notes (NOTES-m4a..m4e, which list no captions). Given as a blanket approval ("everything").

@@ -491,7 +491,6 @@ impl Stash {
     }
 
     /// Deducts `n` Ash and returns true, or changes nothing and returns false.
-    #[allow(dead_code)] // R2 (pull engine) / R6 (moth shop) spend Ash
     pub fn spend_ash(&mut self, n: u32) -> bool {
         match self.ash.checked_sub(n) {
             Some(left) => {

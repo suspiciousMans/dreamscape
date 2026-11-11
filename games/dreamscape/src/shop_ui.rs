@@ -416,6 +416,25 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
     }
     let cx = screen.center().x;
+    // === m4c === motion: shelves ease in, the cursor item springs up, dust ticks up on open
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let cur = cursor_item(v.shop_shelf, v.shop_col);
+    let anim = crate::screen_anim::advance(
+        p.ctx(),
+        "m4c_shop",
+        v.time,
+        0,
+        Some((v.shop_shelf * 64 + v.shop_col) as u32),
+        !matches!(state_of(v, cur), State::Buy(_)), // a purchase flips this: the 80 ms squash
+        0.0,
+        amount,
+    );
+    let mo = anim.grid(v.time, amount);
+    let age = mo.age;
+    let dust_now = crate::screen_anim::tick(v.dust as i64, age, 0.0, amount);
+    let earned_now = crate::screen_anim::tick(v.dust_earned as i64, age, 0.0, amount);
+    // === end m4c ===
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 14.0),
@@ -431,7 +450,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::CENTER_TOP,
         format!(
             "{} dream dust   ·   {} earned in all",
-            v.dust, v.dust_earned
+            dust_now, earned_now
         ),
         FontId::monospace(22.0),
         rgba([255, 210, 80], 1.0),
@@ -471,6 +490,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         } else {
             0
         };
+        let row_e = crate::screen_anim::enter(si, age, amount); // === m4c ===
         let label = if items.len() > ROW_SLOTS && si == v.shop_shelf {
             format!("{}  {}/{}", shelf.label(), v.shop_col + 1, items.len())
         } else if items.len() > ROW_SLOTS {
@@ -483,7 +503,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
             Align2::LEFT_TOP,
             label,
             FontId::monospace(16.0),
-            rgba(ink(v), if si == v.shop_shelf { 0.9 } else { 0.4 }),
+            rgba(ink(v), (if si == v.shop_shelf { 0.9 } else { 0.4 }) * row_e),
         );
         // More to the left / right: little arrows at the plank's ends.
         for (show, x, glyph) in [
@@ -520,35 +540,43 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         );
         for (vi, item) in items.iter().copied().skip(start).take(ROW_SLOTS).enumerate() {
             let ci = start + vi;
-            let c = Pos2::new(left + vi as f32 * slot + slot * 0.5, row_y + slot * 0.45);
+            // === m4c === items rise in along the shelf
+            let e = crate::screen_anim::enter(si + vi, age, amount);
+            let c_rest = Pos2::new(left + vi as f32 * slot + slot * 0.5, row_y + slot * 0.45);
+            let c = c_rest + Vec2::new(0.0, (e - 1.0) * 8.0); // drops in from above; the highlight stays put
+            // === end m4c ===
             let is_sel = si == v.shop_shelf && ci == v.shop_col;
             let state = state_of(v, item);
             let dim = match state {
                 State::Buy(price) if price > v.dust => 0.35,
                 _ => 1.0,
-            };
+            } * e; // === m4c ===
             if is_sel {
                 // Tall enough to hold the price tag under the icon.
                 let r = Rect::from_min_max(
-                    c - Vec2::splat(slot * 0.5 - 3.0),
-                    c + Vec2::new(slot * 0.5 - 3.0, 40.0),
+                    c_rest - Vec2::splat(slot * 0.5 - 3.0),
+                    c_rest + Vec2::new(slot * 0.5 - 3.0, 40.0),
                 );
-                p.rect_filled(r, 0.0, rgba(hue(v.time * 0.2), 0.18));
-                crate::pixel_ui::brackets(p, r.expand(2.0), 3.0, rgba(hue(v.time * 0.2), 1.0));
+                p.rect_filled(r, 0.0, rgba(hue(v.time * 0.2), 0.18 * e));
+                crate::pixel_ui::brackets(p, r.expand(2.0), 3.0, rgba(hue(v.time * 0.2), e));
             }
+            // === m4c === the bob only runs with motion on; the spring lifts and grows the cursor item
+            let key = (si * 64 + ci) as u32;
             let lift = if is_sel {
-                (v.time * 4.0).sin() * 2.0 - 2.0
+                (if amount > 0.0 { (v.time * 4.0).sin() * 2.0 } else { 0.0 }) - 2.0 - mo.lift_of(key, 8.0)
             } else {
                 0.0
             };
-            draw_icon(p, c + Vec2::new(0.0, lift), 4.0, item, v, dim);
+            let grow = if is_sel { mo.scale_of(key) } else { 1.0 };
+            draw_icon(p, c + Vec2::new(0.0, lift), 4.0 * grow, item, v, dim);
+            // === end m4c ===
             let (tag, col) = price_tag(state, v.dust);
             p.text(
                 c + Vec2::new(0.0, 22.0),
                 Align2::CENTER_TOP,
                 tag,
                 FontId::monospace(13.0),
-                rgba(col, dim.max(0.6)),
+                rgba(col, dim.max(0.6 * e)),
             );
         }
         y += slot + 18.0;
@@ -561,19 +589,20 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     );
     preview(p, panel, selected, v);
     let info = selected.info();
+    let pe = crate::screen_anim::enter(3, age, amount); // === m4c === the details ease in after the shelves
     p.text(
         panel.left_bottom() + Vec2::new(0.0, 14.0),
         Align2::LEFT_TOP,
         info.name,
         FontId::monospace(26.0),
-        rgba(ink(v), 1.0),
+        rgba(ink(v), pe),
     );
     p.text(
         panel.left_bottom() + Vec2::new(0.0, 46.0),
         Align2::LEFT_TOP,
         info.blurb,
         FontId::proportional(19.0),
-        rgba([200, 190, 230], 0.85),
+        rgba([200, 190, 230], 0.85 * pe),
     );
     let action = match sel_state {
         State::Buy(price) => format!("[enter] buy for {price} dust"),
@@ -585,13 +614,29 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         State::Equipped => "equipped".into(),
     };
     let action = v.k(&action);
+    let action_w = p.layout_no_wrap(action.clone(), FontId::monospace(20.0), rgba([255, 210, 80], 1.0)).size().x; // === m4c ===
     p.text(
         panel.left_bottom() + Vec2::new(0.0, 76.0),
         Align2::LEFT_TOP,
         action,
         FontId::monospace(20.0),
-        rgba([255, 210, 80], 0.95),
+        rgba([255, 210, 80], 0.95 * pe),
     );
+    // === m4c === the focused action's chip, only while the action can be taken (key text only)
+    let can_act = match sel_state {
+        State::Buy(price) => price <= v.dust,
+        State::Stocked { runs, price } => runs + PERK_RUNS <= MAX_CHARGES && price <= v.dust,
+        State::Owned => true,
+        State::Equipped => false,
+    };
+    if can_act {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, st, v.pad);
+        let at = panel.left_bottom() + Vec2::new(action_w + 34.0, 86.0);
+        if at.x + 30.0 < screen.right() {
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, st);
+        }
+    }
+    // === end m4c ===
     if matches!(selected, Item::Perk(_)) {
         p.text(
             panel.left_bottom() + Vec2::new(0.0, 104.0),

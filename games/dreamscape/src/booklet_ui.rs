@@ -115,6 +115,12 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     let u = crate::pixel_ui::scale(screen);
     let cell = crate::pixel_ui::cell(u);
     let cx = screen.center().x;
+    // === m4b === cards ease in (and again on a page turn); the card count ticks up
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let anim = crate::screen_anim::advance(ctx, "m4b_booklet", v.time, v.booklet_page as u32, None, false, 0.0, amount);
+    let (age, page_age) = (anim.age(v.time), anim.epoch_age(v.time));
+    // === end m4b ===
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 24.0),
@@ -130,7 +136,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         "page {} / {}  ·  {} cards",
         v.booklet_page + 1,
         v.booklet_pages,
-        v.booklet_total
+        crate::screen_anim::tick(v.booklet_total as i64, age, 0.0, amount) // === m4b ===
     );
     p.text(
         Pos2::new(cx, screen.top() + 78.0 * u),
@@ -178,8 +184,15 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             Rect::from_min_max(first.min, last.max).expand2(Vec2::new(cell * 4.0, cell * 3.0));
         crate::pixel_ui::panel(p, shelf, [90, 70, 150], rgba([10, 5, 24], 0.6), cell, 0.6);
     }
-    for (c, r) in v.booklet_cards.iter().zip(&rects) {
-        card(ctx, p, *r, c, v, art, 1.0);
+    for (i, (c, r)) in v.booklet_cards.iter().zip(&rects).enumerate() {
+        // === m4b === rise a little and fade in, staggered along the page
+        let e = crate::screen_anim::enter(i, page_age, amount);
+        let r = r.translate(Vec2::new(0.0, (1.0 - e) * 14.0 * u));
+        card(ctx, p, r, c, v, art, 1.0);
+        if e < 1.0 {
+            p.rect_filled(r, 0.0, rgba([8, 4, 20], (1.0 - e) * 0.9));
+        }
+        // === end m4b ===
     }
     // Turn-page arrows, dim when there's no page that way.
     for (dir, ok) in [
@@ -255,6 +268,21 @@ pub fn card(
     art: &mut CardArt,
     scale: f32,
 ) {
+    card_hover(ctx, p, r, c, v, art, scale, 0.0);
+}
+
+/// `card` with the art's warp hover (0 = at rest, 1 = selected: the wobble is stronger).
+#[allow(clippy::too_many_arguments)]
+pub fn card_hover(
+    ctx: &egui::Context,
+    p: &egui::Painter,
+    r: Rect,
+    c: &Card,
+    v: &HudView,
+    art: &mut CardArt,
+    scale: f32,
+    hover: f32,
+) {
     let frame = style_frame(v.card_style, card_frame(c, v.time), v.time, c.number);
     let s = scale;
     p.rect_filled(r, 0.0, rgba([16, 9, 30], 1.0));
@@ -314,7 +342,15 @@ pub fn card(
         Vec2::new(inner.width(), ART_H * s),
     );
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, ART_H * s / inner.width()));
-    p.image(art.texture(ctx, c), art_rect, uv, Color32::WHITE);
+    let warp = crate::card_warp::WarpParams {
+        theme: c.theme,
+        seed: c.seed,
+        t: v.time,
+        hover,
+        juice: v.settings_snapshot.ui_juice,
+        reduced_motion: v.settings_snapshot.reduced_motion,
+    };
+    p.add(egui::Shape::mesh(crate::card_warp::art_mesh(art.texture(ctx, c), art_rect, uv, Color32::WHITE, &warp, |q| q)));
     p.rect_stroke(art_rect, 0.0, Stroke::new(2.0_f32, rgba(frame, 0.8)));
     if c.rarity >= Rarity::Lucid {
         foil(p, art_rect, v.time);

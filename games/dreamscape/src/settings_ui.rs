@@ -38,9 +38,15 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
     );
     pixel_ui::panel(p, panel, [120, 100, 180], rgba([8, 4, 20], 0.85), c, 0.7);
     let font = (row_h * 0.72).clamp((row_h * 0.85).min(12.0), 24.0);
+    // === m4a === rows ease in, the focused one springs up
+    let set = &v.settings_snapshot;
+    let mo = crate::screen_anim::list_motion(p, "m4a_settings", v.time, Some(s.selected), set);
+    // === end m4a ===
     for (i, (label, value)) in s.rows.iter().enumerate() {
         let sel = i == s.selected;
-        let y = y0 + i as f32 * row_h;
+        let e = crate::screen_anim::enter(i, mo.age, mo.amount); // === m4a ===
+        let y = y0 + i as f32 * row_h + (1.0 - e) * 5.0 * u;
+        let font = font * mo.scale_of(i as u32);
         let col = if sel { hue(v.time * 0.2) } else { ink(v) };
         if sel {
             pixel_ui::selected_row(
@@ -58,7 +64,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
             Align2::LEFT_TOP,
             label,
             FontId::monospace(font),
-            rgba(col, if sel { 1.0 } else { 0.75 }),
+            rgba(col, (if sel { 1.0 } else { 0.75 }) * e),
         );
         let shown = if sel && s.capturing {
             "press a key…".to_string()
@@ -72,9 +78,18 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
             Align2::RIGHT_TOP,
             shown,
             FontId::monospace(font),
-            rgba(col, 0.95),
+            rgba(col, 0.95 * e),
         );
     }
+    // === m4a === the chip on the focused row (rebinding says its own thing)
+    if !s.capturing && !s.rows.is_empty() {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, set, v.pad);
+        let y = y0 + s.selected as f32 * row_h + row_h * 0.5;
+        if let Some(at) = crate::screen_anim::chip_beside(panel.right(), y, &key, screen.right()) {
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, set);
+        }
+    }
+    // === end m4a ===
     crate::loadout_ui::hint_bar(
         p,
         screen,

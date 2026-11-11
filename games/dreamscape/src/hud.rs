@@ -160,6 +160,8 @@ pub struct HudView {
     pub lottery: crate::lottery_ui::LotteryView,
     /// The Lucid Store's tickets tab. // === fortune ===
     pub tickets: crate::tickets_ui::TicketsView,
+    /// The Lucid Store's relic tab (case and pouch). // === relics-ui ===
+    pub relics: crate::relic_ui::RelicView,
     /// Runs of packs opened without a remembered Lucid card (pack pity, read-only).
     pub pack_dry: u32,
     /// (card number, mastery level) for every card in the booklet.
@@ -218,6 +220,10 @@ pub struct HudView {
     pub lid: f32,
     /// Nightmares: (boss title, sigils taken, sigils total, attack warning).
     pub boss: Option<(String, usize, usize, Option<&'static str>)>,
+    // === prompts ===
+    /// Context-only key/button chips for this frame (see `prompts::compute`).
+    pub prompts: Vec<crate::prompts::Prompt>,
+    // === end prompts ===
 }
 
 impl HudView {
@@ -551,6 +557,7 @@ pub fn draw(
         }
         Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store if v.store_tab == 2 => return crate::tickets_ui::draw(&p, screen, v),
+        Mode::Store if v.store_tab == 3 => return crate::relic_ui::draw(ctx, &p, screen, v), // === relics-ui ===
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),
@@ -582,13 +589,14 @@ pub fn draw(
     // === combat ===
     foe_pips(&p, screen, v);
     // === end combat ===
-    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, art);
+    crate::hand::draw(ctx, &p, screen, &v.hand, &v.hand_links, &v.hand_pile, v.time, v.settings_snapshot.reduced_motion, v.settings_snapshot.ui_juice, art);
     // === pressure ===
     if let (Mode::Playing, Some((lid, warn))) = (v.mode, v.pressure_lid) {
         pressure_bar(&p, screen, lid, warn, v.time);
     }
     // === end pressure ===
     boss_bar(&p, screen, v);
+    prompt_chips(&p, screen, v); // === prompts ===
     controls_legend(&p, screen, v);
     if v.first_person {
         // A tiny pixel cross: where you're looking.
@@ -894,11 +902,7 @@ fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
         let centre = at + Vec2::new(i as f32 * step + 4.5 * px, 4.5 * px);
         let full = i < now;
         let just_broke = !full && i == now && v.nerve_flinch > 0.0;
-        let beat = if full && now == 1 {
-            1.0 + 0.18 * (v.time * 6.0).sin().max(0.0)
-        } else {
-            1.0
-        };
+        let beat = if full && now == 1 { heart_beat(v.time, &v.settings_snapshot) } else { 1.0 };
         let (rgb, alpha) = if full {
             ([255, 80, 120], 1.0)
         } else if just_broke {
@@ -917,6 +921,23 @@ fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
         );
     }
 }
+
+// === m4e === the calm in-run HUD: continuous pulses obey the comfort settings
+/// Scale of the last heart's throb: steady at Off / reduced motion, a gentle
+/// beat otherwise (Full does not beat harder: the HUD stays calm).
+pub fn heart_beat(time: f32, s: &crate::settings::Settings) -> f32 {
+    if crate::ui_motion::effective(s.ui_juice, s.reduced_motion) <= 0.0 {
+        return 1.0;
+    }
+    1.0 + 0.18 * (time * 6.0).sin().max(0.0)
+}
+
+/// Whether the HURRIED timer is in its red phase: a 2 Hz blink under 10 s,
+/// but a steady red (no strobe) with reduce-flashing.
+pub fn timer_urgent(time: f32, left: f32, s: &crate::settings::Settings) -> bool {
+    left > 0.0 && left < 10.0 && (s.reduce_flashing || (time * 4.0) as i32 % 2 == 0)
+}
+// === end m4e ===
 
 /// Top right: the dream's twist and HURRIED timer. The hand (held ability cards) sits down the right edge.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -954,7 +975,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     }
     if let Some(t) = v.timer {
         let (text, rgb) = if t > 0.0 {
-            let urgent = t < 10.0 && (v.time * 4.0) as i32 % 2 == 0;
+            let urgent = timer_urgent(v.time, t, &v.settings_snapshot);
             (
                 format!("{t:>4.1}s"),
                 if urgent { [255, 60, 80] } else { ink(v) },
@@ -1554,6 +1575,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn m4e_hud_pulses_obey_the_comfort_settings() {
+        let soft = crate::settings::Settings::default();
+        let off = crate::settings::Settings { ui_juice: crate::ui_motion::UiJuice::Off, ..soft.clone() };
+        let reduced = crate::settings::Settings { reduced_motion: true, ..soft.clone() };
+        let calm = crate::settings::Settings { reduce_flashing: true, ..soft.clone() };
+        let beats: Vec<f32> = (0..40).map(|k| heart_beat(k as f32 * 0.05, &soft)).collect();
+        assert!(beats.iter().all(|b| (1.0..=1.18001).contains(b)) && beats.iter().any(|b| *b > 1.1));
+        for s in [&off, &reduced] {
+            assert!((0..40).all(|k| heart_beat(k as f32 * 0.05, s) == 1.0));
+        }
+        // Blink: both phases appear normally; steady red with reduce-flashing; none above 10 s or after.
+        let phases: Vec<bool> = (0..8).map(|k| timer_urgent(k as f32 * 0.25, 5.0, &soft)).collect();
+        assert!(phases.contains(&true) && phases.contains(&false));
+        assert!((0..8).all(|k| timer_urgent(k as f32 * 0.25, 5.0, &calm)));
+        assert!(!timer_urgent(0.0, 12.0, &calm) && !timer_urgent(0.0, 0.0, &calm) && !timer_urgent(0.0, -1.0, &soft));
+    }
+
+    #[test]
     fn shard_pips_shrink_then_condense_but_never_leave_their_lane() {
         for width in [1280.0_f32, 1920.0] {
             let room = pip_room(width);
@@ -1657,3 +1696,91 @@ mod tests {
         }
     }
 }
+
+// === prompts ===
+/// One key/button chip centred at `at`: a rounded plate with the key text
+/// (and an optional caption), bobbing and glowing with `prompts::bob`.
+/// Off or reduced motion: static, with a steady outline. `reduce_flashing`
+/// halves the glow swing. Empty `key` draws nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn prompt_chip(
+    p: &egui::Painter,
+    at: Pos2,
+    key: &str,
+    caption: &str,
+    state: crate::prompts::State,
+    time: f32,
+    s: &crate::settings::Settings,
+) {
+    use crate::prompts::{bob, soften, State};
+    if key.is_empty() {
+        return;
+    }
+    let (dy, glow) = bob(time, state, s.ui_juice, s.reduced_motion);
+    let glow = soften(glow, s.reduce_flashing);
+    let still = s.reduced_motion || s.ui_juice == crate::ui_motion::UiJuice::Off;
+    let hue = match state {
+        State::Available => [190, 230, 255],
+        State::Required => [255, 215, 140],
+    };
+    let key_g = p.layout_no_wrap(key.to_string(), FontId::monospace(20.0), rgba([255, 255, 255], 1.0));
+    let cap_g = (!caption.is_empty())
+        .then(|| p.layout_no_wrap(caption.to_string(), FontId::monospace(16.0), rgba(hue, 0.95)));
+    let gap = 8.0;
+    let w = key_g.size().x + 16.0 + cap_g.as_ref().map_or(0.0, |c| c.size().x + gap);
+    let h = key_g.size().y + 6.0;
+    let rect = Rect::from_center_size(Pos2::new(at.x, at.y + dy), Vec2::new(w, h));
+    let round = h * 0.4;
+    if !still {
+        p.rect_filled(rect.expand(3.0 + 3.0 * glow), round + 3.0, rgba(hue, 0.10 + 0.18 * glow));
+    }
+    p.rect_filled(rect, round, rgba([20, 14, 40], 0.82));
+    let (stroke_w, stroke_a) = if still { (2.0_f32, 0.95_f32) } else { (1.5_f32, 0.5 + 0.5 * glow) };
+    p.rect_stroke(rect, round, egui::Stroke::new(stroke_w, rgba(hue, stroke_a)));
+    let key_pos = Pos2::new(
+        rect.left() + 8.0,
+        rect.center().y - key_g.size().y * 0.5,
+    );
+    p.galley(key_pos, key_g.clone(), rgba([255, 255, 255], 1.0));
+    if let Some(c) = cap_g {
+        p.galley(
+            Pos2::new(key_pos.x + key_g.size().x + gap, rect.center().y - c.size().y * 0.5),
+            c,
+            rgba(hue, 0.95),
+        );
+    }
+}
+
+/// Darkens the screen behind a Required prompt (nothing for Available ones).
+#[allow(dead_code)] // M4: the choice screens call this before their own drawing
+pub fn prompt_dim(p: &egui::Painter, screen: Rect, prompts: &[crate::prompts::Prompt], s: &crate::settings::Settings) {
+    if crate::prompts::dims_rest(prompts) && s.ui_juice != crate::ui_motion::UiJuice::Off {
+        p.rect_filled(screen, 0.0, rgba([0, 0, 0], 0.35));
+    }
+}
+
+/// The frame's chips in their default places: anchored ones at their target,
+/// the rest in a row above the hand.
+fn prompt_chips(p: &egui::Painter, screen: Rect, v: &HudView) {
+    let s = &v.settings_snapshot;
+    let mut row: Vec<(String, &'static str, crate::prompts::State)> = Vec::new();
+    for pr in &v.prompts {
+        let key = crate::prompts::label(pr.action, v.mode, s, v.pad);
+        let cap = crate::prompts::caption(pr.action);
+        match pr.target {
+            Some([x, y]) => {
+                let at = Pos2::new(screen.left() + x * screen.width(), screen.top() + y * screen.height());
+                prompt_chip(p, at, &key, cap, pr.state, v.time, s);
+            }
+            None if !key.is_empty() => row.push((key, cap, pr.state)),
+            None => {}
+        }
+    }
+    let step = 64.0;
+    let x0 = screen.center().x - step * (row.len() as f32 - 1.0) * 0.5;
+    let y = screen.bottom() - screen.height() * 0.30;
+    for (i, (key, cap, state)) in row.iter().enumerate() {
+        prompt_chip(p, Pos2::new(x0 + step * i as f32, y), key, cap, *state, v.time, s);
+    }
+}
+// === end prompts ===
