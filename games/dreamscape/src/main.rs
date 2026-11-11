@@ -99,18 +99,14 @@ mod records;
 #[allow(dead_code)] // relic streams R1-R8 consume these as they land
 mod relic_types;
 // === relic_art ===
-#[allow(dead_code)] // R6 consumes relic_art
 mod relic_art;
 // === end relic_art ===
-#[allow(dead_code)] // UI revamp streams M1-M4, R3-R6 consume ui_motion as they land
 mod ui_motion;
 mod screen_anim; // === m4b ===
-#[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
 mod relic_weapon; // === relics-weapon ===
-#[allow(dead_code)] // R6
+mod relic_ui; // === relics-ui ===
 mod relic_names;
-#[allow(dead_code)] // R2/R6 call relic_effects::effect_for when a relic is pressed
 mod relic_effects;
 mod reveal_ui;
 mod scraps;
@@ -832,6 +828,15 @@ pub struct DreamscapeGame {
     /// What the last ticket scratch revealed, and how long ago.
     ticket_revealed: Option<tickets_ui::Revealed>,
     ticket_age: f32,
+    // === relics-ui ===
+    /// 0 = the case, 1 = the pouch.
+    relic_page: u8,
+    /// The pouch cursor, by relic id (never an index).
+    relic_cursor: Option<u32>,
+    /// The relic just pulled (already saved) and seconds since the press.
+    relic_open: Option<(u32, f32)>,
+    relic_status: Option<String>,
+    // === end relics-ui ===
     /// The first of the two presses to scratch a ticket has been made.
     ticket_confirm: bool,
     ticket_status: Option<String>,
@@ -1432,6 +1437,12 @@ impl DreamscapeGame {
             lottery_pick: 0,
             ticket_revealed: None,
             ticket_age: 0.0,
+            // === relics-ui ===
+            relic_page: 0,
+            relic_cursor: None,
+            relic_open: None,
+            relic_status: None,
+            // === end relics-ui ===
             ticket_confirm: false,
             ticket_status: None,
             tickets_this_run: 0,
@@ -4191,6 +4202,7 @@ impl DreamscapeGame {
             } else {
                 tickets_ui::TicketsView::default()
             },
+            relics: if self.mode == hud::Mode::Store && self.store_tab == 3 { self.relic_view() } else { relic_ui::RelicView::default() }, // === relics-ui ===
             // === perf === the screens look a card up and treat a missing one as level 0,
             // so only cards that earned xp are listed (was: every card in the booklet).
             mastery_levels: self
@@ -8803,6 +8815,129 @@ impl DreamscapeGame {
         }
     }
 
+    // === relics-ui ===
+    fn relic_view(&self) -> relic_ui::RelicView {
+        let b = &self.booklet;
+        let (rows, foil, pulls_to_pity, featured) = relic_ui::view_rows(b, today());
+        let ids = relic_ui::order(&b.relics);
+        let pouch = ids.iter().filter_map(|&id| b.relics.iter().find(|r| r.id == id).cloned()).collect();
+        relic_ui::RelicView {
+            page: self.relic_page,
+            ash: b.stash.ash,
+            max_cost: relic_ui::max_cost(),
+            rows,
+            foil,
+            pulls_to_pity,
+            since_mythic: b.relic_lottery.since_mythic,
+            total_pulls: b.relic_lottery.total_pulls,
+            featured,
+            opening: self.relic_open.and_then(|(id, age)| {
+                b.relics.iter().find(|r| r.id == id).map(|r| relic_ui::OpeningView { relic: r.clone(), age })
+            }),
+            pouch,
+            cursor: relic_ui::cursor_or_first(&b.relics, self.relic_cursor),
+            equipped: retention::equipped(b).map(|r| r.id),
+            status: self.relic_status.clone(),
+        }
+    }
+
+    /// An opening that has not reached its final card.
+    fn relic_opening_running(&self) -> bool {
+        let Some((id, age)) = self.relic_open else { return false };
+        let Some(r) = self.booklet.relics.iter().find(|r| r.id == id) else { return false };
+        let s = relic_ui::style(self.settings.ui_juice, self.settings.reduced_motion);
+        !relic_ui::frame(s, r.rarity, r.foil, age, self.settings.reduce_flashing).done
+    }
+
+    fn relic_skip(&mut self) {
+        if let Some((_, age)) = self.relic_open.as_mut() {
+            *age = 1.0e6;
+        }
+    }
+
+    /// Leaving or switching tabs: the last opening shows its final card, the page resets.
+    fn relic_leave_tab(&mut self) {
+        self.relic_skip();
+        self.relic_page = 0;
+        self.relic_status = None;
+    }
+
+    /// Spend Ash and open the case. The relic is rolled and saved here; the
+    /// screen only uncovers it.
+    fn relic_pull(&mut self) {
+        if self.coop_active() || self.autopilot || self.relic_opening_running() {
+            return;
+        }
+        let before = self.booklet.clone();
+        match relic_ui::commit_pull(&mut self.booklet, today()) {
+            Err(relic_ui::PullError::TooPoor { need }) => {
+                self.relic_status = Some(format!("you need {need} more ash"));
+                self.sfx(Sound::Denied);
+            }
+            Ok(got) => {
+                if self.persist_booklet() {
+                    log::info!(
+                        "Relic: {:?}{}{} {} (ash now {})",
+                        got.relic.rarity,
+                        if got.pull.pity { " PITY" } else { "" },
+                        if got.relic.foil { " FOIL" } else { "" },
+                        got.relic.name,
+                        self.booklet.stash.ash
+                    );
+                    self.relic_open = Some((got.relic.id, 0.0));
+                    self.relic_cursor = Some(got.relic.id);
+                    self.relic_status = None;
+                    self.sync_held_relic();
+                    self.sfx(Sound::WakeDoor);
+                } else {
+                    self.booklet = before;
+                    self.relic_status = Some("the case couldn't be written down (see log)".into());
+                }
+            }
+        }
+    }
+
+    /// Wear the relic under the pouch cursor.
+    fn relic_equip(&mut self) {
+        if self.coop_active() || self.autopilot {
+            return;
+        }
+        let Some(id) = relic_ui::cursor_or_first(&self.booklet.relics, self.relic_cursor) else { return };
+        if retention::equipped(&self.booklet).map(|r| r.id) == Some(id) {
+            return;
+        }
+        let before = self.booklet.clone();
+        if !retention::equip_relic(&mut self.booklet, id) {
+            return;
+        }
+        if self.persist_booklet() {
+            self.sync_held_relic_force();
+            self.relic_status = Some("equipped".into());
+            self.sfx(Sound::Pick);
+        } else {
+            self.booklet = before;
+            self.relic_status = Some("the pouch couldn't be written down (see log)".into());
+        }
+    }
+
+    /// The equipped relic becomes the weapon in hand (run start, resume, equip).
+    /// With nothing equipped the hand is left as it is (the dev env still works).
+    fn sync_held_relic(&mut self) {
+        if self.prologue.is_some() {
+            return;
+        }
+        self.sync_held_relic_force();
+    }
+
+    fn sync_held_relic_force(&mut self) {
+        if let Some(r) = retention::equipped(&self.booklet) {
+            if let Some(weapon) = r.weapon {
+                self.held_relic = Some(HeldRelic { rarity: r.rarity, weapon });
+            }
+        }
+    }
+    // === end relics-ui ===
+
     fn tickets_view(&self) -> tickets_ui::TicketsView {
         let stash = &self.booklet.stash;
         let left = !tickets::unowned_cosmetics(stash).is_empty();
@@ -8982,6 +9117,7 @@ impl DreamscapeGame {
         self.lottery_status = None;
         self.ticket_status = None; // === fortune ===
         self.ticket_confirm = false;
+        self.relic_leave_tab(); // === relics-ui ===
         self.mode = hud::Mode::Store;
     }
 
@@ -9306,6 +9442,7 @@ impl DreamscapeGame {
             // === end ascension ===
         };
         self.card_fx = retention::card_effects(&self.booklet, &cards);
+        self.sync_held_relic(); // === relics-ui === run start and resume
         self.loadout_numbers = cards.iter().map(|c| c.number).collect();
         self.run.bonus_rerolls = self.card_fx.free_rerolls;
         if !self.card_fx.is_zero() {
@@ -11775,6 +11912,23 @@ impl Game for DreamscapeGame {
                     self.ticket_press();
                 }
             }
+            Ok("relics") | Ok("relic_pull") | Ok("relic_pouch") => {
+                // === relics-ui === dev hook: some ash, the relic tab, optionally a pull or the pouch
+                self.booklet.stash.earn_ash(600);
+                self.open_store();
+                self.store_tab = 3;
+                let which = crate::dev::var("DREAMSCAPE_SCREEN").unwrap_or_default();
+                if which != "relics" {
+                    self.relic_pull();
+                }
+                if which == "relic_pouch" {
+                    for _ in 0..6 {
+                        self.relic_open = None;
+                        self.relic_pull();
+                    }
+                    self.relic_page = 1;
+                }
+            }
             Ok("lottery") | Ok("lottery_pull") => {
                 // Dev only: a fat purse so the screen has something to show.
                 self.booklet.stash.earn(300);
@@ -12163,6 +12317,12 @@ impl Game for DreamscapeGame {
                     self.open_store();
                     return;
                 }
+                // === relics-ui === any key skips the opening to its final card (the relic is already saved)
+                (hud::Mode::Store, _) if self.store_tab == 3 && self.relic_opening_running() => {
+                    self.relic_skip();
+                    return;
+                }
+                // === end relics-ui ===
                 (hud::Mode::Booklet | hud::Mode::Store, Keycode::Escape) => {
                     self.mode = self.booklet_return;
                     return;
@@ -12189,12 +12349,40 @@ impl Game for DreamscapeGame {
                     return;
                 }
                 (hud::Mode::Store, Keycode::Tab) => {
-                    self.store_tab = (self.store_tab + 1) % 3; // === fortune === perks, lottery, tickets
+                    self.store_tab = (self.store_tab + 1) % 4; // === fortune === perks, lottery, tickets, relics
+                    self.relic_leave_tab(); // === relics-ui ===
                     self.lottery_status = None;
                     self.ticket_status = None;
                     self.ticket_confirm = false;
                     return;
                 }
+                // === relics-ui ===
+                (hud::Mode::Store, Keycode::P) if self.store_tab == 3 => {
+                    self.relic_page = 1 - self.relic_page;
+                    self.relic_status = None;
+                    return;
+                }
+                (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 3 => {
+                    if self.relic_page == 0 {
+                        self.relic_pull();
+                    } else {
+                        self.relic_equip();
+                    }
+                    return;
+                }
+                (hud::Mode::Store, Keycode::W | Keycode::Up | Keycode::S | Keycode::Down | Keycode::A | Keycode::Left | Keycode::D | Keycode::Right)
+                    if self.store_tab == 3 =>
+                {
+                    if self.relic_page == 1 {
+                        let delta = if matches!(key, Keycode::W | Keycode::Up | Keycode::A | Keycode::Left) { -1 } else { 1 };
+                        self.relic_cursor = relic_ui::move_cursor(&self.booklet.relics, self.relic_cursor, delta);
+                    }
+                    return;
+                }
+                (hud::Mode::Store, _) if self.store_tab == 3 => {
+                    return;
+                }
+                // === end relics-ui ===
                 // === fortune ===
                 (hud::Mode::Store, Keycode::Return | Keycode::Space) if self.store_tab == 2 => {
                     self.ticket_press();
@@ -12410,6 +12598,9 @@ impl Game for DreamscapeGame {
         if self.mode == hud::Mode::Store {
             self.lottery_age += dt;
             self.ticket_age += dt; // === fortune ===
+            if let Some((_, age)) = self.relic_open.as_mut() {
+                *age += dt; // === relics-ui ===
+            }
         }
         if self.mode == hud::Mode::Playing {
             let dt = dt.min(gameplay::MAX_DT);
@@ -18053,6 +18244,20 @@ mod screen_smoke {
         add(&g, "Lottery");
         g.store_tab = 2;
         add(&g, "Tickets");
+        // === relics-ui === measured at Full juice, the dearest setting
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.booklet.stash.earn_ash(100_000);
+        for _ in 0..30 {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.store_tab = 3;
+        g.relic_page = 0;
+        g.relic_open = Some((g.booklet.relics.last().unwrap().id, 9.0));
+        add(&g, "Relics");
+        g.relic_page = 1;
+        add(&g, "Pouch");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        // === end relics-ui ===
         rows
     }
 
@@ -18075,7 +18280,7 @@ mod screen_smoke {
     #[test]
     fn every_screen_stays_inside_its_ui_budget() {
         // (screen, max shapes, max triangles)
-        const BUDGET: [(&str, usize, usize); 13] = [
+        const BUDGET: [(&str, usize, usize); 15] = [
             ("Warning", 120, 2_800),
             ("Title", 550, 3_900),
             ("Summary", 80, 600),
@@ -18089,6 +18294,8 @@ mod screen_smoke {
             ("Store", 340, 5_800),
             ("Lottery", 500, 5_500),
             ("Tickets", 100, 1_600),
+            ("Relics", 160, 2_800), // === relics-ui === at Full juice
+            ("Pouch", 180, 2_700),
         ];
         let rows = all_screen_costs();
         let mut over = Vec::new();
@@ -18197,6 +18404,22 @@ mod screen_smoke {
         bad.extend(overflows(&g, "Tickets"));
         g.ticket_confirm = true;
         bad.extend(overflows(&g, "Tickets-confirm"));
+        // === relics-ui === the case, an opening, and a full pouch
+        g.store_tab = 3;
+        g.booklet.stash.earn_ash(100_000);
+        bad.extend(overflows(&g, "Relic-case"));
+        for _ in 0..30 {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.relic_open = Some((g.booklet.relics.last().unwrap().id, 1.5));
+        bad.extend(overflows(&g, "Relic-opening"));
+        g.relic_page = 1;
+        bad.extend(overflows(&g, "Relic-pouch"));
+        g.relic_page = 0;
+        g.relic_open = None;
+        g.booklet.relics.clear();
+        g.booklet.equipped_relic = None;
+        // === end relics-ui ===
         g.store_tab = 1;
         g.begin_pick(offers(3));
         bad.extend(overflows(&g, "PackPick"));
@@ -19244,6 +19467,162 @@ mod screen_smoke {
         }
     }
     // === end m4c ===
+
+    // === relics-ui ===
+    fn r6_game(name: &str, relics_n: usize) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn_ash(100_000);
+        for _ in 0..relics_n {
+            relic_ui::commit_pull(&mut g.booklet, today()).unwrap();
+        }
+        g.open_store();
+        g.store_tab = 3;
+        g
+    }
+
+    #[test]
+    fn r6_relic_tab_draws_and_fits_in_every_state_at_two_sizes() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for (n, label) in [(0, "empty"), (1, "one"), (30, "thirty")] {
+                let mut g = r6_game(&format!("r6_fit_{n}"), n);
+                g.settings.ui_juice = juice;
+                // The case: idle, then at several beats of an opening.
+                g.relic_page = 0;
+                g.relic_open = None;
+                let bad = m4b_overflows(&g, &format!("Relic case idle {label} {juice:?}"));
+                assert!(bad.is_empty(), "{}", bad.join("\n"));
+                if n > 0 {
+                    let id = g.booklet.relics.last().unwrap().id;
+                    for age in [0.05, 0.4, 0.9, 1.4, 2.0, 3.0, 9.0] {
+                        g.relic_open = Some((id, age));
+                        let bad = m4b_overflows(&g, &format!("Relic case age {age} {label} {juice:?}"));
+                        assert!(bad.is_empty(), "{}", bad.join("\n"));
+                    }
+                }
+                g.relic_page = 1;
+                for cur in [None, Some(1), Some(n as u32)] {
+                    g.relic_cursor = cur;
+                    let bad = m4b_overflows(&g, &format!("Relic pouch {label} {juice:?} {cur:?}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r6_pull_commits_once_saves_and_the_screen_shows_that_relic() {
+        let mut g = r6_game("r6_pull", 0);
+        let ash = g.booklet.stash.ash;
+        g.relic_pull();
+        assert_eq!(g.booklet.relics.len(), 1);
+        let r = g.booklet.relics[0].clone();
+        assert_eq!(g.relic_open.map(|o| o.0), Some(r.id));
+        assert_eq!(ash - g.booklet.stash.ash, relics::cost_for(r.rarity));
+        // Saved at commit: the file on disk already holds it.
+        assert_eq!(cards::load(&g.booklet_path).relics, g.booklet.relics);
+        // A press during the opening does nothing more (no second roll).
+        g.relic_pull();
+        assert_eq!(g.booklet.relics.len(), 1);
+        // Skip jumps to the final card; leaving and returning shows the same relic.
+        g.relic_skip();
+        assert!(!g.relic_opening_running());
+        g.relic_leave_tab();
+        assert_eq!(g.relic_view().opening.map(|o| o.relic), Some(r));
+    }
+
+    #[test]
+    fn r6_a_poor_player_cannot_pull_and_nothing_changes() {
+        let mut g = r6_game("r6_poor", 0);
+        g.booklet.stash.ash = relic_ui::max_cost() - 1;
+        let before = g.booklet.clone();
+        g.relic_pull();
+        assert_eq!(g.booklet.relics, before.relics);
+        assert_eq!(g.booklet.stash.ash, before.stash.ash);
+        assert!(g.relic_status.is_some() && g.relic_open.is_none());
+    }
+
+    #[test]
+    fn r6_equipping_sets_the_held_weapon_and_runs_start_with_it() {
+        let mut g = r6_game("r6_equip", 6);
+        g.held_relic = None;
+        let ids = relic_ui::order(&g.booklet.relics);
+        let pick = *ids.last().unwrap();
+        g.relic_cursor = Some(pick);
+        g.relic_equip();
+        let r = g.booklet.relics.iter().find(|r| r.id == pick).unwrap().clone();
+        assert_eq!(g.booklet.equipped_relic, Some(pick));
+        let h = g.held_relic.expect("held");
+        assert_eq!((h.rarity, Some(h.weapon)), (r.rarity, r.weapon));
+        assert_eq!(cards::load(&g.booklet_path).equipped_relic, Some(pick), "saved");
+        // A run start re-reads the equipped relic.
+        g.held_relic = None;
+        g.prologue = None;
+        g.refresh_card_effects();
+        assert_eq!(g.held_relic.map(|h| h.rarity), Some(r.rarity));
+        // Equipping the one already worn changes nothing.
+        let n = g.booklet.clone();
+        g.relic_equip();
+        assert_eq!(g.booklet.equipped_relic, n.equipped_relic);
+        // The pouch marks the worn one.
+        assert_eq!(g.relic_view().equipped, Some(pick));
+    }
+
+    #[test]
+    fn r6_an_old_booklet_without_relics_shows_an_empty_pouch() {
+        let mut g = r6_game("r6_old", 0);
+        g.relic_page = 1;
+        assert!(g.booklet.relics.is_empty());
+        let v = g.relic_view();
+        assert!(v.pouch.is_empty() && v.cursor.is_none() && v.equipped.is_none());
+        let drawn: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 3.0])).into_iter().map(|t| t.0).collect();
+        assert!(drawn.iter().any(|t| t.contains("EMPTY")), "{drawn:?}");
+    }
+
+    #[test]
+    fn r6_odds_and_pity_are_on_screen_from_the_first_frame_and_never_tick() {
+        let mut g = r6_game("r6_odds", 3);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let pct = |times: &[f32]| -> Vec<String> {
+            texts(&frames_at(&g, 1280.0, 720.0, times))
+                .into_iter()
+                .map(|t| t.0)
+                .filter(|t| t.contains('%') || t.contains("GUARANTEED"))
+                .collect()
+        };
+        let first = pct(&[0.0]);
+        assert!(first.iter().any(|t| t.contains("MYTHIC GUARANTEED")), "{first:?}");
+        assert!(first.iter().filter(|t| t.ends_with('%')).count() >= 4, "{first:?}");
+        assert_eq!(first, pct(&[0.0, 0.3, 0.6, 0.9, 1.5]));
+        let all: String = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 3.0])).into_iter().map(|t| t.0).collect::<Vec<_>>().join("|");
+        for banned in ["SO CLOSE", "LAST CHANCE", "ALMOST", "HURRY"] {
+            assert!(!all.contains(banned));
+        }
+    }
+
+    #[test]
+    fn r6_chip_only_when_a_pull_is_possible() {
+        let mut g = r6_game("r6_chip", 0);
+        let rich = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.ash = 0;
+        let poor = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(rich > poor, "{rich} vs {poor}");
+    }
+
+    #[test]
+    fn r6_reduced_motion_is_a_crossfade_with_no_motion_and_off_is_final_at_once() {
+        let mut g = r6_game("r6_still", 1);
+        let id = g.booklet.relics[0].id;
+        g.relic_open = Some((id, 0.0));
+        g.settings.reduced_motion = true;
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let a: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+        let b: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 0.2])).into_iter().map(|t| t.0).collect();
+        assert_eq!(a, b, "reduced motion: same text on every frame");
+        g.settings.reduced_motion = false;
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        assert!(!g.relic_opening_running(), "Off: the final card at once");
+    }
+    // === end relics-ui ===
 
 }
 

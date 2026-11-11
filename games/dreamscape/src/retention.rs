@@ -24,7 +24,6 @@ pub fn card_effects(b: &Booklet, cards: &[Card]) -> QuirkEffect {
 
 // === relic-equip ===
 /// Wears the owned relic `id` into runs. False (nothing changes) if not owned.
-#[allow(dead_code)] // R6 equip flow
 pub fn equip_relic(b: &mut Booklet, id: u32) -> bool {
     if b.relics.iter().any(|r| r.id == id) {
         b.equipped_relic = Some(id);
@@ -194,7 +193,6 @@ pub(crate) fn press_pull(b: &mut Booklet, pull: Pull, seed: u64) -> Pulled {
 /// Appends `relic` to the pouch with the next id (max id + 1, so ids are
 /// never reused; the first is 1) and returns the stored relic. The caller's
 /// `id` is ignored; the pull engine (R2) decides everything else.
-#[allow(dead_code)] // R2: the pull engine calls this
 pub fn press_relic(b: &mut Booklet, mut relic: crate::relic_types::Relic) -> crate::relic_types::Relic {
     relic.id = b.relics.iter().map(|r| r.id).max().map_or(1, |m| m + 1);
     b.relics.push(relic.clone());

@@ -94,6 +94,7 @@ impl Spring {
     }
 
     /// Settled: close to the target and nearly still.
+    #[cfg(test)]
     pub fn settled(&self, target: f32) -> bool {
         (self.pos - target).abs() < 1e-3 && self.vel.abs() < 1e-2
     }

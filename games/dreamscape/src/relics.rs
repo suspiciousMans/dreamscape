@@ -215,7 +215,6 @@ pub fn pull(state: &mut RelicState, seed: u64, featured: Option<DreamTheme>) -> 
 }
 
 /// Wear level for the art pass (R3). Pure in `seed`.
-#[allow(dead_code)] // R3: relic_art.rs
 pub fn wear_tier(seed: u64) -> WearTier {
     match percent_roll(seed, WEAR_SALT) {
         0..=39 => WearTier::Clean,
@@ -226,7 +225,6 @@ pub fn wear_tier(seed: u64) -> WearTier {
 }
 
 /// Etch glyph index in `0..ETCH_GLYPHS`. Pure in `seed`.
-#[allow(dead_code)] // R3: relic_art.rs
 pub fn etch_glyph(seed: u64) -> u8 {
     (percent_roll(seed, ETCH_SALT) % ETCH_GLYPHS) as u8
 }

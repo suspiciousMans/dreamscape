@@ -10,6 +10,7 @@ use crate::worth::mix;
 pub const MAX_DUST_PCT: u32 = 15;
 pub const MAX_SPEED_PCT: u32 = 8;
 pub const MAX_CALM_PCT: u32 = 10;
+#[cfg(test)]
 pub const MAX_MEMORY: f32 = 0.06;
 pub const MAX_REROLLS: u32 = 2;
 pub const MAX_SHARDS: u32 = 2;

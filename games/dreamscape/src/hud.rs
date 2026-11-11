@@ -160,6 +160,8 @@ pub struct HudView {
     pub lottery: crate::lottery_ui::LotteryView,
     /// The Lucid Store's tickets tab. // === fortune ===
     pub tickets: crate::tickets_ui::TicketsView,
+    /// The Lucid Store's relic tab (case and pouch). // === relics-ui ===
+    pub relics: crate::relic_ui::RelicView,
     /// Runs of packs opened without a remembered Lucid card (pack pity, read-only).
     pub pack_dry: u32,
     /// (card number, mastery level) for every card in the booklet.
@@ -555,6 +557,7 @@ pub fn draw(
         }
         Mode::Store if v.store_tab == 1 => return crate::lottery_ui::draw(ctx, &p, screen, v, art),
         Mode::Store if v.store_tab == 2 => return crate::tickets_ui::draw(&p, screen, v),
+        Mode::Store if v.store_tab == 3 => return crate::relic_ui::draw(ctx, &p, screen, v), // === relics-ui ===
         Mode::Store => return crate::shop_ui::draw(&p, screen, v),
         Mode::Title => return crate::title_ui::draw(&p, screen, v),
         Mode::Warning => return crate::title_ui::draw_warning(&p, screen, v),

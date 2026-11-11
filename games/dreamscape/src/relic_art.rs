@@ -100,7 +100,8 @@ fn glyph_cell(id: u8, x: i32, y: i32) -> bool {
     }
 }
 
-/// The glyph as a 16x16 mask (tests, and the painter for crisp overlays).
+/// The glyph as a 16x16 mask (tests).
+#[cfg(test)]
 pub fn glyph_mask(id: u8) -> [bool; 256] {
     let mut m = [false; 256];
     for y in 0..16 {
