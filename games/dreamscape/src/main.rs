@@ -18514,7 +18514,7 @@ mod screen_smoke {
     #[test]
     fn no_relic_leaves_strikes_exactly_as_they_were() {
         let mut g = game("relic_none");
-        assert!(g.held_relic.is_none() || std::env::var_os("DREAMSCAPE_GIVE_RELIC").is_some());
+        assert!(g.held_relic.is_none() || crate::dev::var_os("DREAMSCAPE_GIVE_RELIC").is_some());
         g.held_relic = None;
         assert_eq!(g.relic_mods(), relic_weapon::StrikeMods::IDENTITY);
         assert_eq!(g.strike_reach(), combat::REACH);
