@@ -65,7 +65,24 @@ pub fn deal(age: f32, i: usize) -> f32 {
     ((age - 0.12 * i as f32) / 0.25).clamp(0.0, 1.0)
 }
 
+// === m4e ===
+/// Deal-in progress with the screen_anim ease; Off / reduced motion (`amount`
+/// 0) deals everything at once.
+pub fn deal_eased(age: f32, i: usize, amount: f32) -> f32 {
+    if amount <= 0.0 {
+        1.0
+    } else {
+        crate::ui_motion::ease_out_cubic(deal(age, i))
+    }
+}
+// === end m4e ===
+
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
+    // === m4e === the selected card springs up 4% and floats; nothing bobs on a loop
+    let amount = crate::ui_motion::effective(v.settings_snapshot.ui_juice, v.settings_snapshot.reduced_motion);
+    let motion = crate::screen_anim::advance(p.ctx(), "m4e_choice", c.age, 0, Some(c.selected as u32), false, 0.0, amount)
+        .grid(c.age, amount);
+    // === end m4e ===
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.72));
     let top = screen.top() + screen.height() * 0.1;
     glitch_text(
@@ -87,17 +104,16 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &ChoiceView) {
     );
     let rects = card_rects(screen, c.cards.len());
     for (i, (card, r)) in c.cards.iter().zip(&rects).enumerate() {
-        let t = deal(c.age, i);
+        let t = deal_eased(c.age, i, amount); // === m4e ===
         if t <= 0.0 {
             continue;
         }
         let sel = i == c.selected;
-        let lift = if sel {
-            -10.0 - 3.0 * (v.time * 3.0).sin()
-        } else {
-            0.0
-        };
+        // === m4e === a still selection sits 10 px up; the spring eases it there
+        let lift = if sel && amount <= 0.0 { -10.0 } else { -motion.lift_of(i as u32, 16.0) };
         let r = r.translate(Vec2::new(0.0, (1.0 - t) * 60.0 + lift));
+        let r = Rect::from_center_size(r.center(), r.size() * motion.scale_of(i as u32));
+        // === end m4e ===
         let frame = if sel { hue(v.time * 0.2) } else { card.frame };
         let c = crate::pixel_ui::cell(crate::pixel_ui::scale(screen));
         crate::pixel_ui::panel(p, r, frame, rgba([18, 10, 40], 0.95 * t), c, t);
@@ -192,5 +208,21 @@ mod tests {
         assert_eq!(deal(0.0, 0), 0.0);
         assert!(deal(0.2, 0) > deal(0.2, 1));
         assert_eq!(deal(5.0, 2), 1.0);
+    }
+
+    #[test]
+    fn m4e_eased_deal_is_monotone_bounded_and_off_is_final() {
+        for i in 0..3 {
+            let mut last = 0.0;
+            for k in 0..100 {
+                let d = deal_eased(k as f32 * 0.02, i, 1.4);
+                assert!((0.0..=1.0).contains(&d) && d >= last);
+                last = d;
+            }
+            assert_eq!(last, 1.0);
+            assert_eq!(deal_eased(0.0, i, 0.0), 1.0);
+        }
+        assert!(deal_eased(0.2, 0, 1.0) > deal_eased(0.2, 1, 1.0));
+        assert_eq!(deal_eased(0.0, 0, 1.0), 0.0);
     }
 }

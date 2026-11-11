@@ -388,6 +388,19 @@ pub fn riffle(since: f32, reduced: bool) -> [Sheet; RIFFLE_SHEETS] {
     out
 }
 
+// === m4e ===
+/// Alpha of recharge cell `i` of `cells`: lit cells 0.9, the one filling
+/// eases from 0.15 to 0.9 with the charge, a ready card pulses 0.7..1.0
+/// (a steady 0.85 when `still`). Monotone in `charge` for every cell.
+pub fn charge_cell_alpha(i: usize, cells: usize, charge: f32, ready: bool, time: f32, still: bool) -> f32 {
+    if ready {
+        return if still { 0.85 } else { 0.7 + 0.3 * (time * 5.0 + i as f32 * 0.5).sin() };
+    }
+    let f = (charge.clamp(0.0, 1.0) * cells as f32 - i as f32).clamp(0.0, 1.0);
+    0.15 + 0.75 * if still { f.floor() } else { crate::ui_motion::smoothstep(f) }
+}
+// === end m4e ===
+
 /// Idle sway of card `i`, in radians: a few degrees, each out of step.
 pub fn sway(time: f32, i: usize, reduced: bool) -> f32 {
     if reduced {
@@ -501,6 +514,9 @@ pub fn draw(
     juice: crate::ui_motion::UiJuice,
     art: &mut crate::booklet_ui::CardArt,
 ) {
+    // === m4e === Off is stillness too: no draw arc, sway, pop or ring growth.
+    let reduced = reduced || juice == crate::ui_motion::UiJuice::Off;
+    // === end m4e ===
     let rests = layout(screen, cards.len());
     let u = crate::pixel_ui::scale(screen);
     draw_links(p, &rests, cards, links, time, u);
@@ -779,6 +795,7 @@ fn draw_card(
 ) {
     let x = Xf::new(r.center(), angle);
     let ready = c.charge >= 1.0;
+    let still = motion.1 || motion.0 == crate::ui_motion::UiJuice::Off; // === m4e ===
     let lit = ready || c.active || amount > 0.0;
     // The frame is the card's own (rarity); the tint is for the ring and flash.
     let frame = if let Some((_, col)) = c.scrap {
@@ -935,9 +952,10 @@ fn draw_card(
         }
     }
 
-    // Recharge: a strip under the art, eight cells; ready ones pulse.
+    // Recharge: a strip under the art, eight cells; the filling cell grows in
+    // smoothly, a ready card's cells pulse softly (steady when `still`).
+    // === m4e ===
     let cells = 8;
-    let filled = (c.charge.clamp(0.0, 1.0) * cells as f32).floor() as i32;
     let cw = art.width() / cells as f32;
     let bar_top = art.bottom() + 3.0 * u * k;
     for i in 0..cells {
@@ -945,13 +963,10 @@ fn draw_card(
             Pos2::new(art.left() + i as f32 * cw, bar_top),
             Vec2::new(cw - 1.0, 5.0 * u * k),
         );
-        let a = if i < filled || ready {
-            if ready { 0.7 + 0.3 * (time * 5.0 + i as f32 * 0.5).sin() } else { 0.9 }
-        } else {
-            0.15
-        };
+        let a = charge_cell_alpha(i, cells, c.charge, ready, time, still);
         x.quad(p, cr, rgba(edge, a));
     }
+    // === end m4e ===
 
     // The ability this card holds, in the lower body.
     let lower = bar_top + 5.0 * u * k + 4.0 * u * k;
@@ -1021,6 +1036,31 @@ mod tests {
 
     fn screen() -> Rect {
         Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))
+    }
+
+    #[test]
+    fn charge_cells_fill_smoothly_and_monotonically() {
+        for still in [false, true] {
+            for i in 0..8 {
+                let mut last = 0.0;
+                for k in 0..=100 {
+                    let a = charge_cell_alpha(i, 8, k as f32 / 100.0 * 0.999, false, 0.0, still);
+                    assert!((0.15..=0.9001).contains(&a));
+                    assert!(a >= last - 1e-6, "cell {i} dipped");
+                    last = a;
+                }
+            }
+        }
+        // Not-yet-reached cells stay dim, passed ones are lit, in both modes.
+        assert_eq!(charge_cell_alpha(5, 8, 0.25, false, 0.0, false), 0.15);
+        assert!((charge_cell_alpha(0, 8, 0.25, false, 0.0, false) - 0.9).abs() < 1e-6);
+        // Smooth mode eases the filling cell; still mode steps.
+        let mid = charge_cell_alpha(2, 8, 0.3125, false, 0.0, false);
+        assert!(mid > 0.15 && mid < 0.9);
+        assert_eq!(charge_cell_alpha(2, 8, 0.3125, false, 0.0, true), 0.15);
+        // A ready card is steady when still, and breathes otherwise.
+        assert_eq!(charge_cell_alpha(3, 8, 1.0, true, 1.0, true), charge_cell_alpha(3, 8, 1.0, true, 2.0, true));
+        assert_ne!(charge_cell_alpha(3, 8, 1.0, true, 1.0, false), charge_cell_alpha(3, 8, 1.0, true, 1.3, false));
     }
 
     #[test]

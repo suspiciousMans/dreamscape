@@ -899,11 +899,7 @@ fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
         let centre = at + Vec2::new(i as f32 * step + 4.5 * px, 4.5 * px);
         let full = i < now;
         let just_broke = !full && i == now && v.nerve_flinch > 0.0;
-        let beat = if full && now == 1 {
-            1.0 + 0.18 * (v.time * 6.0).sin().max(0.0)
-        } else {
-            1.0
-        };
+        let beat = if full && now == 1 { heart_beat(v.time, &v.settings_snapshot) } else { 1.0 };
         let (rgb, alpha) = if full {
             ([255, 80, 120], 1.0)
         } else if just_broke {
@@ -922,6 +918,23 @@ fn hearts(p: &egui::Painter, at: Pos2, v: &HudView) {
         );
     }
 }
+
+// === m4e === the calm in-run HUD: continuous pulses obey the comfort settings
+/// Scale of the last heart's throb: steady at Off / reduced motion, a gentle
+/// beat otherwise (Full does not beat harder: the HUD stays calm).
+pub fn heart_beat(time: f32, s: &crate::settings::Settings) -> f32 {
+    if crate::ui_motion::effective(s.ui_juice, s.reduced_motion) <= 0.0 {
+        return 1.0;
+    }
+    1.0 + 0.18 * (time * 6.0).sin().max(0.0)
+}
+
+/// Whether the HURRIED timer is in its red phase: a 2 Hz blink under 10 s,
+/// but a steady red (no strobe) with reduce-flashing.
+pub fn timer_urgent(time: f32, left: f32, s: &crate::settings::Settings) -> bool {
+    left > 0.0 && left < 10.0 && (s.reduce_flashing || (time * 4.0) as i32 % 2 == 0)
+}
+// === end m4e ===
 
 /// Top right: the dream's twist and HURRIED timer. The hand (held ability cards) sits down the right edge.
 fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
@@ -959,7 +972,7 @@ fn run_status(p: &egui::Painter, screen: Rect, v: &HudView) {
     }
     if let Some(t) = v.timer {
         let (text, rgb) = if t > 0.0 {
-            let urgent = t < 10.0 && (v.time * 4.0) as i32 % 2 == 0;
+            let urgent = timer_urgent(v.time, t, &v.settings_snapshot);
             (
                 format!("{t:>4.1}s"),
                 if urgent { [255, 60, 80] } else { ink(v) },
@@ -1557,6 +1570,24 @@ pub(crate) fn hash01(k: u32, salt: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m4e_hud_pulses_obey_the_comfort_settings() {
+        let soft = crate::settings::Settings::default();
+        let off = crate::settings::Settings { ui_juice: crate::ui_motion::UiJuice::Off, ..soft.clone() };
+        let reduced = crate::settings::Settings { reduced_motion: true, ..soft.clone() };
+        let calm = crate::settings::Settings { reduce_flashing: true, ..soft.clone() };
+        let beats: Vec<f32> = (0..40).map(|k| heart_beat(k as f32 * 0.05, &soft)).collect();
+        assert!(beats.iter().all(|b| (1.0..=1.18001).contains(b)) && beats.iter().any(|b| *b > 1.1));
+        for s in [&off, &reduced] {
+            assert!((0..40).all(|k| heart_beat(k as f32 * 0.05, s) == 1.0));
+        }
+        // Blink: both phases appear normally; steady red with reduce-flashing; none above 10 s or after.
+        let phases: Vec<bool> = (0..8).map(|k| timer_urgent(k as f32 * 0.25, 5.0, &soft)).collect();
+        assert!(phases.contains(&true) && phases.contains(&false));
+        assert!((0..8).all(|k| timer_urgent(k as f32 * 0.25, 5.0, &calm)));
+        assert!(!timer_urgent(0.0, 12.0, &calm) && !timer_urgent(0.0, 0.0, &calm) && !timer_urgent(0.0, -1.0, &soft));
+    }
 
     #[test]
     fn shard_pips_shrink_then_condense_but_never_leave_their_lane() {

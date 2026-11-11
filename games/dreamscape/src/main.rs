@@ -18901,6 +18901,131 @@ mod screen_smoke {
     }
     // === end m4d ===
 
+    // === m4e === in-run HUD + hand + summary + upgrade picks screen pass
+    fn m4e_hand(n: usize) -> Vec<hand::HandCard> {
+        (0..n)
+            .map(|i| hand::HandCard { charge: (i as f32 + 1.0) / (n as f32 + 1.0), active: i == 2, ..card("DASH", hand::NEVER) })
+            .collect()
+    }
+
+    fn m4e_cost(g: &DreamscapeGame, w: f32, h: f32, tweak: &dyn Fn(&mut hud::HudView)) -> (usize, usize) {
+        let mut v = g.hud_view();
+        tweak(&mut v);
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let k = hud::ui_scale(v.mode, w, h);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let out = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art));
+        let ppp = out.pixels_per_point;
+        let shapes = out.shapes.len();
+        let tris = ctx
+            .tessellate(out.shapes, ppp)
+            .iter()
+            .map(|m| match &m.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.indices.len() / 3,
+                _ => 0,
+            })
+            .sum();
+        (shapes, tris)
+    }
+
+    const M4E_JUICE: [ui_motion::UiJuice; 3] = [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full];
+
+    #[test]
+    fn m4e_upgrade_picks_draw_and_fit_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            let mut g = m4b_game("m4e_choice", 12);
+            g.settings.ui_juice = juice;
+            for depth in [1, 6, 12] {
+                g.director.depth = depth;
+                g.open_upgrade_choice();
+                for age in [0.0, 0.2, 3.0] {
+                    g.choice_view.age = age;
+                    bad.extend(m4b_overflows(&g, &format!("Choice {juice:?} depth {depth} age {age}")));
+                }
+            }
+            g.open_wake_choice();
+            g.choice_view.age = 3.0;
+            bad.extend(m4b_overflows(&g, &format!("WakeChoice {juice:?}")));
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_summary_draws_and_fits_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            for reduced in [false, true] {
+                let mut g = m4b_game("m4e_summary", 12);
+                g.settings.ui_juice = juice;
+                g.settings.reduced_motion = reduced;
+                g.mode = hud::Mode::Summary;
+                for age in [0.0, 0.3, 1.5, 8.0] {
+                    g.title_age = age;
+                    bad.extend(m4b_overflows(&g, &format!("Summary {juice:?} reduced={reduced} age {age}")));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_full_hand_in_the_run_fits_at_two_sizes_for_every_juice() {
+        let mut bad = Vec::new();
+        for juice in M4E_JUICE {
+            let mut g = game("m4e_hand");
+            g.settings.ui_juice = juice;
+            g.mode = hud::Mode::Playing;
+            for n in [1, 3, 5] {
+                bad.extend(overflows_with(&g, &format!("HUD hand {n} {juice:?}"), &|v| {
+                    v.hand = m4e_hand(n);
+                    v.hand_pile.shown = true;
+                    v.nerve = (1, 4);
+                    v.timer = Some(6.0);
+                }));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn m4e_screens_at_full_juice_stay_inside_their_budgets() {
+        let mut g = m4b_game("m4e_budget", 12);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        let mut rows = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            g.mode = hud::Mode::Playing;
+            rows.push((format!("Playing 5-card {w}x{h}"), m4e_cost(&g, w, h, &|v| {
+                v.hand = m4e_hand(5);
+                v.hand_pile.shown = true;
+                v.hand_pile.draw_count = 4;
+                v.nerve = (1, 4);
+            }), (340, 3_300)));
+            g.mode = hud::Mode::Summary;
+            g.title_age = 0.5;
+            rows.push((format!("Summary {w}x{h}"), m4e_cost(&g, w, h, &|_| {}), (80, 600)));
+            g.open_upgrade_choice();
+            g.choice_view.age = 3.0;
+            rows.push((format!("Choice {w}x{h}"), m4e_cost(&g, w, h, &|_| {}), (160, 1_100)));
+        }
+        let mut over = Vec::new();
+        for (l, (s, t), (ms, mt)) in &rows {
+            eprintln!("m4e cost {l}: {s} shapes, {t} triangles");
+            if s > ms || t > mt {
+                over.push(format!("{l}: {s} shapes, {t} triangles (max {ms}/{mt})"));
+            }
+        }
+        assert!(over.is_empty(), "{}", over.join("\n"));
+    }
+    // === end m4e ===
+
     // === m4a === title + settings + codex/memories/code motion
     fn m4a_game(name: &str) -> DreamscapeGame {
         let mut g = m4b_game(name, 12);
