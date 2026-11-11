@@ -97,6 +97,8 @@ mod relic_types;
 mod ui_motion;
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
+#[allow(dead_code)] // R2/R6 call relic_effects::effect_for when a relic is pressed
+mod relic_effects;
 mod reveal_ui;
 mod scraps;
 mod code_ui;
@@ -2545,8 +2547,12 @@ impl DreamscapeGame {
         }
         let want_max = self.run.nerve_max();
         // === end upgrades2 ===
+        // === relic-nerve === an equipped relic's extra nerve cap (never above 8)
+        let cap = nerve::cap_with(self.card_fx.max_nerve);
+        let want_max = (want_max + self.card_fx.max_nerve).min(cap);
+        // === end relic-nerve ===
         if want_max > self.nerve.max() {
-            self.nerve.raise_max(want_max - self.nerve.max());
+            self.nerve.raise_max_to(want_max - self.nerve.max(), cap);
         }
         self.counter_cd = (self.counter_cd - dt).max(0.0);
         self.lunge_left = (self.lunge_left - dt).max(0.0);
