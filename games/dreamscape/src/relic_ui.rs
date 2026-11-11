@@ -481,7 +481,14 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView) {
     p.text(
         Pos2::new(cx, screen.top() + 62.0 * l.uf),
         Align2::CENTER_TOP,
-        format!("{} ash   ·   {} relics   ·   {} pulls so far", tick(r.ash), r.pouch.len(), tick(r.total_pulls)),
+        format!(
+            "{} ash   ·   {} {}   ·   {} {} so far",
+            tick(r.ash),
+            r.pouch.len(),
+            if r.pouch.len() == 1 { "relic" } else { "relics" },
+            tick(r.total_pulls),
+            if r.total_pulls == 1 { "pull" } else { "pulls" }
+        ),
         FontId::monospace(20.0 * l.uf),
         rgba([255, 210, 80], 1.0),
     );

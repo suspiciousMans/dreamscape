@@ -13928,7 +13928,8 @@ impl Game for DreamscapeGame {
         let mut held_draw: Option<(Arc<GpuMesh>, Arc<GpuTexture>, Mat4, Option<(Arc<GpuMesh>, Mat4)>)> = None;
         if let Some(h) = self.held_relic {
             let (juice, reduced) = (self.settings.ui_juice, self.settings.reduced_motion);
-            let size = f32::from(h.weapon.scale_pct) / 100.0;
+            // First person: the mesh sits 0.85 m from the eye, so scale it down or it fills a quarter of the view.
+            let size = f32::from(h.weapon.scale_pct) / 100.0 * if fp { 0.55 } else { 1.0 };
             let pose = relic_weapon::held_pose(time, self.held_lag, juice, reduced);
             let world = if fp {
                 let q = Quat::from_euler(engine::glam::EulerRot::YXZ, pose.rot.y, pose.rot.x, pose.rot.z);
