@@ -18509,4 +18509,39 @@ mod screen_smoke {
         assert_eq!(g.mode, hud::Mode::Playing);
     }
     // === end deathfx ===
+
+    // === relics-weapon ===
+    #[test]
+    fn no_relic_leaves_strikes_exactly_as_they_were() {
+        let mut g = game("relic_none");
+        assert!(g.held_relic.is_none() || std::env::var_os("DREAMSCAPE_GIVE_RELIC").is_some());
+        g.held_relic = None;
+        assert_eq!(g.relic_mods(), relic_weapon::StrikeMods::IDENTITY);
+        assert_eq!(g.strike_reach(), combat::REACH);
+        assert_eq!(g.strike_arc_cos(), combat::ARC_COS);
+    }
+
+    #[test]
+    fn a_mythic_relic_reaches_further_and_a_cracked_one_less_but_both_stay_capped() {
+        let mut g = game("relic_mods");
+        g.held_relic = None;
+        let base = (g.strike_reach(), g.strike_arc_cos());
+        let mut last = base.0;
+        for rarity in [
+            relic_types::RelicRarity::Cracked,
+            relic_types::RelicRarity::Worn,
+            relic_types::RelicRarity::Pristine,
+            relic_types::RelicRarity::Mythic,
+        ] {
+            let weapon = relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, 9);
+            g.held_relic = Some(HeldRelic { rarity, weapon });
+            let (reach, arc) = (g.strike_reach(), g.strike_arc_cos());
+            assert!(reach >= last - 0.3 && reach <= base.0 * relic_weapon::MAX_REACH_MULT + 1e-4);
+            assert!(arc <= base.1 && arc >= base.1 - relic_weapon::MAX_ARC_RELAX - 1e-4);
+            last = reach;
+        }
+        assert_eq!(g.relic_mods().damage_bonus, 1, "Mythic adds one damage");
+    }
+    // === end relics-weapon ===
 }
+
