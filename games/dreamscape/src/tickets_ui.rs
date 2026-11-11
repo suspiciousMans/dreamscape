@@ -52,6 +52,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let c = pixel_ui::cell(u);
     let cx = screen.center().x;
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
+    // === m4c === motion: the table eases in row by row; counters tick up when the tab opens
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let anim = crate::screen_anim::advance(p.ctx(), "m4c_tickets", v.time, 0, None, false, 0.0, amount);
+    let age = anim.age(v.time);
+    let tick = |n: u32| crate::screen_anim::tick(n as i64, age, 0.0, amount);
+    // === end m4c ===
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 14.0),
@@ -67,7 +74,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         Align2::CENTER_TOP,
         format!(
             "{} tickets   ·   {} dream dust   ·   {} scratched so far",
-            t.tickets, v.dust, t.scratches
+            tick(t.tickets), tick(v.dust), tick(t.scratches)
         ),
         FontId::monospace(22.0),
         rgba([255, 210, 80], 1.0),
@@ -93,21 +100,23 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let inner_l = panel.left() + c * 3.0;
     let inner_r = panel.right() - c * 3.0;
     let mut y = top + 14.0 * u;
-    for (label, share) in &t.odds {
+    for (row, (label, share)) in t.odds.iter().enumerate() {
+        let e = crate::screen_anim::enter(row, age, amount); // === m4c ===
+        let ry = y + (1.0 - e) * 6.0 * u;
         let size = pixel_ui::fit(label, 16.0 * u, width * 0.58, 9.0);
         p.text(
-            Pos2::new(inner_l, y),
+            Pos2::new(inner_l, ry),
             Align2::LEFT_TOP,
             label,
             FontId::monospace(size),
-            rgba(ink(v), 0.9),
+            rgba(ink(v), 0.9 * e),
         );
         p.text(
-            Pos2::new(inner_r, y),
+            Pos2::new(inner_r, ry),
             Align2::RIGHT_TOP,
             format!("{:.0}%", share * 100.0),
             FontId::monospace(16.0 * u.max(0.8)),
-            rgba([255, 210, 80], 0.95),
+            rgba([255, 210, 80], 0.95 * e),
         );
         y += 24.0 * u;
     }
@@ -193,6 +202,13 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
         rgba(ink(v), 0.55),
     );
 
+    // === m4c === the focused action's chip, only while a ticket can be scratched (key text only)
+    if t.tickets > 0 {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, st, v.pad);
+        let at = Pos2::new(ticket.center().x, ticket.top() - 16.0 * u);
+        crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, st);
+    }
+    // === end m4c ===
     if let Some(s) = &t.status {
         p.text(
             Pos2::new(cx, screen.bottom() - 84.0 * u),
