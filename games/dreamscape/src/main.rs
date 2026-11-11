@@ -108,6 +108,8 @@ mod screen_anim; // === m4b ===
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
 mod relic_weapon; // === relics-weapon ===
+#[allow(dead_code)] // R6
+mod relic_names;
 mod reveal_ui;
 mod scraps;
 mod code_ui;
