@@ -199,7 +199,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         }
     }
     // === end m4c ===
-    crate::loadout_ui::hint_bar(p, screen, v, "[tab] back to the store   [esc] leave");
+    crate::loadout_ui::hint_bar(p, screen, v, "[tab] the dream tickets   [esc] leave");
     pixel_ui::scanlines(p, screen, c, 8);
 }
 
