@@ -19511,6 +19511,19 @@ mod screen_smoke {
     }
 
     #[test]
+    fn r6_relic_screens_stay_inside_the_ui_budget_at_both_sizes() {
+        let mut g = r6_game("r6_budget", 30);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            for (page, label, max_shapes, max_tris) in [(0, "case", 160, 2_800), (1, "pouch", 180, 2_700)] {
+                g.relic_page = page;
+                let c = ui_cost(&g, w, h);
+                assert!(c.shapes <= max_shapes && c.triangles <= max_tris, "relic {label} {w}x{h}: {c:?}");
+            }
+        }
+    }
+
+    #[test]
     fn r6_pull_commits_once_saves_and_the_screen_shows_that_relic() {
         let mut g = r6_game("r6_pull", 0);
         let ash = g.booklet.stash.ash;
