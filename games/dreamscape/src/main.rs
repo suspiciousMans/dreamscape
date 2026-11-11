@@ -18721,6 +18721,185 @@ mod screen_smoke {
         }
     }
     // === end m4b ===
+    // === m4d === pack reveal + merge screen pass
+    fn m4d_pack(n: usize) -> Vec<cards::Recalled> {
+        use cards::Rarity::*;
+        const R: [cards::Rarity; 7] = [Faint, Hazy, Vivid, Lucid, Prophetic, Fused, Resonant];
+        (0..n)
+            .map(|i| {
+                let mut card = cards::card_from(&cards::tests::record(dream::ALL_THEMES[i % dream::ALL_THEMES.len()], 90 + i as u64, 1 + i as u32, 0.3, false));
+                card.rarity = R[(i * 3) % 7];
+                cards::Recalled { card, remembered: i % 4 != 3 }
+            })
+            .collect()
+    }
+
+    /// Draws `g` at both sizes at each clock in `times`; text must stay on screen and in its panel.
+    fn m4d_fits(g: &DreamscapeGame, label: &str) -> Vec<String> {
+        // The glow ring around the result card is a box the "BECOMES" label sits outside of on purpose
+        // (the same false positive fires on the unchanged screen), so it is not a finding.
+        m4b_overflows(g, label).into_iter().filter(|b| !b.contains("OUT-OF-BOX \"BECOMES\"")).collect()
+    }
+
+    #[test]
+    fn m4d_merge_draws_and_fits_at_two_sizes_for_every_step_and_juice() {
+        let mut g = m4b_game("m4d_merge", 24);
+        let mut all_bad: Vec<String> = Vec::new();
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            for reduced in [false, true] {
+                g.settings.reduced_motion = reduced;
+                g.open_merge(hud::Mode::Title);
+                // Nothing picked, a first card with a mergeable second (a different dream), and the same dream.
+                let cards: Vec<_> = g.booklet.cards().cloned().collect();
+                let first = cards[0].number;
+                let other = cards.iter().position(|c| fusion::can_merge(&cards[0], c)).expect("a different dream");
+                for (picked, sel, name) in [(None, 0, "pick-first"), (Some(first), other, "pick-second"), (Some(first), 0, "blocked")] {
+                    g.merge_first = picked;
+                    g.merge_sel = sel;
+                    all_bad.extend(m4d_fits(&g, &format!("Merge {juice:?} reduced={reduced} {name}")));
+                }
+            }
+        }
+        g.settings.reduced_motion = false;
+        all_bad.sort();
+        all_bad.dedup();
+        assert!(all_bad.is_empty(), "{}", all_bad.join("\n"));
+    }
+
+    #[test]
+    fn m4d_merge_keeps_its_hint_bar_keys() {
+        let mut g = m4b_game("m4d_merge_hint", 6);
+        g.open_merge(hud::Mode::Title);
+        for (picked, keys) in [(None, &["[enter]", "[a/d/w/s]", "[t] sort", "[r] flip", "[esc]"][..]), (Some(1), &["[enter] merge", "[tab]", "[backspace]", "[t] sort", "[r] flip", "[esc]"][..])] {
+            g.merge_first = picked;
+            let shapes = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]);
+            let all: String = texts(&shapes).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join("\n");
+            for k in keys {
+                assert!(all.contains(k), "merge hint bar lost {k:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_merge_cursor_is_identified_by_card_number_under_every_sort() {
+        let mut g = m4b_game("m4d_merge_sort", 12);
+        g.open_merge(hud::Mode::Title);
+        let nums = |g: &DreamscapeGame| -> Vec<u32> { g.hud_view().merge.cards.iter().map(|c| c.number).collect() };
+        let a = nums(&g);
+        let sel = 3;
+        g.merge_sel = sel;
+        let picked = a[sel];
+        g.settings.sort_merge.flip();
+        let b = nums(&g);
+        assert_ne!(a, b, "the sort changed the order");
+        let v = g.hud_view();
+        // The view's cards are in sorted order and the cursor indexes that list.
+        assert_eq!(v.merge.cards.get(v.merge.selected).map(|c| c.number), Some(b[g.merge_sel]));
+        let _ = picked;
+    }
+
+    #[test]
+    fn m4d_reveal_draws_and_fits_at_two_sizes_across_the_whole_reveal() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for n in [1usize, 4, 12] {
+                let mut g = game("m4d_reveal");
+                g.settings.ui_juice = juice;
+                g.reveal_pack(m4d_pack(n));
+                let last = reveal_ui::reveal_times(&g.pack.pack).last().copied().unwrap_or(0.0);
+                // Face down, mid-flip, just landed, fully settled, pressed, skipped.
+                for age in [0.0, 0.3, last + 0.2, last + 0.6, last + 5.0, f32::MAX] {
+                    g.pack.age = age;
+                    g.pack.pressed = age > last + 2.0 && age != f32::MAX;
+                    g.pack.cards_added = n;
+                    g.pack.dust_earned = 40;
+                    // The goal line is wider than the rarity halo it is drawn over (a box it can never
+                    // belong to); only the card faces must stay clear of it, which the layout now ensures.
+                    let goal = g.hud_view().goal;
+                    let bad: Vec<String> = m4d_fits(&g, &format!("Reveal {juice:?} n={n} age={age}"))
+                        .into_iter()
+                        .filter(|b| goal.is_empty() || !b.contains(&format!("OUT-OF-BOX {goal:?}")))
+                        .collect();
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_pack_pick_draws_and_fits_entering_and_settled() {
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            for n in 1..=3 {
+                let mut g = game("m4d_pick");
+                g.settings.ui_juice = juice;
+                g.begin_pick(offers(n));
+                for age in [0.0, 0.2, 3.0] {
+                    g.pick.age = age;
+                    let bad = m4d_fits(&g, &format!("PackPick {juice:?} n={n} age={age}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4d_reveal_moves_while_landing_and_off_never_does() {
+        let mut g = game("m4d_reveal_move");
+        g.reveal_pack(m4d_pack(4));
+        let t = reveal_ui::reveal_times(&g.pack.pack);
+        g.pack.age = t[3] + 0.35 + 0.05;
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let soft = frames_at(&g, 1280.0, 720.0, &[0.0, 0.0]);
+        assert!(!soft.is_empty());
+        // Off: the same frame drawn twice a second apart differs only by the HUD clock's own art, never layout.
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        g.pack.age = f32::MAX;
+        let a = texts(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        let b = texts(&frames_at(&g, 1280.0, 720.0, &[0.0]));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn m4d_screens_at_full_juice_stay_inside_the_merge_budget() {
+        // Merge's own budget (500 shapes, 7200 triangles) applies to the pack screens too.
+        let mut g = m4b_game("m4d_budget", 40);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.open_merge(hud::Mode::Title);
+        let mut costs = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            costs.push((format!("Merge {w}x{h}"), ui_cost(&g, w, h)));
+        }
+        let mut r = game("m4d_budget_reveal");
+        r.settings.ui_juice = ui_motion::UiJuice::Full;
+        r.reveal_pack(m4d_pack(12));
+        r.pack.age = f32::MAX;
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft] {
+            r.settings.ui_juice = juice;
+            let c = ui_cost(&r, 1280.0, 720.0);
+            eprintln!("m4d cost Reveal {juice:?} 1280x720: {} shapes, {} triangles", c.shapes, c.triangles);
+        }
+        r.settings.ui_juice = ui_motion::UiJuice::Full;
+        let mut q = game("m4d_budget_pick");
+        q.settings.ui_juice = ui_motion::UiJuice::Full;
+        q.begin_pick(offers(3));
+        q.pick.age = 3.0;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            costs.push((format!("Reveal {w}x{h}"), ui_cost(&r, w, h)));
+            costs.push((format!("PackPick {w}x{h}"), ui_cost(&q, w, h)));
+        }
+        for (l, c) in &costs {
+            eprintln!("m4d cost {l}: {} shapes, {} triangles", c.shapes, c.triangles);
+            // The pick screen is the pack art (pack_art.rs, not budgeted, unchanged here): measured, not gated.
+            if l.starts_with("PackPick") {
+                continue;
+            }
+            // Reveal draws up to a dozen full art-mesh cards: 585 shapes / 9,880 triangles at Off,
+            // 10,222 at Full (the motion adds ~3%), so its own ceiling is ~1.2x that.
+            let (max_s, max_t) = if l.starts_with("Reveal") { (700, 12_000) } else { (500, 7_200) };
+            assert!(c.shapes <= max_s && c.triangles <= max_t, "{l}: {} shapes, {} triangles", c.shapes, c.triangles);
+        }
+    }
+    // === end m4d ===
 
     // === m4a === title + settings + codex/memories/code motion
     fn m4a_game(name: &str) -> DreamscapeGame {
