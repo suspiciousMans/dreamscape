@@ -109,6 +109,14 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         );
     }
     let cx = screen.center().x;
+    // === m4c === motion: the odds panel eases in; counters tick up when the tab opens.
+    // Only layout and counters move: the odds themselves are never animated.
+    let st = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);
+    let anim = crate::screen_anim::advance(ctx, "m4c_lottery", v.time, 0, None, false, 0.0, amount);
+    let age = anim.age(v.time);
+    let tick = |n: u32| crate::screen_anim::tick(n as i64, age, 0.0, amount);
+    // === end m4c ===
     glitch_text(
         p,
         Pos2::new(cx, screen.top() + 14.0),
@@ -124,14 +132,14 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         Align2::CENTER_TOP,
         format!(
             "{} dream dust   ·   a pull costs {}   ·   {} pulls so far",
-            v.dust, l.cost, l.total_pulls
+            tick(v.dust), l.cost, tick(l.total_pulls)
         ),
         FontId::monospace(22.0),
         rgba([255, 210, 80], 1.0),
     );
 
     fortune_line(p, screen, v);
-    odds_panel(p, screen, v);
+    odds_panel(p, screen, v, age, amount); // === m4c ===
     stage(ctx, p, screen, v, art);
 
     // Controls and status, bottom.
@@ -182,6 +190,15 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         FontId::monospace(size),
         rgba(ink(v), if can_pull { 0.95 } else { 0.45 }),
     );
+    // === m4c === the focused action's chip beside the pull strip, only while a pull is affordable
+    if can_pull {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, st, v.pad);
+        let at = Pos2::new(strip.right() + 30.0, strip.center().y);
+        if at.x + 30.0 < screen.right() {
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, st);
+        }
+    }
+    // === end m4c ===
     crate::loadout_ui::hint_bar(p, screen, v, "[tab] back to the store   [esc] leave");
     pixel_ui::scanlines(p, screen, c, 8);
 }
@@ -213,7 +230,7 @@ fn fortune_line(p: &egui::Painter, screen: Rect, v: &HudView) {
 }
 
 /// The honest numbers: exact odds, pity, sparks, tonight's featured dream.
-fn odds_panel(p: &egui::Painter, screen: Rect, v: &HudView) {
+fn odds_panel(p: &egui::Painter, screen: Rect, v: &HudView, age: f32, amount: f32) {
     let l = &v.lottery;
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
@@ -237,26 +254,28 @@ fn odds_panel(p: &egui::Painter, screen: Rect, v: &HudView) {
     let inner_w = panel.width() - c * 6.0;
     let mut y = top + 18.0 * u;
     let bar_w = inner_w - 110.0 * u - 70.0 * u;
-    for &(r, share) in &l.odds {
+    for (row, &(r, share)) in l.odds.iter().enumerate() {
+        let e = crate::screen_anim::enter(row, age, amount); // === m4c ===
+        let ry = y + (1.0 - e) * 6.0 * u;
         let col = rarity_color(r, v.time);
         p.text(
-            Pos2::new(inner_l, y),
+            Pos2::new(inner_l, ry),
             Align2::LEFT_TOP,
             r.label(),
             FontId::monospace(17.0 * u.max(0.8)),
-            rgba(col, 1.0),
+            rgba(col, e),
         );
         let bar = Rect::from_min_size(
-            Pos2::new(inner_l + 100.0 * u, y + 3.0 * u),
+            Pos2::new(inner_l + 100.0 * u, ry + 3.0 * u),
             Vec2::new(bar_w, 12.0 * u),
         );
-        pixel_ui::bar(p, bar, share, col, 1.0);
+        pixel_ui::bar(p, bar, share, col, e);
         p.text(
-            Pos2::new(panel.right() - c * 3.0, y),
+            Pos2::new(panel.right() - c * 3.0, ry),
             Align2::RIGHT_TOP,
             format!("{:.1}%", share * 100.0),
             FontId::monospace(17.0 * u.max(0.8)),
-            rgba(ink(v), 0.8),
+            rgba(ink(v), 0.8 * e),
         );
         y += 24.0 * u;
     }

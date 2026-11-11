@@ -18722,5 +18722,105 @@ mod screen_smoke {
     }
     // === end m4b ===
 
+    // === m4c === shop + tickets + lottery motion
+    fn m4c_game(name: &str) -> DreamscapeGame {
+        let mut g = m4b_game(name, 12);
+        g.booklet.stash.earn(5000);
+        g.booklet.stash.tickets = 3;
+        g.open_store();
+        g
+    }
+
+    #[test]
+    fn m4c_store_tabs_draw_and_fit_at_two_sizes_entering_and_settled() {
+        let mut g = m4c_game("m4c_fit");
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            for tab in 0..3 {
+                for (shelf, col) in [(0, 0), (1, 2), (2, 5)] {
+                    g.store_tab = tab;
+                    g.shop_shelf = shelf;
+                    g.shop_col = col;
+                    let bad = m4b_overflows(&g, &format!("Store tab {tab} {juice:?} {shelf}/{col}"));
+                    assert!(bad.is_empty(), "{}", bad.join("\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4c_entrance_moves_each_tab_then_settles_and_off_is_final_at_once() {
+        let mut g = m4c_game("m4c_enter");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        for tab in 0..3 {
+            g.store_tab = tab;
+            let first = frames_at(&g, 1280.0, 720.0, &[0.0]);
+            let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+            assert!(first != mid, "tab {tab}: things ease in");
+            g.settings.ui_juice = ui_motion::UiJuice::Off;
+            let off_first: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+            let off_later: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.3, 0.6, 0.9, 1.2, 1.5])).into_iter().map(|t| t.0).collect();
+            assert_eq!(off_first, off_later, "tab {tab}: Off draws the final text on frame 1");
+            g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        }
+    }
+
+    #[test]
+    fn m4c_odds_text_is_exact_from_the_first_frame_and_never_ticks() {
+        let mut g = m4c_game("m4c_odds");
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        for tab in [1, 2] {
+            g.store_tab = tab;
+            let pct = |times: &[f32]| -> Vec<String> {
+                texts(&frames_at(&g, 1280.0, 720.0, times)).into_iter().map(|t| t.0).filter(|t| t.contains('%')).collect()
+            };
+            let first = pct(&[0.0]);
+            let later = pct(&[0.0, 0.3, 0.6, 0.9, 1.2, 1.5]);
+            assert!(!first.is_empty(), "tab {tab} shows odds");
+            assert_eq!(first, later, "tab {tab}: the odds read the same while the panel eases in");
+        }
+    }
+
+    #[test]
+    fn m4c_counters_tick_up_to_the_exact_value() {
+        let mut g = m4c_game("m4c_tick");
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        g.store_tab = 0;
+        let has = |times: &[f32], needle: &str| texts(&frames_at(&g, 1280.0, 720.0, times)).iter().any(|t| t.0.contains(needle));
+        let dust = format!("{} dream dust", g.booklet.stash.dust);
+        assert!(!has(&[0.0, 0.1], &dust), "mid-count shows a smaller number");
+        assert!(has(&[0.0, 0.3, 0.6, 0.9, 1.2], &dust), "settles on the real dust");
+    }
+
+    #[test]
+    fn m4c_chip_only_when_the_action_is_available() {
+        let mut g = m4c_game("m4c_chip");
+        g.store_tab = 2;
+        let n_with = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.tickets = 0;
+        let n_without = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(n_with > n_without, "{n_with} vs {n_without}: no ticket, no chip");
+        g.store_tab = 1;
+        g.booklet.stash.dust = 0;
+        let poor = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        g.booklet.stash.dust = 5000;
+        let rich = frames_at(&g, 1280.0, 720.0, &[0.0, 3.0]).len();
+        assert!(rich > poor, "{rich} vs {poor}: cannot afford a pull, no chip");
+    }
+
+    #[test]
+    fn m4c_reduced_motion_makes_the_store_static() {
+        let mut g = m4c_game("m4c_still");
+        g.settings.reduced_motion = true;
+        for tab in 0..3 {
+            g.store_tab = tab;
+            let a: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0])).into_iter().map(|t| t.0).collect();
+            let b: Vec<String> = texts(&frames_at(&g, 1280.0, 720.0, &[0.0, 0.3, 0.6, 0.9, 1.2, 1.5])).into_iter().map(|t| t.0).collect();
+            assert_eq!(a, b, "tab {tab}: no tick-up, no entrance");
+        }
+    }
+    // === end m4c ===
+
+
 }
 
