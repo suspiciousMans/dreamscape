@@ -273,7 +273,6 @@ struct Slash {
 struct HeldRelic {
     rarity: relic_types::RelicRarity,
     weapon: relic_types::Weapon,
-    theme: dream::DreamTheme,
 }
 // === end relics-weapon ===
 
@@ -1281,9 +1280,9 @@ impl DreamscapeGame {
             held_relic: crate::dev::var("DREAMSCAPE_GIVE_RELIC")
                 .ok()
                 .and_then(|s| relic_weapon::parse_give(&s))
-                .map(|(rarity, seed)| {
-                    let theme = dream::DreamTheme::Lobby;
-                    HeldRelic { rarity, weapon: relic_weapon::weapon_for(rarity, theme, seed), theme }
+                .map(|(rarity, seed)| HeldRelic {
+                    rarity,
+                    weapon: relic_weapon::weapon_for(rarity, dream::DreamTheme::Lobby, seed),
                 }),
             held_sway: relic_weapon::HeldSway::new(),
             held_yaw_prev: 0.0,
@@ -2579,6 +2578,14 @@ impl DreamscapeGame {
     // === combat ===
     /// Strike, stagger timers, unravelling enemies, calm motes, the flash.
     fn update_combat(&mut self, dt: f32) {
+        // === relics-weapon === the held weapon lags behind a camera turn
+        if self.held_relic.is_some() && dt > 0.0 {
+            let turn = (self.yaw - self.held_yaw_prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.held_lag = self.held_sway.step(dt, turn / dt, self.settings.ui_juice, self.settings.reduced_motion);
+        }
+        self.held_yaw_prev = self.yaw;
+        // === end relics-weapon ===
         // Dev: DREAMSCAPE_STRIKE=<secs> lets the autopilot swing, over and
         // over, from that many seconds in (for screenshots).
         let dev_from = if self.autopilot {
@@ -13713,6 +13720,45 @@ impl Game for DreamscapeGame {
         set_frame(program_i, locs_i);
         set_frame(program, locs);
 
+        // === relics-weapon === the held weapon: mesh, tint, model matrix
+        let mut held_draw: Option<(Arc<GpuMesh>, Arc<GpuTexture>, Mat4, Option<(Arc<GpuMesh>, Mat4)>)> = None;
+        if let Some(h) = self.held_relic {
+            let (juice, reduced) = (self.settings.ui_juice, self.settings.reduced_motion);
+            let size = f32::from(h.weapon.scale_pct) / 100.0;
+            let pose = relic_weapon::held_pose(time, self.held_lag, juice, reduced);
+            let world = if fp {
+                let q = Quat::from_euler(engine::glam::EulerRot::YXZ, pose.rot.y, pose.rot.x, pose.rot.z);
+                view.inverse() * (Mat4::from_translation(pose.offset) * Mat4::from_quat(q))
+            } else {
+                // Third person: in the right hand, level with the waist.
+                let f = Vec3::new(self.facing.x, 0.0, self.facing.z).normalize_or_zero();
+                let f = if f == Vec3::ZERO { Vec3::Z } else { f };
+                let right = f.cross(Vec3::Y).normalize_or_zero();
+                let q = Quat::from_rotation_arc(Vec3::Z, f) * Quat::from_rotation_z(-relic_weapon::TILT);
+                Mat4::from_translation(self.player_position + right * 0.45 + f * 0.25 + Vec3::new(0.0, 0.8 + pose.bob, 0.0))
+                    * Mat4::from_quat(q)
+            };
+            let mesh = self.meshes.get(&relic_weapon::shape_of(&h.weapon)).cloned();
+            let orbiter = (h.rarity == relic_types::RelicRarity::Mythic)
+                .then(|| self.meshes.get(&relic_weapon::orbiter_shape(&h.weapon)).cloned())
+                .flatten();
+            let color = [h.weapon.tint[0], h.weapon.tint[1], h.weapon.tint[2], 255];
+            let tex = self
+                .textures
+                .entry(color)
+                .or_insert_with(|| {
+                    Arc::new(GpuTexture::from_rgba8(gl, &color, 1, 1, TextureFilter::Nearest).expect("1x1 texture upload"))
+                })
+                .clone();
+            if let Some(mesh) = mesh {
+                let orbit = orbiter.map(|m2| {
+                    let off = relic_weapon::orbiter_offset(time, juice, reduced);
+                    (m2, world * Mat4::from_translation(off) * Mat4::from_scale(Vec3::splat(0.07)))
+                });
+                held_draw = Some((mesh, tex, world * Mat4::from_scale(Vec3::splat(size)), orbit));
+            }
+        }
+        // === end relics-weapon ===
         // === deathfx === only the dreamer dissolves (Full death)
         let (dissolve_amount, dissolve_color) = self
             .death
@@ -14025,6 +14071,52 @@ impl Game for DreamscapeGame {
                 gl.uniform_1_f32(Some(l), 0.0);
             }
         }
+        // === relics-weapon === drawn after the world, through the same
+        // uDissolve as the dreamer; first person clears depth so it never
+        // clips into a wall. Not a Hero: no dark shell, no silhouette.
+        if let Some((mesh, tex, model, orbit)) = &held_draw {
+            unsafe {
+                gl.use_program(Some(program));
+                if fp {
+                    gl.clear(engine::glow::DEPTH_BUFFER_BIT);
+                }
+                if params.backface_culling {
+                    gl.enable(engine::glow::CULL_FACE);
+                    gl.cull_face(engine::glow::BACK);
+                }
+                if let Some(l) = &lit_loc {
+                    gl.uniform_1_f32(Some(l), gameplay::lit_level(true, false));
+                }
+                if let Some(l) = &hero_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &melt_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = &uv_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), dissolve_amount);
+                }
+                if let Some(l) = dissolve_color_loc {
+                    gl.uniform_3_f32(Some(l), dissolve_color[0], dissolve_color[1], dissolve_color[2]);
+                }
+                tex.bind(gl, 0);
+                for (mesh, model) in std::iter::once((mesh, model)).chain(orbit.as_ref().map(|(m, x)| (m, x))) {
+                    if let Some(l) = &model_loc {
+                        gl.uniform_matrix_4_f32_slice(Some(l), false, &model.to_cols_array());
+                    }
+                    gl.bind_vertex_array(Some(mesh.vao));
+                    mesh.draw_bound(gl);
+                }
+                gl.bind_vertex_array(None);
+                if let Some(l) = dissolve_loc {
+                    gl.uniform_1_f32(Some(l), 0.0);
+                }
+            }
+        }
+        // === end relics-weapon ===
 
         // Where the player is on screen (NDC -> 0..1), for the vignette centre.
         let clip = Mat4::perspective_rh(fov.to_radians(), aspect_for_overlay, 0.1, 1000.0)
