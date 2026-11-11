@@ -9,6 +9,13 @@
 /// Nerve at the start of a run, and the most a run can reach.
 pub const START: u32 = 3;
 pub const MAX: u32 = 5;
+/// The most any relic can lift the cap to.
+pub const HARD_MAX: u32 = 8;
+
+/// The cap with a relic's `extra` nerve, never above [`HARD_MAX`].
+pub fn cap_with(extra: u32) -> u32 {
+    (MAX + extra).min(HARD_MAX)
+}
 /// Nerve left after being caught (the respawn).
 pub const REFILL: u32 = 2;
 /// Seconds of invulnerability after a hit.
@@ -179,8 +186,14 @@ impl Nerve {
     }
 
     /// Raises the most you can hold (and heals the same amount).
+    #[cfg(test)]
     pub fn raise_max(&mut self, n: u32) {
-        self.max = (self.max + n).min(MAX);
+        self.raise_max_to(n, MAX);
+    }
+
+    /// As [`Nerve::raise_max`] with a higher cap (see [`cap_with`]).
+    pub fn raise_max_to(&mut self, n: u32, cap: u32) {
+        self.max = (self.max + n).min(cap.min(HARD_MAX)).max(self.max);
         self.heal(n);
     }
 
@@ -407,4 +420,20 @@ mod tests {
         assert_eq!(n.recover(), 0, "REWIND has nothing to give back");
     }
     // === end abilities3 ===
+
+    #[test]
+    fn relic_nerve_raises_the_cap_but_never_past_eight() {
+        assert_eq!(cap_with(0), MAX);
+        assert_eq!(cap_with(1), MAX + 1);
+        assert_eq!(cap_with(99), HARD_MAX);
+        let mut n = Nerve::new(MAX);
+        n.raise_max_to(1, cap_with(1));
+        assert_eq!(n.max(), MAX + 1);
+        n.raise_max_to(10, cap_with(1));
+        assert_eq!(n.max(), MAX + 1);
+        n.raise_max_to(10, 99);
+        assert_eq!(n.max(), HARD_MAX);
+        n.raise_max(1);
+        assert_eq!(n.max(), HARD_MAX, "plain raise never lowers");
+    }
 }

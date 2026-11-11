@@ -64,6 +64,7 @@ impl RelicEffect {
             calm_pct: self.calm_pct,
             free_rerolls: self.free_rerolls,
             start_shards: self.start_shards,
+            max_nerve: self.max_nerve,
         }
     }
 }

@@ -380,6 +380,11 @@ pub struct Booklet {
     #[serde(default)]
     pub satchel: crate::scraps::Satchel,
     // === end scraps ===
+    // === relic-equip ===
+    /// The relic worn into runs (old saves: none, so the best owned one).
+    #[serde(default)]
+    pub equipped_relic: Option<u32>,
+    // === end relic-equip ===
 }
 
 impl Booklet {

@@ -95,6 +95,8 @@ pub struct QuirkEffect {
     pub free_rerolls: u32,
     /// Lucidity shards held at the start of the run.
     pub start_shards: u32,
+    /// Extra nerve cap (relics only; `nerve::cap_with` bounds it).
+    pub max_nerve: u32,
 }
 
 impl QuirkEffect {
@@ -108,6 +110,7 @@ impl QuirkEffect {
             calm_pct: self.calm_pct + other.calm_pct,
             free_rerolls: self.free_rerolls + other.free_rerolls,
             start_shards: self.start_shards + other.start_shards,
+            max_nerve: self.max_nerve + other.max_nerve,
         }
     }
 
