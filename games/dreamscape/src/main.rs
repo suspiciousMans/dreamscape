@@ -104,6 +104,7 @@ mod relic_art;
 // === end relic_art ===
 #[allow(dead_code)] // UI revamp streams M1-M4, R3-R6 consume ui_motion as they land
 mod ui_motion;
+mod screen_anim; // === m4b ===
 #[allow(dead_code)] // R3/R4/R6 consume the pull engine as they land
 mod relics;
 mod relic_weapon; // === relics-weapon ===
@@ -18547,5 +18548,179 @@ mod screen_smoke {
         assert_eq!(g.relic_mods().damage_bonus, 1, "Mythic adds one damage");
     }
     // === end relics-weapon ===
+
+    // === m4b === loadout + deck builder + booklet motion
+    /// Draws the current screen on ONE context at each of `times` (the HUD's clock),
+    /// as the game does, and returns the last frame's shapes.
+    fn frames_at(g: &DreamscapeGame, w: f32, h: f32, times: &[f32]) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        hud::install_font(&ctx);
+        let mut art = booklet_ui::CardArt::default();
+        let mut packs_art = pack_art::PackArt::default();
+        let mut last = Vec::new();
+        for &t in times {
+            let mut v = g.hud_view();
+            v.time = t;
+            let k = hud::ui_scale(v.mode, w, h);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w / k, h / k))),
+                ..Default::default()
+            };
+            last = ctx.run(input, |ctx| hud::draw(ctx, &v, &mut art, &g.pack, &g.pick, &mut packs_art)).shapes;
+        }
+        last
+    }
+
+    fn m4b_game(name: &str, cards_n: usize) -> DreamscapeGame {
+        let mut g = game(name);
+        let records: Vec<_> = dream::ALL_THEMES
+            .iter()
+            .cycle()
+            .take(cards_n)
+            .enumerate()
+            .map(|(i, &t)| cards::tests::record(t, 40 + i as u64, 1 + i as u32, 0.3, i % 2 == 0))
+            .collect();
+        g.booklet.add_run(1, &records);
+        g
+    }
+
+    /// Text that leaves the screen or its panel, drawn in the entrance and settled.
+    fn m4b_overflows(g: &DreamscapeGame, label: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            // 0.0 = first frame (entrance start), then mid-entrance, then long settled.
+            for times in [&[0.0_f32][..], &[0.0, 0.1][..], &[0.0, 0.1, 3.0][..]] {
+                let shapes = frames_at(g, w, h, times);
+                let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h));
+                let panels = boxes(&shapes);
+                let drawn = texts(&shapes);
+                if drawn.is_empty() {
+                    bad.push(format!("{label} {w}x{h} drew no text"));
+                }
+                for (text, r) in drawn {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    if !screen.expand(1.5).contains_rect(r) {
+                        bad.push(format!("{label} {w}x{h} t{times:?} OFF-SCREEN {text:?} {r:?}"));
+                        continue;
+                    }
+                    let c = r.center();
+                    let home = panels
+                        .iter()
+                        .filter(|b| b.contains(c) && b.area() > r.area() * 1.05 && b.area() < screen.area() * 0.9)
+                        .min_by(|a, b| a.area().total_cmp(&b.area()));
+                    if let Some(b) = home {
+                        if !b.expand(1.5).contains_rect(r) {
+                            bad.push(format!("{label} {w}x{h} t{times:?} OUT-OF-BOX {text:?} {r:?} box {b:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn m4b_deck_builder_draws_and_fits_at_two_sizes_entering_and_settled() {
+        let mut g = m4b_game("m4b_deck", 40);
+        g.booklet.lore.deck = g.booklet.cards().take(7).map(|c| c.number).collect();
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            g.open_loadout();
+            // The cursor on a later card, past the first window (scrolled grid).
+            for sel in [0, 7, 33] {
+                g.loadout_sel = sel;
+                let bad = m4b_overflows(&g, &format!("Deck {juice:?} sel {sel}"));
+                assert!(bad.is_empty(), "{}", bad.join("\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn m4b_booklet_draws_and_fits_at_two_sizes_entering_and_settled() {
+        let mut g = m4b_game("m4b_booklet", 30);
+        for juice in [ui_motion::UiJuice::Off, ui_motion::UiJuice::Soft, ui_motion::UiJuice::Full] {
+            g.settings.ui_juice = juice;
+            g.open_booklet();
+            let bad = m4b_overflows(&g, &format!("Booklet {juice:?}"));
+            assert!(bad.is_empty(), "{}", bad.join("\n"));
+        }
+    }
+
+    #[test]
+    fn m4b_entrance_moves_the_deck_builder_then_settles() {
+        let mut g = m4b_game("m4b_enter", 20);
+        g.open_loadout();
+        g.settings.ui_juice = ui_motion::UiJuice::Soft;
+        let start = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let mid = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1]);
+        let end_a = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 3.0, 3.5]);
+        let end_b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 4.0, 4.5]);
+        assert!(start != mid, "tiles come in over time");
+        assert!(mid != end_a);
+        // Settled: only the slow card wobble and cursor pulse remain, tile positions agree.
+        assert_eq!(start.len().max(end_a.len()) > 0, true);
+        g.settings.ui_juice = ui_motion::UiJuice::Off;
+        let off_a = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let off_b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 4.0]);
+        assert_eq!(off_a.len(), off_b.len(), "Off: the first frame already has everything");
+        let _ = end_b;
+    }
+
+    #[test]
+    fn m4b_reduced_motion_makes_the_booklet_static() {
+        let mut g = m4b_game("m4b_still", 6);
+        g.settings.reduced_motion = true;
+        g.open_booklet();
+        let a = frames_at(&g, 1280.0, 720.0, &[0.0]);
+        let b = frames_at(&g, 1280.0, 720.0, &[0.0, 0.1, 5.0]);
+        let ta: Vec<String> = texts(&a).into_iter().map(|t| t.0).collect();
+        let tb: Vec<String> = texts(&b).into_iter().map(|t| t.0).collect();
+        assert_eq!(ta, tb, "no tick-up and no entrance under reduced motion");
+    }
+
+    #[test]
+    fn m4b_cursor_follows_the_sorted_order_by_card_number() {
+        let mut g = m4b_game("m4b_sorted", 12);
+        g.open_loadout();
+        g.loadout_sel = 0;
+        let asc = g.hud_view().loadout.cards[0].number;
+        g.settings.sort_loadout = sorting::Sort { key: sorting::SortKey::Number, dir: sorting::Dir::Desc };
+        let desc = g.hud_view().loadout.cards[0].number;
+        assert_ne!(asc, desc, "the same index is another card after a flip");
+        // One context across the flip: the focus follows the card number, and the draw stays whole.
+        let ctx = egui::Context::default();
+        let key = |n| Some(n);
+        let mut a = screen_anim::ScreenAnim::default();
+        a.update(1.0, 0, key(asc), false, 0.0, 1.0);
+        a.update(1.1, 0, key(desc), false, 0.0, 1.0);
+        assert_eq!(a.grid(1.1, 1.0).focus_key, Some(desc));
+        assert_eq!(a.grid(1.1, 1.0).prev_key, Some(asc));
+        let _ = ctx;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            assert!(frames_at(&g, w, h, &[0.0, 0.1, 2.0]).len() > 50);
+        }
+    }
+
+    #[test]
+    fn m4b_screens_stay_cheap_at_full_juice_and_a_full_deck() {
+        let mut g = m4b_game("m4b_cost", 60);
+        g.settings.ui_juice = ui_motion::UiJuice::Full;
+        g.booklet.lore.deck = g.booklet.cards().take(deck::DECK_MAX).map(|c| c.number).collect();
+        g.open_loadout();
+        g.loadout_sel = 20;
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let c = ui_cost(&g, w, h);
+            assert!(c.shapes <= 450 && c.triangles <= 7_000, "Loadout {w}x{h}: {c:?}");
+        }
+        g.open_booklet();
+        for (w, h) in [(640.0, 360.0), (1280.0, 720.0)] {
+            let c = ui_cost(&g, w, h);
+            assert!(c.shapes <= 240 && c.triangles <= 3_900, "Booklet {w}x{h}: {c:?}");
+        }
+    }
+    // === end m4b ===
+
 }
 

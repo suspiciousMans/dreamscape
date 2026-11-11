@@ -2,7 +2,7 @@
 //! from in a run. Reuses the loadout screen's grid, card and hint bar; the
 //! slot row becomes a strip of up to [`DECK_MAX`] pips with a DECK n/12 meter.
 
-use crate::booklet_ui::{card, card_frame, CardArt, CARD_SIZE};
+use crate::booklet_ui::{card_frame, CardArt, CARD_SIZE};
 use crate::deck::{self, DECK_MAX, DECK_MIN};
 use crate::hud::{glitch_text, ink, rgba, HudView};
 use crate::loadout_ui::{self, GridMarks};
@@ -98,7 +98,25 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.95));
     let cx = screen.center().x;
     let top = screen.top() + 22.0 * u;
-    glitch_text(p, Pos2::new(cx, top), true, &label(m.chosen.len()), 44.0 * u, ink(v), 1.0, v);
+    // === m4b === motion: eased entrance, hover spring, press squash, climbing meter
+    let s = &v.settings_snapshot;
+    let amount = crate::ui_motion::effective(s.ui_juice, s.reduced_motion);
+    let sel_card = m.cards.get(m.selected); // the cursor indexes the sorted list the view carries
+    let anim = crate::screen_anim::advance(
+        ctx,
+        "m4b_deck",
+        v.time,
+        0,
+        sel_card.map(|c| c.number),
+        sel_card.is_some_and(|c| m.chosen.contains(&c.number)),
+        meter_fill(m.chosen.len()).0,
+        amount,
+    );
+    let mo = anim.grid(v.time, amount);
+    let age = mo.age;
+    // === end m4b ===
+    let shown = crate::screen_anim::tick(m.chosen.len() as i64, age, 0.0, amount) as usize;
+    glitch_text(p, Pos2::new(cx, top), true, &label(shown), 44.0 * u, ink(v), 1.0, v);
     let owned = m.cards.len();
     let kind = meter(m.chosen.len(), owned);
 
@@ -108,15 +126,17 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
             Some(cd) => {
                 let col = card_frame(cd, v.time);
                 let off = m.benched.contains(&cd.number); // === decklife ===
-                pixel_ui::panel(p, r, col, rgba(col, 0.16), c * 0.7, if off { 0.45 } else { 1.0 });
+                let e = crate::screen_anim::enter(i, age, amount); // === m4b ===
+                let r = r.translate(Vec2::new(0.0, (1.0 - e) * 6.0 * u));
+                pixel_ui::panel(p, r, col, rgba(col, 0.16 * e), c * 0.7, (if off { 0.45 } else { 1.0 }) * e);
                 let pw = crate::powers::power_of(cd);
-                pixel_ui::icon(p, r.center(), icons::ability(pw.active), (c * 0.5).max(1.5), pw.tint, pixel_ui::lighter(pw.tint), 1.0);
+                pixel_ui::icon(p, r.center(), icons::ability(pw.active), (c * 0.5).max(1.5), pw.tint, pixel_ui::lighter(pw.tint), e);
                 p.text(
                     r.left_top() + Vec2::new(c, c * 0.6),
                     Align2::LEFT_TOP,
                     format!("{}", cd.number),
                     FontId::monospace((8.0 * u).max(6.0)),
-                    rgba(col, 0.9),
+                    rgba(col, 0.9 * e),
                 );
             }
             None => pixel_ui::panel(p, r, [70, 62, 100], rgba([12, 7, 24], 0.6), c * 0.7, 0.6),
@@ -125,7 +145,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
 
     // The meter: filled to the count, a notch at the minimum.
     let bar = meter_rect(screen);
-    let (fill, min) = meter_fill(m.chosen.len());
+    let (fill, min) = (anim.meter(), meter_fill(m.chosen.len()).1);
     let col = match kind {
         Meter::Short => [230, 110, 120],
         Meter::Full => [240, 200, 110],
@@ -206,7 +226,19 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     let lay = loadout_ui::layout(screen);
     let (grid_top, grid_w) = (lay.grid_top, lay.grid_w);
     let marks = GridMarks { marked: &m.chosen, ..Default::default() };
-    loadout_ui::draw_grid(p, screen, v, &m.cards, m.selected, &marks, grid_top, grid_w);
+    loadout_ui::draw_grid_motion(p, screen, v, &m.cards, m.selected, &marks, grid_top, grid_w, &mo);
+    // === m4b === the focused action's chip, on the selected tile
+    if let Some(sel) = sel_card {
+        let key = crate::prompts::label(crate::prompts::ActionId::Confirm, v.mode, s, v.pad);
+        let tiles = loadout_ui::grid_tiles(screen, m.cards.len(), m.selected, grid_top, grid_w);
+        if let Some((_, tr)) = tiles.iter().find(|(i, _)| *i == m.selected) {
+            // Beside the grid, level with the tile: it never covers another tile's text.
+            let edge = tiles.iter().map(|(_, r)| r.right()).fold(tr.right(), f32::max);
+            let at = Pos2::new(edge + c * 3.0 + 30.0, tr.center().y - mo.lift_of(sel.number, c));
+            crate::hud::prompt_chip(p, at, &key, "", crate::prompts::State::Available, v.time, s);
+        }
+    }
+    // === end m4b ===
 
     if let Some(sel) = m.cards.get(m.selected) {
         let avail = screen.bottom() - 64.0 * u - grid_top;
@@ -217,7 +249,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
         let col = card_frame(sel, v.time);
         let back = r.expand2(Vec2::new(10.0 * u, 10.0 * u));
         pixel_ui::panel(p, back, col, rgba([12, 6, 26], 0.8), c, 0.5);
-        card(ctx, p, r, sel, v, art, sc);
+        crate::booklet_ui::card_hover(ctx, p, r, sel, v, art, sc, mo.hover()); // === m4b === the selected card warps more
         let at = Pos2::new(r.left(), back.bottom() + 12.0 * u);
         pixel_ui::split_text(p, at, Align2::LEFT_TOP, &sel.name, pixel_ui::fit(&sel.name, 15.0 * u, size.x, 8.0), rgba(col, 1.0), 1.0, 0.5);
         loadout_ui::power_lines(p, at + Vec2::new(0.0, 22.0 * u), size.x, sel, None, u, v.time);

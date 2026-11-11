@@ -6,6 +6,7 @@ use crate::booklet_ui::{card, card_frame, CardArt, CARD_SIZE};
 use crate::cards::Card;
 use crate::hud::{glitch_text, ink, rgba, HudView};
 use crate::pixel_ui;
+use crate::screen_anim::GridMotion;
 use crate::pixels::icons;
 use crate::powers::power;
 use crate::upgrades::{ABILITY_SLOTS, SLOT_KEYS};
@@ -226,6 +227,23 @@ pub fn draw_grid(
     grid_top: f32,
     width: f32,
 ) -> f32 {
+    draw_grid_motion(p, screen, v, cards, selected, marks, grid_top, width, &GridMotion::still())
+}
+
+/// `draw_grid` with the M4b motion: tiles ease in (fade + rise, staggered
+/// along the diagonal), the focused one grows, floats and squashes on a press.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_grid_motion(
+    p: &egui::Painter,
+    screen: Rect,
+    v: &HudView,
+    cards: &[Card],
+    selected: usize,
+    marks: &GridMarks,
+    grid_top: f32,
+    width: f32,
+    mo: &GridMotion,
+) -> f32 {
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
     let left = screen.left() + screen.width() * 0.05;
@@ -238,23 +256,26 @@ pub fn draw_grid(
         if row < first_row || row >= first_row + ROWS {
             continue;
         }
-        let r = tile_rect(left, grid_top, tile, gap, i, first_row);
+        let home = tile_rect(left, grid_top, tile, gap, i, first_row);
+        let e = mo.enter(i % COLS, row - first_row);
+        let rise = (1.0 - e) * 8.0 * u - mo.lift_of(card.number, c);
+        let r = Rect::from_center_size(home.center() + Vec2::new(0.0, rise), tile * mo.scale_of(card.number));
         let col = card_frame(card, v.time);
         let power = crate::powers::power_of(card);
         let on = marks.marked.contains(&card.number);
         let dim = marks.dim_theme == Some(card.theme);
         let sel = i == selected;
-        let a = if dim { 0.35 } else { 1.0 };
+        let a = if dim { 0.35 } else { 1.0 } * e;
         pixel_ui::panel(
             p,
             r,
             col,
             rgba(
                 if on { col } else { [14, 8, 28] },
-                if on { 0.38 } else { 0.9 },
+                (if on { 0.38 } else { 0.9 }) * e,
             ),
             c.min(tile.y / 8.0).max(2.0),
-            if sel { 1.0 } else { 0.7 * a },
+            if sel { e } else { 0.7 * a },
         );
         // A band of the rarity colour along the top.
         p.rect_filled(
@@ -298,7 +319,7 @@ pub fn draw_grid(
                 p,
                 r.right_top() + Vec2::new(-c * 4.0, c * 4.5),
                 (c * 0.67).max(2.0),
-                rgba([255, 255, 255], 0.95),
+                rgba([255, 255, 255], 0.95 * e),
             );
         }
         if let Some((n, letter)) = marks.badge {
@@ -307,7 +328,7 @@ pub fn draw_grid(
                     r.right_top() + Vec2::new(-c * 4.0, c * 4.5),
                     Vec2::splat(c * 4.5),
                 );
-                p.rect_filled(b, 0.0, rgba([255, 240, 150], 1.0));
+                p.rect_filled(b, 0.0, rgba([255, 240, 150], e));
                 p.text(
                     b.center(),
                     Align2::CENTER_CENTER,
@@ -324,7 +345,7 @@ pub fn draw_grid(
             } else {
                 0.0
             };
-            pixel_ui::brackets(p, r.expand(c * 0.5 + bob), c, rgba(ink(v), 1.0));
+            pixel_ui::brackets(p, r.expand(c * 0.5 + bob), c, rgba(ink(v), e));
         }
     }
     // Where you are in a long booklet: a thin track beside the grid.
