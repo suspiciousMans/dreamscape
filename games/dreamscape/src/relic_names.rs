@@ -887,6 +887,24 @@ mod tests {
     }
 
     #[test]
+    fn every_theme_shape_rarity_has_a_bounded_name_and_flavour() {
+        for theme in ALL_THEMES {
+            for shape in ALL_SHAPES {
+                for rarity in RARITIES {
+                    for seed in 0..12u64 {
+                        let s = RelicSpec { shape, ..spec(theme, rarity, seed, &[]) };
+                        let n = name(&s);
+                        assert!(!n.is_empty() && n.len() <= MAX_NAME, "{n}");
+                        assert!(n.split(' ').all(|w| !w.is_empty()), "{n:?}");
+                        let f = flavour(&s);
+                        assert!(!f.is_empty() && f.len() <= MAX_FLAVOUR, "{f}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn charset_is_pixel_font_safe() {
         for theme in ALL_THEMES {
             for rarity in RARITIES {
