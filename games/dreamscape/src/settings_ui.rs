@@ -15,6 +15,7 @@ pub struct SettingsView {
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, s: &SettingsView) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.94));
+    crate::menu_bg::draw(p, screen, v);
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
     let cx = screen.center().x;

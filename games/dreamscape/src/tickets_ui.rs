@@ -52,6 +52,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
     let c = pixel_ui::cell(u);
     let cx = screen.center().x;
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
+    crate::menu_bg::draw(p, screen, v);
     // === m4c === motion: the table eases in row by row; counters tick up when the tab opens
     let st = &v.settings_snapshot;
     let amount = crate::ui_motion::effective(st.ui_juice, st.reduced_motion);

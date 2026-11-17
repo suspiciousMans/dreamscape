@@ -526,6 +526,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.95));
+    crate::menu_bg::draw(p, screen, v);
     let cx = screen.center().x;
     let top = screen.top() + 22.0 * u;
     glitch_text(

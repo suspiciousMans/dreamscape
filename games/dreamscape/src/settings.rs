@@ -109,6 +109,8 @@ pub struct Settings {
     pub sort_loadout: crate::sorting::Sort,
     /// How much the menus and cards move: off / soft / full (`ui_motion`).
     pub ui_juice: crate::ui_motion::UiJuice,
+    /// The design behind the menus (`menu_bg.rs`).
+    pub menu_backdrop: crate::menu_bg::MenuBackdrop,
 }
 
 impl Default for Settings {
@@ -134,6 +136,7 @@ impl Default for Settings {
             sort_merge: Default::default(),
             sort_loadout: Default::default(),
             ui_juice: Default::default(),
+            menu_backdrop: Default::default(),
         }
     }
 }
@@ -216,6 +219,7 @@ pub enum Row {
     ReducedMotion,
     ReduceFlashing,
     UiJuice,
+    MenuBackdrop,
     GentleNerve,
     ColorblindMarkers,
     Fullscreen,
@@ -234,6 +238,7 @@ pub fn rows() -> Vec<Row> {
         Row::ReducedMotion,
         Row::ReduceFlashing,
         Row::UiJuice,
+        Row::MenuBackdrop,
         Row::GentleNerve,
         Row::ColorblindMarkers,
         Row::Fullscreen,
@@ -255,6 +260,7 @@ impl Row {
             Row::ReducedMotion => "reduced motion".into(),
             Row::ReduceFlashing => "reduce flashing".into(),
             Row::UiJuice => "menu motion".into(),
+            Row::MenuBackdrop => "menu background".into(),
             Row::GentleNerve => "gentle nerve".into(),
             Row::ColorblindMarkers => "colour-blind markers".into(),
             Row::Fullscreen => "fullscreen".into(),
@@ -277,6 +283,7 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
         Row::ReduceFlashing => s.reduce_flashing = !s.reduce_flashing,
         Row::UiJuice => s.ui_juice = s.ui_juice.step(dir),
+        Row::MenuBackdrop => s.menu_backdrop = s.menu_backdrop.step(dir),
         Row::GentleNerve => s.gentle_nerve = !s.gentle_nerve,
         Row::ColorblindMarkers => s.colorblind_markers = !s.colorblind_markers,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
@@ -298,6 +305,7 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::ReducedMotion => onoff(s.reduced_motion),
         Row::ReduceFlashing => onoff(s.reduce_flashing),
         Row::UiJuice => s.ui_juice.label().to_string(),
+        Row::MenuBackdrop => s.menu_backdrop.label().to_string(),
         Row::GentleNerve => onoff(s.gentle_nerve),
         Row::ColorblindMarkers => onoff(s.colorblind_markers),
         Row::Fullscreen => onoff(s.fullscreen),
@@ -428,6 +436,17 @@ mod tests {
         assert_eq!(value(&s, Row::UiJuice), "off");
         let old: Settings = ron::from_str("(music: 0.5)").unwrap();
         assert_eq!(old.ui_juice, UiJuice::Soft);
+    }
+
+    #[test]
+    fn menu_background_row_cycles_and_old_files_load_stars() {
+        use crate::menu_bg::MenuBackdrop;
+        let mut s = Settings::default();
+        assert_eq!(s.menu_backdrop, MenuBackdrop::Stars);
+        adjust(&mut s, Row::MenuBackdrop, 1);
+        assert_eq!(value(&s, Row::MenuBackdrop), "drifting cards");
+        let old: Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert_eq!(old.menu_backdrop, MenuBackdrop::Stars);
     }
 
     #[test]

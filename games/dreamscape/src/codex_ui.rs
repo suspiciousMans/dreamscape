@@ -28,6 +28,7 @@ pub fn spaced(name: &str) -> String {
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
+    crate::menu_bg::draw(p, screen, v);
     let u = pixel_ui::scale(screen);
     let cell = pixel_ui::cell(u);
     let cx = screen.center().x;

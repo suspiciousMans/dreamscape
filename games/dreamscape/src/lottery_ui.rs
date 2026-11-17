@@ -96,6 +96,7 @@ fn theme_name(t: DreamTheme) -> &'static str {
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     let l = &v.lottery;
     p.rect_filled(screen, 0.0, rgba([6, 3, 16], 0.96));
+    crate::menu_bg::draw(p, screen, v);
     for k in 0..60u32 {
         let h1 = crate::hud::hash01(k, 7);
         let h2 = crate::hud::hash01(k, 8);
