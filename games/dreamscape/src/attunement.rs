@@ -49,6 +49,74 @@ pub fn counts<'a>(cards: impl Iterator<Item = &'a Card>) -> Vec<(Attribute, usiz
     out
 }
 
+/// Two attunements at once open a combo: a third passive that neither
+/// attribute gives on its own, and a line in the booklet that names the pair.
+/// Deliberately a short, hand-picked list rather than every possible pair —
+/// the point is that two attunements you chose on purpose read as one thing.
+pub struct Combo {
+    pub a: Attribute,
+    pub b: Attribute,
+    pub name: &'static str,
+    pub line: &'static str,
+    /// The passive the pair grants, on top of the two attunements.
+    pub gift: Upgrade,
+}
+
+/// The pairs worth naming. Every gift is a passive the two attributes' own
+/// dreams don't hand out, so a combo is a new lever rather than a third stack
+/// of one you already have.
+pub const COMBOS: [Combo; 6] = [
+    Combo {
+        a: Attribute::Bloom,
+        b: Attribute::Tide,
+        name: "RIPTIDE",
+        line: "the garden drinks the sea",
+        gift: Upgrade::LightBones,
+    },
+    Combo {
+        a: Attribute::Rust,
+        b: Attribute::Hour,
+        name: "RUSTED CLOCK",
+        line: "the machines keep their own time",
+        gift: Upgrade::QuickHands,
+    },
+    Combo {
+        a: Attribute::Void,
+        b: Attribute::Abyss,
+        name: "THE LONG FALL",
+        line: "there is no floor under the floor",
+        gift: Upgrade::Tailwind,
+    },
+    Combo {
+        a: Attribute::Static,
+        b: Attribute::Chord,
+        name: "WHITE NOISE",
+        line: "every sound has a shape",
+        gift: Upgrade::NightOwl,
+    },
+    Combo {
+        a: Attribute::Glass,
+        b: Attribute::Gaze,
+        name: "MIRROR GAZE",
+        line: "something is looking back",
+        gift: Upgrade::Dowsing,
+    },
+    Combo {
+        a: Attribute::Spore,
+        b: Attribute::Trace,
+        name: "MYCELIUM",
+        line: "the way grows behind you",
+        gift: Upgrade::PackRat,
+    },
+];
+
+/// The combo the dreamer has open, if both of its attributes are attuned.
+pub fn combo(attuned: &[Attribute]) -> Option<&'static Combo> {
+    COMBOS
+        .iter()
+        .find(|c| attuned.contains(&c.a) && attuned.contains(&c.b))
+}
+
 pub fn attuned(counts: &[(Attribute, usize)]) -> Vec<Attribute> {
     counts
         .iter()
@@ -67,6 +135,9 @@ pub fn line(counts: &[(Attribute, usize)]) -> String {
             .map(|&a| format!("{} +{}", a.label(), reward(a).info().name))
             .collect();
         parts.push(format!("ATTUNED  {}", names.join(" · ")));
+    }
+    if let Some(c) = combo(&done) {
+        parts.push(format!("COMBO  {}", c.name));
     }
     if let Some((a, n)) = counts.iter().find(|(_, n)| *n < NEEDED) {
         parts.push(format!("next: {} {}/{}", a.label(), n, NEEDED));
@@ -124,6 +195,44 @@ mod tests {
         let l = line(&c);
         assert!(l.contains("ATTUNED") && l.contains("BLOOM"));
         assert!(l.contains("next: VELVET 2/5"));
+    }
+
+    #[test]
+    fn two_attunements_open_their_combo_whichever_order_they_came_in() {
+        let pair = [Attribute::Bloom, Attribute::Tide];
+        let c = combo(&pair).expect("RIPTIDE");
+        assert_eq!(c.name, "RIPTIDE");
+        assert_eq!(combo(&[Attribute::Tide, Attribute::Bloom]).map(|c| c.name), Some("RIPTIDE"));
+        // One of the pair is not a combo.
+        assert!(combo(&[Attribute::Bloom]).is_none());
+        assert!(combo(&[]).is_none());
+        assert!(combo(&[Attribute::Bloom, Attribute::Rust]).is_none());
+    }
+
+    #[test]
+    fn every_combo_is_a_passive_that_is_not_one_of_its_own_rewards() {
+        for c in &COMBOS {
+            assert!(!c.gift.is_ability(), "{}: gift is an ability", c.name);
+            assert_ne!(c.gift, reward(c.a), "{}: gift repeats one attunement", c.name);
+            assert_ne!(c.gift, reward(c.b), "{}: gift repeats one attunement", c.name);
+            assert!(!c.name.is_empty() && !c.line.is_empty());
+        }
+        // No pair is listed twice, in either order.
+        for (i, a) in COMBOS.iter().enumerate() {
+            for b in &COMBOS[i + 1..] {
+                let same = (a.a == b.a && a.b == b.b) || (a.a == b.b && a.b == b.a);
+                assert!(!same, "{} and {} are the same pair", a.name, b.name);
+            }
+        }
+    }
+
+    #[test]
+    fn the_line_names_a_combo_once_both_halves_are_attuned() {
+        let c = vec![(Attribute::Bloom, 5), (Attribute::Tide, 5)];
+        let l = line(&c);
+        assert!(l.contains("COMBO  RIPTIDE"), "{l}");
+        // One attunement alone names no combo.
+        assert!(!line(&[(Attribute::Bloom, 5)]).contains("COMBO"));
     }
 
     #[test]

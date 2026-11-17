@@ -35,9 +35,13 @@ pub enum Variant {
     Mirrored,
     /// A ghost of you from 5 seconds ago banks shards, and enemies chase it.
     Echo,
+    /// The frame folds into four mirrored quadrants. Visual only.
+    Kaleidoscope,
+    /// The walls away from the route swell and settle by half a cell.
+    Breathing,
 }
 
-pub const ALL_VARIANTS: [Variant; 12] = [
+pub const ALL_VARIANTS: [Variant; 14] = [
     Variant::LowGravity,
     Variant::Flooded,
     Variant::Blackout,
@@ -50,6 +54,8 @@ pub const ALL_VARIANTS: [Variant; 12] = [
     Variant::Tiny,
     Variant::Mirrored,
     Variant::Echo,
+    Variant::Kaleidoscope,
+    Variant::Breathing,
 ];
 
 /// Seconds a HASTY dream gives you.
@@ -104,6 +110,8 @@ impl Variant {
             Variant::Tiny => "SHRUNK",
             Variant::Mirrored => "MIRRORED",
             Variant::Echo => "ECHOING",
+            Variant::Kaleidoscope => "KALEIDOSCOPIC",
+            Variant::Breathing => "BREATHING",
         }
     }
 
@@ -121,6 +129,8 @@ impl Variant {
             Variant::Tiny => "the dream got bigger, or you got smaller",
             Variant::Mirrored => "left is where right used to be",
             Variant::Echo => "you are not alone, you are five seconds ago",
+            Variant::Kaleidoscope => "the dream is folded in four",
+            Variant::Breathing => "the walls are breathing",
         }
     }
 
@@ -154,6 +164,13 @@ impl Variant {
             // The Afterimage Fields already leave ghosts of you.
             Variant::Echo => theme.spec().feature != Feature::Echoes,
             Variant::LowGravity => theme.spec().feature != Feature::Weightless,
+            // Nothing to fold on the calm dreams (they never twist anyway).
+            Variant::Kaleidoscope => !matches!(theme, DreamTheme::Lobby | DreamTheme::Awakening),
+            // The dreams with no walls at all have nothing to breathe.
+            Variant::Breathing => !matches!(
+                layout,
+                LayoutKind::PlatformChain | LayoutKind::Spiral | LayoutKind::Terraces
+            ),
             _ => true,
         }
     }
