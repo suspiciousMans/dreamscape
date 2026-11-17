@@ -26,6 +26,8 @@ const CARD_H: f32 = 149.0;
 const VISIBLE: f32 = 0.82;
 /// Tilt between neighbouring cards, in radians (about 6 degrees).
 const TILT_STEP: f32 = 0.105;
+/// The halo a hint card breathes: a pale, quiet green.
+const HINT_GLOW: [u8; 3] = [180, 240, 205];
 
 /// One card in the hand, as the HUD sees it.
 #[derive(Clone, Debug)]
@@ -56,6 +58,10 @@ pub struct HandCard {
     pub since_draw: f32,
     /// Deck hands: nothing in this slot right now (waiting to draw).
     pub empty: bool,
+    // === hints ===
+    /// Combat hints: a foe in reach has a counter, and this is the card for it.
+    pub hint: bool,
+    // === end hints ===
     // === toolcards ===
     /// A run-only tool card bought from the moth: no booklet card behind
     /// it, so no artwork, passive or edge. It wears [`TOOL_FRAME`] and a tag.
@@ -816,6 +822,14 @@ fn draw_card(
     let k = r.width() / (CARD_W * u); // 1.0 at rest, a little more popped
     let cell = (3.0 * u * k).round().max(2.0);
     let body = Rect::from_center_size(Pos2::ZERO, r.size());
+
+    // === hints === a card that answers a foe in reach breathes a soft halo
+    if c.hint {
+        let breath = if still { 0.5 } else { 0.5 + 0.5 * (time * 2.4).sin() };
+        let halo = Rect::from_center_size(Pos2::ZERO, body.size() + Vec2::splat(9.0 * u * k));
+        x.quad(p, halo, rgba(HINT_GLOW, 0.12 + 0.16 * breath));
+    }
+    // === end hints ===
 
     // A soft shadow, so the overlap reads; then frame and body.
     x.quad(p, body.translate(Vec2::new(-3.0 * u, 3.0 * u)), Color32::from_black_alpha(110));

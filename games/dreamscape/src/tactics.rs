@@ -20,6 +20,42 @@ pub const MIMIC_EXTRA_DELAY: f32 = 3.0;
 pub const SENTRY_BOOST: f32 = 1.5;
 /// A jester likes to throw you within this of a stalker or sentry.
 pub const JESTER_ASSIST_RADIUS: f32 = specials::SENTRY_RANGE;
+/// How long a shout keeps a listener hurried.
+pub const ALERT_SECS: f32 = 6.0;
+/// A hurried listener's clock runs this much quicker. It is chosen by the
+/// sweep in the tests: the quickest hurry that still leaves time to answer a
+/// tell, and no quicker than a FAST elite.
+pub const ALERT_SPEED: f32 = 1.25;
+
+/// The depth tactics apply at, or None in the gentle first dreams.
+pub fn stage(depth: u32) -> Option<u32> {
+    (depth >= SHOUT_DEPTH).then_some(depth)
+}
+
+/// How fast a foe acts: alert hurries it, and a FAST elite always does.
+/// These do not multiply: a hurried FAST foe is as quick as a FAST one, never
+/// quicker, so no combination can put a foe past your walk.
+pub fn tempo(fast: bool, alerted: bool) -> f32 {
+    let elite = if fast { specials::ELITE_FAST } else { 1.0 };
+    let edge = if alerted { ALERT_SPEED } else { 1.0 };
+    elite.max(edge)
+}
+
+/// Indices of everyone within shouting distance of `from` (no cooldown check:
+/// new enemies have no separate shout history). `others` = (index, position).
+pub fn earshot(depth: u32, from: Vec3, others: &[(usize, Vec3)]) -> Vec<usize> {
+    if depth < SHOUT_DEPTH {
+        return Vec::new();
+    }
+    let mut v: Vec<usize> = others
+        .iter()
+        .filter(|&&(_, p)| flat_dist(p, from) <= SHOUT_RADIUS)
+        .map(|&(k, _)| k)
+        .collect();
+    v.sort_unstable();
+    v
+}
+
 /// An elite's pack: this many followers within this reach.
 pub const PACK_MAX: usize = 3;
 pub const PACK_RADIUS: f32 = 9.0 * CELL;
@@ -202,6 +238,57 @@ mod tests {
         assert_eq!(sentry_boost(4, s, f, m), 1.0);
         assert_eq!(sentry_boost(5, s, f, None), 1.0);
         assert_eq!(sentry_boost(5, s, f, Some(Vec3::new(0.0, 0.0, -CELL))), 1.0);
+    }
+
+    #[test]
+    fn the_hurry_is_the_quickest_that_still_leaves_a_reaction() {
+        // The shortest tell a new enemy shows, and the quickest of them on its
+        // feet (a Weeper is the fastest: it keeps 0.8 of your walk).
+        const REACTION: f32 = 0.40; // seconds to answer a tell
+        const STEPS: u32 = 7;
+        let tell = crate::tooth::TELEGRAPH;
+        let march = crate::weeper::SPEED_MULT; // the quickest new foe, plain
+        let mut pick = 1.0;
+        for i in 0..=STEPS {
+            let s = 1.0 + 0.05 * i as f32;
+            let reaction = tell / s;
+            // Tempo is a maximum, so this is the quickest a hurried foe gets.
+            let quickest = march * s.max(specials::ELITE_FAST);
+            println!(
+                "hurry {s:.2}: tell {reaction:.3}s, quickest {quickest:.2}x your walk, cycles {:.0}% shorter",
+                (1.0 - 1.0 / s) * 100.0
+            );
+            if reaction >= REACTION && quickest <= 1.0 {
+                pick = s;
+            }
+        }
+        assert_eq!(ALERT_SPEED, pick, "the shipped hurry is the sweep's pick");
+        // A hurry must actually be worth raising: at least a fifth off.
+        let cycle = 1.0 / ALERT_SPEED;
+        assert!(cycle <= 0.85, "{cycle}");
+        // And no combination can outrun your walk (a FAST Weeper only keeps pace).
+        let quickest = crate::weeper::SPEED_MULT * tempo(true, true);
+        assert!(quickest <= 1.0, "{quickest}");
+        assert_eq!(tempo(true, true), specials::ELITE_FAST);
+        assert_eq!(tempo(false, false), 1.0);
+    }
+
+    #[test]
+    fn shouts_reach_new_enemies_too_and_alert_hurries_them() {
+        let near = at(1.0, 0.0);
+        let far = at(SHOUT_RADIUS + 1.0, 0.0);
+        let o = [(7, near), (9, far), (4, at(-1.0, 0.0))];
+        assert_eq!(earshot(3, at(0.0, 0.0), &o), vec![4, 7]);
+        assert!(earshot(2, at(0.0, 0.0), &o).is_empty());
+        // Alert is a hurry, never a freeze; a FAST elite is always quick, and
+        // the two combine with `max`: hurry never stacks on top of FAST.
+        assert_eq!(tempo(false, false), 1.0);
+        assert!(tempo(false, true) > 1.0);
+        assert_eq!(tempo(true, false), specials::ELITE_FAST);
+        assert_eq!(tempo(true, true), tempo(true, false));
+        assert_eq!(stage(2), None);
+        assert_eq!(stage(3), Some(3));
+        assert!((ALERT_SECS - 6.0).abs() < 1e-6);
     }
 
     #[test]

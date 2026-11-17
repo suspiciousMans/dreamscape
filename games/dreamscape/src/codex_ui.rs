@@ -130,9 +130,12 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
             }
         }
     }
-    // Strange things: one small panel each.
+    // Strange things: one panel each. The list is long (the five theme enemies
+    // plus the six combat foes), so the type scales with the slot: in a small
+    // window the names stay and the hints are clipped or dropped, never drawn
+    // over the next entry.
     let n = c.enemies.len().max(1);
-    let slot_h = ((right_panel.height() - cell * 6.0) / n as f32).min(70.0 * u.max(0.8));
+    let slot_h = ((right_panel.height() - cell * 6.0) / n as f32).max(cell * 2.0);
     for (i, (name, hint)) in c.enemies.iter().enumerate() {
         let e = crate::screen_anim::enter(i + 4, age, amount); // === m4a ===
         let r = Rect::from_min_size(
@@ -140,30 +143,43 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
                 right_panel.left() + cell * 3.0,
                 right_panel.top() + cell * 4.0 + i as f32 * slot_h + (1.0 - e) * 5.0 * u,
             ),
-            Vec2::new(right_panel.width() - cell * 6.0, slot_h - cell),
+            Vec2::new(right_panel.width() - cell * 6.0, (slot_h - cell).max(1.0)),
         );
+        let text_w = r.width() - cell * 6.0;
+        let name_font = (slot_h * 0.34).clamp(7.5, 18.0 * u.max(0.8));
+        let hint_font = (slot_h * 0.26).clamp(6.0, 15.0 * u.max(0.8));
+        let name_top = cell * 1.5;
+        let hint_top = name_top + name_font * 1.2;
+        let rows = if hint_top < r.height() {
+            ((r.height() - hint_top) / (hint_font * 1.25)).floor() as usize
+        } else {
+            0
+        };
         match hint {
             Some(h) => {
                 let tone = hue(v.time * 0.1 + i as f32 * 0.2);
                 pixel_ui::panel(p, r, tone, rgba([14, 8, 28], 0.8 * e), cell.min(3.0), 0.8 * e);
                 p.text(
-                    r.left_top() + Vec2::new(cell * 3.0, cell * 2.0),
+                    r.left_top() + Vec2::new(cell * 3.0, name_top),
                     Align2::LEFT_TOP,
-                    name,
-                    FontId::monospace(18.0 * u.max(0.8)),
+                    pixel_ui_clip(name, text_w, name_font),
+                    FontId::monospace(name_font),
                     rgba(tone, e),
                 );
-                let g = p.layout(
-                    h.clone(),
-                    FontId::proportional(15.0 * u.max(0.8)),
-                    rgba([200, 190, 230], 0.9 * e),
-                    r.width() - cell * 6.0,
-                );
-                p.galley(
-                    r.left_top() + Vec2::new(cell * 3.0, cell * 2.0 + 22.0 * u.max(0.8)),
-                    g,
-                    rgba([200, 190, 230], 0.9 * e),
-                );
+                if rows > 0 {
+                    let text = clip_lines(h, text_w, hint_font, rows);
+                    let g = p.layout(
+                        text,
+                        FontId::proportional(hint_font),
+                        rgba([200, 190, 230], 0.9 * e),
+                        text_w,
+                    );
+                    p.galley(
+                        r.left_top() + Vec2::new(cell * 3.0, hint_top),
+                        g,
+                        rgba([200, 190, 230], 0.9 * e),
+                    );
+                }
             }
             None => {
                 pixel_ui::panel(
@@ -179,7 +195,7 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
                     r.center(),
                     Align2::CENTER_CENTER,
                     "???",
-                    FontId::monospace(18.0 * u.max(0.8)),
+                    FontId::monospace(name_font.max(8.0)),
                     rgba([120, 110, 150], 0.7 * e),
                 );
             }
@@ -196,6 +212,22 @@ pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView, c: &CodexView) {
     }
     crate::loadout_ui::hint_bar(p, screen, v, "[esc] back");
     pixel_ui::scanlines(p, screen, cell, 8);
+}
+
+/// `text` cut short (with a tilde) to fit `lines` wrapped lines of `width`
+/// pixels at proportional `font`; empty when there is no room for a line.
+fn clip_lines(text: &str, width: f32, font: f32, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let per_line = (width / (font * 0.55)).floor().max(1.0) as usize;
+    let max = per_line * lines;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let cut: String = chars[..max.saturating_sub(1)].iter().collect();
+    format!("{}~", cut.trim_end())
 }
 
 /// `name` cut short (with a tilde) to fit `width` pixels at monospace `font`.
@@ -216,5 +248,16 @@ mod tests {
     fn names_are_spaced_and_uppercased() {
         assert_eq!(spaced("MyceliumGrove"), "MYCELIUM GROVE");
         assert_eq!(spaced("Lobby"), "LOBBY");
+    }
+
+    #[test]
+    fn long_hints_are_clipped_to_the_rows_they_have() {
+        let short = "a short one";
+        assert_eq!(clip_lines(short, 300.0, 10.0, 2), short);
+        let long = "pale moths circle. one dives at a time. strike them, or hold still.";
+        let cut = clip_lines(long, 120.0, 10.0, 1);
+        assert!(cut.ends_with('~'), "{cut}");
+        assert!(cut.chars().count() <= 21, "{cut}");
+        assert_eq!(clip_lines(long, 120.0, 10.0, 0), "", "no room, no text");
     }
 }
