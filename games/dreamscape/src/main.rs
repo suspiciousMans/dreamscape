@@ -325,6 +325,12 @@ struct SpecialEnemy {
     entity: Entity,
     kind: EnemyKind,
     ai: SpecialAI,
+    // === tactics ===
+    /// An elite variant: bigger and armoured, or hidden until close.
+    elite: Option<Elite>,
+    /// Seconds left of the hurry a shout gave it.
+    alert: f32,
+    // === end tactics ===
 }
 
 // === enemies-a ===
@@ -347,10 +353,30 @@ struct NewFoe {
     extras: Vec<Entity>,
     /// What it was doing last frame, so its sounds play once: (telling, lunging/slamming, tears).
     heard: (bool, bool, usize),
+    // === tactics ===
+    /// An elite variant: bigger and armoured, or hidden until close.
+    elite: Option<Elite>,
+    /// Seconds left of the hurry a shout gave it.
+    alert: f32,
+    // === end tactics ===
 }
 
 /// Segments of a Lullaby's slam ring.
 const SLAM_SEGMENTS: usize = 32;
+// === tactics === indices in the shout list are kept apart by these
+const FOE_BASE: usize = 10_000;
+const SPECIAL_BASE: usize = 20_000;
+
+/// How an elite variant stands: BIG is larger, a SHADE is only there when it
+/// is close. `base` is the size the foe would have as a plain one.
+fn elite_stand(elite: Option<Elite>, base: Vec3, at: Vec3, player: Vec3) -> Vec3 {
+    match elite {
+        Some(Elite::Shade) if (at - player).length() > specials::SHADE_SHOWS_WITHIN => Vec3::ZERO,
+        Some(e) => base * e.scale_mult(),
+        None => base,
+    }
+}
+// === end tactics ===
 // === end enemies-a ===
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -756,6 +782,8 @@ pub struct DreamscapeGame {
     secret: Option<SecretWall>,
     /// The crack's hint has been shown this launch.
     secret_hint_given: bool,
+    /// The strike line has been shown this launch (the first fighting dream).
+    strike_hint_given: bool,
     /// What the moth still has on the shelf in this dream.
     moth_stock: Option<moth_shop::Shelf>,
     skittish: Option<Skittish>,
@@ -1261,6 +1289,7 @@ impl DreamscapeGame {
             caches: Vec::new(),
             secret: None,
             secret_hint_given: false,
+            strike_hint_given: false,
             moth_stock: None,
             skittish: None,
             ground_y: f32::MIN,
@@ -2514,6 +2543,18 @@ impl DreamscapeGame {
     // === end deck ===
 
     fn hand_view(&self) -> Vec<hand::HandCard> {
+        // === hints === the cards that answer a foe close enough to matter
+        let counters: Vec<upgrades::Ability> = if self.settings.combat_hints {
+            let reach = combat::REACH + 5.0;
+            self.combat_targets()
+                .into_iter()
+                .filter(|t| (t.pos - self.player_position).length() < reach)
+                .filter_map(|t| combat::counter(t.kind))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // === end hints ===
         self.run
             .abilities
             .iter()
@@ -2593,6 +2634,7 @@ impl DreamscapeGame {
                     tint,
                     tint2,
                     since_use,
+                    hint: counters.contains(&a.ability), // === hints ===
                 }
             })
             .collect()
@@ -2880,6 +2922,58 @@ impl DreamscapeGame {
         }
     }
 
+    /// The depth tactics apply at, or None where they are switched off.
+    fn tactics_stage(&self) -> Option<u32> {
+        let quiet = self.coop_active() || self.coop.is_some() || self.hunter.is_some();
+        if quiet {
+            None
+        } else {
+            tactics::stage(self.director.depth)
+        }
+    }
+
+    /// Tactics (hard mode): everyone within earshot of `from` is hurried, and
+    /// an elite leader also pulls its pack. `leader` is (pacer index, elite).
+    fn raise_alarm(&mut self, from: Vec3, leader: Option<(usize, Option<Elite>)>) {
+        let Some(depth) = self.tactics_stage() else { return };
+        let pos = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
+        let pacers: Vec<(usize, Vec3, f32)> = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter_map(|(k, p)| pos(&self.world, p.entity).map(|v| (k, v, self.tactics.cooldown(k))))
+            .collect();
+        let shouter = leader.map_or(usize::MAX, |l| l.0);
+        for k in tactics::shout_targets(depth, shouter, from, &pacers) {
+            self.tactics.mark(k);
+            self.enemies[k].ai.alert();
+        }
+        if let Some((k, Some(elite))) = leader {
+            let others: Vec<(usize, Vec3)> = pacers.iter().map(|&(i, v, _)| (i, v)).collect();
+            for i in tactics::pack_follow(depth, k, Some(elite), from, &others) {
+                self.enemies[i].ai.alert();
+            }
+        }
+        let mut heard: Vec<(usize, Vec3)> = Vec::new();
+        for (k, f) in self.newfoes.iter().enumerate() {
+            if let Some(v) = pos(&self.world, f.entity) {
+                heard.push((FOE_BASE + k, v));
+            }
+        }
+        for (k, s) in self.specials.iter().enumerate() {
+            if let Some(v) = pos(&self.world, s.entity) {
+                heard.push((SPECIAL_BASE + k, v));
+            }
+        }
+        for id in tactics::earshot(depth, from, &heard) {
+            if let Some(k) = id.checked_sub(SPECIAL_BASE) {
+                self.specials[k].alert = tactics::ALERT_SECS;
+            } else if let Some(k) = id.checked_sub(FOE_BASE) {
+                self.newfoes[k].alert = tactics::ALERT_SECS;
+            }
+        }
+    }
+
     /// Everything that can be struck right now: (entity, position, kind, unaware).
     fn combat_targets(&self) -> Vec<CombatTarget> {
         let at = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
@@ -2915,6 +3009,8 @@ impl DreamscapeGame {
                 EnemyKind::Moths => combat::Kind::Moth,
                 EnemyKind::Mask => combat::Kind::Mask,
                 EnemyKind::Leech => combat::Kind::Leech,
+                // The combat-only foes are their own list (`self.newfoes`).
+                EnemyKind::Tooth | EnemyKind::Weeper | EnemyKind::Lullaby => continue,
             };
             if let Some(pos) = at(&self.world, sp.entity) {
                 // Sentries see you coming; the rest are unaware until chasing.
@@ -3590,6 +3686,9 @@ impl DreamscapeGame {
                 continue;
             };
             taken.push(at);
+            // === tactics === an elite group: bigger and armoured, or a shade
+            let elite = specials::roll_group_elite(dream.seed, taken.len(), self.difficulty());
+            // === end tactics ===
             match kind {
                 EnemyKind::Moths => {
                     let orb = self.mesh(Shape::Orb)?;
@@ -3605,7 +3704,11 @@ impl DreamscapeGame {
                             Lit,
                             Spin(5.0),
                         ));
-                        self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Moth(m.id) });
+                        // === tactics === each moth of the swarm carries its group's variant
+                        let hp = combat::foe_hp(combat::Kind::Moth, elite);
+                        self.foes.insert(entity, combat::Foe { hp, max: hp });
+                        self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Moth(m.id), elite, alert: 0.0 });
+                        // === end tactics ===
                     }
                     self.moth_swarm = Some(swarm);
                 }
@@ -3627,7 +3730,11 @@ impl DreamscapeGame {
                         MeshRenderer { mesh: cube, texture: self.b_tex.get("mask").cloned() },
                         Lit,
                     ));
-                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Mask(m) });
+                    // === tactics ===
+                    let hp = combat::foe_hp(combat::Kind::Mask, elite);
+                    self.foes.insert(entity, combat::Foe { hp, max: hp });
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Mask(m), elite, alert: 0.0 });
+                    // === end tactics ===
                 }
                 _ => {
                     let blob = self.mesh(Shape::Orb)?;
@@ -3638,10 +3745,15 @@ impl DreamscapeGame {
                         MeshRenderer { mesh: blob, texture: Some(tex) },
                         Lit,
                     ));
-                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Leech(leech::Leech::new(pos)) });
+                    // === tactics ===
+                    let hp = combat::foe_hp(combat::Kind::Leech, elite);
+                    self.foes.insert(entity, combat::Foe { hp, max: hp });
+                    self.specials.push(SpecialEnemy { entity, kind, ai: SpecialAI::Leech(leech::Leech::new(pos)), elite, alert: 0.0 });
+                    // === end tactics ===
                 }
             }
             log::info!("New enemy: {kind:?} at {at:?} (depth {})", dream.depth);
+            self.booklet.codex.meet(kind);
             if !self.seen_kinds.contains(&kind) {
                 self.seen_kinds.push(kind);
                 hints.push(kind.hint());
@@ -3667,6 +3779,10 @@ impl DreamscapeGame {
         let player = self.player_position;
         let ps = gameplay::MOVE_SPEED;
         let reduced = self.settings.reduced_motion;
+        // === tactics === a hurried swarm beats its wings quicker
+        let hurry = self.specials.iter().any(|s| s.alert > 0.0 && matches!(&s.ai, SpecialAI::Moth(_)));
+        let dt = dt * if hurry { tactics::ALERT_SPEED } else { 1.0 };
+        // === end tactics ===
         let count = |s: &Option<moths::Swarm>| {
             s.as_ref().map_or((0, 0), |s| {
                 (
@@ -3690,6 +3806,10 @@ impl DreamscapeGame {
         let mut touching: Vec<Entity> = Vec::new();
         let mut shaken: Vec<Entity> = Vec::new();
         for sp in &mut self.specials {
+            // === tactics === a shout hurries it; the hurry ebbs away
+            let pace = dt * tactics::tempo(sp.elite == Some(Elite::Fast), sp.alert > 0.0);
+            sp.alert = (sp.alert - dt).max(0.0);
+            // === end tactics ===
             match &mut sp.ai {
                 SpecialAI::Moth(id) => {
                     let Some(m) = self.moth_swarm.as_ref().and_then(|s| s.moths.iter().find(|m| m.id == *id)) else {
@@ -3699,7 +3819,7 @@ impl DreamscapeGame {
                         t.position = m.pos;
                         // The tell: brighten, and (unless reduced motion) swell.
                         let swell = if reduced { 0.0 } else { 0.9 };
-                        t.scale = Vec3::splat(0.45 * (1.0 + swell * m.glow()));
+                        t.scale = elite_stand(sp.elite, Vec3::splat(0.45 * (1.0 + swell * m.glow())), m.pos, player); // tactics
                     }
                     let key = if m.glow() > 0.25 { "moth_bright" } else { "moth" };
                     if let (Ok(mut r), Some(tex)) = (self.world.get::<&mut MeshRenderer>(sp.entity), self.b_tex.get(key)) {
@@ -3710,7 +3830,7 @@ impl DreamscapeGame {
                     let reeling = self.staggered.contains_key(&sp.entity);
                     let before = mk.state;
                     if !held && !reeling {
-                        mk.update(dt, player, ps);
+                        mk.update(pace, player, ps); // tactics
                     }
                     if matches!(before, mask::State::Telegraph(_)) && matches!(mk.state, mask::State::Slamming(_)) {
                         sounds.push(Sound::SlamLand);
@@ -3722,7 +3842,7 @@ impl DreamscapeGame {
                         t.position = mk.pos + Vec3::Y * 0.45;
                         t.rotation = Quat::from_rotation_y(mk.yaw);
                         let lean = if reduced { 0.0 } else { 0.25 };
-                        t.scale = Vec3::new(1.3, 1.9, 0.4) * (1.0 + lean * mk.glow());
+                        t.scale = elite_stand(sp.elite, Vec3::new(1.3, 1.9, 0.4) * (1.0 + lean * mk.glow()), t.position, player); // tactics
                     }
                     let key = if mk.glow() > 0.0 {
                         "mask_tell"
@@ -3737,7 +3857,7 @@ impl DreamscapeGame {
                 }
                 SpecialAI::Leech(lc) => {
                     if !held && !self.staggered.contains_key(&sp.entity) {
-                        if lc.update(dt, player, ps).touching {
+                        if lc.update(pace, player, ps).touching { // tactics
                             touching.push(sp.entity);
                         }
                         if lc.drain_due() {
@@ -3752,7 +3872,7 @@ impl DreamscapeGame {
                         t.rotation = Quat::from_rotation_y(mask::yaw_toward(lc.pos, player));
                         // It swells as the next drain nears.
                         let swell = if reduced { 0.0 } else { 0.5 * lc.drain_progress() };
-                        t.scale = Vec3::new(0.9, 0.4, 0.55) * (1.0 + swell);
+                        t.scale = elite_stand(sp.elite, Vec3::new(0.9, 0.4, 0.55) * (1.0 + swell), lc.pos, player); // tactics
                     }
                 }
                 _ => {}
@@ -4305,7 +4425,7 @@ impl DreamscapeGame {
                         .iter()
                         .map(|&t| (codex_ui::spaced(&format!("{t:?}")), c.best_in(t)))
                         .collect(),
-                    enemies: dream::ALL_ENEMY_KINDS
+                    enemies: dream::ALL_CODEX_ENEMIES
                         .iter()
                         .map(|&k| {
                             (
@@ -5094,6 +5214,7 @@ impl DreamscapeGame {
     ) -> anyhow::Result<()> {
         let mut hints = Vec::new();
         for (k, sp) in dream.specials.iter().enumerate() {
+            self.booklet.codex.meet(sp.kind);
             if !self.seen_kinds.contains(&sp.kind) {
                 self.seen_kinds.push(sp.kind);
                 hints.push(sp.kind.hint());
@@ -5116,8 +5237,14 @@ impl DreamscapeGame {
                     Vec3::new(0.9, 0.9, 0.3),
                     [255, 120, 255, 255],
                 ),
-                // === combat === ENEMIES-B are built by `spawn_enemies_b`
-                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
+                // === combat === ENEMIES-B are built by `spawn_enemies_b`,
+                // and the combat-only foes by `spawn_newfoes`.
+                EnemyKind::Moths
+                | EnemyKind::Mask
+                | EnemyKind::Leech
+                | EnemyKind::Tooth
+                | EnemyKind::Weeper
+                | EnemyKind::Lullaby => continue,
             };
             let mesh = self.mesh(shape)?;
             let texture = match sp.kind {
@@ -5184,13 +5311,22 @@ impl DreamscapeGame {
                 EnemyKind::Jester => {
                     SpecialAI::Jester(EnemyAI::new(sp.a, sp.b, pacer_speed * 0.6, 0.0, 0.0))
                 }
-                EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => continue,
+                EnemyKind::Moths
+                | EnemyKind::Mask
+                | EnemyKind::Leech
+                | EnemyKind::Tooth
+                | EnemyKind::Weeper
+                | EnemyKind::Lullaby => continue,
             };
             log::info!("Special enemy: {:?} at {:?}", sp.kind, sp.at);
             self.specials.push(SpecialEnemy {
                 entity,
                 kind: sp.kind,
                 ai,
+                // === tactics === story specials wear no elite variant
+                elite: None,
+                alert: 0.0,
+                // === end tactics ===
             });
         }
         // Fog pockets: low purple puffs you wade through slowly.
@@ -5217,6 +5353,17 @@ impl DreamscapeGame {
         }
         self.dream_hint = hints.join(" · ");
         Ok(())
+    }
+
+    /// The codex's name for a combat-only foe; the other kinds are already
+    /// `EnemyKind`s and record themselves where they spawn.
+    fn codex_kind(kind: combat::Kind) -> Option<EnemyKind> {
+        match kind {
+            combat::Kind::Tooth => Some(EnemyKind::Tooth),
+            combat::Kind::Weeper => Some(EnemyKind::Weeper),
+            combat::Kind::Lullaby => Some(EnemyKind::Lullaby),
+            _ => None,
+        }
     }
 
     // === enemies-a ===
@@ -5295,6 +5442,15 @@ impl DreamscapeGame {
                     [255, 200, 110, 255],
                 ),
             };
+            // === tactics === an elite variant: rarer, bigger, armoured or a shade
+            let elite = specials::roll_foe_elite(dream.seed, self.newfoes.len(), self.difficulty());
+            let base = base * elite.map_or(1.0, Elite::scale_mult);
+            // Its tell wears the elite's colour, so the variant reads in the dark.
+            let tell = elite.map_or(tell, |e| {
+                let c = e.color();
+                [c[0], c[1], c[2], 255]
+            });
+            // === end tactics ===
             let calm_tex = self.texture(gl, calm);
             let tell_tex = self.texture(gl, tell);
             let at = Vec3::new(lair.x, lair.y + (base.y * 0.5).max(0.5), lair.z);
@@ -5334,7 +5490,14 @@ impl DreamscapeGame {
                     NewAI::Lullaby(lullaby::Lullaby::new(at, player_speed))
                 }
             };
-            log::info!("New enemy: {kind:?} at {at:?}");
+            // === tactics ===
+            let hp = combat::foe_hp(kind, elite);
+            self.foes.insert(entity, combat::Foe { hp, max: hp });
+            log::info!(
+                "New enemy: {kind:?} at {at:?}{}",
+                elite.map_or(String::new(), |e| format!(" ({} elite)", e.label()))
+            );
+            // === end tactics ===
             self.newfoes.push(NewFoe {
                 entity,
                 kind,
@@ -5345,7 +5508,14 @@ impl DreamscapeGame {
                 tell: tell_tex,
                 extras,
                 heard: (false, false, 0),
+                // === tactics ===
+                elite,
+                alert: 0.0,
+                // === end tactics ===
             });
+            if let Some(k) = Self::codex_kind(kind) {
+                self.booklet.codex.meet(k);
+            }
         }
         Ok(())
     }
@@ -5362,8 +5532,15 @@ impl DreamscapeGame {
         let yaw_of = |f: Vec3| Quat::from_rotation_y(f.x.atan2(f.z));
         // What they do out loud this frame, played once the loop lets go of `self`.
         let mut heard: Vec<(Sound, Vec3)> = Vec::new();
+        // === tactics === shouts raised this frame, once the loop lets go
+        let mut shouted: Vec<(Vec3, Option<Elite>)> = Vec::new();
+        // === end tactics ===
         for f in &mut self.newfoes {
             let reeling = held || self.staggered.contains_key(&f.entity);
+            // === tactics === a shout hurries it, and a FAST elite always does
+            let pace = dt * tactics::tempo(f.elite == Some(Elite::Fast), f.alert > 0.0);
+            f.alert = (f.alert - dt).max(0.0);
+            // === end tactics ===
             // The body first (one Transform borrowed at a time: hecs checks
             // borrows per component column, not per entity).
             let (telling, pos) = {
@@ -5373,31 +5550,36 @@ impl DreamscapeGame {
                 let telling = match &mut f.ai {
                     NewAI::Tooth(a) => {
                         if !held {
-                            a.update(&mut t.position, player, dt);
+                            a.update(&mut t.position, player, pace); // tactics
                         }
-                        t.scale = f.base * a.scale_mult(reduced);
+                        t.scale = elite_stand(f.elite, f.base * a.scale_mult(reduced), t.position, player);
                         t.rotation = yaw_of(a.facing());
                         a.eye_lit()
                     }
                     NewAI::Weeper(a) => {
                         if !reeling {
-                            a.update_aimed(&mut t.position, player, aim, &self.foe_walls, dt);
+                            a.update_aimed(&mut t.position, player, aim, &self.foe_walls, pace); // tactics
                         }
-                        t.scale = f.base * a.scale_mult(reduced);
+                        t.scale = elite_stand(f.elite, f.base * a.scale_mult(reduced), t.position, player);
                         t.rotation = yaw_of(a.facing());
                         a.telling()
                     }
                     NewAI::Lullaby(a) => {
                         if !reeling {
-                            a.update(&mut t.position, player, dt);
+                            a.update(&mut t.position, player, pace); // tactics
                         }
-                        t.scale = f.base * a.scale_mult(reduced);
+                        t.scale = elite_stand(f.elite, f.base * a.scale_mult(reduced), t.position, player);
                         t.rotation = yaw_of(a.facing());
                         matches!(a.phase(), lullaby::Phase::Telegraph(_))
                     }
                 };
                 (telling, t.position)
             };
+            // === tactics === the first frame of a tell is its shout
+            if telling && !f.heard.0 {
+                shouted.push((pos, f.elite));
+            }
+            // === end tactics ===
             // Then what it carries: tears, plate, marker, ring.
             match &f.ai {
                 NewAI::Tooth(_) => {}
@@ -5466,6 +5648,11 @@ impl DreamscapeGame {
             f.heard = now;
             // === end sounds ===
         }
+        // === tactics ===
+        for (at, elite) in shouted {
+            self.raise_alarm(at, Some((usize::MAX, elite)));
+        }
+        // === end tactics ===
         for (s, at) in heard {
             self.sfx_at(s, at);
         }
@@ -10047,6 +10234,36 @@ impl DreamscapeGame {
         self.prologue.is_none() && self.director.sanctuary()
     }
 
+    // === strike tutorial ===
+    /// The first dream with something in it that can hit back says how to
+    /// strike, once a launch. Returns true if it wrote the line.
+    fn say_strike_tutorial(&mut self) -> bool {
+        if self.strike_hint_given || self.prologue.is_some() || self.coop_active() {
+            return false;
+        }
+        let foe = !self.enemies.is_empty()
+            || !self.specials.is_empty()
+            || !self.newfoes.is_empty();
+        if !foe {
+            return false;
+        }
+        self.strike_hint_given = true;
+        let key = prompts::label(
+            prompts::ActionId::Strike,
+            hud::Mode::Playing,
+            &self.settings,
+            self.using_pad,
+        );
+        let line = tutorial::strike_prompt(&key);
+        self.dream_hint = if self.dream_hint.is_empty() {
+            line
+        } else {
+            format!("{} · {line}", self.dream_hint)
+        };
+        true
+    }
+    // === end strike tutorial ===
+
     /// A dream with no enemies, gates, hazards or twists placed in it: a
     /// sanctuary, or the Lobby. Effects that belong to a real sanctuary
     /// (nerve refill, its chord and hint) stay on [`Self::sanctuary`].
@@ -11496,6 +11713,7 @@ impl DreamscapeGame {
         // === end shards ===
         self.spawn_enemies_b(gl, &dream)?; // === combat ===
         drop(t_foes); // === perf ===
+        self.say_strike_tutorial(); // === strike tutorial ===
         // === sanctuary === a place to breathe: nerve refills
         if self.sanctuary() {
             self.nerve.heal(self.nerve.max());
@@ -13215,28 +13433,19 @@ impl Game for DreamscapeGame {
         }
         // === tactics ===
         if tactics_on && !chase_starts.is_empty() {
+            // A shout carries to the new enemies too, and an elite pulls its pack.
             let pos_of = |w: &World, e: Entity| w.get::<&Transform>(e).ok().map(|t| t.position);
-            let snapshot: Vec<(usize, Vec3)> = self
-                .enemies
+            let starts: Vec<(usize, Option<Elite>, Vec3)> = chase_starts
                 .iter()
-                .enumerate()
-                .filter_map(|(k, p)| pos_of(&self.world, p.entity).map(|v| (k, v)))
+                .filter_map(|&(k, elite)| {
+                    self.enemies
+                        .get(k)
+                        .and_then(|p| pos_of(&self.world, p.entity))
+                        .map(|v| (k, elite, v))
+                })
                 .collect();
-            for (k, elite) in chase_starts {
-                let Some(&(_, from)) = snapshot.iter().find(|&&(i, _)| i == k) else {
-                    continue;
-                };
-                let others: Vec<(usize, Vec3, f32)> = snapshot
-                    .iter()
-                    .map(|&(i, v)| (i, v, self.tactics.cooldown(i)))
-                    .collect();
-                for i in tactics::shout_targets(tactic_depth, k, from, &others) {
-                    self.tactics.mark(i);
-                    self.enemies[i].ai.alert();
-                }
-                for i in tactics::pack_follow(tactic_depth, k, elite, from, &snapshot) {
-                    self.enemies[i].ai.alert();
-                }
+            for (k, elite, from) in starts {
+                self.raise_alarm(from, Some((k, elite)));
             }
         }
         // === end tactics ===
@@ -14816,6 +15025,7 @@ mod screen_smoke {
             cracked: false,
             since_draw: hand::NEVER,
             empty: false,
+            hint: false, // === hints ===
             tool: false,
             scrap: None, // === scraps ===
         }
@@ -15273,7 +15483,7 @@ mod screen_smoke {
             Transform { position: at, rotation: Quat::IDENTITY, scale: Vec3::ONE },
             Spin(1.0),
         ));
-        g.specials.push(SpecialEnemy { entity, kind, ai });
+        g.specials.push(SpecialEnemy { entity, kind, ai, elite: None, alert: 0.0 }); // tactics
         entity
     }
 
@@ -15318,6 +15528,42 @@ mod screen_smoke {
         h.dream_age += combat::BLINK_BACKSTAB_SECS + 0.1;
         h.resolve_strike();
         assert_eq!(h.enemies.len(), 1);
+    }
+
+    #[test]
+    fn the_first_fighting_dream_says_how_to_strike_once() {
+        let mut g = game("strike-tutorial");
+        g.mode = hud::Mode::Playing;
+        assert!(
+            !g.say_strike_tutorial(),
+            "a dream with nothing in it teaches nothing"
+        );
+        put_pacer(&mut g, Vec3::new(0.0, 1.0, 2.0), false);
+        assert!(g.say_strike_tutorial());
+        let key = prompts::label(
+            prompts::ActionId::Strike,
+            hud::Mode::Playing,
+            &g.settings,
+            false,
+        );
+        assert!(
+            g.dream_hint.contains(&key),
+            "the line names the bound key: {}",
+            g.dream_hint
+        );
+        assert!(!g.say_strike_tutorial(), "only once a launch");
+    }
+
+    #[test]
+    fn every_combat_foe_has_a_codex_name() {
+        for k in [
+            combat::Kind::Tooth,
+            combat::Kind::Weeper,
+            combat::Kind::Lullaby,
+        ] {
+            assert!(DreamscapeGame::codex_kind(k).is_some(), "{k:?}");
+        }
+        assert!(DreamscapeGame::codex_kind(combat::Kind::Stalker).is_none());
     }
 
     #[test]

@@ -156,6 +156,14 @@ pub enum EnemyKind {
     Mask,
     /// Latches on and drains.
     Leech,
+    // COMBAT foes (added last, for the codex). They spawn through `newfoes`,
+    // never from a theme's list, so they stay out of `ALL_ENEMY_KINDS` too.
+    /// Lunges out of the dark; only the lunge hurts.
+    Tooth,
+    /// Keeps its distance and spits slow tears.
+    Weeper,
+    /// Slow and armoured at the front; slams a ring.
+    Lullaby,
 }
 
 pub const ALL_ENEMY_KINDS: [EnemyKind; 5] = [
@@ -164,6 +172,24 @@ pub const ALL_ENEMY_KINDS: [EnemyKind; 5] = [
     EnemyKind::Sentry,
     EnemyKind::Drifter,
     EnemyKind::Jester,
+];
+
+/// Everything the codex's STRANGE THINGS panel lists: the five theme enemies,
+/// the three that spawn through `foespawn`, and the three combat-only foes.
+/// Display order only; none of these come from a theme's own list by being
+/// here.
+pub const ALL_CODEX_ENEMIES: [EnemyKind; 11] = [
+    EnemyKind::Stalker,
+    EnemyKind::Mimic,
+    EnemyKind::Sentry,
+    EnemyKind::Drifter,
+    EnemyKind::Jester,
+    EnemyKind::Moths,
+    EnemyKind::Mask,
+    EnemyKind::Leech,
+    EnemyKind::Tooth,
+    EnemyKind::Weeper,
+    EnemyKind::Lullaby,
 ];
 
 impl EnemyKind {
@@ -178,6 +204,9 @@ impl EnemyKind {
             EnemyKind::Moths => "pale moths circle. one dives at a time. strike them, or hold still.",
             EnemyKind::Mask => "a mask. strike it from the side. its face shrugs off blows.",
             EnemyKind::Leech => "something latches on. jump three times to shake it off.",
+            EnemyKind::Tooth => "a tooth. it lunges from the dark. dash through it, then strike.",
+            EnemyKind::Weeper => "a weeper keeps its distance and spits tears. close the gap.",
+            EnemyKind::Lullaby => "a lullaby. its face is armoured. hit it from behind, or jump its ring.",
         }
     }
 }
@@ -1153,6 +1182,29 @@ mod tests {
                 crate::gameplay::profile_index(&profiles, name).is_some(),
                 "{t:?}: no profile '{name}'"
             );
+        }
+    }
+
+    #[test]
+    fn the_codex_lists_every_foe_once_and_each_says_something() {
+        assert_eq!(ALL_CODEX_ENEMIES.len(), 11);
+        for (i, k) in ALL_CODEX_ENEMIES.iter().enumerate() {
+            assert!(!k.hint().is_empty(), "{k:?}");
+            // The panel draws one panel per foe; a long line would grow it.
+            assert!(k.hint().len() <= 90, "{k:?} hint is too long for the panel");
+            assert!(!ALL_CODEX_ENEMIES[..i].contains(k), "{k:?} is listed twice");
+        }
+        // The codex list is display-only: it never feeds a theme's spawns.
+        assert_eq!(ALL_ENEMY_KINDS.len(), 5);
+        for k in [
+            EnemyKind::Moths,
+            EnemyKind::Mask,
+            EnemyKind::Leech,
+            EnemyKind::Tooth,
+            EnemyKind::Weeper,
+            EnemyKind::Lullaby,
+        ] {
+            assert!(!ALL_ENEMY_KINDS.contains(&k), "{k:?} must not spawn from a theme");
         }
     }
 }

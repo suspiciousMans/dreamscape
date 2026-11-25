@@ -6,6 +6,7 @@
 //! Enemies unravel at zero hp: nothing here kills, it undoes.
 
 use crate::specials::Elite;
+use crate::upgrades::Ability;
 use engine::glam::Vec3;
 
 /// How far a strike reaches (world units), and the cosine of its half-arc
@@ -314,6 +315,27 @@ pub enum Kind {
     Moth,
     Mask,
     Leech,
+}
+
+/// The card that answers `kind`, if one does: the combat hint points at it
+/// while the foe is in reach. Enemies whose answer is a movement (jumping a
+/// ring, stepping out of a gaze) have no card and so no hint.
+pub fn counter(kind: Kind) -> Option<Ability> {
+    match kind {
+        Kind::Pacer { .. } | Kind::Tooth => Some(Ability::Dash),
+        Kind::Weeper => Some(Ability::Blink),
+        Kind::Lullaby => Some(Ability::Slam),
+        Kind::Stalker => Some(Ability::Flare),
+        Kind::Moth => Some(Ability::Stillness),
+        Kind::Mask => Some(Ability::Gust),
+        Kind::Leech => Some(Ability::Ward),
+        Kind::Sentry | Kind::Drifter | Kind::Jester => None,
+    }
+}
+
+/// Hit points a foe of `kind` starts with, its elite variant included.
+pub fn foe_hp(kind: Kind, elite: Option<Elite>) -> f32 {
+    base_hp(kind) + elite.map_or(0.0, Elite::hp_bonus)
 }
 
 /// Hit points by kind (see the combat plan).
@@ -657,6 +679,38 @@ mod tests {
             // Same lit window: a trail never lengthens or shortens the flash.
             assert_eq!(slash_ray(0, SLASH_RAYS, SLASH_FADE + 0.001, half, false, false, Some(tr)), None);
             assert!(slash_spark(2, 0.1, half, false, Some(tr)).is_some());
+        }
+    }
+
+    #[test]
+    fn every_foe_with_a_card_has_a_counter_and_the_rest_say_so() {
+        // Pacers answer to a dash through them, whichever elite they are.
+        for elite in [None, Some(Elite::Fast), Some(Elite::Big), Some(Elite::Splitter), Some(Elite::Shade)] {
+            for child in [false, true] {
+                assert_eq!(counter(Kind::Pacer { elite, child }), Some(Ability::Dash));
+            }
+        }
+        assert_eq!(counter(Kind::Tooth), Some(Ability::Dash));
+        assert_eq!(counter(Kind::Weeper), Some(Ability::Blink));
+        assert_eq!(counter(Kind::Lullaby), Some(Ability::Slam));
+        assert_eq!(counter(Kind::Moth), Some(Ability::Stillness));
+        assert_eq!(counter(Kind::Mask), Some(Ability::Gust));
+        assert_eq!(counter(Kind::Leech), Some(Ability::Ward));
+        assert_eq!(counter(Kind::Stalker), Some(Ability::Flare));
+        // Elites only ever add hit points, and only BIG does.
+        for kind in [Kind::Tooth, Kind::Weeper, Kind::Lullaby, Kind::Moth, Kind::Mask, Kind::Leech] {
+            assert_eq!(foe_hp(kind, None), base_hp(kind));
+            assert_eq!(foe_hp(kind, Some(Elite::Fast)), base_hp(kind));
+            assert_eq!(foe_hp(kind, Some(Elite::Shade)), base_hp(kind));
+            assert_eq!(foe_hp(kind, Some(Elite::Big)), base_hp(kind) + 2.0);
+        }
+        // These answer to where you stand, not to a card.
+        for kind in [Kind::Sentry, Kind::Drifter, Kind::Jester] {
+            assert_eq!(counter(kind), None);
+        }
+        // A hint is only ever shown for a card the hand can hold.
+        for kind in [Kind::Pacer { elite: None, child: false }, Kind::Tooth, Kind::Weeper, Kind::Lullaby, Kind::Stalker, Kind::Moth, Kind::Mask, Kind::Leech] {
+            assert!(crate::upgrades::ALL_ABILITIES.contains(&counter(kind).unwrap()));
         }
     }
 }

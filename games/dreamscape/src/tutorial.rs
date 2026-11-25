@@ -104,6 +104,16 @@ pub fn prompt(s: Step) -> &'static str {
     }
 }
 
+/// The first dream that can hit back says how to strike. `key` is the strike
+/// binding as the player's device says it (empty = nothing to name).
+pub fn strike_prompt(key: &str) -> String {
+    if key.is_empty() {
+        "something here can hurt you. strike it back.".to_string()
+    } else {
+        format!("something here can hurt you. [{key}] strikes.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +156,17 @@ mod tests {
         assert!(!g.patrols.is_empty(), "no enemy to teach dodging");
         assert_eq!(d.descend(), Some(DreamTheme::Lobby));
         assert!(!d.nightmare);
+    }
+
+    #[test]
+    fn the_strike_line_names_the_key_and_has_a_fallback() {
+        let line = strike_prompt("F");
+        assert!(line.contains("[F]") && line.ends_with('.'), "{line}");
+        assert!(line.len() <= 80, "the hint has to fit the title card: {line}");
+        assert!(strike_prompt("B").contains("[B]"));
+        let none = strike_prompt("");
+        assert!(!none.contains('['), "no empty brackets: {none}");
+        assert!(none.ends_with('.'));
     }
 
     #[test]

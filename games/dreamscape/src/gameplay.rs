@@ -612,6 +612,115 @@ mod tests {
     }
 
     #[test]
+    fn the_ramp_is_measured_dream_by_dream_and_its_cliffs_are_known() {
+        // A headless walk up a hard climb: every knob per dream, where each one
+        // stops responding, and the cliffs in between. Run with --nocapture for
+        // the table. The asserts pin the cliffs this report names, so a retune
+        // cannot move them quietly.
+        const PLAYER: f32 = MOVE_SPEED;
+        const LAST: u32 = 64;
+        let cap = 0.92 * PLAYER / crate::enemy_ai::CHASE_BOOST;
+        let mut last = (0.0f32, 0.0f32, 0.0f32, 0.0f32); // difficulty, chase, count, radius
+        let mut first_full = [0u32; 4]; // chase, count, radius, elite
+        let mut cliff = Vec::new();
+        for depth in 1..=LAST {
+            let dreams = depth.saturating_sub(1); // a climb that began at dream 1
+            let diff = difficulty(Some((dreams, 0)));
+            let chase =
+                (pressured_enemy_speed(depth, diff, PLAYER) * crate::enemy_ai::CHASE_BOOST).min(cap);
+            let count = pressured_enemy_count(diff);
+            let radius = pressured_chase_radius(depth, diff);
+            let elite = crate::specials::elite_chance(diff);
+            let ratio = if last.0 > 0.0 { diff / last.0 } else { 1.0 };
+            if depth <= 20 || depth % 4 == 0 {
+                println!(
+                    "dream {depth:>2}: difficulty {diff:>9.1} (x{ratio:.3})  chase {chase:.2}/{PLAYER:.2} walk  \
+                     radius {radius:.2}  pacers x{count:.2}  elite {:.0}%",
+                    elite * 100.0
+                );
+            }
+            if depth > 1 {
+                let near = |now: f32, full: f32| (now - full).abs() < 1e-4;
+                if first_full[0] == 0 && near(chase, cap) {
+                    first_full[0] = depth;
+                }
+                if first_full[1] == 0 && near(count, 4.0) {
+                    first_full[1] = depth;
+                }
+                if first_full[2] == 0 && near(radius, MAX_PRESSURED_CHASE) {
+                    first_full[2] = depth;
+                }
+                if first_full[3] == 0 && near(elite, 0.5) {
+                    first_full[3] = depth;
+                }
+                let step = (radius - last.3, count - last.2, chase - last.1);
+                if step.0 > 1.5 || step.1 > 0.4 || step.2 > 0.5 {
+                    cliff.push((depth, step));
+                }
+            }
+            last = (diff, chase, count, radius);
+        }
+        println!(
+            "caps reach full: chase dream {}, pacer count dream {}, alert radius dream {}, elite chance dream {}",
+            first_full[0], first_full[1], first_full[2], first_full[3]
+        );
+        for (depth, (r, c, s)) in &cliff {
+            println!("cliff at dream {depth}: radius {r:+.2}, pacers {c:+.2}, chase {s:+.2}");
+        }
+        // Overdrive: each refusal is a step bigger than a dream's 18%.
+        for refusals in 0..=3 {
+            let d = difficulty(Some((10, refusals)));
+            println!("10 dreams + {refusals} refusals: difficulty {d:.0}");
+        }
+        // Enemy counts the dreams themselves add, sampled from the real plans.
+        for depth in [3u32, 4, 5, 6, 7, 8, 10, 12, 16] {
+            let (mut foes, mut groups) = (0.0f32, 0.0f32);
+            let seeds = 300u64;
+            for seed in 0..seeds {
+                let themes = crate::dream::ALL_THEMES;
+                let theme = themes[(seed as usize) % themes.len()];
+                foes += crate::newfoes::plan(depth, theme, seed, false)
+                    .iter()
+                    .map(|(_, n)| *n)
+                    .sum::<usize>() as f32;
+                groups += [
+                    crate::moths::spawn_plan(depth, theme, seed, false),
+                    crate::mask::spawn_plan(depth, theme, seed, false),
+                    crate::leech::spawn_plan(depth, theme, seed, false),
+                ]
+                .iter()
+                .filter(|p| !p.is_empty())
+                .count() as f32;
+            }
+            println!(
+                "depth {depth:>2}: {:.2} new enemies + {:.2} group kinds planned per dream",
+                foes / seeds as f32,
+                groups / seeds as f32
+            );
+        }
+
+        // The cliffs the report names, pinned.
+        assert_eq!(pressured_chase_radius(1, difficulty(Some((0, 0)))), 0.0);
+        assert!(pressured_chase_radius(2, difficulty(Some((1, 0)))) > 0.0);
+        assert_eq!(pressured_enemy_count(MAX_DIFFICULTY), 4.0);
+        assert_eq!(crate::specials::elite_chance(MAX_DIFFICULTY), 0.5);
+        assert!(first_full[1] <= first_full[3], "the count cap binds before the elite cap");
+        let clamped = (1..=LAST)
+            .find(|&n| difficulty(Some((n, 0))) == MAX_DIFFICULTY)
+            .expect("the ramp does clamp");
+        println!("difficulty clamps at dream {clamped}");
+        assert!(clamped < 60, "the 60-dream exponent guard is never reached first");
+        assert!((difficulty(Some((10, 1))) / difficulty(Some((10, 0))) - OVERDRIVE_STEP).abs() < 1e-3);
+        assert_eq!(loadout_difficulty(1000.0), LOADOUT_DIFFICULTY_CAP);
+        // And every chased enemy really is slower than the player, all the way up.
+        for depth in 1..=LAST {
+            let diff = difficulty(Some((depth, 7)));
+            let chase = pressured_enemy_speed(depth, diff, PLAYER) * crate::enemy_ai::CHASE_BOOST;
+            assert!(chase < PLAYER, "dream {depth}: {chase} vs {PLAYER}");
+        }
+    }
+
+    #[test]
     fn a_pressured_chase_is_still_visible_before_it_reaches_you() {
         let clear = crate::tunnel::sight_radius(1.0) * (1.0 - crate::tunnel::SIGHT_FADE);
         assert!(clear > MAX_PRESSURED_CHASE + ENEMY_TOUCH_RADIUS, "{clear}");
