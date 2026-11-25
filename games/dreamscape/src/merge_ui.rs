@@ -293,6 +293,7 @@ pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, a
     let c = pixel_ui::cell(u);
     let lay = layout(screen);
     p.rect_filled(screen, 0.0, rgba([10, 4, 18], 0.95));
+    crate::menu_bg::draw(p, screen, v);
     let cx = screen.center().x;
     let top = screen.top() + 20.0 * u;
     let state = step(m);

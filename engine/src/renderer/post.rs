@@ -36,6 +36,7 @@ pub struct CompositePass {
     uniform_dither_strength: Option<glow::UniformLocation>,
     uniform_tint_color: Option<glow::UniformLocation>,
     uniform_tint_strength: Option<glow::UniformLocation>,
+    uniform_mirror: Option<glow::UniformLocation>,
     overlay: OverlayLocs,
     pub(crate) grain_tex: Option<glow::Texture>,
 }
@@ -87,6 +88,10 @@ pub struct PostParams {
     /// rather than a crisp overlay. See `engine::screen_effect`.
     pub tint_color: [f32; 3],
     pub tint_strength: f32,
+    /// A four-way mirror fold of the finished frame about the centre (the
+    /// KALEIDOSCOPE twist): 0 = off, 1 = fully folded. Shaders that don't
+    /// declare the `uMirror` uniform ignore it, the same as the tint.
+    pub mirror: f32,
 }
 
 impl Default for PostParams {
@@ -96,6 +101,7 @@ impl Default for PostParams {
             dither_strength: 0.0,
             tint_color: [0.0; 3],
             tint_strength: 0.0,
+            mirror: 0.0,
         }
     }
 }
@@ -109,6 +115,7 @@ impl CompositePass {
             unsafe { gl.get_uniform_location(program, "uDitherStrength") };
         let uniform_tint_color = unsafe { gl.get_uniform_location(program, "uTintColor") };
         let uniform_tint_strength = unsafe { gl.get_uniform_location(program, "uTintStrength") };
+        let uniform_mirror = unsafe { gl.get_uniform_location(program, "uMirror") };
         let empty_vao = unsafe { gl.create_vertex_array().map_err(anyhow::Error::msg)? };
         let loc = |n: &str| unsafe { gl.get_uniform_location(program, n) };
         let overlay = OverlayLocs {
@@ -131,6 +138,7 @@ impl CompositePass {
             uniform_dither_strength,
             uniform_tint_color,
             uniform_tint_strength,
+            uniform_mirror,
         })
     }
 
@@ -194,6 +202,7 @@ impl CompositePass {
                 params.tint_color[2],
             );
             gl.uniform_1_f32(self.uniform_tint_strength.as_ref(), params.tint_strength);
+            gl.uniform_1_f32(self.uniform_mirror.as_ref(), params.mirror);
             let o = &self.overlay;
             match overlay.filter(|_| o.on.is_some()) {
                 Some(ov) => {

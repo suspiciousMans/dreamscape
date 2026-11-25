@@ -264,6 +264,71 @@ impl Elite {
             Elite::Shade => "SHADE",
         }
     }
+
+    /// Extra hit points an elite of this kind carries (BIG is the armoured one).
+    pub fn hp_bonus(self) -> f32 {
+        match self {
+            Elite::Big => 2.0,
+            _ => 0.0,
+        }
+    }
+
+    /// How much larger it stands.
+    pub fn scale_mult(self) -> f32 {
+        match self {
+            Elite::Big => 1.3,
+            _ => 1.0,
+        }
+    }
+}
+
+/// Elite variants a new enemy can wear. A Splitter's split is pacer-only.
+pub const FOE_ELITES: [Elite; 3] = [Elite::Fast, Elite::Big, Elite::Shade];
+/// Elite variants the ENEMIES-B group can wear: their pace is authored inside
+/// each module, so FAST is not offered there.
+pub const GROUP_ELITES: [Elite; 2] = [Elite::Big, Elite::Shade];
+/// A new enemy turns elite at this share of a pacer's chance. A headless sweep
+/// over real spawn plans (see the tests) picks 1.0: parity with the pacer curve
+/// is the share whose per-foe rate matches it, which is about one elite new foe
+/// every other deep dream.
+pub const FOE_ELITE_SHARE: f32 = 1.0;
+
+/// Deterministic elite roll for new enemy `k` of a dream.
+pub fn roll_foe_elite(seed: u64, k: usize, difficulty: f32) -> Option<Elite> {
+    roll_foe_elite_with(seed, k, difficulty, FOE_ELITE_SHARE)
+}
+
+/// The same roll at another share: the balance sweep tries shares out.
+pub fn roll_foe_elite_with(seed: u64, k: usize, difficulty: f32, share: f32) -> Option<Elite> {
+    roll_foe_from(seed, k, difficulty, &FOE_ELITES, share)
+}
+
+/// Deterministic elite roll for a Moths/Mask/Leech group of a dream.
+pub fn roll_group_elite(seed: u64, k: usize, difficulty: f32) -> Option<Elite> {
+    roll_group_elite_with(seed, k, difficulty, FOE_ELITE_SHARE)
+}
+
+pub fn roll_group_elite_with(seed: u64, k: usize, difficulty: f32, share: f32) -> Option<Elite> {
+    roll_foe_from(seed, k, difficulty, &GROUP_ELITES, share)
+}
+
+fn roll_foe_from(
+    seed: u64,
+    k: usize,
+    difficulty: f32,
+    list: &'static [Elite],
+    share: f32,
+) -> Option<Elite> {
+    // Its own, well-mixed stream: one roll never turns another enemy elite, and
+    // every dream gets its own draw (an XOR of a small seed would not move the
+    // high bits the roll is read from, so every dream would draw the same one).
+    let h = crate::worth::mix(
+        seed ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        0x5DEE_CE66_D1CE_5EED,
+    );
+    let roll = (h >> 40) as f32 / (1u64 << 24) as f32;
+    (roll < elite_chance(difficulty) * share)
+        .then(|| list[(h >> 3) as usize % list.len()])
 }
 
 /// Chance a pacer is elite at this difficulty (none in gentle runs).
@@ -552,5 +617,92 @@ mod tests {
             let fwd = Vec3::new(y.sin(), 0.0, y.cos());
             assert!(fwd.dot(dir) > 0.9999);
         }
+    }
+
+
+    #[test]
+    fn the_elite_share_is_the_one_a_dream_sweep_chooses() {
+        // A headless sweep over real spawn plans: how many new enemies a dream
+        // fields, and how often one of them turns elite at each candidate share.
+        use crate::combat::Kind;
+        use crate::dream::ALL_THEMES;
+        use crate::gameplay;
+        const SHARES: [f32; 10] = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3];
+        let mut dreams: Vec<([usize; 3], f32)> = Vec::new(); // (kinds' counts, difficulty)
+        let mut news = 0usize;
+        for depth in 4..=12u32 {
+            for seed in 0..200u64 {
+                let theme = ALL_THEMES[(seed as usize) % ALL_THEMES.len()];
+                let plan = crate::newfoes::plan(depth, theme, seed, false);
+                let counts = [
+                    plan.iter().filter(|(k, _)| *k == Kind::Tooth).map(|(_, n)| *n).sum(),
+                    plan.iter().filter(|(k, _)| *k == Kind::Weeper).map(|(_, n)| *n).sum(),
+                    plan.iter().filter(|(k, _)| *k == Kind::Lullaby).map(|(_, n)| *n).sum(),
+                ];
+                news += counts.iter().sum::<usize>();
+                let difficulty = gameplay::difficulty(Some((depth, 0))) * 1.2; // a strong loadout
+                dreams.push((counts, difficulty));
+            }
+        }
+        // (dreams with an elite, elites per dream, group elites' dreams, per-foe rate)
+        let measure = |share: f32| {
+            let (mut with_one, mut elites, mut groups) = (0usize, 0usize, 0usize);
+            for (seed, (counts, difficulty)) in dreams.iter().enumerate() {
+                let mut here = 0usize;
+                let total: usize = counts.iter().sum();
+                for k in 0..total {
+                    if roll_foe_elite_with(seed as u64, k, *difficulty, share).is_some() {
+                        here += 1;
+                    }
+                }
+                if roll_group_elite_with(seed as u64, 1, *difficulty, share).is_some() {
+                    groups += 1;
+                }
+                elites += here;
+                if here > 0 {
+                    with_one += 1;
+                }
+            }
+            let n = dreams.len() as f32;
+            (
+                with_one as f32 / n,
+                elites as f32 / n,
+                groups as f32 / n,
+                elites as f32 / news as f32,
+            )
+        };
+        // What a pacer gets in the same dreams: the curve the new enemies match.
+        let pacers = dreams
+            .iter()
+            .map(|(_, difficulty)| elite_chance(*difficulty))
+            .sum::<f32>()
+            / dreams.len() as f32;
+        let mut pick = SHARES[0];
+        let mut best = f32::MAX;
+        for share in SHARES {
+            let (dreams_with, mean, groups, per_foe) = measure(share);
+            println!(
+                "share {share:.2}: {:.0}% of deep dreams have an elite new foe, {mean:.2} each,                  {:.0}% a group elite, {:.0}% of foes elite (pacer curve {:.0}%)",
+                dreams_with * 100.0,
+                groups * 100.0,
+                per_foe * 100.0,
+                pacers * 100.0
+            );
+            let cost = (per_foe - pacers).abs();
+            if cost < best {
+                best = cost;
+                pick = share;
+            }
+        }
+        assert_eq!(FOE_ELITE_SHARE, pick, "the shipped share is the sweep's pick");
+        let (dreams_with, mean, groups, per_foe) = measure(pick);
+        // It matches the pacer curve it was measured against...
+        assert!((per_foe - pacers).abs() < 0.02, "{per_foe} vs {pacers}");
+        // ...which is about one elite new foe every other deep dream.
+        assert!((0.28..=0.45).contains(&dreams_with), "{dreams_with}");
+        assert!((0.35..=0.6).contains(&mean), "{mean}");
+        // The group roll shares the number, and stays a rarer sight.
+        assert!((0.18..=0.35).contains(&groups), "{groups}");
+        assert!(news > 0);
     }
 }

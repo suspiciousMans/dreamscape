@@ -143,7 +143,7 @@ impl Death {
                 let ang = unit(i, 2) * std::f32::consts::TAU;
                 let r = 0.35 * unit(i, 3).sqrt();
                 let y0 = 1.2 * unit(i, 4);
-                let sway = 0.15 * (life * 5.0 + unit(i, 5) * 6.28).sin();
+                let sway = 0.15 * (life * 5.0 + unit(i, 5) * std::f32::consts::TAU).sin();
                 Ember {
                     offset: [
                         r * ang.cos() + sway,

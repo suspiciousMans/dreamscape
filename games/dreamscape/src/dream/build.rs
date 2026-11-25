@@ -1303,8 +1303,14 @@ fn specials(
                     }
                 })
             }
-            // ENEMIES-B come from `foespawn`, never from the theme lists.
-            EnemyKind::Moths | EnemyKind::Mask | EnemyKind::Leech => None,
+            // ENEMIES-B and the combat foes come from `foespawn` / `newfoes`,
+            // never from the theme lists.
+            EnemyKind::Moths
+            | EnemyKind::Mask
+            | EnemyKind::Leech
+            | EnemyKind::Tooth
+            | EnemyKind::Weeper
+            | EnemyKind::Lullaby => None,
             // Jesters pace between two floor cells anywhere; they're harmless.
             EnemyKind::Jester => far_cell(rng, &used).and_then(|c| {
                 let next = grid

@@ -112,6 +112,7 @@ pub fn card_rects(screen: Rect, n: usize) -> Vec<Rect> {
 
 pub fn draw(ctx: &egui::Context, p: &egui::Painter, screen: Rect, v: &HudView, art: &mut CardArt) {
     p.rect_filled(screen, 0.0, rgba([8, 4, 20], 0.94));
+    crate::menu_bg::draw(p, screen, v);
     let u = crate::pixel_ui::scale(screen);
     let cell = crate::pixel_ui::cell(u);
     let cx = screen.center().x;

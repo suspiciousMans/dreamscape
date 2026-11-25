@@ -23,8 +23,8 @@ pub use secret::{rolls as secret_rolls, SECRET_CHANCE};
 pub use names::{dream_name, whisper};
 pub use texture::{Pattern, TEX_SIZE};
 pub use theme::{
-    DreamTheme, EnemyKind, Feature, Mood, PropKind, ALL_ENEMY_KINDS, ALL_PROPS as ALL_PROP_KINDS,
-    ALL_THEMES,
+    DreamTheme, EnemyKind, Feature, Mood, PropKind, ALL_CODEX_ENEMIES, ALL_ENEMY_KINDS,
+    ALL_PROPS as ALL_PROP_KINDS, ALL_THEMES,
 };
 pub use variant::{
     echo_chase_target, echo_ghost, echo_reaches, mirror_input, mirror_stick,

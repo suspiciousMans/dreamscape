@@ -145,23 +145,7 @@ pub fn menu_hit(screen: Rect, rows: &[String], has_goal: bool, at: Pos2) -> Opti
 }
 
 pub fn draw(p: &egui::Painter, screen: Rect, v: &HudView) {
-    p.rect_filled(screen, 0.0, rgba([5, 2, 14], 1.0));
-    // Star field that breathes.
-    for k in 0..140u32 {
-        let h1 = crate::hud::hash01(k, 1);
-        let h2 = crate::hud::hash01(k, 2);
-        let pulse = 0.5 + 0.5 * (v.time * (0.5 + h1) + h2 * std::f32::consts::TAU).sin();
-        let at = Pos2::new(
-            screen.left() + h1 * screen.width(),
-            screen.top() + h2 * screen.height(),
-        );
-        let size = if h1 > 0.93 { 4.0 } else { 2.0 };
-        p.rect_filled(
-            Rect::from_center_size(at, Vec2::splat(size)),
-            0.0,
-            rgba(hue(h2 + v.time * 0.02), 0.15 + 0.5 * pulse),
-        );
-    }
+    crate::menu_bg::draw_title(p, screen, v);
     let cx = screen.center().x;
     let u = pixel_ui::scale(screen);
     let c = pixel_ui::cell(u);

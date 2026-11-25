@@ -7,6 +7,8 @@ uniform float uColorLevels;
 uniform float uDitherStrength;
 uniform vec3 uTintColor;
 uniform float uTintStrength;
+// KALEIDOSCOPE: 0 = off, 1 = the frame folded into four mirrored quadrants.
+uniform float uMirror;
 
 // Values 0..15 arranged for a reasonably well-spread ordered-dither pattern.
 const mat4 kBayer = mat4(
@@ -41,7 +43,15 @@ vec3 overlay(vec3 c) {
 }
 
 void main() {
-    vec4 color = texture(uSourceTex, vUV);
+    // Fold about the middle: every quadrant shows the same corner reflected,
+    // so the finished frame is symmetric both ways. Text and the HUD are
+    // drawn after this pass, so they stay flat and readable.
+    vec2 uv = vUV;
+    if (uMirror > 0.0) {
+        vec2 folded = 0.5 + abs(vUV - 0.5);
+        uv = mix(vUV, folded, uMirror);
+    }
+    vec4 color = texture(uSourceTex, uv);
 
     ivec2 cell = ivec2(mod(gl_FragCoord.xy, 4.0));
     float threshold = kBayer[cell.x][cell.y] - 0.5;

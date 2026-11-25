@@ -92,6 +92,8 @@ pub struct Settings {
     pub reduce_flashing: bool,
     /// Combat: five nerve to start and a longer breather after a hit.
     pub gentle_nerve: bool,
+    /// Combat hints: cards that answer a foe in reach glow softly.
+    pub combat_hints: bool,
     /// Shards and portals use fixed colour-blind-safe colours and patterns.
     pub colorblind_markers: bool,
     pub fullscreen: bool,
@@ -109,6 +111,8 @@ pub struct Settings {
     pub sort_loadout: crate::sorting::Sort,
     /// How much the menus and cards move: off / soft / full (`ui_motion`).
     pub ui_juice: crate::ui_motion::UiJuice,
+    /// The design behind the menus (`menu_bg.rs`).
+    pub menu_backdrop: crate::menu_bg::MenuBackdrop,
 }
 
 impl Default for Settings {
@@ -121,6 +125,7 @@ impl Default for Settings {
             reduced_motion: false,
             reduce_flashing: false,
             gentle_nerve: false,
+            combat_hints: true,
             colorblind_markers: false,
             fullscreen: false,
             mouse_sens: 0.5,
@@ -134,6 +139,7 @@ impl Default for Settings {
             sort_merge: Default::default(),
             sort_loadout: Default::default(),
             ui_juice: Default::default(),
+            menu_backdrop: Default::default(),
         }
     }
 }
@@ -216,7 +222,9 @@ pub enum Row {
     ReducedMotion,
     ReduceFlashing,
     UiJuice,
+    MenuBackdrop,
     GentleNerve,
+    CombatHints,
     ColorblindMarkers,
     Fullscreen,
     MouseSens,
@@ -234,7 +242,9 @@ pub fn rows() -> Vec<Row> {
         Row::ReducedMotion,
         Row::ReduceFlashing,
         Row::UiJuice,
+        Row::MenuBackdrop,
         Row::GentleNerve,
+        Row::CombatHints,
         Row::ColorblindMarkers,
         Row::Fullscreen,
         Row::MouseSens,
@@ -255,7 +265,9 @@ impl Row {
             Row::ReducedMotion => "reduced motion".into(),
             Row::ReduceFlashing => "reduce flashing".into(),
             Row::UiJuice => "menu motion".into(),
+            Row::MenuBackdrop => "menu background".into(),
             Row::GentleNerve => "gentle nerve".into(),
+            Row::CombatHints => "combat hints".into(),
             Row::ColorblindMarkers => "colour-blind markers".into(),
             Row::Fullscreen => "fullscreen".into(),
             Row::MouseSens => "mouse sensitivity".into(),
@@ -277,7 +289,9 @@ pub fn adjust(s: &mut Settings, row: Row, dir: i32) {
         Row::ReducedMotion => s.reduced_motion = !s.reduced_motion,
         Row::ReduceFlashing => s.reduce_flashing = !s.reduce_flashing,
         Row::UiJuice => s.ui_juice = s.ui_juice.step(dir),
+        Row::MenuBackdrop => s.menu_backdrop = s.menu_backdrop.step(dir),
         Row::GentleNerve => s.gentle_nerve = !s.gentle_nerve,
+        Row::CombatHints => s.combat_hints = !s.combat_hints,
         Row::ColorblindMarkers => s.colorblind_markers = !s.colorblind_markers,
         Row::Fullscreen => s.fullscreen = !s.fullscreen,
         Row::MouseSens => step(&mut s.mouse_sens),
@@ -298,7 +312,9 @@ pub fn value(s: &Settings, row: Row) -> String {
         Row::ReducedMotion => onoff(s.reduced_motion),
         Row::ReduceFlashing => onoff(s.reduce_flashing),
         Row::UiJuice => s.ui_juice.label().to_string(),
+        Row::MenuBackdrop => s.menu_backdrop.label().to_string(),
         Row::GentleNerve => onoff(s.gentle_nerve),
+        Row::CombatHints => onoff(s.combat_hints),
         Row::ColorblindMarkers => onoff(s.colorblind_markers),
         Row::Fullscreen => onoff(s.fullscreen),
         Row::MouseSens => pct(s.mouse_sens),
@@ -367,7 +383,7 @@ mod tests {
         adjust(&mut s, Row::ColorblindMarkers, 1);
         assert!(s.colorblind_markers);
         assert_eq!(value(&s, Row::ColorblindMarkers), "on");
-        assert_eq!(rows().len(), 12 + ALL_ACTIONS.len() + 1);
+        assert_eq!(rows().len(), 13 + ALL_ACTIONS.len() + 1);
         adjust(&mut s, Row::GentleNerve, 1);
         assert!(s.gentle_nerve);
         assert_eq!(value(&s, Row::GentleNerve), "on");
@@ -428,6 +444,17 @@ mod tests {
         assert_eq!(value(&s, Row::UiJuice), "off");
         let old: Settings = ron::from_str("(music: 0.5)").unwrap();
         assert_eq!(old.ui_juice, UiJuice::Soft);
+    }
+
+    #[test]
+    fn menu_background_row_cycles_and_old_files_load_stars() {
+        use crate::menu_bg::MenuBackdrop;
+        let mut s = Settings::default();
+        assert_eq!(s.menu_backdrop, MenuBackdrop::Stars);
+        adjust(&mut s, Row::MenuBackdrop, 1);
+        assert_eq!(value(&s, Row::MenuBackdrop), "drifting cards");
+        let old: Settings = ron::from_str("(music: 0.5)").unwrap();
+        assert_eq!(old.menu_backdrop, MenuBackdrop::Stars);
     }
 
     #[test]
