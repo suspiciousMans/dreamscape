@@ -7594,6 +7594,7 @@ impl Game for Sandbox {
                 dither_strength: params.dither_strength,
                 tint_color,
                 tint_strength,
+                ..Default::default()
             },
         );
 

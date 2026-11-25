@@ -79,7 +79,7 @@ These stay abstract and dreamlike: no drug use is shown, only the look and feel.
 
 Each dream needs a `ThemeSpec`, vocabulary (at least 18 of each word list, nouns unique across dreams), an `Attribute` for its cards, a profile `.ron`, weighted exits, and possibly a new `PropKind` or `Shape`. The existing tests enforce all of this.
 
-### 3.4 New twists
+### 3.4 New twists ✅ (all six; Kaleidoscope and Breathing are the last two)
 - **Mirrored**: left and right controls are swapped (the one twist that does *not* follow the screen).
 - **Tiny**: the camera pulls back 2×, so the dreamer is small in a huge dream.
 - **Echo**: a ghost of you from 5s ago also collects shards. Enemies chase it too.

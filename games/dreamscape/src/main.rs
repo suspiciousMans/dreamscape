@@ -27,6 +27,7 @@ mod abilities2;
 mod abilities3;
 mod access;
 mod attunement;
+mod breathing;
 mod achievements;
 mod balance;
 mod booklet_ui;
@@ -54,6 +55,7 @@ mod enemy_ai;
 mod eye;
 mod eye_motion;
 mod juice;
+mod kaleido;
 mod fortune;
 mod lottery;
 mod lottery_ui;
@@ -9553,10 +9555,15 @@ impl DreamscapeGame {
             Vec::new()
         } else {
             let counts = attunement::counts(self.booklet.cards());
-            attunement::attuned(&counts)
-                .into_iter()
-                .map(attunement::reward)
-                .collect()
+            let done = attunement::attuned(&counts);
+            let mut gifts: Vec<Upgrade> = done.iter().copied().map(attunement::reward).collect();
+            // Two attunements at once open a combo: one more passive, and a
+            // named line in the booklet.
+            if let Some(c) = attunement::combo(&done) {
+                log::info!("Combo: {} ({})", c.name, c.line);
+                gifts.push(c.gift);
+            }
+            gifts
         };
         self.run = if self.deck.is_some() {
             RunUpgrades::from_hand(&cards, &self.deck_cards) // === deck ===
@@ -10995,6 +11002,13 @@ impl DreamscapeGame {
             }
         }
         // === end hazards ===
+        // === breathing === only the walls a walk away from the route move
+        let breathing_route = if self.twists.has(dream::Variant::Breathing) {
+            breathing::route_points(&dream)
+        } else {
+            Vec::new()
+        };
+        // === end breathing ===
         let t_tiles = engine::perf::scope("load.spawn_tiles"); // === perf ===
         for block in &dream.blocks {
             if block.kind == BlockKind::Portal && !dream.sigils.is_empty() {
@@ -11159,6 +11173,25 @@ impl DreamscapeGame {
                             },
                         )
                         .expect("entity was just spawned");
+                    // === breathing === far walls sway; route walls never do
+                    if block.kind == BlockKind::Wall && !breathing_route.is_empty() {
+                        let amp =
+                            breathing::amp_for(breathing::clearance(block.pos, &breathing_route));
+                        if amp > 0.0 {
+                            self.world
+                                .insert_one(
+                                    entity,
+                                    breathing::Breathe {
+                                        base: block.pos,
+                                        amp,
+                                        period: breathing::period_for(block.pos),
+                                        phase: breathing::phase_for(block.pos),
+                                    },
+                                )
+                                .expect("entity was just spawned");
+                        }
+                    }
+                    // === end breathing ===
                 }
             }
         }
@@ -12666,6 +12699,14 @@ impl Game for DreamscapeGame {
         for (_e, (t, bob)) in self.world.query_mut::<(&mut Transform, &Bob)>() {
             t.position.y = bob.base + bob.amp * (time * bob.speed + bob.phase).sin();
         }
+        // === breathing === (the collider sways too: physics reads the live Transform)
+        for (_e, (t, br)) in self
+            .world
+            .query_mut::<(&mut Transform, &breathing::Breathe)>()
+        {
+            t.position = br.base + breathing::offset(br.amp, br.period, br.phase, time);
+        }
+        // === end breathing ===
         self.title_age += dt;
         if self.mode == hud::Mode::Summary && self.autopilot && self.title_age > 1.5 {
             self.title_age = 0.0;
@@ -14365,6 +14406,11 @@ impl Game for DreamscapeGame {
                 dither_strength: 0.0,
                 tint_color: flash.color,
                 tint_strength: gameplay::flash_tint(flash.strength, reduce_flashing),
+                mirror: kaleido::strength(
+                    self.twists.has(dream::Variant::Kaleidoscope),
+                    reduce_flashing,
+                    self.settings.reduced_motion,
+                ),
             },
         );
         if engine::perf::enabled() {
